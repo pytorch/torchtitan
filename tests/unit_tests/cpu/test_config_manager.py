@@ -463,7 +463,7 @@ class TestConfigManager(unittest.TestCase):
         assert config.checkpoint.async_mode == "async"
 
     def test_trainer_config_quantization_default(self):
-        from torchtitan.components.quantization.utils import has_quantization
+        from torchtitan.quantization.utils import has_quantization
 
         config_manager = ConfigManager()
         config = config_manager.parse_args(

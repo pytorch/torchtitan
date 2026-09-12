@@ -11,9 +11,9 @@ import pytest
 import torch
 
 import torchtitan.experiments.torchft.trainer as ft
-from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import override
+from torchtitan.config.transform import LoRAConverter
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import model_registry

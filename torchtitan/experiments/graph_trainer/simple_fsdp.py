@@ -27,11 +27,12 @@ from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
-from torchtitan.components.quantization._fsdp_tensor import (
+from torchtitan.protocols.module import Module
+
+from torchtitan.quantization._fsdp_tensor import (
     _ShardedFSDPTensor,
     _UnshardedFSDPTensor,
 )
-from torchtitan.protocols.module import Module
 
 _active_parametrization = True
 

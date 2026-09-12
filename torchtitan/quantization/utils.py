@@ -66,15 +66,9 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
 
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
-    from torchtitan.components.quantization.float8 import (
-        _float8_experts_cache,
-        Float8Linear,
-    )
-    from torchtitan.components.quantization.mxfp8.converter import (
-        _mxfp8_experts_cache,
-        MXFP8Linear,
-    )
-    from torchtitan.components.quantization.nvfp4 import NVFP4Linear
+    from .float8 import _float8_experts_cache, Float8Linear
+    from .mxfp8.converter import _mxfp8_experts_cache, MXFP8Linear
+    from .nvfp4 import NVFP4Linear
 
     quant_linear_types: list[type] = []
     if Float8Linear is not None:

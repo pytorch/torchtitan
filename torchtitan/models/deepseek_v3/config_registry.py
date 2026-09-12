@@ -8,12 +8,6 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.components.quantization import (
-    Float8GroupedExpertsConverter,
-    Float8LinearConverter,
-    MXFP8GroupedExpertsConverter,
-    MXFP8LinearConverter,
-)
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
@@ -23,6 +17,12 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.quantization import (
+    Float8GroupedExpertsConverter,
+    Float8LinearConverter,
+    MXFP8GroupedExpertsConverter,
+    MXFP8LinearConverter,
+)
 from torchtitan.trainer import Trainer
 
 from . import model_registry

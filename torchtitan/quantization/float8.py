@@ -12,12 +12,13 @@ from typing import Literal
 
 import torch
 import torch._inductor.config
-from torchtitan.components.quantization import QuantizationConverter
+
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
+from . import QuantizationConverter
 from .utils import module_filter_fn, swap_token_dispatcher
 
 
@@ -135,7 +136,7 @@ class Float8LinearConverter(QuantizationConverter):
                 logger.info(
                     "Using _auto_filter_for_recipe to avoid converting linear layers "
                     "with dims too small to benefit from float8 training. "
-                    "See torchtitan/components/quantization/float8.md for more info."
+                    "See torchtitan/quantization/float8.md for more info."
                 )
                 self.filter_fn = _auto_filter_for_recipe(
                     cfg.recipe_name, filter_fqns=clean_fqns

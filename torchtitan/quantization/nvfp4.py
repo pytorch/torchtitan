@@ -25,12 +25,13 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import has_cuda_capability
+
+from . import QuantizationConverter
 
 logger = logging.getLogger(__name__)
 

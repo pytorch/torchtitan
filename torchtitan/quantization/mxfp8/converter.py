@@ -11,11 +11,11 @@ from typing import Literal
 
 import torch
 
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.tools.utils import has_cuda_capability
 
+from .. import QuantizationConverter
 from ..utils import swap_token_dispatcher
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ try:
     # down: linear.py and tensor.py import torchao's mxfp8 cast kernels at
     # module scope, and triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale
     # is newer than any torchao release. Catching it keeps
-    # ``import torchtitan.components.quantization`` working for float8 and
+    # ``import torchtitan.quantization`` working for float8 and
     # nvfp4 users, and defers the error to whoever builds this converter.
     from .linear import MXFP8Linear
 
