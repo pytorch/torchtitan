@@ -39,6 +39,7 @@ __all__ = [
     "spmd_local_context",
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
+    "spmd_type_for_axis",
     "spmd_dense_mesh",
     "spmd_mesh_group",
     "spmd_sparse_mesh",
@@ -301,6 +302,14 @@ def _per_axis_types(
                     )
                 result[MeshAxisName(axis)] = spmd.S(dim)
     return result
+
+
+def spmd_type_for_axis(
+    layout: spmd.SpmdType,
+    axis: MeshAxisName | str,
+) -> spmd.PerMeshAxisSpmdType:
+    """Return the concrete per-axis type represented by an SPMD layout."""
+    return _per_axis_types(layout)[MeshAxisName(axis)]
 
 
 def spmd_validate_redistributions(sharding_config: Any) -> None:

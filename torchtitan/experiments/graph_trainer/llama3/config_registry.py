@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from functools import partial
-
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.configs import (
@@ -55,7 +53,7 @@ def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
     """
     config = to_graph_trainer_config(
         llama3_debugmodel_dist_gemm(),
-        partial(model_registry, tp_gemm_backend="dist_gemm"),
+        model_registry,
     )
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config

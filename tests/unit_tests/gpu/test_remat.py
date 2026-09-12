@@ -15,13 +15,13 @@ from unittest.mock import patch
 import torch
 import torch_remat as remat
 
+from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.attention import FlexInnerAttention, GQAttention
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
 )
-from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
@@ -39,11 +39,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
-from torchtitan.overrides.fused_swiglu import (
-    dist_gemm_fused_swiglu,
-    fused_swiglu,
-    FusedSwiGLUGroupedExperts,
-)
+from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLUGroupedExperts
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -519,19 +515,13 @@ class TestRematRegions(unittest.TestCase):
             "torchtitan.overrides.fused_swiglu._fused_silu_and_mul",
             side_effect=silu_and_mul,
         ):
-            dist_gemm_config = DistGEMMFeedForward.Config(
-                w1=feed_forward_config.w1,
-                w2=feed_forward_config.w2,
-                w3=feed_forward_config.w3,
-            )
+            async_config = deepcopy(feed_forward_config)
+            AsyncTensorParallelTransform().transform(async_config)
             variants = (
                 (sigmoid_config.build(), ["w13", "w2", "gate"]),
-                (dist_gemm_config.build(), ["w13", "w2"]),
+                (async_config.build(), ["w13", "w2"]),
                 (fused_swiglu(feed_forward_config).build(), ["w13", "w2"]),
-                (
-                    dist_gemm_fused_swiglu(dist_gemm_config).build(),
-                    ["w13", "w2"],
-                ),
+                (fused_swiglu(async_config).build(), ["w13", "w2"]),
             )
             for feed_forward, expected_names in variants:
                 with self.subTest(feed_forward=type(feed_forward).__name__):

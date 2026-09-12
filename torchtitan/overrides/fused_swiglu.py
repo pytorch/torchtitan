@@ -10,12 +10,12 @@
 
 The default ``FeedForward`` already computes its gate and up projections with
 one physical ``w13`` linear. ``fused_swiglu`` only replaces the torch-native
-SiLU and multiply operations with a Triton kernel.
+SiLU and multiply operations with a Triton kernel. Communication-aware linear
+subclasses are preserved by the config replacement.
 
-``dist_gemm_fused_swiglu`` preserves the dist-GEMM collective overlap while
-using the same activation replacement. ``fused_grouped_experts`` similarly replaces
-the grouped experts' torch-native SiLU and multiply with the Triton operation;
-their gate and up projection is already fused by default.
+``fused_grouped_experts`` similarly replaces the grouped experts' torch-native
+SiLU and multiply with the Triton operation; their gate and up projection is
+already fused by default.
 """
 
 from dataclasses import dataclass, replace
@@ -30,13 +30,11 @@ from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.activation import ActivationFn, SwiGLU
-from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts
 
 __all__ = [
     "FusedSwiGLUGroupedExperts",
-    "dist_gemm_fused_swiglu",
     "fused_grouped_experts",
     "silu_and_mul_backward_kernel",
     "silu_and_mul_forward_kernel",
@@ -385,17 +383,6 @@ def _replace_swiglu_activation(cfg: FeedForward.Config) -> FeedForward.Config:
     description="Fuse the SwiGLU SiLU and multiply operations with Triton.",
 )
 def fused_swiglu(cfg: FeedForward.Config) -> FeedForward.Config:
-    return _replace_swiglu_activation(cfg)
-
-
-@override(
-    target=DistGEMMFeedForward.Config,
-    exact=True,
-    description="Fuse SwiGLU activation while preserving dist-GEMM TP overlap.",
-)
-def dist_gemm_fused_swiglu(
-    cfg: DistGEMMFeedForward.Config,
-) -> DistGEMMFeedForward.Config:
     return _replace_swiglu_activation(cfg)
 
 

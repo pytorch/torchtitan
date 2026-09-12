@@ -10,10 +10,11 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
-    DistGEMMFeedForward,
-    RowParallelLinear,
-    validate_dist_gemm_preconditions,
+    AsyncAllGatherLinear,
+    AsyncLinearReduceScatter,
+    validate_async_tp_preconditions,
 )
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
 DP = MeshAxisName.DP
@@ -135,13 +136,26 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
     }
 
 
-def colwise_config() -> ShardingConfig:
-    """ColwiseParallel: weight S(0), output S(-1)."""
+def colwise_config(*, input_layout: SpmdType | None = None) -> ShardingConfig:
+    """ColwiseParallel: optional input all-gather, weight S(0), output S(-1)."""
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
+        in_src_shardings=(
+            {"input": input_layout} if input_layout is not None else None
+        ),
+        in_dst_shardings=(
+            {
+                "input": dense_activation_placement(
+                    tp=spmd.R,
+                    cp=spmd.S(0),
+                )
+            }
+            if input_layout is not None
+            else None
+        ),
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
     )
 
@@ -221,24 +235,27 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         f"set_gqa_attention_sharding requires GQAttention.Config, "
         f"got {type(attention_cfg).__name__}"
     )
-    # The dist-GEMM attention block runs both TP collectives inside its own
-    # GEMMs, so it declares different activation contracts from the stock block.
-    # SP and spmd_types are preconditions for dist-GEMM, enforced in
-    # validate_dist_gemm_preconditions; this branch only declares the contracts.
-    dist_gemm = isinstance(attention_cfg.wo, RowParallelLinear.Config)
-    if dist_gemm:
-        validate_dist_gemm_preconditions(enable_sp=enable_sp)
-
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    # dist-GEMM: AllGatherFusedQKVLinear consumes the sequence shard directly, so
-    # there is no attention-boundary all-gather left for the block to declare.
+    # Config converters may wrap GQAttention.Config (for example, LoRA freezes
+    # the parent config) without changing the module it builds. Use the owner
+    # rather than the concrete config type so those wrappers keep the same
+    # communication boundary.
+    qkv_owns_input_redistribution = attention_cfg._owner is GQAttention
+    if isinstance(
+        attention_cfg.qkv_linear.wqkv, AsyncAllGatherLinear.Config
+    ) or isinstance(attention_cfg.wo, AsyncLinearReduceScatter.Config):
+        validate_async_tp_preconditions(enable_sp=enable_sp)
+
+    # Communication-aware QKV linears move the input redistribution inside the
+    # qkv remat region. Other attention implementations retain the established
+    # attention-boundary redistribution.
     attention_cfg.sharding_config = (
         None
-        if dist_gemm
+        if qkv_owns_input_redistribution
         else ShardingConfig(
             in_src_shardings={
                 "x_TD": attn_x_layout,
@@ -252,22 +269,10 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
-    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
-
-    wo_config = rowwise_config(output_sp=enable_sp)
-    if dist_gemm:
-        # A stock rowwise linear emits a Partial over its slice of K and lets the
-        # framework reduce-scatter it. RowParallelLinear collapses those two
-        # steps -- the reduce-scatter happens inside the fused op -- so it returns
-        # the final Shard(1) directly and never produces a Partial. Keep only the
-        # parameter shardings: with the output already in its final layout there
-        # is nothing left to check or redistribute.
-        #
-        # Transitional. Once redistribute collectives move inside the modules and
-        # boundary src->dst redistribution goes away, every module declares only
-        # its state like this and the branch collapses.
-        wo_config = ShardingConfig(state_shardings=wo_config.state_shardings)
-    attention_cfg.wo.sharding_config = wo_config
+    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config(
+        input_layout=attn_x_layout if qkv_owns_input_redistribution else None
+    )
+    attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
 def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
@@ -314,28 +319,26 @@ def set_dense_ffn_sharding(
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    # Same two differences as the dist-GEMM attention block: the fused w13
-    # consume the sequence shard directly, so there is no boundary all-gather to
-    # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
-    # See set_gqa_attention_sharding; both branches collapse once redistribute
-    # collectives move inside the modules.
-    dist_gemm = isinstance(feed_forward_cfg, DistGEMMFeedForward.Config)
-    if dist_gemm:
-        validate_dist_gemm_preconditions(enable_sp=enable_sp)
+    # Config converters may wrap FeedForward.Config without changing the
+    # module it builds. Model-specific FeedForward subclasses remain on their
+    # established outer boundary until their shared-input paths are audited.
+    w13_owns_input_redistribution = feed_forward_cfg._owner is FeedForward
+    if isinstance(feed_forward_cfg.w1, AsyncAllGatherLinear.Config) or isinstance(
+        feed_forward_cfg.w2, AsyncLinearReduceScatter.Config
+    ):
+        validate_async_tp_preconditions(enable_sp=enable_sp)
     feed_forward_cfg.sharding_config = (
         None
-        if dist_gemm
+        if w13_owns_input_redistribution
         else ShardingConfig(
             in_src_shardings={"x": attn_x_layout},
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         )
     )
-    feed_forward_cfg.w1.sharding_config = colwise_config()
-    feed_forward_cfg.w3.sharding_config = colwise_config()
-    w2_config = rowwise_config(output_sp=enable_sp)
-    if dist_gemm:
-        w2_config = ShardingConfig(state_shardings=w2_config.state_shardings)
-    feed_forward_cfg.w2.sharding_config = w2_config
+    w13_input_layout = attn_x_layout if w13_owns_input_redistribution else None
+    feed_forward_cfg.w1.sharding_config = colwise_config(input_layout=w13_input_layout)
+    feed_forward_cfg.w3.sharding_config = colwise_config(input_layout=w13_input_layout)
+    feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
 def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
