@@ -116,8 +116,8 @@ class TorchFTCheckpointManager(CheckpointManager):
             optimizers.init_cache_state_dict()
 
             def state_dict():
-                if isinstance(optimizers, TorchFTOptimizersContainer):
-                    optimizers._refresh_cached_state_dict()
+                assert isinstance(optimizers, TorchFTOptimizersContainer)
+                optimizers._refresh_cached_state_dict()
                 ret = {}
                 for k, v in self.states.items():
                     if k in {MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE}:
