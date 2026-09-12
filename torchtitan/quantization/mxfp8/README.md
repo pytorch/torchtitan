@@ -313,7 +313,7 @@ lower panel shows the difference between the 50-step mean losses, making the
 small numerical divergence visible rather than implying bitwise-identical
 training.
 
-![Llama 3 8B BF16 and MXFP8 32x32 training loss on C4](../../../../assets/images/mxfp8_32x32_vs_bf16_loss.png)
+![Llama 3 8B BF16 and MXFP8 32x32 training loss on C4](../../../assets/images/mxfp8_32x32_vs_bf16_loss.png)
 
 *Training loss over 3,000 steps; faint lines are per-step values and bold lines
 are 50-step moving averages.*
