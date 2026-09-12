@@ -10,9 +10,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from dist_moe import DistMoeInputScaledRMSNorm
 
-from torchtitan.components.dist_moe import DistMoeConverter
-from torchtitan.components.dist_moe.backend import _DistMoeRuntime, DistMoeRoutedExperts
+from torchtitan.components.dist_moe import (
+    DistMoeBackendConfig,
+    DistMoeConverter,
+    DistMoeRoutedExperts,
+)
+from torchtitan.components.dist_moe.backend import _DistMoeRuntime
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.moe import RoutedExperts
 
@@ -123,3 +128,69 @@ def test_dist_moe_forwards_expert_output_postprocess(dtype):
     assert configured.fn(value) is value
     postprocess.assert_called_once_with(value)
     assert not configured.includes_scale_and_sum
+
+
+@pytest.mark.parametrize("dtype", ["bf16", "mxfp8"])
+def test_dist_moe_preserves_typed_expert_output_postprocess(dtype):
+    """The adapter forwards a backend-aware postprocess without wrapping it."""
+    stock = make_routed_experts_config(
+        dim=32,
+        hidden_dim=64,
+        num_experts=4,
+        top_k=2,
+        param_init={},
+        comm_backend="standard",
+    )
+    config = DistMoeConverter(
+        DistMoeConverter.Config(backend=DistMoeBackendConfig(dtype=dtype))
+    ).convert(stock)
+    assert isinstance(config, DistMoeRoutedExperts.Config)
+    module = config.build()
+    module._runtime = _runtime(None)
+    module._runtime.context = cast(Any, object())
+    weight = torch.nn.Parameter(torch.ones(32))
+    expected = DistMoeInputScaledRMSNorm(weight, eps=1e-8, gain_center=1.0)
+
+    class TypedPostprocess:
+        """Expose the optional DistMoE conversion protocol."""
+
+        def to_dist_moe_postprocess(self) -> DistMoeInputScaledRMSNorm:
+            """Return the typed annex postprocess.
+
+            Returns:
+                The postprocess descriptor expected by the DistMoE adapter.
+            """
+            return expected
+
+        def __call__(self, value: torch.Tensor) -> torch.Tensor:
+            """Preserve the ordinary routed-expert callable contract.
+
+            Args:
+                value: Route-wise expert output.
+
+            Returns:
+                The unchanged output used by this adapter-only test.
+            """
+            return value
+
+    postprocess = TypedPostprocess()
+
+    with (
+        patch(
+            "torchtitan.components.dist_moe.backend._dynamic_prepared_weight",
+            side_effect=lambda value, **_kwargs: value,
+        ),
+        patch(
+            "torchtitan.components.dist_moe.backend.run_dist_moe",
+            return_value=torch.empty(2, 32),
+        ) as run,
+    ):
+        module(
+            torch.empty(2, 32),
+            torch.empty(2, 2),
+            torch.empty(2, 2, dtype=torch.int64),
+            torch.empty(4, dtype=torch.int64),
+            expert_output_postprocess=postprocess,
+        )
+
+    assert run.call_args.kwargs["options"].experts_output_postprocess is expected

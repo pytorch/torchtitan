@@ -41,6 +41,7 @@ from dist_moe import (
     DistMoeContext,
     DistMoeExecutionOptions,
     DistMoeExpertPostprocess,
+    DistMoeInputScaledRMSNorm,
     DistMoeVmmConfig,
     DistMoeVmmPrefetch,
     plan_dist_moe_memory,
@@ -453,14 +454,26 @@ class DistMoeRoutedExperts(RoutedExperts):
         postprocess = None
         callback = expert_output_postprocess
         if callback is not None:
+            factory = getattr(type(callback), "to_dist_moe_postprocess", None)
+            if factory is not None:
+                postprocess = factory(callback)
+                if not isinstance(
+                    postprocess,
+                    (DistMoeExpertPostprocess, DistMoeInputScaledRMSNorm),
+                ):
+                    raise TypeError(
+                        "to_dist_moe_postprocess() must return a DistMoE "
+                        "postprocess configuration"
+                    )
+            else:
 
-            def postprocess_with_sparse_mesh(value: torch.Tensor) -> torch.Tensor:
-                """Run the caller-owned transform under the expert mesh context."""
-                assert callback is not None
-                with maybe_set_sparse_mesh():
-                    return callback(value)
+                def postprocess_with_sparse_mesh(value: torch.Tensor) -> torch.Tensor:
+                    """Run the caller-owned transform under the expert mesh context."""
+                    assert callback is not None
+                    with maybe_set_sparse_mesh():
+                        return callback(value)
 
-            postprocess = DistMoeExpertPostprocess(postprocess_with_sparse_mesh)
+                postprocess = DistMoeExpertPostprocess(postprocess_with_sparse_mesh)
 
         options = DistMoeExecutionOptions(
             inplace_wgrad_accum=self._backend_config.inplace_wgrad_accum,

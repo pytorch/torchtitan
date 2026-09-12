@@ -29,11 +29,13 @@ from torch._functorch.partitioners import (
     get_default_op_list,
     NodeInfo,
 )
-from torch._higher_order_ops.effects import has_effects
 from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import CheckpointPolicy
 
-from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
+from torchtitan.distributed.activation_checkpoint import (
+    _get_default_save_ops,
+    _has_cacheable_effect,
+)
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
@@ -268,7 +270,7 @@ def tag_sac_policy(
         if fqn.startswith(("lm_head", "loss")):
             continue
 
-        if has_effects(node.target):
+        if _has_cacheable_effect(node.target):
             node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
 
