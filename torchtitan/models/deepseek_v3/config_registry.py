@@ -52,17 +52,6 @@ def deepseek_v3_mxfp8_linear_converter_config(
     )
 
 
-def enable_fused_swiglu(config: Trainer.Config) -> None:
-    # Activate the stock dense-FFN and MoE grouped-expert overrides. The separate
-    # dist-GEMM FFN override is not needed by these configs.
-    for override in (
-        "torchtitan.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-    ):
-        assert override not in config.override.imports
-        config.override.imports.append(override)
-
-
 def deepseek_v3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
@@ -157,28 +146,6 @@ def deepseek_v3_debugmodel_hybridep(
     return config
 
 
-def deepseek_v3_debugmodel_minimal_async_ep(
-    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> Trainer.Config:
-    config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry(
-        "debugmodel",
-        seq_len=seq_len,
-        moe_comm_backend="minimal_async_ep",
-    )
-    enable_fused_swiglu(config)
-    config.parallelism = ParallelismConfig(
-        data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=1,
-        tensor_parallel_degree=1,
-        context_parallel_degree=1,
-        pipeline_parallel_degree=1,
-        expert_parallel_degree=1,
-        enable_sequence_parallel=False,
-    )
-    return config
-
-
 def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("16B", seq_len=seq_len, attn_backend="flex")
     return Trainer.Config(
@@ -222,28 +189,6 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
         attn_backend="flex",
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
-    )
-    config.training.disable_cuda_graphs = False
-    return config
-
-
-def deepseek_v3_16b_minimal_async_ep(seq_len: int | None = None) -> Trainer.Config:
-    config = deepseek_v3_16b(seq_len=seq_len)
-    config.model_spec = model_registry(
-        "16B",
-        seq_len=seq_len,
-        attn_backend="flex",
-        moe_comm_backend="minimal_async_ep",
-    )
-    enable_fused_swiglu(config)
-    config.parallelism = ParallelismConfig(
-        data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=1,
-        tensor_parallel_degree=1,
-        context_parallel_degree=1,
-        pipeline_parallel_degree=1,
-        expert_parallel_degree=1,
-        enable_sequence_parallel=False,
     )
     config.training.disable_cuda_graphs = False
     return config

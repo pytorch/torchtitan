@@ -7,6 +7,11 @@
 
 import torchtitan_recipes.tests.models as recipes
 
+from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
+from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
+from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan.models.qwen3.config_registry import qwen3_debugmodel_moe_param_groups
+
 from tests.integration_tests import OverrideDefinitions
 
 
@@ -26,6 +31,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
             ),
+            loss_compare_seed_config=llama3_debugmodel,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_region_ac_fsdp2_tp2_cp2],
@@ -35,6 +41,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
             ),
+            loss_compare_seed_config=llama3_debugmodel,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2],
@@ -78,6 +85,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/real_pg/deepseek_v3_cp_pp_a10g.txt"
             ),
+            loss_compare_seed_config=deepseek_v3_debugmodel,
             use_real_pg=True,
         ),
         OverrideDefinitions(
@@ -118,6 +126,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/qwen3_a10g.txt"
             ),
+            loss_compare_seed_config=qwen3_debugmodel_moe_param_groups,
         ),
         OverrideDefinitions(
             configs=[
@@ -192,6 +201,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
             golden_numerics_path="tests/assets/losses/real_pg/gpt_oss_pp_a10g.txt",
+            loss_compare_seed_config=gpt_oss_debugmodel_flex,
             use_real_pg=True,
         ),
         OverrideDefinitions(

@@ -7,7 +7,6 @@
 """Configurations for the ``h100`` integration test suite."""
 
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
-from torchtitan.distributed.activation_checkpoint import FullAC
 
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
@@ -18,7 +17,6 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel_dist_gemm,
     llama3_debugmodel_float8,
 )
-from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.trainer import Trainer
 
 
@@ -67,24 +65,6 @@ def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
     )
 
 
-def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
-    from torchtitan.models.deepseek_v3.config_registry import (
-        deepseek_v3_debugmodel_minimal_async_ep,
-    )
-
-    config = deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048)
-    config.compile.enable = False
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.context_parallel_degree = 2
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 8
-    config.activation_checkpoint = FullAC.Config()
-    return apply_transforms(
-        config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
-    )
-
-
 def deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile() -> Trainer.Config:
     config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
     config.parallelism.data_parallel_shard_degree = 4
@@ -100,14 +80,4 @@ def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
     config = qwen3_moe_deepep(seq_len=512)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 4
-    return config
-
-
-def deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8_sdc_replay() -> (
-    Trainer.Config
-):
-    config = deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8()
-    config.debug.deterministic = True
-    config.debug.seed = 42
-    config.sdc_replayer = SDCReplayer.Config()
     return config

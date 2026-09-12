@@ -79,8 +79,8 @@ class TrainingConfig:
     Disable CUDA graph capture and replay for the forward+backward step. CUDA
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
-    when ``non_blocking_capacity_factor`` is set, or with MinimalAsyncEP. Other
-    EP backends synchronize with the host during dispatch. Pipeline parallelism
+    when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
+    with the host during dispatch. Pipeline parallelism
     is supported with single-stage schedules such as GPipe and 1F1B. CUDA graphs
     are independent of ``torch.compile(mode="reduce-overhead")``, which performs
     its own CUDA graph capture.

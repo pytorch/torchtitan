@@ -55,22 +55,6 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
-            configs=[
-                recipes.deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8_sdc_replay
-            ],
-            test_descr="DeepSeek V3 FSDP+CP+TP+MinimalAsyncEP with SDC replay",
-            test_name="deepseek_v3_fsdp+cp+tp+minimal_async_ep+sdc_replay",
-            ngpu=8,
-            skip_rocm_test=True,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.deepseek_v3_debugmodel_minimal_async_ep_fsdp2_tp2_cp2_ep8],
-            test_descr="DeepSeek V3 FSDP+CP+TP+MinimalAsyncEP",
-            test_name="deepseek_v3_fsdp+cp+tp+minimal_async_ep",
-            ngpu=8,
-            skip_rocm_test=True,
-        ),
-        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_dist_gemm_tp2],
             test_descr="Dist GEMM: fuse the TP collectives into the attention "
             "and FFN projections (FSDP2 + TP2)",

@@ -60,7 +60,7 @@ def parallelize_kimi_k3(
     annotate_replicated_parameters(model, parallel_dims)
 
     # model_registry's moe_comm_backend picks the dispatcher: standard
-    # (default), deepep and minimal_async_ep run on this model; hybridep
+    # (default) and deepep run on this model; hybridep
     # needs GB200-class hardware.
     model.parallelize(parallel_dims)
 

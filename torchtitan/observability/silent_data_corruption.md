@@ -60,7 +60,7 @@ zeroed in place, preserving their storage addresses for CUDA graphs, with no
 gradient-sized clone or copy kernels on checked steps.
 
 Eager execution, `torch.compile`, CUDA graphs, symmetric-memory FSDP,
-distributed GEMM, async TP, DeepEP v2, HybridEP, and MinimalAsyncEP can
+distributed GEMM, async TP, DeepEP v2, and HybridEP can
 participate in replay. GraphTrainer uses the same replay boundary. Execution
 backends do not need their internal scratch state restored as long as one
 forward/backward invocation completes before it returns and later invocations
