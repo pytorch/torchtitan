@@ -22,6 +22,7 @@ from torch.distributed.pipelining.schedules import (
 )
 from torch.distributed.tensor import DTensor
 from torch.utils.hooks import RemovableHandle
+from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh
 
 from torchtitan.models.common.moe import GroupedExperts, RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
@@ -39,6 +40,7 @@ from dist_moe import (
     DistMoeConfig,
     DistMoeContext,
     DistMoeExecutionOptions,
+    DistMoeExpertPostprocess,
     DistMoeVmmConfig,
     DistMoeVmmPrefetch,
     plan_dist_moe_memory,
@@ -208,6 +210,12 @@ class DistMoeConverter(ModelConfigConverter):
         for _fqn, config, parent, attr in targets:
             if isinstance(config, DistMoeRoutedExperts.Config):
                 continue
+            if type(config) is not RoutedExperts.Config:
+                raise TypeError(
+                    "Dist-MoE cannot convert a specialized routed-experts config; "
+                    "express model-specific behavior through the common routed-"
+                    "expert contract"
+                )
             if type(config.inner_experts) is not GroupedExperts.Config:
                 raise TypeError(
                     "Dist-MoE requires the stock GroupedExperts parameter layout"
@@ -398,8 +406,23 @@ class DistMoeRoutedExperts(RoutedExperts):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        expert_output_postprocess: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Run the annex using routing decisions produced by TorchTitan."""
+        """Run the annex using routing decisions produced by TorchTitan.
+
+        Args:
+            x_TD: Local input tokens.
+            topk_scores_TK: Router scores for selected experts.
+            topk_expert_ids_TK: Global IDs of selected experts.
+            num_local_tokens_per_expert_E: Counts maintained by TorchTitan for
+                load-balancing state. DistMoE derives its own dispatch metadata.
+            expert_output_postprocess: Optional route-wise transformation applied
+                after peer combine and before score-weighted reduction.
+
+        Returns:
+            Combined local expert output.
+        """
         del num_local_tokens_per_expert_E
         if self._runtime is None or self._runtime.context is None:
             raise RuntimeError("Dist-MoE context is not initialized")
@@ -427,11 +450,24 @@ class DistMoeRoutedExperts(RoutedExperts):
             w13_arg = w13.flatten(1, 2)
             w2_arg = w2
 
+        postprocess = None
+        callback = expert_output_postprocess
+        if callback is not None:
+
+            def postprocess_with_sparse_mesh(value: torch.Tensor) -> torch.Tensor:
+                """Run the caller-owned transform under the expert mesh context."""
+                assert callback is not None
+                with maybe_set_sparse_mesh():
+                    return callback(value)
+
+            postprocess = DistMoeExpertPostprocess(postprocess_with_sparse_mesh)
+
         options = DistMoeExecutionOptions(
             inplace_wgrad_accum=self._backend_config.inplace_wgrad_accum,
             wgrad_parameter_owners=(self.w13_EGFD, self.w2_EDF)
             if self._backend_config.inplace_wgrad_accum
             else None,
+            experts_output_postprocess=postprocess,
         )
         return run_dist_moe(
             x_TD.contiguous(),
