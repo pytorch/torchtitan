@@ -103,7 +103,8 @@ def _build_hf_to_titan_patterns() -> list[tuple[str, str, bool]]:
         (r"^(.*\.)router\.proj\.weight$", r"\1router.gate.weight", False),
         (r"^(.*\.)gate\.e_score_correction_bias$", r"\1expert_bias", False),
         (r"^(.*\.)experts\.down_proj$", rf"\1{_TITAN_EXPERTS_PREFIX}.{down}", False),
-        # Shared experts use FeedForward (w1/w2/w3 attribute names, not params)
+        # Shared experts use logical w1/w2/w3 adapter keys, which are packed
+        # into the native FeedForward w13/w2 state after these renames.
         (r"^(.*\.shared_experts)\.gate_proj\.weight$", r"\1.w1.weight", False),
         (r"^(.*\.shared_experts)\.up_proj\.weight$", r"\1.w3.weight", False),
         (r"^(.*\.shared_experts)\.down_proj\.weight$", r"\1.w2.weight", False),

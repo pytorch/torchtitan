@@ -74,7 +74,7 @@ class TestMoE(unittest.TestCase):
             {name for name, _ in experts.named_parameters(recurse=False)},
             {"w13", "w2_EDF"},
         )
-        self.assertEqual(tuple(experts.w13.shape), (2, 16, 4))
+        self.assertEqual(tuple(experts.w13.shape), (2, 8, 2, 4))
 
     def test_grouped_experts_checkpoint_uses_physical_projection_keys(self):
         source = GroupedExperts.Config(
