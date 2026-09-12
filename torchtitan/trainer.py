@@ -173,6 +173,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "--compile.components."
                 )
 
+            if (
+                self.compile.enable_async_tensor_parallel
+                and self.parallelism.tensor_parallel_degree <= 1
+            ):
+                logger.warning(
+                    "compile.enable_async_tensor_parallel has no effect without "
+                    "tensor parallelism. Set --parallelism.tensor_parallel_degree > 1."
+                )
+
             if self.model_spec is not None:
                 validate_context_parallel(self.model_spec.model, self.parallelism)
 
