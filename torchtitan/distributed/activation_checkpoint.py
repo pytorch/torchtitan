@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch_remat as remat
 import tyro
 from torch._functorch.partitioners import get_default_op_list
+from torch._higher_order_ops.effects import has_effects
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
@@ -97,6 +98,29 @@ def _get_default_save_ops() -> set:
     return save_ops
 
 
+def _full_ac_policy(
+    _ctx,
+    op,
+    *_args,
+    **_kwargs,
+) -> CheckpointPolicy:
+    """Save effectful operations while recomputing pure operations."""
+    if _has_cacheable_effect(op):
+        return CheckpointPolicy.MUST_SAVE
+    return CheckpointPolicy.PREFER_RECOMPUTE
+
+
+def _has_cacheable_effect(op) -> bool:
+    """Return whether SAC can preserve an effect by caching the op output.
+
+    Low-level ``c10d`` operations return an asynchronous ``Work`` handle and
+    are implementation details of functional collectives. Caching one without
+    its enclosing functional collective skips the launch while leaving freshly
+    allocated outputs uninitialized during recomputation.
+    """
+    return has_effects(op) and getattr(op, "namespace", None) != "c10d"
+
+
 def _disable_dynamo_lru_cache() -> None:
     # Disable dynamo LRU cache to workaround an interaction between SAC, PP, and Flex:
     #
@@ -167,7 +191,7 @@ class ActivationCheckpointing(Configurable):
 
 
 class FullAC(ActivationCheckpointing):
-    """Recompute the entire transformer block during the backward pass."""
+    """Recompute pure block operations while preserving effects."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
@@ -178,6 +202,7 @@ class FullAC(ActivationCheckpointing):
     ) -> nn.Module:
         return ptd_checkpoint_wrapper(
             module,
+            context_fn=lambda: create_selective_checkpoint_contexts(_full_ac_policy),
             preserve_rng_state=self.config.preserve_rng_state,
             determinism_check=self.config.determinism_check,
             early_stop=False,
@@ -251,6 +276,9 @@ class SelectiveAC(ActivationCheckpointing):
             meta = {"forward_mm_count": 0, "recompute_mm_count": 0}
 
             def wrapped_policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
+                if _has_cacheable_effect(func):
+                    return CheckpointPolicy.MUST_SAVE
+
                 # Always save CUDA→CPU results to avoid recomputing them
                 # (e.g. MoE D2H sync for all-to-all metadata).
                 if (
