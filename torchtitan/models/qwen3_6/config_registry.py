@@ -19,7 +19,10 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
     MultiModalProcessor,
 )
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
 from torchtitan.trainer import Trainer
 
 from . import model_registry, QWEN3_6_SPECIAL_TOKENS
@@ -38,7 +41,9 @@ def _multimodal_collator_config(
     )
 
 
-def qwen36_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+def qwen36_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -75,7 +80,9 @@ def qwen36_debugmodel(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def qwen36_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
+def qwen36_debugmodel_varlen_attn(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     config = qwen36_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(
         "debugmodel", seq_len=seq_len, attn_backend="varlen"
@@ -84,7 +91,9 @@ def qwen36_debugmodel_varlen_attn(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
-def qwen36_debugmodel_moe(seq_len: int | None = None) -> Trainer.Config:
+def qwen36_debugmodel_moe(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
     model_spec = model_registry(
         "debugmodel_moe", seq_len=seq_len, moe_comm_backend="standard"
     )

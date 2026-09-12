@@ -77,6 +77,11 @@ from torchtitan.models.qwen3_5.config_registry import (
     qwen35_debugmodel_moe,
     qwen35_debugmodel_varlen_attn,
 )
+from torchtitan.models.qwen3_6.config_registry import (
+    qwen36_debugmodel,
+    qwen36_debugmodel_moe,
+    qwen36_debugmodel_varlen_attn,
+)
 from torchtitan.models.qwen3_8.config_registry import (
     qwen38_debugmodel,
     qwen38_debugmodel_moe,
@@ -121,6 +126,9 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     qwen35_debugmodel,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_varlen_attn,
+    qwen36_debugmodel,
+    qwen36_debugmodel_moe,
+    qwen36_debugmodel_varlen_attn,
     qwen38_debugmodel,
     qwen38_debugmodel_moe,
     qwen38_debugmodel_varlen_attn,
