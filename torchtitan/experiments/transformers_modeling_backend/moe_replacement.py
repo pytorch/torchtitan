@@ -146,7 +146,7 @@ def build_and_swap_native_moe(
             out_dst_shardings=hf_sp_layout,
         )
 
-        # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but
+        # set_moe_sharding_config shards the shared FFN (w13/w2) but
         # leaves the SigmoidGatedFeedForward gate to model-specific code.
         shared = moe_config.shared_experts
         if isinstance(shared, SigmoidGatedFeedForward.Config):
@@ -508,9 +508,8 @@ def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]
         "w3_EFD": init_fn,
     }
     param_layout = {
-        "w1_EFD": spmd.S(1),
+        "w13": spmd.S(1),
         "w2_EDF": spmd.S(2),
-        "w3_EFD": spmd.S(1),
     }
     _expert_param_info_cache = (param_init, param_layout)
     return _expert_param_info_cache
