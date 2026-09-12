@@ -69,7 +69,7 @@ def _make_fused_linear_init(
 def split_fused_gate_up_state_dict(
     state_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return a state dict with dense ``w13`` parameters split into w1/w3."""
+    """Return a state dict with ``w13`` parameters split into logical w1/w3."""
     result = dict(state_dict)
     for param_name in ("weight", "bias"):
         suffix = f"w13.{param_name}"
@@ -85,14 +85,14 @@ def split_fused_gate_up_state_dict(
         if not key.endswith("w13"):
             continue
         prefix = key[: -len("w13")]
-        gate_up = result.pop(key).unflatten(1, (-1, 2))
+        gate_up = result.pop(key)
         result[f"{prefix}w1_EFD"] = gate_up[:, :, 0, :].contiguous()
         result[f"{prefix}w3_EFD"] = gate_up[:, :, 1, :].contiguous()
     return result
 
 
 def fuse_gate_up_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
-    """Return a state dict with dense w1/w3 parameters packed into ``w13``."""
+    """Return a state dict with logical w1/w3 parameters packed into ``w13``."""
     result = dict(state_dict)
     for param_name in ("weight", "bias"):
         suffix = f"w1.{param_name}"
@@ -116,7 +116,7 @@ def fuse_gate_up_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
             continue
         result[f"{prefix}w13"] = torch.stack(
             [result.pop(gate_key), result.pop(up_key)], dim=2
-        ).flatten(1, 2)
+        )
     return result
 
 
