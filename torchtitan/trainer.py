@@ -51,6 +51,9 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
+from torchtitan.distributed.xpu_embedding import (
+    enable_capture_safe_embedding_backward,
+)
 from torchtitan.distributed.xpugraph import wrap_with_xpu_graph, xpugraph_teardown
 from torchtitan.models.common.attention import FlexAttention, VarlenAttention
 from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
@@ -682,6 +685,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 if utils.device_type == "xpu"
                 else wrap_with_cuda_graph
             )
+            if utils.device_type == "xpu":
+                enable_capture_safe_embedding_backward()
             self.fwd_bwd_fn = wrap_fn(
                 self.fwd_bwd_fn,
                 gradient_accumulation_steps=self.gradient_accumulation_steps,
