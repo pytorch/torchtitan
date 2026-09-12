@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 import torch_remat as remat
@@ -65,6 +66,60 @@ def _make_fused_linear_init(
     return _init
 
 
+def split_fused_gate_up_state_dict(
+    state_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a state dict with dense ``w13`` parameters split into w1/w3."""
+    result = dict(state_dict)
+    for param_name in ("weight", "bias"):
+        suffix = f"w13.{param_name}"
+        for key in tuple(result):
+            if not key.endswith(suffix):
+                continue
+            prefix = key[: -len(suffix)]
+            gate_up = result.pop(key).unflatten(0, (-1, 2))
+            result[f"{prefix}w1.{param_name}"] = gate_up[:, 0].contiguous()
+            result[f"{prefix}w3.{param_name}"] = gate_up[:, 1].contiguous()
+
+    for key in tuple(result):
+        if not key.endswith("w13"):
+            continue
+        prefix = key[: -len("w13")]
+        gate_up = result.pop(key).unflatten(1, (-1, 2))
+        result[f"{prefix}w1_EFD"] = gate_up[:, :, 0, :].contiguous()
+        result[f"{prefix}w3_EFD"] = gate_up[:, :, 1, :].contiguous()
+    return result
+
+
+def fuse_gate_up_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Return a state dict with dense w1/w3 parameters packed into ``w13``."""
+    result = dict(state_dict)
+    for param_name in ("weight", "bias"):
+        suffix = f"w1.{param_name}"
+        for gate_key in tuple(result):
+            if not gate_key.endswith(suffix):
+                continue
+            prefix = gate_key[: -len(suffix)]
+            up_key = f"{prefix}w3.{param_name}"
+            if up_key not in result:
+                continue
+            result[f"{prefix}w13.{param_name}"] = torch.stack(
+                [result.pop(gate_key), result.pop(up_key)], dim=1
+            ).flatten(0, 1)
+
+    for gate_key in tuple(result):
+        if not gate_key.endswith("w1_EFD"):
+            continue
+        prefix = gate_key[: -len("w1_EFD")]
+        up_key = f"{prefix}w3_EFD"
+        if up_key not in result:
+            continue
+        result[f"{prefix}w13"] = torch.stack(
+            [result.pop(gate_key), result.pop(up_key)], dim=2
+        ).flatten(1, 2)
+    return result
+
+
 def compute_ffn_hidden_dim(
     dim: int,
     *,
@@ -84,46 +139,22 @@ def compute_ffn_hidden_dim(
 class FeedForward(Module):
     """SwiGLU feed-forward with one physical gate-and-up projection.
 
-    ``w1`` and ``w3`` remain separate logical configs and checkpoint keys, but
-    build into one interleaved ``w13`` Linear. Config takes the **final**
-    hidden_dim (no internal 2/3 scaling). Use compute_ffn_hidden_dim() for
-    Llama3/4-style dim computation.
+    ``w13`` stores the interleaved gate and up projections. Config takes the
+    **final** hidden_dim (no internal 2/3 scaling). Use
+    compute_ffn_hidden_dim() for Llama3/4-style dim computation.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        w1: Linear.Config
+        w13: Linear.Config
         w2: Linear.Config
-        w3: Linear.Config
-        activation_fn: ActivationFn.Config = field(
-            default_factory=lambda: ActivationFn.Config(
-                fn=SwiGLU()  # pyrefly: ignore[bad-argument-type]
-            )
-        )
+        activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
 
     def __init__(self, config: Config):
         super().__init__()
-        w1_init = (config.w1.param_init or {}).get("weight")
-        w3_init = (config.w3.param_init or {}).get("weight")
-        w13_param_init = None
-        if w1_init is not None and w3_init is not None:
-            w13_param_init = {"weight": _make_fused_linear_init(w1_init, w3_init)}
-
-        w13_config = replace(
-            config.w1,
-            out_features=2 * config.w1.out_features,
-            bias=False,
-            param_init=w13_param_init,
-        )
-        self.w13 = w13_config.build()
-        self.w13._logical_output_slices = (
-            ("w1", config.w1.out_features),
-            ("w3", config.w3.out_features),
-        )
+        self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
-        self.register_state_dict_post_hook(self._split_w13_on_save)
-        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up_TF = remat.region(
@@ -137,38 +168,9 @@ class FeedForward(Module):
             self.w2,
             self.remat_region_name("w2"),
             recompute=self.remat_should_recompute("w2"),
-        )(self._activation(gate_TF, up_TF))
+        )(self.activation_fn(gate_TF, up_TF))
         remat.recompute_needs_tensor(out_TD)
         return out_TD
-
-    def _activation(self, gate_TF: torch.Tensor, up_TF: torch.Tensor) -> torch.Tensor:
-        return self.activation_fn(gate_TF, up_TF)
-
-    @staticmethod
-    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Expose the physical w13 parameter as logical w1 and w3 keys."""
-        for param_name in ("weight", "bias"):
-            key = f"{prefix}w13.{param_name}"
-            if key not in state_dict:
-                continue
-            param = state_dict.pop(key).unflatten(0, (-1, 2))
-            state_dict[f"{prefix}w1.{param_name}"] = param[:, 0].contiguous()
-            state_dict[f"{prefix}w3.{param_name}"] = param[:, 1].contiguous()
-
-    @staticmethod
-    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
-        """Merge logical w1 and w3 checkpoint keys into the physical w13."""
-        for param_name in ("weight", "bias"):
-            w1_key = f"{prefix}w1.{param_name}"
-            w3_key = f"{prefix}w3.{param_name}"
-            if w1_key in state_dict and w3_key in state_dict:
-                state_dict[f"{prefix}w13.{param_name}"] = torch.stack(
-                    [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=1
-                ).flatten(0, 1)
-
-        native_key = f"{prefix}w13"
-        if native_key in state_dict:
-            state_dict[f"{prefix}w13.weight"] = state_dict.pop(native_key).flatten(0, 1)
 
 
 class SigmoidGatedFeedForward(FeedForward):
