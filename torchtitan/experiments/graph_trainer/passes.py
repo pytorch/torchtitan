@@ -40,7 +40,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     MOE_BLOCK_FQN,
     validate_ep_overlap_config,
 )
-
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
@@ -147,6 +146,28 @@ def construct_mandatory_graph_passes() -> list[Callable]:
     return [remove_parameter_gradient_markers_pass]
 
 
+def tag_must_save(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+    *,
+    config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
+) -> torch.fx.GraphModule:
+    """Tagging necessary nodes before regional inductor"""
+    from torch.utils.checkpoint import CheckpointPolicy
+
+    from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
+
+    logger.info("Tagging `MUST_SAVE` nodes before inductor pass")
+    for node in gm.graph.nodes:
+        if _is_backward_node(node):
+            continue
+        if torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set()):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+    return gm
+
+
 def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -155,6 +176,7 @@ def compile_time_passes(
     parallel_dims=None,
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
+    model_parts: list | None = None,
 ) -> list[Callable]:
     """Cleanup, FlexInnerAttention annotation, and regional_inductor passes.
 
@@ -183,6 +205,11 @@ def compile_time_passes(
         get_default_transformer_block_buckets,
     )
 
+    order_changed_for_auto_solver = False
+    memory_policy = config.compile.memory_policy.lower()
+    if memory_policy == "auto_perf_maxing":
+        order_changed_for_auto_solver = True
+
     n_layers = len(config.model_spec.model.layers)
     loss_config = getattr(config, "loss", None)
     uses_chunked_loss = isinstance(loss_config, ChunkedLossWrapper.Config)
@@ -208,155 +235,328 @@ def compile_time_passes(
         split_moe_expert_buckets=efsdp_degree > 1,
     )
 
-    passes = construct_mandatory_graph_passes()
-    if include_mandatory_normalization:
-        passes.extend(
-            [
-                eliminate_dead_code_pass,
-                canonicalize_graph_pass,
-                deduplicate_fsdp_unshard_chains_pass,
-            ]
-        )
-    ep_overlap_chunk_passes: list[Callable] = []
-    ep_overlap_module_fqn: str | None = None
-    ep_overlap_chunk_strategy: str | None = None
-    if ep_overlap_enabled:
-        (
-            overlap_dim,
-            ep_overlap_chunk_strategy,
-            ep_overlap_module_fqn,
-        ) = validate_ep_overlap_config(config.compile.ep_overlap)
-        if (
-            ep_overlap_chunk_strategy == "graph"
-            and _tensor_parallel_degree(config, parallel_dims) > 1
-        ):
-            # After DTensor lowering, the FX graph contains physical TP-local
-            # tensors and TP/SP layout helpers. Splitting those values is not
-            # proven equivalent to eager DTensor-level chunking.
-            raise ValueError(
-                "Graph EP chunking does not support tensor_parallel_degree > 1. "
-                "Use tensor_parallel_degree=1 or eager chunking for this "
-                "configuration."
-            )
-        if ep_overlap_chunk_strategy == "eager":
-            ep_overlap_chunk_passes.append(populate_eager_chunk_metadata_pass)
-        if ep_overlap_chunk_strategy == "graph":
-            ep_overlap_chunk_passes.extend(
+    if order_changed_for_auto_solver:
+        passes = construct_mandatory_graph_passes()
+        if include_mandatory_normalization:
+            passes.extend(
                 [
-                    functools.partial(
-                        populate_chunk_dim_metadata_pass,
-                        mode=overlap_dim,
-                    ),
-                    functools.partial(
-                        ep_overlap_chunk_pass,
-                        mode=overlap_dim,
-                        module_pattern=ep_overlap_module_fqn,
-                        num_static_inputs=traced_result.num_static_inputs,
-                        optimize_grad_live_out=not (
-                            config.compile.ep_overlap.disable_early_grad_accumulation
-                        ),
-                        require_all_to_all=(
-                            getattr(config.parallelism, "expert_parallel_degree", 1) > 1
-                        ),
-                    ),
+                    eliminate_dead_code_pass,
+                    canonicalize_graph_pass,
+                    deduplicate_fsdp_unshard_chains_pass,
                 ]
             )
+        ep_overlap_chunk_passes: list[Callable] = []
+        ep_overlap_module_fqn: str | None = None
+        ep_overlap_chunk_strategy: str | None = None
+        if ep_overlap_enabled:
+            (
+                overlap_dim,
+                ep_overlap_chunk_strategy,
+                ep_overlap_module_fqn,
+            ) = validate_ep_overlap_config(config.compile.ep_overlap)
+            if (
+                ep_overlap_chunk_strategy == "graph"
+                and _tensor_parallel_degree(config, parallel_dims) > 1
+            ):
+                # After DTensor lowering, the FX graph contains physical TP-local
+                # tensors and TP/SP layout helpers. Splitting those values is not
+                # proven equivalent to eager DTensor-level chunking.
+                raise ValueError(
+                    "Graph EP chunking does not support tensor_parallel_degree > 1. "
+                    "Use tensor_parallel_degree=1 or eager chunking for this "
+                    "configuration."
+                )
+            if ep_overlap_chunk_strategy == "eager":
+                ep_overlap_chunk_passes.append(populate_eager_chunk_metadata_pass)
+            if ep_overlap_chunk_strategy == "graph":
+                ep_overlap_chunk_passes.extend(
+                    [
+                        functools.partial(
+                            populate_chunk_dim_metadata_pass,
+                            mode=overlap_dim,
+                        ),
+                        functools.partial(
+                            ep_overlap_chunk_pass,
+                            mode=overlap_dim,
+                            module_pattern=ep_overlap_module_fqn,
+                            num_static_inputs=traced_result.num_static_inputs,
+                            optimize_grad_live_out=not (
+                                config.compile.ep_overlap.disable_early_grad_accumulation
+                            ),
+                            require_all_to_all=(
+                                getattr(config.parallelism, "expert_parallel_degree", 1)
+                                > 1
+                            ),
+                        ),
+                    ]
+                )
 
-    passes.extend(
-        [
-            functools.partial(
-                tag_with_memory_policy_pass,
-                config=config,
-            ),
-            functools.partial(
-                apply_cpu_offload_pass,
-                prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
-                defer_n_layers=config.compile.cpu_offload_defer_n_layers,
-            ),
-            selective_activation_remat_pass,
-        ]
-    )
-    if ep_overlap_enabled:
-        passes.extend(ep_overlap_chunk_passes)
-        passes.append(isolate_ep_process_group_pass)
-        passes.append(eliminate_dead_code_pass)
-
-    if config.compile.enable_fsdp_ag_rs_overlap:
-        passes.append(reassign_collective_pgs_pass)
-    passes.append(
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=module_bucket_plans,
-            # FSDP2 packs buckets in managed parameter order. The traced state
-            # FQNs preserve that registration order, unlike graph execution order.
-            fsdp_param_module_order=get_fsdp_param_module_order(
-                traced_result.state_fqns
-            ),
-        )
-    )
-
-    if ep_overlap_enabled:
-        assert ep_overlap_module_fqn is not None
-        passes.append(
-            functools.partial(
-                ep_overlap_schedule_pass,
-                module_pattern=ep_overlap_module_fqn,
-                require_all_to_all=(
-                    getattr(config.parallelism, "expert_parallel_degree", 1) > 1
+        passes.extend(
+            [
+                functools.partial(
+                    tag_must_save,
+                    config=config,
+                    trace=traced_result,
+                    model_parts=model_parts,
                 ),
-                pair_first_token_exchange=ep_overlap_module_fqn == MOE_BLOCK_FQN,
+                selective_activation_remat_pass,
+            ]
+        )
+
+        if ep_overlap_enabled:
+            passes.extend(ep_overlap_chunk_passes)
+            passes.append(isolate_ep_process_group_pass)
+            passes.append(eliminate_dead_code_pass)
+
+        if config.compile.enable_fsdp_ag_rs_overlap:
+            passes.append(reassign_collective_pgs_pass)
+
+        if ep_overlap_enabled:
+            assert ep_overlap_module_fqn is not None
+            passes.append(
+                functools.partial(
+                    ep_overlap_schedule_pass,
+                    module_pattern=ep_overlap_module_fqn,
+                    require_all_to_all=(
+                        getattr(config.parallelism, "expert_parallel_degree", 1) > 1
+                    ),
+                    pair_first_token_exchange=ep_overlap_module_fqn == MOE_BLOCK_FQN,
+                )
             )
-        )
-        passes.append(concretize_ep_chunk_symbolic_shapes_pass)
+            passes.append(concretize_ep_chunk_symbolic_shapes_pass)
 
-    enable_fsdp_dense_region_overlap = config.compile.enable_fsdp_dense_region_overlap
-    if (
-        enable_fsdp_dense_region_overlap
-        and ep_overlap_enabled
-        and (
-            ep_overlap_module_fqn != MOE_BLOCK_FQN
-            or ep_overlap_chunk_strategy != "graph"
+        enable_fsdp_dense_region_overlap = (
+            config.compile.enable_fsdp_dense_region_overlap
         )
-    ):
-        warnings.warn(
-            "--compile.enable_fsdp_dense_region_overlap is ignored when "
-            "--compile.ep_overlap.enabled is set unless graph chunking is "
-            "applied to layers.*.moe. The dense FSDP scheduler can be used "
-            "standalone when ep_overlap is disabled.",
-            stacklevel=2,
-        )
-        enable_fsdp_dense_region_overlap = False
+        if (
+            enable_fsdp_dense_region_overlap
+            and ep_overlap_enabled
+            and (
+                ep_overlap_module_fqn != MOE_BLOCK_FQN
+                or ep_overlap_chunk_strategy != "graph"
+            )
+        ):
+            warnings.warn(
+                "--compile.enable_fsdp_dense_region_overlap is ignored when "
+                "--compile.ep_overlap.enabled is set unless graph chunking is "
+                "applied to layers.*.moe. The dense FSDP scheduler can be used "
+                "standalone when ep_overlap is disabled.",
+                stacklevel=2,
+            )
+            enable_fsdp_dense_region_overlap = False
 
-    if enable_fsdp_dense_region_overlap:
-        # Move FSDP comm launches into neighboring transformer dense regions.
-        # This is useful both as an EP-overlap companion and as a standalone
-        # FSDP scheduling ablation, so it is controlled by its explicit flag.
-        passes.append(
-            functools.partial(
-                schedule_fsdp_comms_to_dense_regions_pass,
-                moe_layer_ids=moe_layer_ids,
-                n_layers=n_layers,
-                transformer_bucket_counts_by_layer=get_transformer_block_bucket_counts(
-                    module_bucket_plans,
+        if enable_fsdp_dense_region_overlap:
+            # Move FSDP comm launches into neighboring transformer dense regions.
+            # This is useful both as an EP-overlap companion and as a standalone
+            # FSDP scheduling ablation, so it is controlled by its explicit flag.
+            passes.append(
+                functools.partial(
+                    schedule_fsdp_comms_to_dense_regions_pass,
+                    moe_layer_ids=moe_layer_ids,
                     n_layers=n_layers,
+                    transformer_bucket_counts_by_layer=get_transformer_block_bucket_counts(
+                        module_bucket_plans,
+                        n_layers=n_layers,
+                    ),
+                    strict=True,
+                )
+            )
+
+        if config.compile.enable_async_tensor_parallel:
+            passes.append(async_tensor_parallel_pass)
+
+        if include_inductor:
+            passes.extend(
+                final_inductor_compile_passes(
+                    config.compile,
+                    use_cudagraph=use_cudagraph,
+                )
+            )
+
+        passes.extend(
+            [
+                functools.partial(
+                    tag_with_memory_policy_pass,
+                    config=config,
+                    trace=traced_result,
+                    model_parts=model_parts,
                 ),
-                strict=True,
+                functools.partial(
+                    apply_cpu_offload_pass,
+                    prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+                    defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+                ),
+                selective_activation_remat_pass,
+            ]
+        )
+
+        passes.append(
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=module_bucket_plans,
+                # FSDP2 packs buckets in managed parameter order. The traced state
+                # FQNs preserve that registration order, unlike graph execution order.
+                fsdp_param_module_order=get_fsdp_param_module_order(
+                    traced_result.state_fqns
+                ),
+            )
+        )
+        return passes
+    else:
+        passes = construct_mandatory_graph_passes()
+        if include_mandatory_normalization:
+            passes.extend(
+                [
+                    eliminate_dead_code_pass,
+                    canonicalize_graph_pass,
+                    deduplicate_fsdp_unshard_chains_pass,
+                ]
+            )
+        ep_overlap_chunk_passes: list[Callable] = []
+        ep_overlap_module_fqn: str | None = None
+        ep_overlap_chunk_strategy: str | None = None
+        if ep_overlap_enabled:
+            (
+                overlap_dim,
+                ep_overlap_chunk_strategy,
+                ep_overlap_module_fqn,
+            ) = validate_ep_overlap_config(config.compile.ep_overlap)
+            if (
+                ep_overlap_chunk_strategy == "graph"
+                and _tensor_parallel_degree(config, parallel_dims) > 1
+            ):
+                # After DTensor lowering, the FX graph contains physical TP-local
+                # tensors and TP/SP layout helpers. Splitting those values is not
+                # proven equivalent to eager DTensor-level chunking.
+                raise ValueError(
+                    "Graph EP chunking does not support tensor_parallel_degree > 1. "
+                    "Use tensor_parallel_degree=1 or eager chunking for this "
+                    "configuration."
+                )
+            if ep_overlap_chunk_strategy == "eager":
+                ep_overlap_chunk_passes.append(populate_eager_chunk_metadata_pass)
+            if ep_overlap_chunk_strategy == "graph":
+                ep_overlap_chunk_passes.extend(
+                    [
+                        functools.partial(
+                            populate_chunk_dim_metadata_pass,
+                            mode=overlap_dim,
+                        ),
+                        functools.partial(
+                            ep_overlap_chunk_pass,
+                            mode=overlap_dim,
+                            module_pattern=ep_overlap_module_fqn,
+                            num_static_inputs=traced_result.num_static_inputs,
+                            optimize_grad_live_out=not (
+                                config.compile.ep_overlap.disable_early_grad_accumulation
+                            ),
+                            require_all_to_all=(
+                                getattr(config.parallelism, "expert_parallel_degree", 1)
+                                > 1
+                            ),
+                        ),
+                    ]
+                )
+
+        passes.extend(
+            [
+                functools.partial(
+                    tag_with_memory_policy_pass,
+                    config=config,
+                    trace=traced_result,
+                    model_parts=model_parts,
+                ),
+                functools.partial(
+                    apply_cpu_offload_pass,
+                    prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+                    defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+                ),
+                selective_activation_remat_pass,
+            ]
+        )
+        if ep_overlap_enabled:
+            passes.extend(ep_overlap_chunk_passes)
+            passes.append(isolate_ep_process_group_pass)
+            passes.append(eliminate_dead_code_pass)
+
+        if config.compile.enable_fsdp_ag_rs_overlap:
+            passes.append(reassign_collective_pgs_pass)
+        passes.append(
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=module_bucket_plans,
+                # FSDP2 packs buckets in managed parameter order. The traced state
+                # FQNs preserve that registration order, unlike graph execution order.
+                fsdp_param_module_order=get_fsdp_param_module_order(
+                    traced_result.state_fqns
+                ),
             )
         )
 
-    if config.compile.enable_async_tensor_parallel:
-        passes.append(async_tensor_parallel_pass)
+        if ep_overlap_enabled:
+            assert ep_overlap_module_fqn is not None
+            passes.append(
+                functools.partial(
+                    ep_overlap_schedule_pass,
+                    module_pattern=ep_overlap_module_fqn,
+                    require_all_to_all=(
+                        getattr(config.parallelism, "expert_parallel_degree", 1) > 1
+                    ),
+                    pair_first_token_exchange=ep_overlap_module_fqn == MOE_BLOCK_FQN,
+                )
+            )
+            passes.append(concretize_ep_chunk_symbolic_shapes_pass)
 
-    if not include_inductor:
-        return passes
-
-    passes.extend(
-        final_inductor_compile_passes(
-            config.compile,
-            use_cudagraph=use_cudagraph,
+        enable_fsdp_dense_region_overlap = (
+            config.compile.enable_fsdp_dense_region_overlap
         )
-    )
-    return passes
+        if (
+            enable_fsdp_dense_region_overlap
+            and ep_overlap_enabled
+            and (
+                ep_overlap_module_fqn != MOE_BLOCK_FQN
+                or ep_overlap_chunk_strategy != "graph"
+            )
+        ):
+            warnings.warn(
+                "--compile.enable_fsdp_dense_region_overlap is ignored when "
+                "--compile.ep_overlap.enabled is set unless graph chunking is "
+                "applied to layers.*.moe. The dense FSDP scheduler can be used "
+                "standalone when ep_overlap is disabled.",
+                stacklevel=2,
+            )
+            enable_fsdp_dense_region_overlap = False
+
+        if enable_fsdp_dense_region_overlap:
+            # Move FSDP comm launches into neighboring transformer dense regions.
+            # This is useful both as an EP-overlap companion and as a standalone
+            # FSDP scheduling ablation, so it is controlled by its explicit flag.
+            passes.append(
+                functools.partial(
+                    schedule_fsdp_comms_to_dense_regions_pass,
+                    moe_layer_ids=moe_layer_ids,
+                    n_layers=n_layers,
+                    transformer_bucket_counts_by_layer=get_transformer_block_bucket_counts(
+                        module_bucket_plans,
+                        n_layers=n_layers,
+                    ),
+                    strict=True,
+                )
+            )
+
+        if config.compile.enable_async_tensor_parallel:
+            passes.append(async_tensor_parallel_pass)
+
+        if not include_inductor:
+            return passes
+
+        passes.extend(
+            final_inductor_compile_passes(
+                config.compile,
+                use_cudagraph=use_cudagraph,
+            )
+        )
+        return passes
 
 
 def final_inductor_compile_passes(
@@ -422,6 +622,7 @@ def construct_default_graph_passes(
     config: "GraphTrainer.Config",
     *,
     parallel_dims=None,
+    model_parts: list | None = None,
 ) -> list[Callable]:
     """Build the pass list for the aot_fx_trace path.
 
@@ -443,6 +644,7 @@ def construct_default_graph_passes(
                 config,
                 use_cudagraph=want_cudagraph,
                 parallel_dims=parallel_dims,
+                model_parts=model_parts,
             )
         )
 
