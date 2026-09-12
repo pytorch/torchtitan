@@ -11,9 +11,6 @@ import torch
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.models.deepseek_v3.config_registry import (
-    deepseek_v3_debugmodel_minimal_async_ep,
-)
 from torchtitan.overrides.fused_swiglu import (
     fused_grouped_experts,
     FusedGroupedExperts,
@@ -41,14 +38,6 @@ def _build_fused_grouped_experts() -> FusedGroupedExperts:
 
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
-    def test_minimal_async_ep_config_imports_override(self):
-        config = deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048)
-
-        self.assertIn(
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-            config.override.imports,
-        )
-
     def test_grouped_experts_config_is_replaced(self):
         cfg = GroupedExperts.Config(
             dim=16,

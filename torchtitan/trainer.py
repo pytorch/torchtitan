@@ -55,7 +55,6 @@ from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
-    MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
@@ -218,9 +217,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
                 LocalTokenDispatcher.Config
             ):
-                if isinstance(
-                    dispatcher_config, MinimalAsyncEPTokenDispatcher.Config
-                ) or (
+                if (
                     isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
                     and dispatcher_config.non_blocking_capacity_factor is not None
                 ):
@@ -229,8 +226,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "CUDA graphs support only expert parallel token dispatcher "
                     "configurations without CPU synchronization. "
-                    "Set HybridEP non_blocking_capacity_factor, or use "
-                    "MinimalAsyncEP, or set --training.disable_cuda_graphs. "
+                    "Set HybridEP non_blocking_capacity_factor, or set "
+                    "--training.disable_cuda_graphs. "
                     "Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )

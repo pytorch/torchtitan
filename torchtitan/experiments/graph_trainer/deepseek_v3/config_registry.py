@@ -16,10 +16,8 @@ from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
-    deepseek_v3_16b_minimal_async_ep,
     deepseek_v3_671b,
     deepseek_v3_debugmodel,
-    deepseek_v3_debugmodel_minimal_async_ep,
     deepseek_v3_mxfp8_linear_converter_config,
 )
 
@@ -65,15 +63,6 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_deepseek_v3_debugmodel_minimal_async_ep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(
-        deepseek_v3_debugmodel_minimal_async_ep(),
-        model_registry,
-    )
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
 def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
     """Test-only FlexInnerAttention baseline that runs through eager pipeline parallelism."""
     config = graph_trainer_deepseek_v3_debugmodel()
@@ -88,15 +77,6 @@ def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_16b(seq_len=4096), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
-    return config
-
-
-def graph_trainer_deepseek_v3_16b_minimal_async_ep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(
-        deepseek_v3_16b_minimal_async_ep(seq_len=4096),
-        model_registry,
-    )
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
 

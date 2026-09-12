@@ -16,7 +16,6 @@ import tyro
 from torchtitan.config import ConfigManager, ParallelismConfig, TrainingConfig
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
-    deepseek_v3_debugmodel_minimal_async_ep,
 )
 from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
@@ -372,7 +371,6 @@ class TestConfigManager(unittest.TestCase):
             "symm_mem_async_tp": config,
             "distributed_gemm": llama3_debugmodel_dist_gemm(seq_len=2048),
             "hybrid_ep": deepseek_v3_debugmodel_hybridep(seq_len=2048),
-            "minimal_async_ep": deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048),
             "deep_ep": qwen3_moe_deepep(seq_len=512),
         }
 

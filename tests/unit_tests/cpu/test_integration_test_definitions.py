@@ -85,8 +85,6 @@ def test_parse_multiple_integration_test_suites() -> None:
 def test_h100_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in build_h100_tests_list()} == {
         "2d_asynctp_compile",
-        "deepseek_v3_fsdp+cp+tp+minimal_async_ep",
-        "deepseek_v3_fsdp+cp+tp+minimal_async_ep+sdc_replay",
         "deepseek_v3_fsdp+hybridep+compile",
         "dist_gemm",
         "float8",
@@ -111,7 +109,6 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:
     specialized_names = {
-        "deepseek_v3_fsdp+cp+tp+minimal_async_ep",
         "deepseek_v3_fsdp+hybridep+compile",
         "qwen3_fsdp+deepep",
     }

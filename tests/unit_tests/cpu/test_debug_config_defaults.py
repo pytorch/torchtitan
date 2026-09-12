@@ -33,7 +33,6 @@ from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
-    deepseek_v3_debugmodel_minimal_async_ep,
     deepseek_v3_debugmodel_mtp,
     deepseek_v3_debugmodel_mxfp8,
 )
@@ -95,7 +94,6 @@ DebugConfigFactory = Callable[..., Trainer.Config]
 _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
-    deepseek_v3_debugmodel_minimal_async_ep,
     deepseek_v3_debugmodel_mtp,
     deepseek_v3_debugmodel_mxfp8,
     deepseek_v4_debugmodel,
