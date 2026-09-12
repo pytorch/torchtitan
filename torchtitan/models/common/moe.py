@@ -46,30 +46,19 @@ from .token_dispatcher import LocalTokenDispatcher
 
 
 def _validate_padding_mask(
-    routing_map_TE: torch.Tensor,
+    x_TD: torch.Tensor,
     padding_mask: torch.Tensor,
 ) -> None:
+    """Validate that the padding mask matches the router input tokens."""
     if padding_mask.dtype != torch.bool:
         raise ValueError(
             f"padding_mask must have dtype bool, got {padding_mask.dtype}."
         )
-    if padding_mask.shape != routing_map_TE.shape[:-1]:
+    if padding_mask.shape != x_TD.shape[:-1]:
         raise ValueError(
-            "padding_mask must have shape matching the routing-map token axis, "
-            f"got {tuple(padding_mask.shape)} for routing map "
-            f"{tuple(routing_map_TE.shape)}."
+            "padding_mask must have shape matching the input token axis, "
+            f"got {tuple(padding_mask.shape)} for input {tuple(x_TD.shape)}."
         )
-
-
-def _exclude_padding_from_routing_map(
-    routing_map_TE: torch.Tensor,
-    padding_mask: torch.Tensor | None,
-) -> torch.Tensor:
-    """Return routing assignments with padding-token rows cleared."""
-    if padding_mask is None:
-        return routing_map_TE
-    _validate_padding_mask(routing_map_TE, padding_mask)
-    return routing_map_TE & ~padding_mask.unsqueeze(-1)
 
 
 class GroupedExperts(Module):
@@ -365,6 +354,9 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
+        if padding_mask is not None:
+            _validate_padding_mask(x_TD, padding_mask)
+
         scores_TE = self.gate(x_TD)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
@@ -413,9 +405,10 @@ class TokenChoiceTopKRouter(Module):
         # for all load-balancing statistics. The auxiliary-loss gradient is
         # injected into topk_scores_TK on backward; see ``AuxLoss.inject``.
         if self.training:
-            masked_routing_map_TE = _exclude_padding_from_routing_map(
-                routing_map_TE,
-                padding_mask,
+            masked_routing_map_TE = (
+                routing_map_TE
+                if padding_mask is None
+                else routing_map_TE & ~padding_mask.unsqueeze(-1)
             )
             with torch.no_grad():
                 self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
@@ -426,9 +419,6 @@ class TokenChoiceTopKRouter(Module):
                     carrier=topk_scores_TK,
                     padding_mask=padding_mask,
                 )
-        elif padding_mask is not None:
-            _validate_padding_mask(routing_map_TE, padding_mask)
-
         return (
             topk_scores_TK,
             topk_expert_ids_TK,

@@ -138,6 +138,20 @@ class TestMoE(unittest.TestCase):
             aux_loss.routing_map_TE.sum(dim=0).to(torch.float32),
         )
 
+    def test_router_validates_padding_mask_before_routing(self):
+        router = make_router_config(
+            dim=4,
+            num_experts=2,
+            gate_param_init={"weight": nn.init.zeros_},
+            top_k=1,
+        ).build()
+        x_TD = torch.randn(4, 4)
+
+        with self.assertRaisesRegex(ValueError, "dtype bool"):
+            router(x_TD, padding_mask=torch.zeros(4))
+        with self.assertRaisesRegex(ValueError, "input token axis"):
+            router(x_TD, padding_mask=torch.zeros(3, dtype=torch.bool))
+
     def test_padding_mask_sharding_matches_router_token_layout(self):
         config = _moe_sharding_config(enable_ep=True, enable_sp=False)
         assert config.in_src_shardings is not None
