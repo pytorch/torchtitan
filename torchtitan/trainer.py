@@ -62,7 +62,7 @@ from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplay
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
+from torchtitan.tools.logging import logger, warn_once
 from torchtitan.tools.profiler import Profiler
 
 
@@ -177,9 +177,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 self.compile.enable_async_tensor_parallel
                 and self.parallelism.tensor_parallel_degree <= 1
             ):
-                logger.warning(
-                    "compile.enable_async_tensor_parallel has no effect without "
-                    "tensor parallelism. Set --parallelism.tensor_parallel_degree > 1."
+                warn_once(
+                    logger,
+                    "compile.enable_async_tensor_parallel has no effect unless "
+                    "--parallelism.tensor_parallel_degree > 1.",
                 )
 
             if self.model_spec is not None:
@@ -412,7 +413,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if config.override.imports:
             apply_overrides(config.override, config)
         # Overrides may change any config field; re-run the full validation.
-        # __post_init__ only raises (no mutation), so re-running is safe.
+        # __post_init__ does not mutate config; warnings are deduped with
+        # warn_once, so re-running is safe.
         config.__post_init__()
 
         logger.info(f"Building {model_spec.name} {model_spec.flavor}")

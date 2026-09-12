@@ -74,22 +74,27 @@ def _async_tp_trainer_config(*, tensor_parallel_degree: int):
     return config
 
 
+_ASYNC_TP_WARN = (
+    "compile.enable_async_tensor_parallel has no effect unless "
+    "--parallelism.tensor_parallel_degree > 1."
+)
+
+
 def test_async_tp_warns_without_tensor_parallelism() -> None:
     config = _async_tp_trainer_config(tensor_parallel_degree=1)
-    with patch("torchtitan.trainer.logger.warning") as mock_warning:
+    with patch("torchtitan.trainer.warn_once") as mock_warn_once:
+        config.__post_init__()
         config.__post_init__()
 
-    mock_warning.assert_called_once()
-    message = mock_warning.call_args.args[0]
-    assert "async" in message.lower()
-    assert "--parallelism.tensor_parallel_degree > 1" in message
+    assert mock_warn_once.call_count == 2
+    for call in mock_warn_once.call_args_list:
+        assert call.args[1] == _ASYNC_TP_WARN
 
 
 def test_async_tp_does_not_warn_with_tensor_parallelism() -> None:
     config = _async_tp_trainer_config(tensor_parallel_degree=2)
-    with patch("torchtitan.trainer.logger.warning") as mock_warning:
+    with patch("torchtitan.trainer.warn_once") as mock_warn_once:
         config.__post_init__()
 
-    for call in mock_warning.call_args_list:
-        message = call.args[0]
-        assert "--parallelism.tensor_parallel_degree > 1" not in message
+    for call in mock_warn_once.call_args_list:
+        assert call.args[1] != _ASYNC_TP_WARN
