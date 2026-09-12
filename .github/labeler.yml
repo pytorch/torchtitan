@@ -1,5 +1,11 @@
-"ciflow/8gpu":
-  - tests/assets/losses/**
+"ciflow/fake-pg":
+  globs:
+    - .ci/docker/**
+    - .github/workflows/**
+    - scripts/**
+    - tests/**
+    - torchtitan/**
+  draft: false
 
 "ciflow/rl":
   - torchtitan/experiments/rl/**

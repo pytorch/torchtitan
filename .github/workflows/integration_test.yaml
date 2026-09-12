@@ -9,18 +9,25 @@ on:
         type: string
         default: cuda
       execution_mode:
-        description: "Process-group mode for reusable workflow calls"
+        description: >-
+          Select the jobs for a reusable workflow call: fake_pg runs the 1-GPU
+          simulated process-group suite, while real_pg runs the 8-GPU real
+          process-group suite. Direct workflow events ignore this input.
         required: false
         type: string
         default: fake_pg
   push:
     branches: [ main ]
     tags:
-      - ciflow/8gpu/*
+      - ciflow/fake-pg/*
+      - ciflow/real-pg/*
     paths-ignore:
       - 'torchtitan/experiments/**'
+  # Direct PR runs cover only ready PRs whose base branch is main.
+  # CIFlow tags provide Fake PG coverage for stacked PRs independently of base.
+  # The job guards below keep draft PRs from running tests.
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches: [ main ]
     paths-ignore:
       - 'torchtitan/experiments/**'
@@ -52,9 +59,13 @@ permissions:
   contents: read
 
 jobs:
+  # Run Fake PG when CIFlow pushes a ciflow/fake-pg tag for a ready PR.
+  # Tag pushes are independent of the PR base, so stacked PRs are covered.
+  # Reusable calls also run this job when execution_mode is fake_pg.
   set-matrix-fake-pg:
     if: >-
-      (github.event_name == 'pull_request' ||
+      ((github.event_name == 'push' &&
+        startsWith(github.ref, 'refs/tags/ciflow/fake-pg/')) ||
        (github.event_name == 'workflow_call' && inputs.execution_mode == 'fake_pg')) &&
       (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
     uses: ./.github/workflows/set-matrix.yaml
@@ -62,9 +73,20 @@ jobs:
       runner-cuda: linux.g5.4xlarge.nvidia.gpu
       gpu-arch: ${{ inputs.gpu-arch || 'cuda' }}
 
+  # Ready PRs based on main run tests marked real_pg_required.
+  # Main pushes and opt-in ciflow/real-pg tags run the full Real PG suite.
+  # Schedules, manual runs, and Real PG reusable calls also run the full suite.
   set-matrix-real-pg:
     if: >-
-      (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.draft == false) &&
+      ((github.event_name == 'push' &&
+        (github.ref == 'refs/heads/main' ||
+         startsWith(github.ref, 'refs/tags/ciflow/real-pg/'))) ||
+       github.event_name == 'pull_request' ||
+       github.event_name == 'schedule' ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'workflow_call' && inputs.execution_mode == 'real_pg')) &&
       (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
     uses: ./.github/workflows/set-matrix.yaml
     with:
@@ -73,7 +95,7 @@ jobs:
   integration-fake-pg:
     name: 1 GPU Integration (Fake PG)
     needs: set-matrix-fake-pg
-    if: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_call' && inputs.execution_mode == 'fake_pg')) && needs.set-matrix-fake-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-fake-pg.outputs.matrix).include[0] != null }}
+    if: ${{ needs.set-matrix-fake-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-fake-pg.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
@@ -192,6 +214,9 @@ jobs:
         if [[ "${{ inputs.test_name || 'all' }}" != "all" ]]; then
           TEST_NAME_ARG="--test_name=${{ inputs.test_name }}"
         fi
+        # Direct PR CI runs only tests that cannot use Fake PG.
+        # Main pushes, ciflow/real-pg tags, schedules, manual runs, and Real PG
+        # workflow calls leave the scope empty and run the full Real PG suite.
         TEST_SCOPE_ARG=""
         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
           TEST_SCOPE_ARG="--test_scope=real_pg_required"
