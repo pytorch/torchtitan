@@ -259,7 +259,9 @@ def accumulate_param_grads_(
 
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
-    return node.meta.get("autograd_backward", False)
+    return node.meta.get("autograd_backward", False) or any(
+        n.meta.get("autograd_backward", False) for n in node.all_input_nodes
+    )
 
 
 def _get_module_fqn(node: torch.fx.Node) -> str:
