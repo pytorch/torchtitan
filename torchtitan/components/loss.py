@@ -164,10 +164,17 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             safe_labels >= vocab_start + local_vocab_size
         )
         local_labels = safe_labels - vocab_start
-        local_labels[out_of_range] = 0
+        # torch.where avoids the aten.index_put_ path that XPU graph capture rejects.
+        local_labels = torch.where(
+            out_of_range, torch.zeros_like(local_labels), local_labels
+        )
 
         local_result = torch.gather(log_probs, -1, local_labels.unsqueeze(-1))
-        local_result[out_of_range.unsqueeze(-1)] = 0
+        local_result = torch.where(
+            out_of_range.unsqueeze(-1),
+            torch.zeros_like(local_result),
+            local_result,
+        )
         local_result = funcol.all_reduce(
             local_result, reduceOp=dist.ReduceOp.SUM.name, group=tp_group
         )
@@ -197,12 +204,18 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
             safe_labels >= ctx.vocab_start + ctx.local_vocab_size
         )
         local_labels = safe_labels - ctx.vocab_start
-        local_labels[out_of_range] = 0
+        # torch.where avoids the aten.index_put_ path that XPU graph capture rejects.
+        local_labels = torch.where(
+            out_of_range, torch.zeros_like(local_labels), local_labels
+        )
 
-        grad_input = torch.zeros_like(log_probs)
-        row_idx = torch.arange(local_labels.shape[0], device=local_labels.device)
-        grad_update = out_of_range.to(grad_input.dtype) - 1.0
-        grad_input[row_idx, local_labels] = grad_update
+        grad_update = out_of_range.to(log_probs.dtype) - 1.0
+        # An elementwise one-hot avoids aten.index_put_ and aten.scatter_, which XPU graph capture rejects even with static shapes.
+        col_idx = torch.arange(
+            ctx.local_vocab_size, device=local_labels.device
+        ).unsqueeze(0)
+        one_hot = (col_idx == local_labels.unsqueeze(-1)).to(log_probs.dtype)
+        grad_input = one_hot * grad_update.unsqueeze(-1)
 
         # reduction="none" gives a per-token ``[T]`` upstream grad; unsqueeze to
         # ``[T, 1]`` to broadcast over the local vocab. "sum" gives the scalar
