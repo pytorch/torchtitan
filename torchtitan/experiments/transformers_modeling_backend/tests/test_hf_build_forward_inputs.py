@@ -6,6 +6,7 @@
 
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
@@ -18,8 +19,6 @@ from torchtitan.experiments.transformers_modeling_backend.model import (
 
 def _run(
     m: HFTransformerModel,
-    *,
-    spmd_backend: str = "partial_dtensor",
 ):
     B, S = 2, 4
     batch = cast(
@@ -38,17 +37,20 @@ def _run(
         pp=1,
         ep=1,
         world_size=1,
-        spmd_backend=spmd_backend,
     )
-    return (
-        m.preprocess_inputs(
-            batch,
-            parallel_dims=pd,
-            parallelism=ParallelismConfig(spmd_backend=spmd_backend),
-        ),
-        B,
-        S,
-    )
+    with patch(
+        "torchtitan.distributed.spmd_types.annotate_input_spmd_types",
+        side_effect=lambda _parallel_dims, batch, _input_sharding: batch,
+    ):
+        return (
+            m.preprocess_inputs(
+                batch,
+                parallel_dims=pd,
+                parallelism=ParallelismConfig(),
+            ),
+            B,
+            S,
+        )
 
 
 def test_hf_builds_mask_when_present(monkeypatch):
@@ -116,7 +118,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     _, _, extra_kwargs = model.preprocess_inputs(
         batch,
         parallel_dims=parallel_dims,
-        parallelism=ParallelismConfig(spmd_backend="spmd_types"),
+        parallelism=ParallelismConfig(),
     )
 
     assert calls == ["cp", "spmd"]

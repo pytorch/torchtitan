@@ -9,7 +9,6 @@
 from dataclasses import dataclass
 
 import torch
-from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.feed_forward import FeedForward
@@ -74,27 +73,16 @@ class KimiGroupedExperts(GroupedExperts):
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        if isinstance(self.w1_EFD, DTensor):
-            w1_EFD = self.w1_EFD.to_local()
-            assert isinstance(self.w2_EDF, DTensor)
-            w2_EDF = self.w2_EDF.to_local()
-            assert isinstance(self.w3_EFD, DTensor)
-            w3_EFD = self.w3_EFD.to_local()
-        else:
-            w1_EFD = self.w1_EFD
-            w2_EDF = self.w2_EDF
-            w3_EFD = self.w3_EFD
-
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
 
         gate_RF = self._grouped_mm(
             A=x_RD.bfloat16(),
-            weight_EOI=w1_EFD,
+            weight_EOI=self.w1_EFD,
             offs=offsets_E,
         )
         up_RF = self._grouped_mm(
             A=x_RD.bfloat16(),
-            weight_EOI=w3_EFD,
+            weight_EOI=self.w3_EFD,
             offs=offsets_E,
         )
 
@@ -102,7 +90,7 @@ class KimiGroupedExperts(GroupedExperts):
 
         return self._grouped_mm(
             A=h_RF,
-            weight_EOI=w2_EDF,
+            weight_EOI=self.w2_EDF,
             offs=offsets_E,
         ).type_as(x_RD)
 

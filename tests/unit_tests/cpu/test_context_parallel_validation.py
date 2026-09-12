@@ -10,48 +10,16 @@ import unittest
 from dataclasses import dataclass
 from unittest import mock
 
-import pytest
-
 from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import ContextParallelTransform
-from torchtitan.config.validation import validate_context_parallel
 from torchtitan.protocols.module import Module
-
-
-class _NoAttentionModel(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        pass
-
-
-class TestBackendGate(unittest.TestCase):
-    """Validate the SPMD backend requirement."""
-
-    def _validate(self, *, spmd_backend: str, cp: int) -> None:
-        validate_context_parallel(
-            _NoAttentionModel.Config(),
-            ParallelismConfig(spmd_backend=spmd_backend, context_parallel_degree=cp),
-        )
-
-    def test_rejects_cp_on_partial_dtensor(self):
-        with self.assertRaisesRegex(ValueError, "spmd_backend='spmd_types'"):
-            self._validate(spmd_backend="partial_dtensor", cp=2)
-
-    def test_allows_cp_on_spmd_types(self):
-        self._validate(spmd_backend="spmd_types", cp=2)
-
-    def test_allows_partial_dtensor_without_cp(self):
-        # Only CP is gated; partial_dtensor stays valid for FSDP/TP/EP runs.
-        self._validate(spmd_backend="partial_dtensor", cp=1)
 
 
 class TestDecoderConfigCpValidation(unittest.TestCase):
     """``Trainer.Config.__post_init__`` applies the CP gates at config time."""
 
     @staticmethod
-    def _config(
-        *, spmd_backend: str, cp: int, varlen: bool = False, cp_kernel: bool = False
-    ):
+    def _config(*, cp: int, varlen: bool = False, cp_kernel: bool = False):
         from torchtitan.models.common.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
@@ -66,50 +34,40 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
             ContextParallelTransform(
                 inner_attention=KVAllGatherCPFlexInnerAttention
             ).transform(config.model_spec.model)
-        config.parallelism.spmd_backend = spmd_backend
         config.parallelism.context_parallel_degree = cp
         config.training.max_context_length = 512
         return config
 
-    def test_rejects_cp_on_partial_dtensor(self):
-        config = self._config(spmd_backend="partial_dtensor", cp=2)
-        with self.assertRaisesRegex(ValueError, "spmd_backend='spmd_types'"):
-            config.__post_init__()
-
-    def test_allows_partial_dtensor_without_cp(self):
-        config = self._config(spmd_backend="partial_dtensor", cp=1)
-        config.__post_init__()
-
-    def test_allows_cp_kernel_on_spmd_types(self):
-        config = self._config(spmd_backend="spmd_types", cp=2, cp_kernel=True)
+    def test_allows_cp_kernel(self):
+        config = self._config(cp=2, cp_kernel=True)
         config.__post_init__()
 
     def test_allows_plain_flex_without_cp(self):
-        config = self._config(spmd_backend="spmd_types", cp=1)
+        config = self._config(cp=1)
         config.__post_init__()
 
     def test_rejects_cp_kernel_without_cp(self):
-        config = self._config(spmd_backend="spmd_types", cp=1, cp_kernel=True)
+        config = self._config(cp=1, cp_kernel=True)
         with self.assertRaisesRegex(ValueError, "context parallel degree is 1"):
             config.__post_init__()
 
-    def test_rejects_plain_flex_cp_on_spmd_types(self):
-        config = self._config(spmd_backend="spmd_types", cp=2)
+    def test_rejects_plain_flex_cp(self):
+        config = self._config(cp=2)
         with self.assertRaisesRegex(ValueError, "KVAllGatherCPFlexInnerAttention"):
             config.__post_init__()
 
-    def test_rejects_varlen_cp_on_spmd_types(self):
-        config = self._config(spmd_backend="spmd_types", cp=2, varlen=True)
+    def test_rejects_varlen_cp(self):
+        config = self._config(cp=2, varlen=True)
         with self.assertRaisesRegex(ValueError, "CPInnerAttention"):
             config.__post_init__()
 
-    def test_rejects_an_unrecognized_kernel_cp_on_spmd_types(self):
+    def test_rejects_an_unrecognized_kernel_cp(self):
         class LocalOnlyAttention(Module):
             @dataclass(kw_only=True, slots=True)
             class Config(Module.Config):
                 pass
 
-        config = self._config(spmd_backend="spmd_types", cp=2)
+        config = self._config(cp=2)
         for layer in config.model_spec.model.layers:
             layer.attention.inner_attention = LocalOnlyAttention.Config()
         with self.assertRaisesRegex(ValueError, "CPInnerAttention"):
@@ -202,7 +160,6 @@ class TestGptOssUlysses(unittest.TestCase):
         ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention).transform(
             config.model_spec.model
         )
-        config.parallelism.spmd_backend = "spmd_types"
         config.parallelism.context_parallel_degree = 2
         config.parallelism.context_parallel_load_balancer = None
         config.__post_init__()
@@ -295,42 +252,14 @@ class TestShippedCpRecipes(unittest.TestCase):
         # Ensure recipe discovery found at least one CP recipe.
         self.assertGreater(checked, 0)
 
-    def test_allows_mtp_cp_on_spmd_types(self):
+    def test_allows_mtp_cp(self):
         from torchtitan.models.deepseek_v3.config_registry import (
             deepseek_v3_debugmodel_mtp,
         )
 
         config = deepseek_v3_debugmodel_mtp()
-        config.parallelism.spmd_backend = "spmd_types"
         config.parallelism.context_parallel_degree = 2
         config.model_spec.model.update_from_config(config=config)
-
-
-class TestFluxConfigCpValidation(unittest.TestCase):
-    """Flux is not a ``Decoder`` and is covered by the same central gate."""
-
-    @staticmethod
-    def _config(*, spmd_backend: str, cp: int):
-        pytest.importorskip(
-            "torchtitan.models.flux.config_registry",
-            reason="Flux requires optional image dependencies",
-        )
-        from torchtitan.models.flux.config_registry import flux_debugmodel
-
-        config = flux_debugmodel()
-        config.parallelism.spmd_backend = spmd_backend
-        config.parallelism.context_parallel_degree = cp
-        return config
-
-    def test_rejects_cp_on_partial_dtensor(self):
-        config = self._config(spmd_backend="partial_dtensor", cp=2)
-        with self.assertRaisesRegex(ValueError, "spmd_backend='spmd_types'"):
-            config.__post_init__()
-
-    def test_allows_partial_dtensor_without_cp(self):
-        # Flux on partial_dtensor is FSDP-only but still a valid configuration.
-        config = self._config(spmd_backend="partial_dtensor", cp=1)
-        config.__post_init__()
 
 
 if __name__ == "__main__":

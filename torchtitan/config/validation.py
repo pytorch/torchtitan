@@ -20,19 +20,13 @@ __all__ = ["validate_context_parallel"]
 def validate_context_parallel(
     model: "Module.Config", parallelism: "ParallelismConfig"
 ) -> None:
-    """Validate the CP backend and each inner attention."""
+    """Validate that each inner attention matches the CP configuration."""
     from torchtitan.models.common.cp_attention import (
         CPInnerAttention,
         UlyssesCPFlexInnerAttention,
     )
 
     cp = parallelism.context_parallel_degree
-    if cp > 1 and parallelism.spmd_backend != "spmd_types":
-        raise ValueError(
-            "Context Parallel requires parallelism.spmd_backend='spmd_types', "
-            f"got {parallelism.spmd_backend!r}."
-        )
-
     first_cp_attention: tuple[str, type[CPInnerAttention]] | None = None
 
     for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):

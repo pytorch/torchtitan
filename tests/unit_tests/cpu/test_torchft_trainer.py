@@ -22,7 +22,6 @@ from torchtitan.models.llama3 import model_registry
 def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     # Restore shared registration and distributed state after this test.
     monkeypatch.setattr(import_module("torchtitan.config.override"), "_REGISTRY", {})
-    monkeypatch.setattr(ft.dist_utils, "_spmd_backend", "spmd_types")
 
     @override(target=FeedForward.Config)
     def ffn_lora(config):

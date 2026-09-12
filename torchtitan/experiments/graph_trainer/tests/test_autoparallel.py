@@ -41,7 +41,7 @@ class _FakeParallelDims:
         self.tp_enabled = not sparse
 
     def get_optional_mesh(self, name):
-        enabled = {"fsdp", "tp"} if not self.sparse else {"efsdp", "ep"}
+        enabled = {"dp_shard", "tp"} if not self.sparse else {"efsdp", "ep"}
         return _FakeMesh((name,)) if name in enabled else None
 
     def get_mesh(self, names):

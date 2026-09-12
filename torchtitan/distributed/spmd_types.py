@@ -23,7 +23,6 @@ from torchtitan.distributed.parallel_dims import (
     ParallelDims,
     unfold_dp_axes,
 )
-from torchtitan.distributed.utils import get_spmd_backend
 
 
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
@@ -140,8 +139,6 @@ def _spmd_mesh_stack() -> list[DeviceMesh | None]:
 
 def current_spmd_mesh() -> DeviceMesh | None:
     """Return the current runtime mesh, or ``None`` if unset."""
-    if get_spmd_backend() != "spmd_types":
-        return None
     stack = _spmd_mesh_stack()
     if not stack:
         return None
@@ -178,11 +175,9 @@ def spmd_local_context(
 
     Local axes retain per-coordinate SPMD semantics during global type
     checking: each coordinate selects an independent tensor, and only the
-    remaining axes describe that tensor's global sharding.  This is a no-op
-    outside spmd_types and for axes with size 1.
+    remaining axes describe that tensor's global sharding. This is a no-op for
+    axes with size 1.
     """
-    if get_spmd_backend() != "spmd_types":
-        return contextlib.nullcontext()
     active_axes = tuple(
         dict.fromkeys(axis for axis in local_axes if spmd_mesh_size(axis) > 1)
     )
@@ -194,10 +189,6 @@ def spmd_local_context(
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    assert (
-        get_spmd_backend() == "spmd_types"
-    ), "set_current_spmd_mesh() is only valid under spmd_types backend"
-
     stack = _spmd_mesh_stack()
     stack.append(mesh)
     if mesh is None:
@@ -218,8 +209,8 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
 
 @contextlib.contextmanager
 def maybe_set_sparse_mesh() -> Iterator[None]:
-    """Activate the registered sparse mesh under spmd_types, otherwise no-op."""
-    if get_spmd_backend() != "spmd_types" or (mesh := spmd_sparse_mesh()) is None:
+    """Activate the registered sparse mesh, if present."""
+    if (mesh := spmd_sparse_mesh()) is None:
         yield
         return
 
@@ -315,8 +306,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
     TODO(pianpwk): this is transitional code while ShardingConfig-based
     redistributions are written in src/dst DTensor-style placements.
     A more general DTensor-style redistribute API should live in spmd_types,
-    or we should write collective-based (not placement-based) redistributions
-    once the partial_dtensor backend is removed.
+    or we should write collective-based (not placement-based) redistributions.
     """
 
     def _normalize_partition_spec(

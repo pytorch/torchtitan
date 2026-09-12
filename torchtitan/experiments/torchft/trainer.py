@@ -60,8 +60,6 @@ class FaultTolerantTrainer(Trainer):
 
         # init distributed and build meshes (FT override handles ft_manager creation)
         self.parallel_dims = parallel_dims = self.init_distributed()
-        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
-
         # Logging needs to happen after distributed initialized
         config.maybe_log()
 
@@ -159,7 +157,7 @@ class FaultTolerantTrainer(Trainer):
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
         )
 
-        # move sharded model to CPU/GPU and initialize weights via DTensor
+        # Move the sharded model to CPU/GPU and initialize its states.
         buffer_device: torch.device | None
         if config.checkpoint.create_seed_checkpoint:
             init_device = "cpu"
@@ -335,10 +333,7 @@ class FaultTolerantTrainer(Trainer):
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
-            spmd_typechecking=(
-                config.parallelism.spmd_backend == "spmd_types"
-                and config.debug.spmd_typechecking
-            ),
+            spmd_typechecking=config.debug.spmd_typechecking,
         )
         if parallel_dims.pp_enabled:
             self.fwd_bwd_fn = self._pp_forward_backward_body

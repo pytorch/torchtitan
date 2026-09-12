@@ -232,11 +232,7 @@ class GraphTrainer(Trainer):
         config_fingerprint = compute_config_fingerprint(
             model, compile_config, self.parallel_dims
         )
-        precompile_meshes = (
-            get_spmd_precompile_meshes(self.parallel_dims)
-            if self.config.parallelism.spmd_backend == "spmd_types"
-            else None
-        )
+        precompile_meshes = get_spmd_precompile_meshes(self.parallel_dims)
 
         self._traced_step = precompile_fx_trace_load(
             storage,
@@ -317,10 +313,7 @@ class GraphTrainer(Trainer):
         assert self._traced_step is not None
         if self._graph_runner is None:
             runtime_meshes = ()
-            if (
-                self.config.compile.precompile_artifact_dir
-                and self.config.parallelism.spmd_backend == "spmd_types"
-            ):
+            if self.config.compile.precompile_artifact_dir:
                 from torchtitan.experiments.graph_trainer.precompile import (
                     get_spmd_precompile_meshes,
                 )

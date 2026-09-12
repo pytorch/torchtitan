@@ -142,7 +142,7 @@ def muse_glimmer_debugmodel(
             max_context_length=model_spec.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(spmd_backend="spmd_types"),
+        parallelism=ParallelismConfig(),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -193,7 +193,7 @@ def muse_glimmer_debugmodel_mm(
             steps=10,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(spmd_backend="spmd_types"),
+        parallelism=ParallelismConfig(),
         checkpoint=CheckpointManager.Config(
             interval=10,
             last_save_model_only=False,
@@ -226,7 +226,6 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             steps=1000,
         ),
         parallelism=ParallelismConfig(
-            spmd_backend="spmd_types",
             data_parallel_shard_degree=-1,
             tensor_parallel_degree=1,
             context_parallel_degree=1,
@@ -264,7 +263,6 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
             disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(
-            spmd_backend="spmd_types",
             data_parallel_shard_degree=-1,
             tensor_parallel_degree=1,
             context_parallel_degree=1,

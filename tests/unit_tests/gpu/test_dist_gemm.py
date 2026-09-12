@@ -23,7 +23,6 @@ Both classes here run in CI. Note there is no GPU unit-test job, so anything
 CUDA-guarded is developer-run only.
 """
 
-import contextlib
 import unittest
 from unittest.mock import patch
 
@@ -36,7 +35,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 from torchtitan.models.common.config_utils import make_gqa_config
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
 from torchtitan.models.common.dist_gemm import (
@@ -47,17 +45,6 @@ from torchtitan.models.common.dist_gemm import (
 
 DIM = 256
 N_HEADS = 8
-
-
-@contextlib.contextmanager
-def use_spmd_backend(backend: str):
-    """Temporarily select an SPMD backend without leaking test state."""
-    previous_backend = get_spmd_backend()
-    set_spmd_backend(backend)
-    try:
-        yield
-    finally:
-        set_spmd_backend(previous_backend)
 
 
 class TestDistGemmAttentionConfig(unittest.TestCase):
@@ -116,18 +103,6 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
                 tp_gemm_backend="dist_gemm",
             )
 
-    def test_dtensor_backend_is_rejected(self):
-        """dist-GEMM is spmd_types-only; the DTensor backends are deprecated."""
-        from torchtitan.models.llama3 import model_registry
-
-        attn = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
-        attn = attn.model.layers[0].attention
-        with use_spmd_backend("partial_dtensor"):
-            with self.assertRaisesRegex(
-                ValueError, "requires parallelism.spmd_backend"
-            ):
-                set_gqa_attention_sharding(attn, enable_sp=True)
-
     def test_sequence_parallel_disabled_is_rejected(self):
         """The fused GEMMs *are* the SP collectives, so SP off has nothing to fuse
         and wo would reduce-scatter where it must all-reduce."""
@@ -135,9 +110,8 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
 
         attn = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
         attn = attn.model.layers[0].attention
-        with use_spmd_backend("spmd_types"):
-            with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
-                set_gqa_attention_sharding(attn, enable_sp=False)
+        with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
+            set_gqa_attention_sharding(attn, enable_sp=False)
 
     def test_bias_on_w1_w3_is_rejected(self):
         """A bias must fail at config time, not silently fall back to stock.
@@ -173,9 +147,8 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
             .model.layers[0]
             .attention
         )
-        with use_spmd_backend("spmd_types"):
-            set_gqa_attention_sharding(stock, enable_sp=True)
-            set_gqa_attention_sharding(fused, enable_sp=True)
+        set_gqa_attention_sharding(stock, enable_sp=True)
+        set_gqa_attention_sharding(fused, enable_sp=True)
 
         self.assertIsNotNone(stock.sharding_config)
         self.assertIsNone(fused.sharding_config)
@@ -232,10 +205,9 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
             .model_spec.model.layers[0]
             .attention
         )
-        with use_spmd_backend("spmd_types"):
-            set_gqa_attention_sharding(attn_cfg, enable_sp=True)
-            attn = attn_cfg.build().to(self.device_type)
-            attn.parallelize(parallel_dims)
+        set_gqa_attention_sharding(attn_cfg, enable_sp=True)
+        attn = attn_cfg.build().to(self.device_type)
+        attn.parallelize(parallel_dims)
 
         self.assertIsNone(attn._sharding_config)
         self.assertIsNone(attn.wo._sharding_config.out_src_shardings)
@@ -311,10 +283,9 @@ class TestFusedFeedForwardNumerics(DTensorTestBase):
 
         # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
-        with use_spmd_backend("spmd_types"):
-            with set_current_spmd_mesh(mesh):
-                x_shard = x.chunk(R, 0)[self.rank].contiguous()
-                out_shard = fused(x_shard)
+        with set_current_spmd_mesh(mesh):
+            x_shard = x.chunk(R, 0)[self.rank].contiguous()
+            out_shard = fused(x_shard)
 
         # fused returns this rank's sequence shard of the full-sequence result
         torch.testing.assert_close(
@@ -394,7 +365,7 @@ class TestFusedSwigluOverlapNumerics(DTensorTestBase):
             )
 
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
-        with use_spmd_backend("spmd_types"), set_current_spmd_mesh(mesh):
+        with set_current_spmd_mesh(mesh):
             out_shard = fused(x.chunk(R, 0)[self.rank].contiguous())
 
         torch.testing.assert_close(
