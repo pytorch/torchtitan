@@ -6,7 +6,8 @@
 
 from dataclasses import replace
 
-from torchtitan.components.quantization import MXFP8GroupedExpertsConverter
+from torchtitan.config.transform import MXFP8GroupedExpertsConverter
+
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,

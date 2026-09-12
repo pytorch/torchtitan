@@ -240,7 +240,7 @@ class TestShippedCpRecipes(unittest.TestCase):
         checked = 0
         for name, fn in self._recipes():
             with mock.patch(
-                "torchtitan.components.quantization.float8.has_cuda_capability",
+                "torchtitan.config.transform.quantization.has_cuda_capability",
                 return_value=True,
             ):
                 config = fn()

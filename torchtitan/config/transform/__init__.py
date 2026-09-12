@@ -9,6 +9,15 @@
 from .apply import apply_transforms, transform_model_config_
 from .base import convert_config_type, ModelConfigTransform
 from .context_parallel import ContextParallelTransform
+from .lora import LoRAConverter
+from .quantization import (
+    Float8GroupedExpertsConverter,
+    Float8LinearConverter,
+    MXFP8GroupedExpertsConverter,
+    MXFP8LinearConverter,
+    NVFP4LinearConverter,
+    QuantizationConverter,
+)
 
 __all__ = [
     "ModelConfigTransform",
@@ -16,4 +25,11 @@ __all__ = [
     "transform_model_config_",
     "convert_config_type",
     "ContextParallelTransform",
+    "LoRAConverter",
+    "Float8GroupedExpertsConverter",
+    "Float8LinearConverter",
+    "MXFP8GroupedExpertsConverter",
+    "MXFP8LinearConverter",
+    "NVFP4LinearConverter",
+    "QuantizationConverter",
 ]

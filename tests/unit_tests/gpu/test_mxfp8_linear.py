@@ -13,12 +13,10 @@ from torch.utils.checkpoint import checkpoint
 pytest.importorskip("torchao")
 pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
 
-import torchtitan.components.quantization.mxfp8.linear as mxfp8_linear  # noqa: E402
-from torchtitan.components.quantization._fsdp_tensor import (  # noqa: E402
-    _UnshardedFSDPTensor,
-)
-from torchtitan.components.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
-from torchtitan.components.quantization.mxfp8.tensor import (  # noqa: E402
+import torchtitan.quantization.mxfp8.linear as mxfp8_linear  # noqa: E402
+from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
+from torchtitan.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
+from torchtitan.quantization.mxfp8.tensor import (  # noqa: E402
     _LinearShardedTensorWithMXFP8Compute,
 )
 
@@ -252,7 +250,7 @@ def test_operands_fields_must_be_distinct_allocations():
     """
     from dataclasses import dataclass
 
-    from torchtitan.components.quantization._fsdp_tensor import _unsharded_inner_tensors
+    from torchtitan.quantization._fsdp_tensor import _unsharded_inner_tensors
 
     qdata = torch.empty(64, 64, device="cuda", dtype=torch.float8_e4m3fn)
 

@@ -21,9 +21,8 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     ParamGroupConfig,
 )
-from torchtitan.components.quantization import NVFP4LinearConverter
-from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.transform import NVFP4LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import (
@@ -31,6 +30,7 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
 from . import model_registry

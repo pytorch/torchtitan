@@ -33,8 +33,7 @@ def validate_converter_order(converters: list) -> None:
     Raises ``ValueError`` if a quantization converter appears after a LoRA
     converter in the list.
     """
-    from torchtitan.components.lora import LoRAConverter
-    from torchtitan.components.quantization import QuantizationConverter
+    from torchtitan.config.transform import LoRAConverter, QuantizationConverter
 
     _BEFORE_LORA = (QuantizationConverter.Config,)
 

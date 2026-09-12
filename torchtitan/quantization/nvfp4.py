@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""NVFP4 quantization converter.
+"""NVFP4 quantized linear building block.
 
 Swaps dense ``Linear.Config`` nodes for :class:`NVFP4Linear`, which keeps a bf16
 weight and quantizes activations, weights, and gradients to NVFP4 on the fly via
@@ -16,23 +16,18 @@ parallelism the block boundary keeps its stock bf16 collectives (all-gather /
 reduce-scatter); NVFP4 does not move fp4 codes over the wire.
 """
 
-import logging
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import cast
 
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
-from torchtitan.tools.utils import has_cuda_capability
-
-logger = logging.getLogger(__name__)
 
 
 TP = MeshAxisName.TP
@@ -260,62 +255,3 @@ def nvfp4_bf16_tail_fqns(num_layers: int, bf16_tail_fraction: float) -> list[str
             "layers in bf16; nothing to convert to NVFP4."
         )
     return [f"layers.{i}." for i in range(convert_upto)]
-
-
-class NVFP4LinearConverter(QuantizationConverter):
-    """Replace matching Linear.Config with NVFP4Linear.Config."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(QuantizationConverter.Config):
-        fqns: list[str] = field(default_factory=list)
-        """
-        List of fully qualified names of modules to apply NVFP4 quantization to.
-        Only Linear.Config entries whose FQN contains a match are converted.
-        If empty, all Linear modules are converted -- pass explicit fqns to keep
-        the LM head in bf16, which the mixed recipe leaves unquantized for stability.
-        """
-
-    def __init__(self, config: Config):
-        self.config = config
-
-        if NVFP4Linear is None:
-            raise ImportError(
-                "torchao is not installed or does not provide the NVFP4 training "
-                "prototype. Install a torchao build with "
-                "torchao.prototype.moe_training.nvfp4_training."
-            )
-
-        if not has_cuda_capability(10, 0):
-            raise ValueError("NVFP4 is only supported on SM100 or later architectures")
-
-        if not self.config.model_compile_enabled:
-            logger.warning(
-                "torch.compile enablement is required for highest performance "
-                "of NVFP4 dynamic quantization."
-            )
-
-    def convert(self, model_config):
-        assert NVFP4Linear is not None
-        fqns = self.config.fqns
-        for fqn, config, parent, attr in model_config.traverse(Linear.Config):
-            if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                if isinstance(config, RouterGateLinear.Config):
-                    raise ValueError(
-                        f"NVFP4 quantization does not support router gate {fqn!r}; "
-                        "exclude it with fqns."
-                    )
-                new_config = NVFP4Linear.Config(
-                    in_features=config.in_features,
-                    out_features=config.out_features,
-                    bias=config.bias,
-                    param_init=config.param_init,
-                )
-                if parent is None:
-                    model_config = new_config
-                elif isinstance(parent, list):
-                    parent[attr] = new_config
-                else:
-                    setattr(parent, attr, new_config)
-
-        logger.info("Converted Linear layers to NVFP4Linear")
-        return model_config
