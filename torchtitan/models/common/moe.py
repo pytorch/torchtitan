@@ -45,6 +45,22 @@ from .token_dispatcher import LocalTokenDispatcher
 #        for the up/gate projections and (E, D, F) for the down one)
 
 
+def _validate_padding_mask(
+    x_TD: torch.Tensor,
+    padding_mask: torch.Tensor,
+) -> None:
+    """Validate that the padding mask matches the router input tokens."""
+    if padding_mask.dtype != torch.bool:
+        raise ValueError(
+            f"padding_mask must have dtype bool, got {padding_mask.dtype}."
+        )
+    if padding_mask.shape != x_TD.shape[:-1]:
+        raise ValueError(
+            "padding_mask must have shape matching the input token axis, "
+            f"got {tuple(padding_mask.shape)} for input {tuple(x_TD.shape)}."
+        )
+
+
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -225,6 +241,22 @@ class TokenChoiceTopKRouter(Module):
         self.route_scale = config.route_scale
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
         self._debug_force_load_balance = config._debug_force_load_balance
+        # Track expert usage and update the expert bias for load balancing.
+        self.register_buffer(
+            "tokens_per_expert_E",
+            torch.zeros(config.num_experts, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        if buffer_device is None:
+            # After ``to_empty()``, the existing buffer records the target device.
+            buffer_device = self.tokens_per_expert_E.device
+        self.tokens_per_expert_E = torch.zeros(
+            self.num_experts,
+            dtype=torch.float32,
+            device=buffer_device,
+        )
 
     def _debug_force_load_balance_routing(
         self, scores_TE: torch.Tensor
@@ -308,18 +340,24 @@ class TokenChoiceTopKRouter(Module):
         self,
         x_TD: torch.Tensor,
         expert_bias_E: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
         **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
             x_TD: Input ``(T, D)``.
             expert_bias_E: Optional load-balancing bias ``(E,)``.
+            padding_mask: Boolean ``(T,)`` mask that is true for padding.
 
         Returns:
             topk_scores_TK: Routing scores ``(T, K)``.
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
+        if padding_mask is not None:
+            _validate_padding_mask(x_TD, padding_mask)
+
         scores_TE = self.gate(x_TD)
 
         # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
@@ -364,21 +402,24 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK,
             True,
         )
-
-        # Auxiliary load-balance loss (DeepSeek-V3 Sec 2.1.2 Eqs 17-20).
-        # The gradient is injected into topk_scores_TK on backward; the loss
-        # itself keeps its forward-side metric accumulation from being re-run
-        # by activation checkpointing (see ``AuxLoss.inject``).  The
-        # routing map is passed in so the loss counts exactly the tokens this
-        # router counted: once the router masks padding positions out of the
-        # map, the loss and its token count follow without further changes.
-        if self.training and self.aux_loss is not None:
-            topk_scores_TK = self.aux_loss(
-                scores_TE,
-                routing_map_TE,
-                carrier=topk_scores_TK,
+        # Keep the full routing map for dispatch, and build the masked view once
+        # for all load-balancing statistics. The auxiliary-loss gradient is
+        # injected into topk_scores_TK on backward; see ``AuxLoss.inject``.
+        if self.training:
+            masked_routing_map_TE = (
+                routing_map_TE
+                if padding_mask is None
+                else routing_map_TE & ~padding_mask.unsqueeze(-1)
             )
-
+            with torch.no_grad():
+                self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
+            if self.aux_loss is not None:
+                topk_scores_TK = self.aux_loss(
+                    scores_TE,
+                    masked_routing_map_TE,
+                    carrier=topk_scores_TK,
+                    padding_mask=padding_mask,
+                )
         return (
             topk_scores_TK,
             topk_expert_ids_TK,
@@ -396,7 +437,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
     per the DeepSeek-V3 design (Sec 2.1.2, "Complementary Sequence-Wise
     Auxiliary Loss").
 
-    With ``E`` experts, top-``K`` selection and ``T`` tokens per forward:
+    With ``E`` experts, top-``K`` selection and ``T`` valid tokens per forward:
 
     Eq. 18: ``f_i = (E / (K T)) * sum_t 1[token t routes to expert i]``
     Eq. 19: ``p_i = (1 / T) * sum_t s'_t,i``,
@@ -463,6 +504,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         routing_map_TE: torch.Tensor,
         *,
         carrier: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Compute the per-forward balance loss and inject its gradient.
 
@@ -472,6 +514,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
                 as counted by the router.
             carrier: Tensor whose backward path carries the injected
                 gradient (the router's top-k scores).
+            padding_mask: Boolean ``(T,)`` mask that is true for padding.
 
         Returns:
             ``carrier`` unchanged (identity forward).
@@ -504,6 +547,8 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # scores.  F.normalize's eps clamp only guards an all-zero score
             # row: the scores are non-negative, so the norm is a plain sum.
             probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+            if padding_mask is not None:
+                probs_TE = probs_TE * ~padding_mask.unsqueeze(-1)
             p_E = self._reduce_token_partials(probs_TE.sum(dim=0), axes)
 
             # Eq. 17: L_bal = sum_i f_i * p_i
@@ -549,7 +594,7 @@ class MoE(Module):
         )
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
-        # NOTE: tokens_per_expert_E is accumulated in the model forward pass.
+        # NOTE: router.tokens_per_expert_E is accumulated in the router forward pass.
         #       expert_bias_E is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
         self.load_balance_coeff = config.load_balance_coeff
@@ -562,17 +607,23 @@ class MoE(Module):
             )
         else:
             self.expert_bias_E = None
-        # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
-        self.register_buffer(
-            "tokens_per_expert_E",
-            torch.zeros(num_experts, dtype=torch.float32),
-            persistent=False,
-        )
 
-    def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
+    @property
+    def tokens_per_expert_E(self) -> torch.Tensor:  # noqa: N802
+        """Router-owned expert counts kept as a compatibility alias."""
+        return self.router.tokens_per_expert_E
+
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
         """
         Args:
             x_TD: Input ``(T, D)``.
+            padding_mask: Boolean ``(T,)`` mask that is true for padding.
 
         Returns:
             Output ``(T, D)``.
@@ -588,21 +639,13 @@ class MoE(Module):
         """
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
-        (
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            routing_map_TE,
-        ) = self.router(x_TD, self.expert_bias_E, **router_kwargs)
+        (topk_scores_TK, topk_expert_ids_TK, routing_map_TE,) = self.router(
+            x_TD,
+            self.expert_bias_E,
+            padding_mask=padding_mask,
+            **router_kwargs,
+        )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
-
-        # tokens_per_expert_E will be used to update the expert bias for load balancing,
-        # and also to count the expert usage.
-        # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert_E --
-        #       first in the forward pass, and then in the backward pass. However, this has no
-        #       effect on the expert bias update thanks to the torch.sign() operator.
-        if self.training:
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(num_local_tokens_per_expert_E)
 
         out_TD = self.routed_experts(
             x_TD,
@@ -620,16 +663,15 @@ class MoE(Module):
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        if self.load_balance_coeff is None:
+            return
         if buffer_device is None:
             # After ``to_empty()``, the existing buffer records the target device.
-            # Reinitialize MoE counters there when no explicit buffer device is passed.
-            buffer_device = self.tokens_per_expert_E.device
+            # Reinitialize the expert bias there when no device is passed.
+            assert self.expert_bias_E is not None
+            buffer_device = self.expert_bias_E.device
 
         with torch.device(buffer_device):
-            self.tokens_per_expert_E = torch.zeros(
+            self.expert_bias_E = torch.zeros(
                 self.routed_experts.inner_experts.num_experts, dtype=torch.float32
             )
-            if self.load_balance_coeff is not None:
-                self.expert_bias_E = torch.zeros(
-                    self.routed_experts.inner_experts.num_experts, dtype=torch.float32
-                )

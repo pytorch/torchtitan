@@ -179,7 +179,10 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
+        del padding_mask
         h = x + self.post_attention_norm(
             self.attention(self.attention_norm(x), attention_masks, positions)
         )
@@ -405,7 +408,7 @@ class MuseGlimmerModel(Decoder):
         batch.pop("special_tokens", None)
 
         positions = batch.get("positions", None)
-        padding_mask = batch.pop("padding_mask", None)
+        padding_mask = batch.get("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(
@@ -494,6 +497,7 @@ class MuseGlimmerModel(Decoder):
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        padding_mask: torch.Tensor | None = None,
         *,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
@@ -521,7 +525,12 @@ class MuseGlimmerModel(Decoder):
             h_TD = tokens
 
         for layer in self.layers.values():
-            h_TD = layer(h_TD, attention_masks, positions)
+            h_TD = layer(
+                h_TD,
+                attention_masks,
+                positions,
+                padding_mask=padding_mask,
+            )
 
         h_TD = self.norm(h_TD) if self.norm is not None else h_TD
 

@@ -122,7 +122,7 @@ class KimiK25Model(DeepSeekV3Model):
 
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions", None)
-        padding_mask = batch.pop("padding_mask", None)
+        padding_mask = batch.get("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(
@@ -220,6 +220,7 @@ class KimiK25Model(DeepSeekV3Model):
         special_tokens: dict[str, int] | None = None,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        padding_mask: torch.Tensor | None = None,
     ):
         """Forward pass for Kimi K2.5.
 
@@ -260,7 +261,7 @@ class KimiK25Model(DeepSeekV3Model):
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
-            x = layer(x, attention_masks, positions)
+            x = layer(x, attention_masks, positions, padding_mask=padding_mask)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

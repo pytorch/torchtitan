@@ -161,6 +161,8 @@ class GptOssTransformerBlock(TransformerBlock):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Transformer block.
@@ -182,7 +184,7 @@ class GptOssTransformerBlock(TransformerBlock):
             attention_masks = attention_masks[self.attn_mask_key]
 
         x = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        x = x + self.moe(self.ffn_norm(x))
+        x = x + self.moe(self.ffn_norm(x), padding_mask=padding_mask)
         return x
 
 

@@ -15,6 +15,8 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
+    token_id_placement,
+    token_id_sequence_parallel_placement,
 )
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
@@ -290,13 +292,22 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         if enable_sp
         else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
+    padding_mask_src_layout = token_id_placement()
+    padding_mask_dst_layout = (
+        token_id_sequence_parallel_placement() if enable_ep else token_id_placement()
+    )
     return ShardingConfig(
         state_shardings={
             "expert_bias_E": dense_param_placement(tp=spmd.R),
-            "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
-        in_src_shardings={"x_TD": sp_layout},
-        in_dst_shardings={"x_TD": desired_input_layout},
+        in_src_shardings={
+            "x_TD": sp_layout,
+            "padding_mask": padding_mask_src_layout,
+        },
+        in_dst_shardings={
+            "x_TD": desired_input_layout,
+            "padding_mask": padding_mask_dst_layout,
+        },
         out_src_shardings=output_layout,
         out_dst_shardings=sp_layout,
     )
@@ -343,6 +354,11 @@ def set_moe_sharding_config(
     # ``resolve_mesh`` filters out disabled axes at runtime.
     moe_cfg.sharding_config = _moe_sharding_config(
         enable_ep=enable_ep, enable_sp=enable_sp
+    )
+    moe_cfg.router.sharding_config = ShardingConfig(
+        state_shardings={
+            "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
+        },
     )
 
     # Router gate: dense-family TP plan with Partial output grad.

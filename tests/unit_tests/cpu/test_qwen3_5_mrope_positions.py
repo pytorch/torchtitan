@@ -48,8 +48,16 @@ class _RecordingLayer(nn.Module):
         super().__init__()
         self._sink = sink
 
-    def forward(self, x, attention_masks=None, positions=None):
+    def forward(
+        self,
+        x,
+        attention_masks=None,
+        positions=None,
+        *,
+        padding_mask=None,
+    ):
         self._sink["positions"] = positions
+        self._sink["padding_mask"] = padding_mask
         return x
 
 
@@ -127,6 +135,22 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             batch["attention_masks"]["deltanet"].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
+
+    def test_padding_mask_routes_to_layers(self):
+        model, sink, parallel_dims, parallelism = self._build_stub_model()
+        positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 0, 1, 2], dtype=torch.int32)
+        padding_mask = torch.tensor([False] * 7 + [True] * 3)
+        input_dict = {
+            "input": torch.randint(0, 100, (10,)),
+            "positions": positions,
+            "labels": torch.zeros(10),
+            "padding_mask": padding_mask,
+        }
+
+        batch = self._run(model, parallel_dims, parallelism, input_dict)
+
+        torch.testing.assert_close(batch["padding_mask"], padding_mask)
+        torch.testing.assert_close(sink["padding_mask"], padding_mask)
 
 
 if __name__ == "__main__":

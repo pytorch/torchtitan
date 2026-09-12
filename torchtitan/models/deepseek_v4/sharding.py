@@ -368,6 +368,7 @@ def set_deepseek_v4_sharding_config(
                     "mtp_input_valid_mask": dense_activation_placement(
                         tp=spmd.R, cp=spmd.S(0)
                     ),
+                    "padding_mask": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
                 },
                 out_src_shardings=replicated_activation,
             )

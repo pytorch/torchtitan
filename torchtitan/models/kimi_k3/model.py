@@ -237,6 +237,8 @@ class KimiK3TransformerBlock(Module):
         block_residual_TND: torch.Tensor,
         attention_masks: KimiK3AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prefix_sum_TD = x_TD
 
@@ -279,7 +281,7 @@ class KimiK3TransformerBlock(Module):
         )
         h_TD = self.ffn_norm(h_TD)
         if self.moe is not None:
-            h_TD = self.moe(h_TD)
+            h_TD = self.moe(h_TD, padding_mask=padding_mask)
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
@@ -349,7 +351,7 @@ class KimiK3Model(Decoder):
         """Build masks and annotate K3 multimodal inputs."""
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions")
-        padding_mask = batch.pop("padding_mask", None)
+        padding_mask = batch.get("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
@@ -469,6 +471,7 @@ class KimiK3Model(Decoder):
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
         attention_masks: KimiK3AttentionMaskDict | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
@@ -493,6 +496,7 @@ class KimiK3Model(Decoder):
                 block_residual_TND,
                 attention_masks,
                 positions,
+                padding_mask=padding_mask,
             )
 
         h_TD = _apply_attention_residual(

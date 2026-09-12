@@ -175,9 +175,11 @@ def _set_deepseek_v3_mtp_sharding(
             mtp_layer_cfg.sharding_config = ShardingConfig(
                 in_src_shardings={
                     "mtp_input_valid_mask": token_id_placement(),
+                    "padding_mask": token_id_placement(),
                 },
                 in_dst_shardings={
                     "mtp_input_valid_mask": token_id_sequence_parallel_placement(),
+                    "padding_mask": token_id_sequence_parallel_placement(),
                 },
             )
         mtp_layer_cfg.enorm.sharding_config = norm

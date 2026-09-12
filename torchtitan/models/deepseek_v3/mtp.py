@@ -151,17 +151,23 @@ class MTPTransformerBlock(TransformerBlock):
         mtp_input_valid_mask: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
-        mtp_input_valid_mask = mtp_input_valid_mask.unsqueeze(-1).to(
-            dtype=prev_embed.dtype
-        )
-        prev_embed = prev_embed * mtp_input_valid_mask
+        mtp_padding_mask = ~mtp_input_valid_mask
+        if padding_mask is not None:
+            mtp_padding_mask = mtp_padding_mask | padding_mask
+        valid_scale_T1 = mtp_input_valid_mask.unsqueeze(-1).to(dtype=prev_embed.dtype)
+        prev_embed = prev_embed * valid_scale_T1
         h = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
         h = h + self.attention(self.attention_norm(h), attention_masks, positions)
         if self.moe_enabled:
-            h = h + self.moe(self.ffn_norm(h))
+            h = h + self.moe(
+                self.ffn_norm(h),
+                padding_mask=mtp_padding_mask,
+            )
         else:
             h = h + self.feed_forward(self.ffn_norm(h))
         return self.mtp_norm(h)
@@ -276,7 +282,7 @@ class MTPDecoder(Decoder):
             input_sharding[f"mtp_labels_{depth}"] = input_sharding["labels"]
             input_sharding[f"mtp_input_valid_mask_{depth}"] = input_sharding["input"]
 
-        padding_mask = batch.pop("padding_mask", None)
+        padding_mask = batch.get("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
@@ -324,11 +330,18 @@ class MTPDecoder(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         if self.mtp_layers is None:
             if not isinstance(tokens, torch.Tensor):
                 raise ValueError("A decoder without MTP expects one token tensor.")
-            return super().forward(tokens, positions, attention_masks)
+            return super().forward(
+                tokens,
+                positions,
+                attention_masks,
+                padding_mask=padding_mask,
+            )
         if self.tok_embeddings is None:
             raise ValueError("MTP decoder forward requires token embeddings.")
         if not isinstance(tokens, tuple) or len(tokens) != len(self.mtp_layers) + 1:
@@ -347,7 +360,7 @@ class MTPDecoder(Decoder):
         # hidden state because MTP consumes the last decoder-layer output.
         h = self.tok_embeddings(main_tokens)
         for layer in self.layers.values():
-            h = layer(h, attention_masks, positions)
+            h = layer(h, attention_masks, positions, padding_mask=padding_mask)
 
         prev_depth_hidden = h
         h = self.norm(h) if self.norm is not None else h
@@ -366,6 +379,7 @@ class MTPDecoder(Decoder):
                 mtp_input_valid_mask,
                 attention_masks,
                 positions,
+                padding_mask=padding_mask,
             )
             mtp_outputs.append(prev_depth_hidden)
 
