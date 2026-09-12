@@ -6,14 +6,22 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
+import spmd_types as spmd
 import torch
+from spmd_types import SpmdType
+from torch.distributed.device_mesh import DeviceMesh
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
 
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+from torchtitan.distributed.context_parallel.api import (
+    ContextParallelLoadBalancer,
+    create_context_parallel_load_balancer,
+    shard_context_parallel_inputs,
+)
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.spmd_types import _per_axis_types, annotate_input_spmd_types
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -35,7 +43,61 @@ from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
-__all__ = ["Decoder", "TransformerBlock"]
+__all__ = ["Decoder", "prepare_context_parallel_input", "TransformerBlock"]
+
+
+def _cp_shard_dims(input_sharding: dict[str, SpmdType]) -> dict[str, int]:
+    """Return the sequence dimension of each CP-sharded model input."""
+    dims: dict[str, int] = {}
+    for name, layout in input_sharding.items():
+        axis_type = _per_axis_types(layout).get(MeshAxisName.CP)
+        if isinstance(axis_type, spmd.Shard):
+            dims[name] = axis_type.dim
+    return dims
+
+
+def prepare_context_parallel_input(
+    input_dict: dict[str, Any],
+    input_shardings: dict[str, SpmdType] | None,
+    cp_mesh: DeviceMesh,
+    load_balancer_type: str | None = "headtail",
+    ptrr_mask_key: str | None = None,
+) -> tuple[dict[str, Any], ContextParallelLoadBalancer]:
+    """Shard decoder tensors and return the load balancer for metadata.
+
+    ``attention_masks`` is read only when PTRR needs a mask to construct the
+    shared partition. Attention backends are responsible for sharding their
+    own metadata.
+    """
+    shard_dims = (
+        _cp_shard_dims(input_shardings)
+        if input_shardings is not None
+        else {"input": 0, "labels": 0, "positions": 0}
+    )
+    named_tensors = {
+        name: value
+        for name, value in input_dict.items()
+        if isinstance(value, torch.Tensor)
+    }
+    shard_names = [name for name in shard_dims if name in named_tensors]
+    if not shard_names:
+        return input_dict, None
+
+    inputs = tuple(named_tensors[name] for name in shard_names)
+    seq_dims = tuple(shard_dims[name] for name in shard_names)
+    load_balancer = create_context_parallel_load_balancer(
+        cp_mesh,
+        inputs[0].size(seq_dims[0]),
+        input_dict.get("attention_masks"),
+        load_balancer_type,
+        ptrr_mask_key,
+    )
+    sharded_inputs = shard_context_parallel_inputs(
+        cp_mesh, inputs, seq_dims, load_balancer
+    )
+    for name, value in zip(shard_names, sharded_inputs):
+        input_dict[name] = value
+    return input_dict, load_balancer
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -341,25 +403,33 @@ class Decoder(BaseModel):
     def _cp_shard_inputs(
         self,
         batch: dict[str, Any],
-        input_shardings: dict[str, Any],
+        input_shardings: dict[str, SpmdType],
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
     ) -> dict[str, Any]:
         from torchtitan.models.common.cp_attention import CPInnerAttention
 
-        inner_attention = self.config.first_full_attention_backend
-        owner = cast(
-            "type[CPInnerAttention] | None",
-            inner_attention._owner if inner_attention is not None else None,
-        )
-        assert owner is not None and issubclass(owner, CPInnerAttention)
-        return owner.cp_shard(
+        cp_mesh = parallel_dims.get_mesh("cp")
+        batch, load_balancer = prepare_context_parallel_input(
             batch,
             input_shardings,
-            parallel_dims.get_mesh("cp"),
+            cp_mesh,
             parallelism.context_parallel_load_balancer,
             parallelism.context_parallel_ptrr_mask_key,
         )
+
+        sharded_backends: set[type[CPInnerAttention]] = set()
+        for _, module_config, _, _ in self.config.traverse(Module.Config, recurse=True):
+            owner = module_config._owner
+            if (
+                owner is None
+                or not issubclass(owner, CPInnerAttention)
+                or owner in sharded_backends
+            ):
+                continue
+            batch = owner.cp_shard(batch, cp_mesh, load_balancer)
+            sharded_backends.add(owner)
+        return batch
 
     def get_attention_masks(
         self,
