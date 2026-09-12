@@ -211,6 +211,14 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.kimi_k2_5_debugmodel_muon_fused_swiglu_fsdp2_ep2],
+            test_descr="Kimi K2.5 DistMuon fused SwiGLU FSDP+EP",
+            test_name="kimi_k2_5_muon_fused_swiglu_fsdp+ep",
+            ngpu=2,
+            timeout=600,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.kimi_k2_5_debugmodel_muon_fsdp8_ep8],
             test_descr="Kimi K2.5 DistMuon FSDP+EP",
             test_name="kimi_k2_5_muon_fsdp+ep",

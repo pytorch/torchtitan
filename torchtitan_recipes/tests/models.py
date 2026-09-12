@@ -399,6 +399,21 @@ def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     return config
 
 
+def kimi_k2_5_debugmodel_muon_fused_swiglu_fsdp2_ep2() -> Trainer.Config:
+    from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
+
+    config = kimi_k2_5_debugmodel(seq_len=512)
+    _use_spmd_types(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.override.imports.append(
+        "torchtitan.overrides.fused_swiglu.fused_swiglu"
+    )
+    config.training.steps = 1
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def kimi_k2_5_debugmodel_muon_fsdp8_ep8() -> Trainer.Config:
     from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
 

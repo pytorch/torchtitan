@@ -15,7 +15,13 @@ from typing import Any, TypeVar
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
-__all__ = ["BlockShard", "BucketConfig", "ComputeLayout", "Owned"]
+__all__ = [
+    "BlockShard",
+    "BucketConfig",
+    "ComputeLayout",
+    "MatrixBatchLayout",
+    "Owned",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +60,36 @@ class BlockShard:
             or self.block_size <= 0
         ):
             raise ValueError("BlockShard.block_size must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class MatrixBatchLayout:
+    """Interpret a flat 2D tensor as a batch of Muon matrices.
+
+    ``matrix_rows`` is required for ``Owned`` compute and optional with
+    ``BlockShard``, where it can be derived from the block size. When
+    ``num_interleaved_matrices`` is greater than one, each storage group has
+    shape ``[matrix_rows, num_interleaved_matrices, columns]``.
+    """
+
+    matrix_rows: int | None = None
+    num_interleaved_matrices: int = 1
+
+    def __post_init__(self) -> None:
+        if self.matrix_rows is not None and (
+            isinstance(self.matrix_rows, bool)
+            or not isinstance(self.matrix_rows, int)
+            or self.matrix_rows <= 0
+        ):
+            raise ValueError("MatrixBatchLayout.matrix_rows must be a positive integer")
+        if (
+            isinstance(self.num_interleaved_matrices, bool)
+            or not isinstance(self.num_interleaved_matrices, int)
+            or self.num_interleaved_matrices <= 0
+        ):
+            raise ValueError(
+                "MatrixBatchLayout.num_interleaved_matrices must be a positive integer"
+            )
 
 
 _ComputeSharding = Owned | Replicate | Shard | BlockShard
@@ -160,12 +196,30 @@ class ComputeLayout:
                     "dp_shard": BlockShard(dim=0, block_size=4),
                 }
             )
+
+        Gather an interleaved pair of four-row matrices to one owner::
+
+            ComputeLayout(
+                shardings_by_mesh_axis={"dp_shard": Owned()},
+                matrix_batch=MatrixBatchLayout(
+                    matrix_rows=4,
+                    num_interleaved_matrices=2,
+                ),
+            )
     """
 
     shardings_by_mesh_axis: Mapping[str, _ComputeSharding]
     shard_order_by_tensor_dim: Mapping[int, tuple[str, ...]] = _DEFAULT_SHARD_ORDER
+    matrix_batch: MatrixBatchLayout | None = None
 
     def __post_init__(self) -> None:
+        if (
+            self.matrix_batch is not None
+            and type(self.matrix_batch) is not MatrixBatchLayout
+        ):
+            raise ValueError(
+                "ComputeLayout.matrix_batch must be a MatrixBatchLayout or None"
+            )
         shardings_by_mesh_axis = dict(self.shardings_by_mesh_axis)
         if not shardings_by_mesh_axis:
             raise ValueError("ComputeLayout must declare a compute sharding")
