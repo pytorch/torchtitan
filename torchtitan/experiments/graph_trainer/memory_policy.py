@@ -32,11 +32,6 @@ from torch._functorch.partitioners import (
 )
 from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import CheckpointPolicy
-from torchinsights.graph_estimation.runtime_estimator import (
-    BENCHMARK,
-    COST_MODEL,
-    INTERPRETER,
-)
 
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
@@ -44,6 +39,11 @@ from torchtitan.experiments.graph_trainer.auto_sac_offload_solver import (
     HOST_MEMORY_FRACTION,
     MEM_MULTIPLIER,
     two_level_solver,
+)
+from torchtitan.experiments.graph_trainer.auto_sac_offload_solver_utils import (
+    BENCHMARK,
+    COST_MODEL,
+    INTERPRETER,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
