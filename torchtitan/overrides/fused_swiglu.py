@@ -348,6 +348,20 @@ def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return _silu_and_mul_2d(gate, up)
 
 
+class FusedSwiGLU(ActivationFn):
+    """SwiGLU activation implemented by the fused Triton operation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ActivationFn.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    def __call__(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        return _fused_silu_and_mul(gate, up)
+
+
 def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     # TODO(pianpwk): Migrate this local_map workaround to a custom op SPMD
     # propagation rule registration system.
@@ -370,14 +384,14 @@ def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
 def _replace_swiglu_activation(cfg: FeedForward.Config) -> FeedForward.Config:
     """Replace the torch-native SwiGLU callable with the fused implementation."""
-    if not isinstance(cfg.activation_fn.fn, SwiGLU):
+    if not isinstance(cfg.activation_fn, SwiGLU.Config):
         raise ValueError(
             "The fused_swiglu override requires the default SwiGLU activation, "
-            f"but found {type(cfg.activation_fn.fn).__name__}."
+            f"but found {type(cfg.activation_fn).__name__}."
         )
     return replace(
         cfg,
-        activation_fn=ActivationFn.Config(fn=_fused_silu_and_mul),
+        activation_fn=FusedSwiGLU.Config(),
     )
 
 

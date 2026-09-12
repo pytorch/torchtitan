@@ -12,6 +12,10 @@ import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.feed_forward import (
+    fuse_gate_up_state_dict,
+    split_fused_gate_up_state_dict,
+)
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
 from .model import DeepSeekV3Model
@@ -155,6 +159,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         2. Split the GroupedExperts' weight into separate expert's weight.
         """
 
+        state_dict = split_fused_gate_up_state_dict(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         hf_state_dict = {}
@@ -278,4 +283,4 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = self.from_hf_map[key]
                 state_dict[new_key] = value
 
-        return state_dict
+        return fuse_gate_up_state_dict(state_dict)
