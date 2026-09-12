@@ -28,6 +28,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
+import torch_remat as remat
 
 from torchtitan.distributed.linear import AllGatherLinear, LinearReduceScatter
 
@@ -193,7 +194,11 @@ class DistGEMMFeedForward(FeedForward):
             _warn_once_no_tp_overlap()
             return super().forward(x)
 
-        gate_up_TF = AllGatherLinear.apply(
+        gate_up_TF = remat.region(
+            AllGatherLinear.apply,
+            self.remat_region_name("w13"),
+            recompute=self.remat_should_recompute("w13"),
+        )(
             x,
             self.w13.weight,
             self.w13.bias,
@@ -202,14 +207,21 @@ class DistGEMMFeedForward(FeedForward):
         )
         gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
         # Elementwise on feature-sharded activations: no collective.
+        remat.recompute_needs_tensor(gate_TF, up_TF)
         h_TF = self.activation_fn(gate_TF, up_TF)
-        return LinearReduceScatter.apply(
+        out_TD = remat.region(
+            LinearReduceScatter.apply,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(
             h_TF,
             self.w2.weight,
             self.w2.bias,
             tp_group,
             tp_group.group_name,
         )
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 __all__ = [
