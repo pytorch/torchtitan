@@ -105,19 +105,36 @@ class KimiLatentMoE(MoE):
         routed_up: Linear.Config
 
     def __init__(self, config: Config):
+        if config.load_balance_coeff is not None:
+            raise ValueError(
+                "KimiLatentMoE cannot combine sign-based and quantile balancing."
+            )
         super().__init__(config)
+        del self.expert_bias_E
+        self.register_buffer(
+            "expert_bias_E",
+            torch.zeros(config.num_experts, dtype=torch.float32),
+            persistent=True,
+        )
         self.routed_down = config.routed_down.build()
         self.routed_norm = config.routed_norm.build()
         self.routed_up = config.routed_up.build()
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        if buffer_device is None:
+            buffer_device = self.tokens_per_expert_E.device
+        super()._init_self_buffers(buffer_device=buffer_device)
+        with torch.device(buffer_device):
+            self.expert_bias_E = torch.zeros(
+                self.routed_experts.inner_experts.num_experts,
+                dtype=torch.float32,
+            )
 
     def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
             x_TD, self.expert_bias_E, **router_kwargs
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
-        if self.training:
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
         routed_TD = self.routed_experts(
             self.routed_down(x_TD),
