@@ -10,14 +10,20 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, TYPE_CHECKING
 
 import spmd_types as spmd
 
 import torch
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.distributed.context_parallel.api import (
+    ContextParallelLoadBalancer,
+    shard_context_parallel_attention_masks,
+)
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
@@ -37,19 +43,17 @@ _HEAD_DIM = 1
 
 
 class CPInnerAttention(ABC):
-    """Inner attention that owns its context-parallel behavior."""
+    """Inner attention that owns its context-parallel metadata sharding."""
 
     @classmethod
     @abstractmethod
     def cp_shard(
         cls,
         input_dict: dict[str, Any],
-        input_shardings: dict[str, Any] | None,
         cp_mesh: "DeviceMesh",
-        load_balancer_type: str | None,
-        ptrr_mask_key: str | None,
+        load_balancer: ContextParallelLoadBalancer,
     ) -> dict[str, Any]:
-        """Shard model inputs for this attention implementation."""
+        """Shard metadata owned by this attention implementation."""
 
 
 class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
@@ -68,22 +72,38 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
     def cp_shard(
         cls,
         input_dict: dict[str, Any],
-        input_shardings: dict[str, Any] | None,
         cp_mesh: "DeviceMesh",
-        load_balancer_type: str | None,
-        ptrr_mask_key: str | None,
+        load_balancer: ContextParallelLoadBalancer,
     ) -> dict[str, Any]:
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
+        attention_masks = input_dict.get("attention_masks")
+        if attention_masks is None:
+            return input_dict
+        if isinstance(attention_masks, BlockMask):
+            input_dict["attention_masks"] = shard_context_parallel_attention_masks(
+                cp_mesh, attention_masks, load_balancer
+            )
+            return input_dict
+        if not isinstance(attention_masks, Mapping):
+            raise ValueError(
+                "K/V all-gather context parallelism requires BlockMask metadata, "
+                f"but got {type(attention_masks).__name__}."
+            )
 
-        return prepare_context_parallel_input(
-            input_dict,
-            input_shardings,
-            cp_mesh,
-            load_balancer_type,
-            ptrr_mask_key,
-        )
+        block_masks = {
+            key: mask
+            for key, mask in attention_masks.items()
+            if isinstance(mask, BlockMask)
+        }
+        if block_masks:
+            sharded_masks = shard_context_parallel_attention_masks(
+                cp_mesh, block_masks, load_balancer
+            )
+            assert isinstance(sharded_masks, dict)
+            input_dict["attention_masks"] = {
+                **attention_masks,
+                **sharded_masks,
+            }
+        return input_dict
 
     def forward(
         self,
@@ -121,25 +141,10 @@ class UlyssesCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
     def cp_shard(
         cls,
         input_dict: dict[str, Any],
-        input_shardings: dict[str, Any] | None,
         cp_mesh: "DeviceMesh",
-        load_balancer_type: str | None,
-        ptrr_mask_key: str | None,
+        load_balancer: ContextParallelLoadBalancer,
     ) -> dict[str, Any]:
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
-        attention_masks = input_dict.pop("attention_masks", None)
-        prepare_context_parallel_input(
-            input_dict,
-            input_shardings,
-            cp_mesh,
-            None,
-            None,
-        )
-        if attention_masks is not None:
-            input_dict["attention_masks"] = attention_masks
+        del cp_mesh, load_balancer
         return input_dict
 
     def forward(
