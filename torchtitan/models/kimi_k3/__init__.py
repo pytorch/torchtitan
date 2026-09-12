@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
+from dataclasses import replace
 from functools import partial
 
 import torch
@@ -12,7 +13,6 @@ import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import (
-    ActivationFn,
     Conv1d,
     Embedding,
     FeedForward,
@@ -22,6 +22,7 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
+    make_ffn_config,
     make_token_dispatcher_config,
 )
 from torchtitan.models.common.moe import (
@@ -133,13 +134,14 @@ def _feed_forward_config(
     dim: int,
     hidden_dim: int,
 ) -> FeedForward.Config:
-    return FeedForward.Config(
-        w1=_linear(dim, hidden_dim),
-        w2=_linear(hidden_dim, dim),
-        w3=_linear(dim, hidden_dim),
-        activation_fn=ActivationFn.Config(
-            fn=SiTUGLU(beta=4.0, linear_beta=25.0)  # pyrefly: ignore[bad-argument-type]
+    return replace(
+        make_ffn_config(
+            dim=dim,
+            hidden_dim=hidden_dim,
+            w1_param_init=_LINEAR_INIT,
+            w2w3_param_init=_LINEAR_INIT,
         ),
+        activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
     )
 
 
@@ -260,11 +262,7 @@ def _latent_moe_config(
                 dim=latent_dim,
                 hidden_dim=expert_hidden_dim,
                 num_experts=num_experts,
-                activation_fn=ActivationFn.Config(
-                    fn=SiTUGLU(  # pyrefly: ignore[bad-argument-type]
-                        beta=4.0, linear_beta=25.0
-                    )
-                ),
+                activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
                 param_init={
                     "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
                     "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),

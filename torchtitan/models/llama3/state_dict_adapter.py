@@ -10,6 +10,10 @@ from typing import Any
 
 logger = logging.getLogger()
 
+from torchtitan.models.common.feed_forward import (
+    fuse_gate_up_state_dict,
+    split_fused_gate_up_state_dict,
+)
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 from .model import Llama3Model
@@ -67,6 +71,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         )
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        state_dict = split_fused_gate_up_state_dict(state_dict)
 
         # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
@@ -151,4 +156,4 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
             state_dict[new_key] = value
 
-        return state_dict
+        return fuse_gate_up_state_dict(state_dict)
