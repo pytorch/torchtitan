@@ -21,6 +21,10 @@ def validate_context_parallel(
     model: "Module.Config", parallelism: "ParallelismConfig"
 ) -> None:
     """Validate that each inner attention matches the CP configuration."""
+    from torchtitan.distributed.context_parallel import (
+        HeadTailLoadBalancer,
+        PTRRLoadBalancer,
+    )
     from torchtitan.models.common.cp_attention import (
         CPInnerAttention,
         UlyssesCPInnerAttention,
@@ -62,10 +66,13 @@ def validate_context_parallel(
         # backend class definition. We need to revisit a good strategy to
         # define "where" should a validation implementation lives.
         if isinstance(inner_attention, UlyssesCPInnerAttention.Config):
-            if parallelism.context_parallel_load_balancer is not None:
+            if isinstance(
+                parallelism.context_parallel_load_balancer,
+                (HeadTailLoadBalancer.Config, PTRRLoadBalancer.Config),
+            ):
                 raise ValueError(
                     f"{fqn}.inner_attention uses {cp_config_type.__qualname__}, so "
-                    "context_parallel_load_balancer must be None."
+                    "context_parallel_load_balancer must use contiguous sharding."
                 )
             head_shard_degree = (
                 parallelism.tensor_parallel_degree * parallelism.context_parallel_degree

@@ -8,6 +8,7 @@ from functools import partial
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
+from torchtitan.distributed.context_parallel import HeadTailLoadBalancer
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -84,7 +85,7 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
     ``build_decoder_config_for_backend``.
     """
     base = llama3_debugmodel()
-    base.parallelism.context_parallel_load_balancer = "headtail"
+    base.parallelism.context_parallel_load_balancer = HeadTailLoadBalancer.Config()
     base.model_spec = model_registry(
         "debugmodel",
         seq_len=base.training.max_context_length,

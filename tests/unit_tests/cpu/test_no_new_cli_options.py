@@ -141,7 +141,6 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "override.imports",
         "parallelism.context_parallel_degree",
         "parallelism.context_parallel_load_balancer",
-        "parallelism.context_parallel_ptrr_mask_key",
         "parallelism.data_parallel_replicate_degree",
         "parallelism.data_parallel_shard_degree",
         "parallelism.enable_fsdp_symm_mem",
