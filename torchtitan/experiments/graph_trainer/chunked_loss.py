@@ -9,10 +9,19 @@ from typing import Any
 
 import torch
 
-from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.components.loss import ChunkedLossConfig, ChunkedLossWrapper, LossInputT
 
 
-class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
+@dataclass(kw_only=True, slots=True)
+class ChunkedLossWrapperWithParamGradsConfig(
+    ChunkedLossConfig[LossInputT],
+):
+    """Configuration for graph-compatible chunked loss execution."""
+
+
+class ChunkedLossWrapperWithParamGrads(
+    ChunkedLossWrapper[LossInputT],
+):
     """ChunkedLossWrapper variant that exposes sharded lm_head param grads as
     explicit autograd outputs of the returned loss tensor, so outer
     ``torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])``
@@ -24,9 +33,7 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
     outer ``loss.backward()`` and ``torch.autograd.grad`` consumers.
     """
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(ChunkedLossWrapper.Config):
-        pass
+    Config = ChunkedLossWrapperWithParamGradsConfig
 
     def _gradient_backprop(
         self,

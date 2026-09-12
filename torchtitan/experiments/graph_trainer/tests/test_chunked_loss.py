@@ -12,11 +12,13 @@ import torch.nn as nn
 from torch.testing._internal.common_utils import TestCase
 
 from torchtitan.components.loss import (
-    BaseLoss,
     ChunkedLossWrapper,
     cross_entropy_loss,
     IGNORE_INDEX,
+    Loss,
+    LossConfig,
 )
+from torchtitan.config import Configurable
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -38,9 +40,17 @@ class _FakeDecoder(nn.Module):
         return self.output(tokens)
 
 
-class _WeightedTwoOutputLoss(BaseLoss):
+class _WeightedTwoOutputLoss(
+    Configurable,
+    Loss[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]],
+):
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(
+        LossConfig[
+            tuple[torch.Tensor, ...],
+            tuple[torch.Tensor, ...],
+        ]
+    ):
         auxiliary_weight: float = 0.25
 
     def __init__(self, config: Config, *, compile_config=None):

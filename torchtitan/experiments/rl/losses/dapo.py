@@ -12,15 +12,15 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.components.loss import BaseLoss, compute_logprobs
-from torchtitan.config import CompileConfig
+from torchtitan.components.loss import compute_logprobs, LossConfig
+from torchtitan.config import CompileConfig, Configurable
 
 # Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
 # logprob mismatch cannot overflow exp() to inf/NaN.
 _MAX_LOG_RATIO = 10.0
 
 
-class DAPOLoss(BaseLoss):
+class DAPOLoss(Configurable):
     """Per-token clipped surrogate loss with DAPO-style "clip-higher".
 
     The same PPO clip as GRPO, but the importance ratio's lower and upper bounds are
@@ -36,7 +36,7 @@ class DAPOLoss(BaseLoss):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(LossConfig):
         ratio_clip_low: float = 0.2
         """Lower clip: the importance ratio is clamped to ``>= 1 - ratio_clip_low``."""
 

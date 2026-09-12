@@ -4,10 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import Any, cast, Generic, Protocol, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -22,11 +21,69 @@ from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.tools.logging import logger
+from typing_extensions import override, TypeVar
 
 # PyTorch's default ignore index for cross-entropy loss
 IGNORE_INDEX = -100
 
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
+LossResult: TypeAlias = tuple[torch.Tensor, dict[str, torch.Tensor]]
+
+PredictionT = TypeVar("PredictionT", contravariant=True)
+LabelsT = TypeVar("LabelsT", contravariant=True)
+
+
+class Loss(Protocol[PredictionT, LabelsT]):
+    """Callable loss contract used by trainers and loss decorators."""
+
+    def __call__(
+        self,
+        pred: PredictionT,
+        labels: LabelsT,
+        global_valid_tokens: torch.Tensor | None = None,
+        **loss_inputs: Any,
+    ) -> LossResult:
+        """Return the scaled loss and any metrics computed by the loss."""
+        ...
+
+
+@dataclass(kw_only=True, slots=True)
+class LossConfig(
+    Configurable.Config,
+    Generic[PredictionT, LabelsT],
+):
+    """Base configuration type for loss components."""
+
+
+def _maybe_compile_loss_fn(
+    loss_fn: LossFunction,
+    compile_config: CompileConfig | None,
+) -> LossFunction:
+    if (
+        compile_config is not None
+        and compile_config.enable
+        and "loss" in compile_config.components
+    ):
+        logger.info("Compiling the loss function with torch.compile")
+        return torch.compile(loss_fn, backend=compile_config.backend)
+    return loss_fn
+
+
+def _normalize_loss(
+    loss: torch.Tensor,
+    global_valid_tokens: torch.Tensor | None,
+) -> torch.Tensor:
+    # loss: V->P, annotate global_valid_tokens
+    if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
+        spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
+        if global_valid_tokens is not None:
+            spmd.assert_type(
+                global_valid_tokens,
+                {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
+            )
+    if global_valid_tokens is not None:
+        loss = loss / global_valid_tokens
+    return loss
 
 
 def cross_entropy_loss(
@@ -95,11 +152,10 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         spmd.assert_local_type_like(
             result,
             logits,
-            {tp_group: spmd.I},  # pyrefly: ignore [bad-argument-type]
+            {tp_group: spmd.I},
         )
 
     @staticmethod
-    # pyrefly: ignore [bad-override]
     def forward(
         ctx,
         logits: torch.Tensor,
@@ -217,77 +273,19 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         return grad_logits, None, None, None, None
 
 
-def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """MSE loss with sum reduction for Transformer models training."""
-    return torch.nn.functional.mse_loss(
-        pred.float(), labels.float().detach(), reduction="sum"
-    )
-
-
-class BaseLoss(ABC, Configurable):
-    """Abstract base class for all loss functions.
-
-    Provides compile support and a unified ``__call__`` signature:
-    ``(pred, labels, global_valid_tokens) -> (scaled_loss, metrics)``.
-    Subclasses must implement ``__init__``. Leaf losses set ``self.fn`` and
-    reuse the default ``__call__``.
-    """
-
-    fn: LossFunction
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        pass
-
-    @abstractmethod
-    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
-        ...
-
-    def _maybe_compile(self, compile_config: CompileConfig | None) -> None:
-        if (
-            compile_config is not None
-            and compile_config.enable
-            and "loss" in compile_config.components
-        ):
-            logger.info("Compiling the loss function with torch.compile")
-            self.fn = torch.compile(self.fn, backend=compile_config.backend)
-
-    def __call__(
-        self,
-        pred: torch.Tensor,
-        labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None = None,
-        **kwargs: Any,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Return the scaled loss and any metrics computed by the loss."""
-        del kwargs
-        loss = self.fn(pred, labels)
-        # loss: V->P, annotate global_valid_tokens
-        if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
-            spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            if global_valid_tokens is not None:
-                spmd.assert_type(
-                    global_valid_tokens,
-                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-                )
-        if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
-        return loss, {}
-
-
-class CrossEntropyLoss(BaseLoss):
+class CrossEntropyLoss(Configurable, Loss[torch.Tensor, torch.Tensor]):
     """Cross-entropy loss with sum reduction for token-based normalization."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(LossConfig[torch.Tensor, torch.Tensor]):
         global_vocab_size: int | None = None
         """Full vocabulary size, needed for spmd_types loss-parallel CE."""
 
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
-        self.fn: LossFunction = cross_entropy_loss
-        self._maybe_compile(compile_config)
+        self.fn = _maybe_compile_loss_fn(cross_entropy_loss, compile_config)
         self.global_vocab_size = config.global_vocab_size
 
+    @override
     def __call__(
         self,
         pred: torch.Tensor,
@@ -297,29 +295,38 @@ class CrossEntropyLoss(BaseLoss):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del kwargs
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
-        # loss: V->P, annotate global_valid_tokens
-        if get_spmd_backend() == "spmd_types" and current_spmd_mesh() is not None:
-            spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            if global_valid_tokens is not None:
-                spmd.assert_type(
-                    global_valid_tokens,
-                    {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
-                )
-        if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
-        return loss, {}
+        return _normalize_loss(loss, global_valid_tokens), {}
 
 
-class MSELoss(BaseLoss):
+def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """MSE loss with sum reduction for Transformer models training."""
+    return torch.nn.functional.mse_loss(
+        pred.float(), labels.float().detach(), reduction="sum"
+    )
+
+
+class MSELoss(Configurable, Loss[torch.Tensor, torch.Tensor]):
     """MSE loss with sum reduction for Transformer models training (e.g. Flux)."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(LossConfig[torch.Tensor, torch.Tensor]):
         pass
 
     def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
-        self.fn: LossFunction = mse_loss
-        self._maybe_compile(compile_config)
+        del config
+        self.fn = _maybe_compile_loss_fn(mse_loss, compile_config)
+
+    @override
+    def __call__(
+        self,
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> LossResult:
+        del kwargs
+        loss = self.fn(pred, labels)
+        return _normalize_loss(loss, global_valid_tokens), {}
 
 
 def compute_logprobs(
@@ -383,6 +390,354 @@ def compute_logprobs(
             torch.softmax(logits, dim=-1) * logits
         ).sum(dim=-1)
     return logprobs, entropy
+
+
+LossInputT = TypeVar(
+    "LossInputT",
+    torch.Tensor,
+    tuple[torch.Tensor, ...],
+    default=torch.Tensor,
+)
+
+
+@dataclass(kw_only=True, slots=True)
+class ChunkedLossConfig(
+    LossConfig[LossInputT, LossInputT],
+):
+    """Configuration for chunked execution of a shape-compatible loss."""
+
+    num_chunks: int = 8
+    """Number of chunks to split the sequence into."""
+
+    loss_fn: LossConfig[
+        LossInputT, LossInputT
+    ] = field(  # pyrefly: ignore[bad-assignment]
+        default_factory=CrossEntropyLoss.Config
+    )
+    """Loss applied to each chunk's logits."""
+
+
+class ChunkedLossWrapper(
+    Configurable,
+    Loss[LossInputT, LossInputT],
+):
+    """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
+
+    Instead of materializing the full [T, V] logits tensor at once, this splits
+    the hidden states into N chunks along the token dimension and computes
+    lm_head + loss on each chunk sequentially. This reduces peak memory
+    from O(T*V) to O(T/N*V).
+
+    The configured inner ``loss_fn`` is called once per chunk on logits from
+    that chunk. ``pred`` and ``labels`` may be aligned tuples; their tensor or
+    tuple structure is preserved when calling the inner loss. Additional
+    per-token ``loss_inputs`` are chunked along the same sequence dimension and
+    forwarded to the inner loss.
+
+    The flow:
+    1. Model forward with _skip_lm_head=True to get one or more hidden states [T, D]
+    2. Split each hidden state and its labels into N chunks along seq dim
+    3. Detach each hidden-state chunk at the lm_head boundary
+    4. Disable FSDP reshard on lm_head across all outputs and chunks
+    5. For each chunk: lm_head on each output -> loss_fn(logits, labels, gvt) -> backward()
+    6. Assemble one full gradient [T, D] per output via GradAccumulator
+    7. Backward through the decoder once with all accumulated gradients
+
+    FSDP2 composability:
+        The lm_head's FSDP reshard-after-forward and reshard-after-backward are
+        temporarily disabled during the chunked loop so that the weight stays
+        unsharded across all outputs and chunks (avoiding repeated all-gathers).
+        Gradient synchronization remains disabled until the final chunk, so one
+        reduce-scatter processes the accumulated lm_head parameter gradients.
+
+    TP / SP composability:
+        The root decoder norm emits hidden states that are replicated on the
+        TP axis before chunking, so each chunk enters the lm_head as
+        ``Replicate()`` input regardless of whether SP is enabled.
+
+        When loss parallel is applied, each TP rank
+        computes partial CE on its ``V/tp`` slice, with an internal
+        all-reduce for the correct log-sum-exp.
+
+    CP: Further chunks the local sequence dimension. Works out of the box.
+
+    Compile: the inner ``loss_fn`` can be compiled independently; lm_head is not compiled.
+    """
+
+    Config = ChunkedLossConfig
+
+    def __init__(
+        self,
+        config: ChunkedLossConfig[LossInputT],
+        *,
+        compile_config: CompileConfig | None = None,
+    ):
+        self.num_chunks = config.num_chunks
+        self.loss_fn: Loss[LossInputT, LossInputT] = config.loss_fn.build(
+            compile_config=compile_config
+        )
+        self.lm_head: nn.Module | None = None
+
+    def set_lm_head(self, lm_head: nn.Module) -> None:
+        """Set the lm_head module. Must be called before the first __call__."""
+        self.lm_head = lm_head
+
+    @override
+    def __call__(
+        self,
+        pred: LossInputT,
+        labels: LossInputT,
+        global_valid_tokens: torch.Tensor | None = None,
+        **loss_inputs: Any,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Compute chunked loss.
+
+        Every prediction represented by ``pred`` must come from model forward
+        with ``_skip_lm_head=True``. Tensor inputs must be paired with tensor
+        labels; tuple inputs must contain one labels tensor per prediction.
+
+        When ``pred`` does not require grad (e.g. validation), runs chunked
+        forward only -- no per-chunk backward or gradient accumulation.
+
+        Returns a differentiable loss and metrics. When ``.backward()`` is called
+        on the loss, it triggers backward through the decoder via a custom
+        autograd Function.
+        """
+        from torch.distributed._composable.fsdp import FSDPModule
+
+        num_chunks = self.num_chunks
+        lm_head = self.lm_head
+        assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
+        if isinstance(pred, torch.Tensor) and isinstance(labels, torch.Tensor):
+            is_multi_output = False
+            predictions = (pred,)
+            labels_per_output = (labels,)
+        elif (
+            isinstance(pred, tuple)
+            and isinstance(labels, tuple)
+            and len(pred) > 0
+            and len(pred) == len(labels)
+        ):
+            is_multi_output = True
+            predictions = pred
+            labels_per_output = labels
+        else:
+            raise ValueError(
+                "ChunkedLossWrapper requires either one prediction/labels "
+                "tensor pair or non-empty aligned tuples."
+            )
+        requires_grad = predictions[0].requires_grad
+        if any(
+            prediction.requires_grad != requires_grad for prediction in predictions[1:]
+        ):
+            raise ValueError(
+                "All chunked-loss predictions must agree on whether gradients "
+                "are required."
+            )
+
+        # Chunking always operates on the *local* view: when ``t`` is a
+        # Shard(0) DTensor, chunking the global view would distribute whole
+        # chunks across ranks (e.g. size=2, num_chunks=8: chunks 0-3 on
+        # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
+        # local seq=0 and breaking GradAccumulator's slice writes.
+        # ``local_map`` runs the chunking body on plain tensors; under the
+        # non-DTensor (eager) path we call ``_chunk_local`` directly.
+        # Equal chunk sizes also match GradAccumulator's sequential slice
+        # writes, which use one chunk length for each write offset.
+        def _chunk_local(t):
+            seq_len = t.shape[0]
+            torch._check(
+                seq_len % num_chunks == 0,
+                lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
+            )
+            chunk_len = seq_len // num_chunks
+            return tuple(
+                c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=0)
+            )
+
+        def _chunk(t):
+            if not isinstance(t, DTensor):
+                return _chunk_local(t)
+            p = t.placements
+            wrapped = local_map(
+                _chunk_local,
+                out_placements=(p,) * num_chunks,
+                in_placements=(p,),
+                device_mesh=t.device_mesh,
+            )
+            return wrapped(t)
+
+        with spmd.local():
+            # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
+            # accumulates ``.grad`` for ``GradAccumulator``.
+            hidden_state_chunks_per_output = tuple(
+                tuple(
+                    chunk.detach().requires_grad_(requires_grad)
+                    for chunk in _chunk(hidden_state)
+                )
+                for hidden_state in predictions
+            )
+            label_chunks_per_output = tuple(
+                _chunk(label) for label in labels_per_output
+            )
+            input_chunks = {
+                key: _chunk(value) if isinstance(value, torch.Tensor) else value
+                for key, value in loss_inputs.items()
+            }
+            grad_accumulators = (
+                tuple(
+                    GradAccumulator(
+                        hidden_state,
+                        num_chunks=num_chunks,
+                        dtype=torch.float32,
+                    )
+                    for hidden_state in predictions
+                )
+                if requires_grad
+                else ()
+            )
+
+            total_loss = predictions[0].new_zeros((), dtype=torch.float32)
+            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+                total_loss = spmd.mutate_type(
+                    total_loss,
+                    src=spmd.R,
+                    dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
+                )
+            metrics: dict[str, torch.Tensor] = {}
+
+            fsdp_enabled = isinstance(lm_head, FSDPModule)
+            # Disable FSDP reshard on lm_head to keep its weight unsharded across
+            # all outputs and chunks, avoiding repeated all-gathers. Coalesce
+            # gradient synchronization into one reduce-scatter at the final chunk
+            # by disabling it for chunks 0..N-2.
+            if fsdp_enabled:
+                lm_head.set_reshard_after_forward(False)
+                lm_head.set_reshard_after_backward(False)
+                lm_head.set_requires_gradient_sync(False, recurse=False)
+                # An implicit unshard stores an all-gather event in FSDP's shared
+                # all_gather_state for the next FSDP module to consume. Since
+                # lm_head is the final FSDP forward in this loop, eager warmup
+                # leaves that state uncleared, and CUDA graph capture cannot wait
+                # on its eager event. Explicitly unshard while FSDP is idle to
+                # avoid populating the shared state.
+                with spmd.no_typecheck():
+                    lm_head.unshard()
+
+            for chunk_index in range(num_chunks):
+                if fsdp_enabled and chunk_index == num_chunks - 1:
+                    lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
+                        True, recurse=False
+                    )
+
+                h_chunks = tuple(
+                    chunks[chunk_index] for chunks in hidden_state_chunks_per_output
+                )
+                label_chunks = tuple(
+                    chunks[chunk_index] for chunks in label_chunks_per_output
+                )
+                loss_inputs = {
+                    key: chunks[chunk_index] if isinstance(chunks, tuple) else chunks
+                    for key, chunks in input_chunks.items()
+                }
+                logits_per_output = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
+                loss_pred = cast(
+                    LossInputT,
+                    logits_per_output if is_multi_output else logits_per_output[0],
+                )
+                loss_labels = cast(
+                    LossInputT,
+                    label_chunks if is_multi_output else label_chunks[0],
+                )
+                chunk_loss, chunk_metrics = self.loss_fn(
+                    loss_pred,
+                    loss_labels,
+                    global_valid_tokens,
+                    **loss_inputs,
+                )
+                metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
+                total_loss = total_loss + chunk_loss.detach()
+
+                if requires_grad:
+                    with spmd.no_typecheck():
+                        chunk_loss.backward()
+                        for h_chunk, grad_accumulator in zip(
+                            h_chunks, grad_accumulators, strict=True
+                        ):
+                            assert h_chunk.grad is not None
+                            grad_accumulator.add(h_chunk.grad)
+                            h_chunk.grad = None
+
+            if fsdp_enabled:
+                lm_head.set_reshard_after_forward(True)
+                lm_head.set_reshard_after_backward(True)
+                lm_head.reshard()
+            if not requires_grad:
+                return total_loss, metrics
+
+            accumulated_grads = tuple(
+                grad_accumulator.result().to(hidden_state.dtype)
+                for hidden_state, grad_accumulator in zip(
+                    predictions, grad_accumulators, strict=True
+                )
+            )
+
+        with spmd.no_typecheck():
+            loss = self._gradient_backprop(
+                predictions,
+                accumulated_grads,
+                total_loss,
+            )
+        return loss, metrics
+
+    @staticmethod
+    def _combine_chunk_metrics(
+        current: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Combine metrics from one sequence chunk into the local accumulator.
+
+        Mean/fraction metrics are expected to already be normalized by the
+        global valid-token count, so summing chunk contributions gives the
+        global mean for this rank's microbatch contribution. The trainer still
+        performs the cross-rank loss-mesh reduction on the returned metrics.
+        """
+        for key, value in values.items():
+            previous = current.get(key)
+            if previous is None:
+                current[key] = value
+            elif key.endswith(("/mean", "/frac", "_mean", "_frac")):
+                current[key] = previous + value
+            elif key.endswith("/max"):
+                current[key] = torch.maximum(previous, value)
+            elif key.endswith("/min"):
+                current[key] = torch.minimum(previous, value)
+            else:
+                raise ValueError(
+                    f"Do not know how to reduce metric '{key}'. "
+                    "Use a /mean, /frac, _mean, _frac, /max, or /min suffix."
+                )
+        return current
+
+    def _gradient_backprop(
+        self,
+        hidden_states: tuple[torch.Tensor, ...],
+        accumulated_grads: tuple[torch.Tensor, ...],
+        total_loss: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return a differentiable loss via _DecoderOutputGradientBackProp.
+        When ``.backward()`` is called (by the trainer or PP schedule),
+        autograd calls ``_DecoderOutputGradientBackProp.backward`` which
+        returns each accumulated gradient for its corresponding hidden state,
+        propagating through the decoder. Subclasses override to swap in a
+        different autograd Function.
+        """
+        return _DecoderOutputGradientBackProp.apply(
+            len(hidden_states),
+            *hidden_states,
+            *accumulated_grads,
+            total_loss,
+        )
 
 
 class GradAccumulator:
@@ -501,318 +856,6 @@ class GradAccumulator:
                 placements=self._placements,
             )
         return self._buffer
-
-
-class ChunkedLossWrapper(BaseLoss):
-    """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
-
-    Instead of materializing the full [T, V] logits tensor at once, this splits
-    the hidden states into N chunks along the token dimension and computes
-    lm_head + loss on each chunk sequentially. This reduces peak memory
-    from O(T*V) to O(T/N*V).
-
-    The inner ``loss_fn`` defaults to ``CrossEntropyLoss`` and is called once per
-    chunk on logits from that chunk. ``pred`` and ``labels`` may be aligned
-    tuples; their tensor or tuple structure is preserved when calling the inner
-    loss. Additional per-token ``loss_inputs`` are chunked along the same
-    sequence dimension and forwarded to the inner loss.
-
-    The flow:
-    1. Model forward with _skip_lm_head=True to get one or more hidden states [T, D]
-    2. Split each hidden state and its labels into N chunks along seq dim
-    3. Detach each hidden-state chunk at the lm_head boundary
-    4. Disable FSDP reshard on lm_head across all outputs and chunks
-    5. For each chunk: lm_head on each output -> loss_fn(logits, labels, gvt) -> backward()
-    6. Assemble one full gradient [T, D] per output via GradAccumulator
-    7. Backward through the decoder once with all accumulated gradients
-
-    FSDP2 composability:
-        The lm_head's FSDP reshard-after-forward and reshard-after-backward are
-        temporarily disabled during the chunked loop so that the weight stays
-        unsharded across all outputs and chunks (avoiding repeated all-gathers).
-        Gradient synchronization remains disabled until the final chunk, so one
-        reduce-scatter processes the accumulated lm_head parameter gradients.
-
-    TP / SP composability:
-        The root decoder norm emits hidden states that are replicated on the
-        TP axis before chunking, so each chunk enters the lm_head as
-        ``Replicate()`` input regardless of whether SP is enabled.
-
-        When loss parallel is applied, each TP rank
-        computes partial CE on its ``V/tp`` slice, with an internal
-        all-reduce for the correct log-sum-exp.
-
-    CP: Further chunks the local sequence dimension. Works out of the box.
-
-    Compile: the inner ``loss_fn`` can be compiled independently; lm_head is not compiled.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
-        num_chunks: int = 8
-        """Number of chunks to split the sequence into."""
-
-        loss_fn: BaseLoss.Config = field(default_factory=CrossEntropyLoss.Config)
-        """Loss applied to each chunk's logits."""
-
-    def __init__(
-        self,
-        config: Config,
-        *,
-        compile_config: CompileConfig | None = None,
-    ):
-        self.num_chunks = config.num_chunks
-        self.loss_fn: BaseLoss = config.loss_fn.build(compile_config=compile_config)
-        self.lm_head: nn.Module | None = None
-
-    def set_lm_head(self, lm_head: nn.Module) -> None:
-        """Set the lm_head module. Must be called before the first __call__."""
-        self.lm_head = lm_head
-
-    def __call__(
-        self,
-        pred: torch.Tensor | tuple[torch.Tensor, ...],
-        labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor | None = None,
-        **loss_inputs: Any,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Compute chunked loss.
-
-        Every prediction represented by ``pred`` must come from model forward
-        with ``_skip_lm_head=True``. Tensor inputs must be paired with tensor
-        labels; tuple inputs must contain one labels tensor per prediction.
-
-        When ``pred`` does not require grad (e.g. validation), runs chunked
-        forward only -- no per-chunk backward or gradient accumulation.
-
-        Returns a differentiable loss and metrics. When ``.backward()`` is called
-        on the loss, it triggers backward through the decoder via a custom
-        autograd Function.
-        """
-        from torch.distributed._composable.fsdp import FSDPModule
-
-        num_chunks = self.num_chunks
-        lm_head = self.lm_head
-        assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
-        if isinstance(pred, torch.Tensor) and isinstance(labels, torch.Tensor):
-            is_multi_output = False
-            pred = (pred,)
-            labels = (labels,)
-        elif (
-            isinstance(pred, tuple)
-            and isinstance(labels, tuple)
-            and len(pred) > 0
-            and len(pred) == len(labels)
-        ):
-            is_multi_output = True
-        else:
-            raise ValueError(
-                "ChunkedLossWrapper requires either one prediction/labels "
-                "tensor pair or non-empty aligned tuples."
-            )
-        requires_grad = pred[0].requires_grad
-        if any(prediction.requires_grad != requires_grad for prediction in pred[1:]):
-            raise ValueError(
-                "All chunked-loss predictions must agree on whether gradients "
-                "are required."
-            )
-
-        # Chunking always operates on the *local* view: when ``t`` is a
-        # Shard(0) DTensor, chunking the global view would distribute whole
-        # chunks across ranks (e.g. size=2, num_chunks=8: chunks 0-3 on
-        # rank 0, 4-7 on rank 1), leaving half the per-chunk DTensors with
-        # local seq=0 and breaking GradAccumulator's slice writes.
-        # ``local_map`` runs the chunking body on plain tensors; under the
-        # non-DTensor (eager) path we call ``_chunk_local`` directly.
-        # Equal chunk sizes also match GradAccumulator's sequential slice
-        # writes, which use one chunk length for each write offset.
-        def _chunk_local(t):
-            seq_len = t.shape[0]
-            torch._check(
-                seq_len % num_chunks == 0,
-                lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
-            )
-            chunk_len = seq_len // num_chunks
-            return tuple(
-                c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=0)
-            )
-
-        def _chunk(t):
-            if not isinstance(t, DTensor):
-                return _chunk_local(t)
-            p = t.placements
-            wrapped = local_map(
-                _chunk_local,
-                out_placements=(p,) * num_chunks,
-                in_placements=(p,),
-                device_mesh=t.device_mesh,
-            )
-            return wrapped(t)
-
-        with spmd.local():
-            # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
-            # accumulates ``.grad`` for ``GradAccumulator``.
-            hidden_state_chunks_per_output = tuple(
-                tuple(
-                    chunk.detach().requires_grad_(requires_grad)
-                    for chunk in _chunk(hidden_state)
-                )
-                for hidden_state in pred
-            )
-            label_chunks_per_output = tuple(_chunk(label) for label in labels)
-            input_chunks = {
-                key: _chunk(value) if isinstance(value, torch.Tensor) else value
-                for key, value in loss_inputs.items()
-            }
-            grad_accumulators = (
-                tuple(
-                    GradAccumulator(
-                        hidden_state,
-                        num_chunks=num_chunks,
-                        dtype=torch.float32,
-                    )
-                    for hidden_state in pred
-                )
-                if requires_grad
-                else ()
-            )
-
-            total_loss = pred[0].new_zeros((), dtype=torch.float32)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                total_loss = spmd.mutate_type(
-                    total_loss,
-                    src=spmd.R,
-                    dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
-                )
-            metrics: dict[str, torch.Tensor] = {}
-
-            fsdp_enabled = isinstance(lm_head, FSDPModule)
-            # Disable FSDP reshard on lm_head to keep its weight unsharded across
-            # all outputs and chunks, avoiding repeated all-gathers. Coalesce
-            # gradient synchronization into one reduce-scatter at the final chunk
-            # by disabling it for chunks 0..N-2.
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(False)
-                lm_head.set_reshard_after_backward(False)
-                lm_head.set_requires_gradient_sync(False, recurse=False)
-                # An implicit unshard stores an all-gather event in FSDP's shared
-                # all_gather_state for the next FSDP module to consume. Since
-                # lm_head is the final FSDP forward in this loop, eager warmup
-                # leaves that state uncleared, and CUDA graph capture cannot wait
-                # on its eager event. Explicitly unshard while FSDP is idle to
-                # avoid populating the shared state.
-                with spmd.no_typecheck():
-                    lm_head.unshard()
-
-            for chunk_index in range(num_chunks):
-                if fsdp_enabled and chunk_index == num_chunks - 1:
-                    lm_head.set_requires_gradient_sync(  # pyrefly: ignore[not-callable]
-                        True, recurse=False
-                    )
-
-                h_chunks = tuple(
-                    chunks[chunk_index] for chunks in hidden_state_chunks_per_output
-                )
-                label_chunks = tuple(
-                    chunks[chunk_index] for chunks in label_chunks_per_output
-                )
-                loss_inputs = {
-                    key: chunks[chunk_index] if isinstance(chunks, tuple) else chunks
-                    for key, chunks in input_chunks.items()
-                }
-                logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
-                if not is_multi_output:
-                    logits = logits[0]
-                    label_chunks = label_chunks[0]
-                chunk_loss, chunk_metrics = self.loss_fn(
-                    logits,  # pyrefly: ignore[bad-argument-type]
-                    label_chunks,  # pyrefly: ignore[bad-argument-type]
-                    global_valid_tokens,
-                    **loss_inputs,
-                )
-                metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
-                total_loss = total_loss + chunk_loss.detach()
-
-                if requires_grad:
-                    with spmd.no_typecheck():
-                        chunk_loss.backward()
-                        for h_chunk, grad_accumulator in zip(
-                            h_chunks, grad_accumulators, strict=True
-                        ):
-                            assert h_chunk.grad is not None
-                            grad_accumulator.add(h_chunk.grad)
-                            h_chunk.grad = None
-
-            if fsdp_enabled:
-                lm_head.set_reshard_after_forward(True)
-                lm_head.set_reshard_after_backward(True)
-                lm_head.reshard()
-            if not requires_grad:
-                return total_loss, metrics
-
-            accumulated_grads = tuple(
-                grad_accumulator.result().to(hidden_state.dtype)
-                for hidden_state, grad_accumulator in zip(
-                    pred, grad_accumulators, strict=True
-                )
-            )
-
-        with spmd.no_typecheck():
-            loss = self._gradient_backprop(
-                pred,
-                accumulated_grads,
-                total_loss,
-            )
-        return loss, metrics
-
-    @staticmethod
-    def _combine_chunk_metrics(
-        current: dict[str, torch.Tensor],
-        values: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        """Combine metrics from one sequence chunk into the local accumulator.
-
-        Mean/fraction metrics are expected to already be normalized by the
-        global valid-token count, so summing chunk contributions gives the
-        global mean for this rank's microbatch contribution. The trainer still
-        performs the cross-rank loss-mesh reduction on the returned metrics.
-        """
-        for key, value in values.items():
-            previous = current.get(key)
-            if previous is None:
-                current[key] = value
-            elif key.endswith(("/mean", "/frac", "_mean", "_frac")):
-                current[key] = previous + value
-            elif key.endswith("/max"):
-                current[key] = torch.maximum(previous, value)
-            elif key.endswith("/min"):
-                current[key] = torch.minimum(previous, value)
-            else:
-                raise ValueError(
-                    f"Do not know how to reduce metric '{key}'. "
-                    "Use a /mean, /frac, _mean, _frac, /max, or /min suffix."
-                )
-        return current
-
-    def _gradient_backprop(
-        self,
-        hidden_states: tuple[torch.Tensor, ...],
-        accumulated_grads: tuple[torch.Tensor, ...],
-        total_loss: torch.Tensor,
-    ) -> torch.Tensor:
-        """Return a differentiable loss via _DecoderOutputGradientBackProp.
-        When ``.backward()`` is called (by the trainer or PP schedule),
-        autograd calls ``_DecoderOutputGradientBackProp.backward`` which
-        returns each accumulated gradient for its corresponding hidden state,
-        propagating through the decoder. Subclasses override to swap in a
-        different autograd Function.
-        """
-        return _DecoderOutputGradientBackProp.apply(
-            len(hidden_states),
-            *hidden_states,
-            *accumulated_grads,
-            total_loss,
-        )
 
 
 class _DecoderOutputGradientBackProp(torch.autograd.Function):

@@ -320,6 +320,9 @@ def _config_types(field_type) -> set[type]:
     field_type = _strip_annotated(field_type)
     if dataclasses.is_dataclass(field_type):
         return _subclasses(field_type)
+    origin = typing.get_origin(field_type)
+    if origin is not None and dataclasses.is_dataclass(origin):
+        return _subclasses(origin)
     found: set[type] = set()
     for arg in typing.get_args(field_type):
         arg = _strip_annotated(arg)
@@ -337,7 +340,7 @@ def _declared_cli_options(
     union members it happens to hold, so everything else would go unguarded.
 
     ``seen`` breaks the cycles that subclass expansion creates:
-    ``ChunkedLossWrapper.Config.loss_fn`` is a ``BaseLoss.Config``, which
+    ``ChunkedLossWrapper.Config.loss_fn`` is a ``LossConfig``, which
     expands back to the wrapper.
     """
     if config_cls in seen:

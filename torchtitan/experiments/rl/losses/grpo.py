@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from torchtitan.components.loss import BaseLoss
+from torchtitan.components.loss import LossConfig
 from torchtitan.experiments.rl.losses.dapo import DAPOLoss
 
 
@@ -22,7 +22,7 @@ class GRPOLoss(DAPOLoss):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(LossConfig):
         clip_eps: float = 0.2
         """Symmetric PPO clip: the ratio is clamped to ``[1 - clip_eps, 1 + clip_eps]``."""
 
