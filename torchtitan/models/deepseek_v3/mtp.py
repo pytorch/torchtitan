@@ -322,12 +322,13 @@ class MTPDecoder(Decoder):
         )
         return input_tokens, loss_labels, batch
 
-    def forward(  # pyrefly: ignore [bad-override]
+    def forward(
         self,
         tokens: torch.Tensor | tuple[torch.Tensor, ...],
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
+        *,
         padding_mask: torch.Tensor | None = None,
     ):
         if self.mtp_layers is None:
