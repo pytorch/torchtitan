@@ -21,6 +21,10 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v7
+        with:
+          # check_accelerator_api.py diffs against the base branch, which a
+          # shallow clone would not contain.
+          fetch-depth: 0
 
       - name: Setup python
         uses: actions/setup-python@v7
@@ -76,15 +80,27 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           # Lychee will checks all links in .md and .py files in the next step
-          SKIP: lychee-link-checker
+          # check-accelerator-api is diff-scoped, so it runs on its own below
+          # with the pull request's actual base branch.
+          SKIP: lychee-link-checker,check-accelerator-api
         run: pre-commit run --show-diff-on-failure --files ${{ steps.changed-files.outputs.all_changed_files }}
 
       - name: Lint all files
         if: github.event_name != 'pull_request'
         env:
           # Lychee checks all links in the next step.
-          SKIP: lychee-link-checker
+          # check-accelerator-api needs a base branch to diff against, which
+          # only exists for pull requests.
+          SKIP: lychee-link-checker,check-accelerator-api
         run: pre-commit run --show-diff-on-failure --all-files
+
+      - name: Check for CUDA-only code (use torch.accelerator)
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${BASE_REF}"
+          python .github/scripts/check_accelerator_api.py --base-ref FETCH_HEAD
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
 
       - name: Check links with Lychee
         env:
