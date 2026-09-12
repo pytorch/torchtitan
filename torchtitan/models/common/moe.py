@@ -208,6 +208,26 @@ class TokenChoiceTopKRouter(Module):
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
         self._debug_force_load_balance = config._debug_force_load_balance
 
+    def _compute_scores(self, x_TD: torch.Tensor) -> torch.Tensor:
+        scores_TE = self.gate(x_TD)
+
+        # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
+        # RouterGateLinear returns scores_TE in FP32.
+        if self.score_func == "sigmoid":
+            return torch.sigmoid(scores_TE)
+        if self.score_func == "softmax":
+            return F.softmax(scores_TE, dim=-1)
+        if self.score_func == "sqrtsoftplus":
+            return F.softplus(scores_TE).sqrt()
+        raise NotImplementedError(f"Unknown score function {self.score_func}")
+
+    def _normalize_topk_scores(
+        self,
+        topk_scores_TK: torch.Tensor,
+    ) -> torch.Tensor:
+        denominator_T1 = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
+        return topk_scores_TK / denominator_T1
+
     def _debug_force_load_balance_routing(
         self, scores_TE: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -302,18 +322,7 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
-        scores_TE = self.gate(x_TD)
-
-        # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
-        # RouterGateLinear returns scores_TE in FP32.
-        if self.score_func == "sigmoid":
-            scores_TE = torch.sigmoid(scores_TE)
-        elif self.score_func == "softmax":
-            scores_TE = F.softmax(scores_TE, dim=-1)
-        elif self.score_func == "sqrtsoftplus":
-            scores_TE = F.softplus(scores_TE).sqrt()
-        else:
-            raise NotImplementedError(f"Unknown score function {self.score_func}")
+        scores_TE = self._compute_scores(x_TD)
 
         if self._debug_force_load_balance:
             topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
@@ -333,8 +342,7 @@ class TokenChoiceTopKRouter(Module):
             topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
-            denominator = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
-            topk_scores_TK = topk_scores_TK / denominator
+            topk_scores_TK = self._normalize_topk_scores(topk_scores_TK)
         topk_scores_TK = topk_scores_TK * self.route_scale
 
         # Build a one-hot boolean routing map (T, E) marking the experts each
