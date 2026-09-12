@@ -296,6 +296,7 @@ class DeepSeekV4Model(Decoder):
                 shift=depth,
                 fill_value=0,
                 positions=positions,
+                padding_mask=padding_mask,
                 return_valid_mask=True,
             )
             prev_hc_hidden, prediction_hidden = mtp_block(
@@ -305,7 +306,7 @@ class DeepSeekV4Model(Decoder):
                 valid_mask,
                 attention_masks,
                 positions,
-                padding_mask_T=padding_mask,
+                padding_mask=padding_mask,
             )
             mtp_outputs.append(prediction_hidden)
         return mtp_outputs

@@ -261,7 +261,6 @@ def _moe_sharding_config(
     *,
     enable_ep: bool,
     enable_sp: bool,
-    padding_mask_sequence_sharded: bool = False,
 ) -> ShardingConfig:
     """``ShardingConfig`` at the MoE boundary.
 
@@ -282,10 +281,8 @@ def _moe_sharding_config(
         if enable_sp
         else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
-    padding_mask_src_layout = token_id_placement(
-        enable_sp=padding_mask_sequence_sharded
-    )
-    padding_mask_dst_layout = token_id_placement(enable_sp=enable_ep)
+    padding_mask_src_layout = token_id_placement(enable_sp=enable_sp)
+    padding_mask_dst_layout = token_id_placement(enable_sp=enable_sp and enable_ep)
     return ShardingConfig(
         state_shardings={
             "expert_bias_E": dense_param_placement(tp=spmd.R),
@@ -308,7 +305,6 @@ def set_moe_sharding_config(
     *,
     enable_ep: bool,
     enable_sp: bool,
-    padding_mask_sequence_sharded: bool = False,
     expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
 ) -> None:
     """Populate ``sharding_config`` on every MoE submodule.
@@ -337,8 +333,6 @@ def set_moe_sharding_config(
         enable_ep: Whether expert parallelism is enabled.
         enable_sp: Whether sequence parallelism is enabled (affects the
             wrapper's enter/exit TP layout).
-        padding_mask_sequence_sharded: Whether the input padding mask is
-            already sequence-sharded across the TP axis.
         expert_param_layout: ``{param_name: tp_placement}`` for the
             routed experts' weight params (used on the EP-disabled +
             TP-enabled path).
@@ -348,7 +342,6 @@ def set_moe_sharding_config(
     moe_cfg.sharding_config = _moe_sharding_config(
         enable_ep=enable_ep,
         enable_sp=enable_sp,
-        padding_mask_sequence_sharded=padding_mask_sequence_sharded,
     )
     moe_cfg.router.sharding_config = ShardingConfig(
         state_shardings={
@@ -380,3 +373,17 @@ def set_moe_sharding_config(
     )
     moe_cfg.routed_experts.sharding_config = routed_experts_config
     moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_config
+
+
+def set_moe_block_padding_mask_sharding(block_cfg, *, enable_sp: bool) -> None:
+    """Align a model-input padding mask with a block's token-axis layout."""
+    sharding_config = block_cfg.sharding_config or ShardingConfig()
+    sharding_config.in_src_shardings = {
+        **(sharding_config.in_src_shardings or {}),
+        "padding_mask": token_id_placement(),
+    }
+    sharding_config.in_dst_shardings = {
+        **(sharding_config.in_dst_shardings or {}),
+        "padding_mask": token_id_placement(enable_sp=enable_sp),
+    }
+    block_cfg.sharding_config = sharding_config

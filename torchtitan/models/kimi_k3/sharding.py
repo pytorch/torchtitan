@@ -17,7 +17,10 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -84,6 +87,7 @@ def set_kimi_k3_sharding_config(
         if layer.delta_attention is not None:
             _set_inner_kda_sharding(layer.delta_attention.inner_kda)
         if layer.moe is not None:
+            set_moe_block_padding_mask_sharding(layer, enable_sp=enable_sp)
             set_moe_sharding_config(
                 layer.moe,
                 enable_ep=enable_ep,

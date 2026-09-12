@@ -95,23 +95,42 @@ class TestLoss(unittest.TestCase):
         assert isinstance(loss_labels, tuple)
         torch.testing.assert_close(input_tokens[0], tokens)
         torch.testing.assert_close(
-            input_tokens[1], torch.tensor([11, 12, 0, 21, 22, 23, 24, 0])
+            input_tokens[1], torch.tensor([11, 12, 0, 21, 22, 0, 0, 0])
         )
         torch.testing.assert_close(
-            input_tokens[2], torch.tensor([12, 0, 0, 22, 23, 24, 0, 0])
+            input_tokens[2], torch.tensor([12, 0, 0, 22, 0, 0, 0, 0])
         )
         torch.testing.assert_close(loss_labels[0], labels)
         torch.testing.assert_close(
             loss_labels[1],
-            torch.tensor([1, 2, IGNORE_INDEX, 4, 5, 6, 7, IGNORE_INDEX]),
+            torch.tensor(
+                [1, 2, IGNORE_INDEX, 4, 5, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX]
+            ),
         )
         torch.testing.assert_close(
             loss_labels[2],
             torch.tensor(
-                [2, IGNORE_INDEX, IGNORE_INDEX, 5, 6, 7, IGNORE_INDEX, IGNORE_INDEX]
+                [
+                    2,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    5,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                ]
             ),
         )
         self.assertEqual(len(extra_kwargs["mtp_input_valid_masks"]), 2)
+        torch.testing.assert_close(
+            extra_kwargs["mtp_input_valid_masks"][0],
+            torch.tensor([True, True, False, True, True, False, False, False]),
+        )
+        torch.testing.assert_close(
+            extra_kwargs["mtp_input_valid_masks"][1],
+            torch.tensor([True, False, False, True, False, False, False, False]),
+        )
         torch.testing.assert_close(extra_kwargs["padding_mask"], padding_mask)
 
     def test_mtp_loss_rejects_plain_tensor(self):
@@ -454,14 +473,14 @@ class _AddMTPBlock(nn.Module):
         self,
         mtp_input_embed,
         prev_embed,
-        mtp_input_valid_mask_T,
+        mtp_input_valid_mask,
         attention_masks,
         positions,
         *,
-        padding_mask_T=None,
+        padding_mask=None,
     ):
-        del attention_masks, positions, padding_mask_T
-        return mtp_input_embed + prev_embed * mtp_input_valid_mask_T.unsqueeze(-1)
+        del attention_masks, positions, padding_mask
+        return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
 
 
 class _FakeMTPDecoder(MTPDecoder):

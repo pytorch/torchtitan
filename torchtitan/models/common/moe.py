@@ -180,23 +180,6 @@ class RoutedExperts(Module):
         )
 
 
-def _validate_padding_mask(
-    routing_map_TE: torch.Tensor,
-    padding_mask_T: torch.Tensor,
-) -> None:
-    """Validate that the padding mask matches the routing-map token axis."""
-    if padding_mask_T.dtype != torch.bool:
-        raise ValueError(
-            f"padding_mask_T must have dtype bool, got {padding_mask_T.dtype}."
-        )
-    if padding_mask_T.shape != routing_map_TE.shape[:-1]:
-        raise ValueError(
-            "padding_mask_T must have shape matching the routing-map token axis, "
-            f"got {tuple(padding_mask_T.shape)} for routing map "
-            f"{tuple(routing_map_TE.shape)}."
-        )
-
-
 class TokenChoiceTopKRouter(Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
     routed to top K experts based on the router scores.
@@ -330,7 +313,17 @@ class TokenChoiceTopKRouter(Module):
             True,
         )
         if padding_mask_T is not None:
-            _validate_padding_mask(routing_map_TE, padding_mask_T)
+            if padding_mask_T.dtype != torch.bool:
+                raise ValueError(
+                    "padding_mask_T must have dtype bool, "
+                    f"got {padding_mask_T.dtype}."
+                )
+            if padding_mask_T.shape != routing_map_TE.shape[:-1]:
+                raise ValueError(
+                    "padding_mask_T must have shape matching the routing-map "
+                    f"token axis, got {tuple(padding_mask_T.shape)} for routing "
+                    f"map {tuple(routing_map_TE.shape)}."
+                )
         # Keep the full routing map for dispatch, and build the masked view once
         # for all load-balancing statistics. The auxiliary-loss gradient is
         # injected into topk_scores_TK on backward; see ``AuxLoss.inject``.

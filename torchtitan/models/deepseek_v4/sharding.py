@@ -21,7 +21,10 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.protocols.sharding import ShardingConfig
 
 _dense_param_rep = dense_param_placement(tp=spmd.R)
@@ -197,7 +200,6 @@ def set_deepseek_v4_layer_sharding(
     *,
     enable_sp: bool,
     enable_ep: bool,
-    padding_mask_sequence_sharded: bool = False,
 ) -> None:
     hc_branch_layout = (
         hc_head_input_sequence_parallel_placement()
@@ -256,11 +258,11 @@ def set_deepseek_v4_layer_sharding(
 
     # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
+        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            padding_mask_sequence_sharded=padding_mask_sequence_sharded,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
         router_cfg = layer_cfg.moe.router
@@ -316,12 +318,6 @@ def set_deepseek_v4_sharding_config(
     if config.mtp_layers is not None:
         replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
         for mtp_cfg in config.mtp_layers:
-            set_deepseek_v4_layer_sharding(
-                mtp_cfg,
-                enable_sp=enable_sp,
-                enable_ep=enable_ep,
-                padding_mask_sequence_sharded=enable_sp,
-            )
             mtp_cfg.e_proj.sharding_config = _replicate_weight
             mtp_cfg.h_proj.sharding_config = _replicate_weight
             mtp_cfg.enorm.sharding_config = _replicate_weight
@@ -341,13 +337,16 @@ def set_deepseek_v4_sharding_config(
                     "mtp_input_embed": replicated_activation,
                     "prev_hc_hidden": replicated_activation,
                     "mtp_input_ids_T": token_id_placement(),
-                    "mtp_input_valid_mask_T": token_id_placement(),
-                    "padding_mask_T": token_id_placement(),
+                    "mtp_input_valid_mask": token_id_placement(),
                 },
                 in_dst_shardings={
                     "mtp_input_ids_T": token_id_placement(enable_sp=enable_sp),
-                    "mtp_input_valid_mask_T": token_id_placement(enable_sp=enable_sp),
-                    "padding_mask_T": token_id_placement(enable_sp=enable_sp),
+                    "mtp_input_valid_mask": token_id_placement(enable_sp=enable_sp),
                 },
                 out_src_shardings=replicated_activation,
+            )
+            set_deepseek_v4_layer_sharding(
+                mtp_cfg,
+                enable_sp=enable_sp,
+                enable_ep=enable_ep,
             )
