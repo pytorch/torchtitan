@@ -28,6 +28,10 @@ from typing import Any
 
 import torch
 
+from torchtitan.models.common.feed_forward import (
+    fuse_gate_up_state_dict,
+    split_fused_gate_up_state_dict,
+)
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .model import Qwen35Model
@@ -122,6 +126,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert torchtitan state dict to HuggingFace Qwen3.5 format."""
+        state_dict = split_fused_gate_up_state_dict(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
 
@@ -367,4 +372,4 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     tt_value = value.reshape(value.shape[0], -1)
                 tt_state_dict[tt_key] = tt_value
 
-        return tt_state_dict
+        return fuse_gate_up_state_dict(tt_state_dict)
