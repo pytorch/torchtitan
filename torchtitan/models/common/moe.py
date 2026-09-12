@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import ClassVar, Literal
 
@@ -166,12 +167,25 @@ class RoutedExperts(Module):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        expert_output_postprocess: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_map`` (from ``sharding_config``) handles
         DTensor→local conversion on entry and local→DTensor(Partial) wrapping
         on exit. The forward body operates on plain local tensors.
+
+        Args:
+            x_TD: Local input tokens.
+            topk_scores_TK: Router scores for the selected experts.
+            topk_expert_ids_TK: Global IDs of the selected experts.
+            num_local_tokens_per_expert_E: Token counts before expert dispatch.
+            expert_output_postprocess: Optional route-wise transformation applied
+                after expert computation and before dispatcher combine.
+
+        Returns:
+            Combined local expert output.
         """
         (
             routed_input_RD,
@@ -187,6 +201,8 @@ class RoutedExperts(Module):
             routed_output_RD = self.inner_experts(
                 routed_input_RD, num_global_tokens_per_local_expert_e
             )
+            if expert_output_postprocess is not None:
+                routed_output_RD = expert_output_postprocess(routed_output_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
