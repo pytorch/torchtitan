@@ -177,8 +177,7 @@ class DistGEMMFeedForward(FeedForward):
     """SwiGLU feed-forward with both TP collectives folded into its GEMMs.
 
     The fused ``w13`` projection consumes an all-gather of the sequence shard;
-    ``w2`` is row-parallel and reduce-scatters back to a sequence shard. Logical
-    checkpoint FQNs remain the logical ``w1``/``w2``/``w3``.
+    ``w2`` is row-parallel and reduce-scatters back to a sequence shard.
 
     Falls back to the standard forward when TP is off.
     """
@@ -209,7 +208,7 @@ class DistGEMMFeedForward(FeedForward):
         gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
         # Elementwise on feature-sharded activations: no collective.
         remat.recompute_needs_tensor(gate_TF, up_TF)
-        h_TF = self._activation(gate_TF, up_TF)
+        h_TF = self.activation_fn(gate_TF, up_TF)
         out_TD = remat.region(
             LinearReduceScatter.apply,
             self.remat_region_name("w2"),
