@@ -162,12 +162,6 @@ def _is_rng_op(node: torch.fx.Node) -> bool:
     return torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set())
 
 
-# Step 1: group nodes by transformer block
-def block_of_node(node: torch.fx.Node) -> int:
-    """Return which transformer block a node belongs to, for now just its layer id."""
-    return _get_layer_id(node)
-
-
 def get_must_keep_list(
     gm: torch.fx.GraphModule, *, save_ops_policy: str = SAVE_OPS_ALL
 ) -> set:
@@ -510,6 +504,8 @@ def two_level_solver(
     if not comm_flag[0]:
         raise ValueError("AC solver plan crashed!")
 
+    # Every rank must end up with the same plan, otherwise the graphs diverge
+    # and the ranks deadlock or time out in NCCL.
     _sync_plan_from_rank0(gm)
 
     # Outer-requested fractions, byte-weighted over each layer's owned
@@ -593,7 +589,7 @@ def plan_outer(
     blocks = defaultdict(list)
     nodes = list(gm.graph.nodes)
     for node in nodes:
-        b = block_of_node(node)
+        b = _get_layer_id(node)
         if b is not None and b != -1:  # skip non-layer nodes (embeddings/loss)
             blocks[b].append(node)
 
@@ -1730,7 +1726,7 @@ def get_fixed_bytes(
             object
         )  # resident again from first bwd use
         if object.category == ACT and object.first_bwd_use_index is not None:
-            layer_id: int = block_of_node(object.producer_node)
+            layer_id: int = _get_layer_id(object.producer_node)
             if layer_id is not None and layer_id != -1:
                 per_layer_node_bytes[layer_id][object.producer_node] += object.size
                 total_freeable += object.size
@@ -1761,7 +1757,7 @@ def get_fixed_bytes(
         fixed_bytes += sum(obj.size for obj in list_of_fixed_tensors_add_at.get(t, ()))
         fixed_bytes_max = max(fixed_bytes_max, fixed_bytes)
         node = nodes[t]
-        layer_id = block_of_node(node)
+        layer_id = _get_layer_id(node)
         fixed_bytes_max_by_layer[layer_id] = max(
             fixed_bytes, fixed_bytes_max_by_layer.get(layer_id, 0)
         )
@@ -1781,20 +1777,20 @@ def get_fixed_bytes(
     act_bytes_per_layer = defaultdict(int)
     for so in storages:
         if so.category == ACT:
-            if block_of_node(so.producer_node) >= 0:
-                act_bytes_per_layer[block_of_node(so.producer_node)] += so.size
+            if _get_layer_id(so.producer_node) >= 0:
+                act_bytes_per_layer[_get_layer_id(so.producer_node)] += so.size
             elif (
-                block_of_node(so.producer_node) == -1
+                _get_layer_id(so.producer_node) == -1
                 and _get_module_fqn(so.producer_node) != ""
             ):
-                act_bytes_per_layer[block_of_node(so.producer_node)] += so.size
+                act_bytes_per_layer[_get_layer_id(so.producer_node)] += so.size
 
     non_layer_act_add_at, non_layer_act_remove_at = defaultdict(list), defaultdict(list)
     for object in storages:
         if (
             # object.category == ACT and
             object.category in (ACT, TEMP, BWD_TEMP)
-            and block_of_node(object.producer_node) == -1
+            and _get_layer_id(object.producer_node) == -1
             and _get_module_fqn(object.producer_node) != ""
         ):
             non_layer_act_add_at[object.produced_index].append(object)
@@ -1833,7 +1829,7 @@ def get_fixed_bytes(
         # identical on every rank (see the ordered-set note above).
         live_sids_per_index[t] = tuple(live)  # storage_objects live at index t
         freeable_sids_per_index[t] = tuple(live_freeable)  # freeable at index t
-        layer_id = block_of_node(nodes[t])
+        layer_id = _get_layer_id(nodes[t])
         accumulative_act_bytes_per_layer[layer_id] = max(
             accumulative_act_bytes_per_layer[layer_id], cum_act_mem
         )

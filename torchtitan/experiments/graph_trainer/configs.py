@@ -133,6 +133,7 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     cpu_offload_budget_gb: float = -1.0
     """Maximum pinned CPU memory (GiB per rank) for offloaded activations.
+    Tensors are selected largest-first until the budget is exhausted.
     -1 uses whatever the host allows, which is the usual choice: the safe value
     depends on node memory and local rank count, not on the model. 0 disables
     offload. A positive value above the host limit is an error, not a silent
@@ -203,10 +204,6 @@ class GraphTrainerCompileConfig(CompileConfig):
     cpu_offload_defer_n_layers: int = 1
     """Defer forward wait_tensor ops this many layers past the last consumer
     to overlap D2H transfers with compute."""
-
-    cpu_offload_budget_gb: float = 100.0
-    """Maximum CPU memory budget (in GB per rank) for offloaded activations.
-    Tensors are selected largest-first until the budget is exhausted."""
 
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
