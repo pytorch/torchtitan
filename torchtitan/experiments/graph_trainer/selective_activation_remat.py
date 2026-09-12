@@ -19,12 +19,22 @@ from torch._functorch.partitioners import (
 )
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _get_layer_id,
     _get_module_fqn,
     _is_backward_node,
+    _NOT_IN_LAYERS,
 )
 
 
 log = logging.getLogger(__name__)
+
+
+REMAT_LAYER_ID_META = "activation_remat_layer_id"
+# A rematerialization region is the indivisible unit whose saved activation
+# boundary is retained while its interior is recomputed during backward. Each
+# transformer layer is one region today; keeping a separate ID allows future
+# regions to span multiple layers without changing this metadata contract.
+REMAT_REGION_ID_META = "activation_remat_region_id"
 
 
 def _privatize_custom_meta(node: fx.Node) -> None:
@@ -158,6 +168,13 @@ def selective_activation_remat_pass(
     all_nodes = list(gm.graph.nodes)
     bwd_nodes = all_nodes[bwd_start:bwd_end]
     order = {n: i for i, n in enumerate(all_nodes)}
+
+    for node in bwd_nodes:
+        layer_id = _get_layer_id(node)
+        if layer_id == _NOT_IN_LAYERS:
+            continue
+        node.meta[REMAT_LAYER_ID_META] = layer_id
+        node.meta[REMAT_REGION_ID_META] = layer_id
 
     # Map each must_recompute fwd node to the bwd node its dup will be
     # inserted in front of. The earliest bwd consumer (in graph order)
@@ -367,6 +384,10 @@ def selective_activation_remat_pass(
             _privatize_custom_meta(dup)  # node_copy shares fwd_node's custom dict
         dup.name = fwd_node.name + "_recomputed"
         dup.meta["autograd_backward"] = True
+        layer_id = _get_layer_id(fwd_node)
+        if layer_id != _NOT_IN_LAYERS:
+            dup.meta[REMAT_LAYER_ID_META] = layer_id
+            dup.meta[REMAT_REGION_ID_META] = layer_id
         recomputed_nodes[fwd_node] = dup
         log.debug(
             "Recomputing %s before backward node %s", fwd_node.name, bwd_target.name
