@@ -567,13 +567,9 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
-            # SigmoidGatedFeedForward is a FeedForward subclass, so w1/w2/w3 stay flat
-            # (no nested ``ffn.`` level) and are directly shardable by
-            # set_moe_sharding_config.
             shared_experts = SigmoidGatedFeedForward.Config(
-                w1=ffn_config.w1,
+                w13=ffn_config.w13,
                 w2=ffn_config.w2,
-                w3=ffn_config.w3,
                 gate=Linear.Config(
                     in_features=shared_info["dim"],
                     out_features=1,

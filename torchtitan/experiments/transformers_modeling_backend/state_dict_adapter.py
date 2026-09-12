@@ -31,6 +31,10 @@ import torch
 from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
     _get_expert_param_info,
 )
+from torchtitan.models.common.feed_forward import (
+    fuse_gate_up_state_dict,
+    split_fused_gate_up_state_dict,
+)
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .model import HFTransformerModel
@@ -221,7 +225,7 @@ def hf_to_titan_moe_state_dict(
         if not converted:
             titan_state_dict[key] = value
 
-    return titan_state_dict
+    return fuse_gate_up_state_dict(titan_state_dict)
 
 
 def titan_to_hf_moe_state_dict(
@@ -238,6 +242,7 @@ def titan_to_hf_moe_state_dict(
     Returns:
         State dict with HF-format keys and fused expert weights.
     """
+    titan_state_dict = split_fused_gate_up_state_dict(titan_state_dict)
     gate_name, down_name, up_name = _expert_names()
     gate_suffix = f"{_TITAN_EXPERTS_PREFIX}.{gate_name}"
     up_suffix = f"{_TITAN_EXPERTS_PREFIX}.{up_name}"
