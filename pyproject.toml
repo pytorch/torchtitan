@@ -77,7 +77,7 @@ markers = [
 python-version = "3.11"
 project-excludes = ["torchtitan/experiments", "**/tests/**"]
 replace-imports-with-any = [
-    "torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "helion", "helion.*", "batch_invariant_ops", "torchcomms", # optional dependencies
+    "torchao.*", "torchft", "torchvision.*", "deep_ep.*", "dist_moe", "dist_moe.*", "jinja2.*", "helion", "helion.*", "batch_invariant_ops", "torchcomms", # optional dependencies
     # torch_remat is required, but does not publish Pyrefly stubs.
     "torch_remat",
 ]
