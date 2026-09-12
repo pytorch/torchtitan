@@ -124,7 +124,7 @@ def _router_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConf
 
 
 def _shared_expert_colwise_config() -> ShardingConfig:
-    """Colwise shared-expert FFN (w1/w3).
+    """Colwise shared-expert FFN (w13).
 
     Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
     to Replicate for the column-sharded matmul; output is Shard(1) on features.
@@ -167,10 +167,10 @@ def _shared_experts_sharding_configs(
     *,
     enable_ep: bool,
     enable_sp: bool,
-) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig, ShardingConfig]:
-    """Configs for shared FeedForward parent and w1/w2/w3 linears."""
-    # The parent FeedForward converts its input to Replicate once before the
-    # w1/w3 fork. w2 reduces its Partial output to the final MoE boundary layout
+) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig]:
+    """Configs for shared FeedForward parent and w13/w2 linears."""
+    # The parent FeedForward converts its input to Replicate once before w13.
+    # w2 reduces its Partial output to the final MoE boundary layout
     # used for the routed + shared add: sequence-sharded when SP is enabled and
     # Partial when SP is disabled.
     input_layout = (
@@ -193,7 +193,6 @@ def _shared_experts_sharding_configs(
         ),
         _shared_expert_colwise_config(),
         _shared_expert_rowwise_config(output_layout=desired_output_layout),
-        _shared_expert_colwise_config(),
     )
 
 
@@ -353,19 +352,13 @@ def set_moe_sharding_config(
     # Shared experts: SwiGLU FFN run in parallel with the routed experts.
     shared = moe_cfg.shared_experts
     if shared is not None:
-        (
-            shared_config,
-            w1_config,
-            w2_config,
-            w3_config,
-        ) = _shared_experts_sharding_configs(
+        (shared_config, w13_config, w2_config,) = _shared_experts_sharding_configs(
             enable_ep=enable_ep,
             enable_sp=enable_sp,
         )
         shared.sharding_config = shared_config
-        shared.w1.sharding_config = w1_config
+        shared.w13.sharding_config = w13_config
         shared.w2.sharding_config = w2_config
-        shared.w3.sharding_config = w3_config
 
     # RoutedExperts (local_map region): activation in/out + local_map, no params.
     routed_experts_config, inner_experts_config = _routed_experts_sharding_configs(

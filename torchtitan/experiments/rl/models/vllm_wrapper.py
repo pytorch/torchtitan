@@ -356,7 +356,7 @@ class VLLMModelWrapper(Module):
             )
         )
 
-        # Apply config overrides (e.g. the fused gate+up SwiGLU) after
+        # Apply config overrides (e.g. the Triton SwiGLU activation) after
         # update_from_config (which fills the sharding the override factories
         # read) and before build
         if override.imports:

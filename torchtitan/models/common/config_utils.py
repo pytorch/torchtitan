@@ -31,7 +31,7 @@ from torchtitan.models.common.dist_gemm import (
     DistGEMMFeedForward,
     RowParallelLinear,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import _make_fused_linear_init, FeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
@@ -188,6 +188,18 @@ def _fused_qkv_param_init(
     return out
 
 
+def fused_gate_up_param_init(
+    gate_param_init: dict[str, Callable],
+    up_param_init: dict[str, Callable],
+) -> dict[str, Callable] | None:
+    """Initialize the logical gate and up slices of a fused ``w13`` weight."""
+    gate_init = gate_param_init.get("weight")
+    up_init = up_param_init.get("weight")
+    if gate_init is None or up_init is None:
+        return None
+    return {"weight": _make_fused_linear_init(gate_init, up_init)}
+
+
 def make_gqa_config(
     *,
     dim: int,
@@ -296,19 +308,18 @@ def make_ffn_config(
     """Build a fully-specified FeedForward.Config.
 
     ``tp_gemm_backend="dist_gemm"`` overlaps the TP collectives with the GEMMs by
-    folding them in: one all-gather feeds w1 and w3, and w2 reduce-scatters. A bias
-    on w1/w3 is rejected by the config. See make_gqa_config.
+    folding them in: one all-gather feeds w13, and w2 reduce-scatters. See
+    make_gqa_config.
     """
     ffn_cls = DistGEMMFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
     return ffn_cls.Config(
-        w1=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w1_param_init
+        w13=Linear.Config(
+            in_features=dim,
+            out_features=2 * hidden_dim,
+            param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
         w2=Linear.Config(
             in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init
-        ),
-        w3=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w2w3_param_init
         ),
     )
 

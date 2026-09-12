@@ -23,6 +23,7 @@ from torchtitan.models.common import (
     RouterGateLinear,
 )
 from torchtitan.models.common.config_utils import (
+    fused_gate_up_param_init,
     make_ffn_config,
     make_routed_experts_config,
 )
@@ -556,7 +557,9 @@ def _build_mtp_layers(
             if block_cfg.moe.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
                 block_cfg.moe.shared_experts.w2.param_init = depth_init
-                block_cfg.moe.shared_experts.w3.param_init = depth_init
+                block_cfg.moe.shared_experts.w13.param_init = fused_gate_up_param_init(
+                    _LINEAR_INIT, depth_init
+                )
         mtp_layers.append(
             MTPBlock.Config(
                 attention=block_cfg.attention,

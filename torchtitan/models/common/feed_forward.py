@@ -4,15 +4,92 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 import torch
-import torch.nn.functional as F
 
+from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
+# Shape suffix legend:
+#   T = token dimensions, D = model dimension, F = feed-forward hidden dimension
+
 __all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
+
+
+def _make_fused_gate_up_init(
+    gate_init: Callable,
+    up_init: Callable,
+    *,
+    gate_up_axis: int,
+) -> Callable:
+    """Build an initializer for a fused gate/up weight from per-half initializers.
+
+    The fused weight has a size-2 ``gate_up_axis`` (index 0 = gate / stock w1,
+    index 1 = up / stock w3). Each half is initialized with its own initializer
+    because the gate and up projections differ (e.g. up shares w2's depth-scaled
+    init), so initializing the whole tensor at once would mis-init the up half.
+    Used by the grouped FusedGroupedExperts ``(E, F, 2, D)`` override and by
+    the logical 3D view of the dense fused linear weight.
+    """
+
+    def _init(t: torch.Tensor) -> None:
+        gate_idx: list[int | slice] = [slice(None)] * t.ndim
+        up_idx: list[int | slice] = [slice(None)] * t.ndim
+        gate_idx[gate_up_axis] = 0
+        up_idx[gate_up_axis] = 1
+        gate_init(t[tuple(gate_idx)])  # gate (stock w1)
+        up_init(t[tuple(up_idx)])  # up (stock w3)
+
+    return _init
+
+
+def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
+    """Build an initializer for an interleaved 2D gate/up linear weight."""
+    init_logical_weight = _make_fused_gate_up_init(gate_init, up_init, gate_up_axis=1)
+
+    def _init(t: torch.Tensor) -> None:
+        init_logical_weight(t.unflatten(0, (-1, 2)))
+
+    return _init
+
+
+def split_fused_gate_up_state_dict(
+    state_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a state dict with dense ``w13`` parameters split into w1/w3."""
+    result = dict(state_dict)
+    for param_name in ("weight", "bias"):
+        suffix = f"w13.{param_name}"
+        for key in tuple(result):
+            if not key.endswith(suffix):
+                continue
+            prefix = key[: -len(suffix)]
+            gate_up = result.pop(key).unflatten(0, (-1, 2))
+            result[f"{prefix}w1.{param_name}"] = gate_up[:, 0].contiguous()
+            result[f"{prefix}w3.{param_name}"] = gate_up[:, 1].contiguous()
+    return result
+
+
+def fuse_gate_up_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Return a state dict with dense w1/w3 parameters packed into ``w13``."""
+    result = dict(state_dict)
+    for param_name in ("weight", "bias"):
+        suffix = f"w1.{param_name}"
+        for gate_key in tuple(result):
+            if not gate_key.endswith(suffix):
+                continue
+            prefix = gate_key[: -len(suffix)]
+            up_key = f"{prefix}w3.{param_name}"
+            if up_key not in result:
+                continue
+            result[f"{prefix}w13.{param_name}"] = torch.stack(
+                [result.pop(gate_key), result.pop(up_key)], dim=1
+            ).flatten(0, 1)
+    return result
 
 
 def compute_ffn_hidden_dim(
@@ -32,34 +109,35 @@ def compute_ffn_hidden_dim(
 
 
 class FeedForward(Module):
-    """SwiGLU feed-forward module shared across models.
+    """SwiGLU feed-forward with one physical gate-and-up projection.
 
-    Config takes the **final** hidden_dim (no internal 2/3 scaling).
-    Use compute_ffn_hidden_dim() for Llama3/4-style dim computation.
+    ``w13`` stores the interleaved gate and up projections. Config takes the
+    **final** hidden_dim (no internal 2/3 scaling). Use
+    compute_ffn_hidden_dim() for Llama3/4-style dim computation.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        w1: Linear.Config
+        w13: Linear.Config
         w2: Linear.Config
-        w3: Linear.Config
+        activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
 
     def __init__(self, config: Config):
         super().__init__()
-        self.w1 = config.w1.build()
+        self.w13 = config.w13.build()
         self.w2 = config.w2.build()
-        self.w3 = config.w3.build()
+        self.activation_fn = config.activation_fn.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        gate_TF, up_TF = self.w13(x).unflatten(-1, (-1, 2)).unbind(-1)
+        return self.w2(self.activation_fn(gate_TF, up_TF))
 
 
 class SigmoidGatedFeedForward(FeedForward):
     """SwiGLU feed-forward with a per-token sigmoid gate.
 
-    The output is ``sigmoid(gate(x)) * ffn(x)``. Inherits ``w1/w2/w3`` from
-    FeedForward so weight FQNs are flat (no nested ``ffn.`` level), which keeps
-    the weights directly shardable.
+    The output is ``sigmoid(gate(x)) * ffn(x)``. It uses FeedForward's fused
+    ``w13`` and ``w2`` projections and adds a separate ``gate`` projection.
     """
 
     @dataclass(kw_only=True, slots=True)
