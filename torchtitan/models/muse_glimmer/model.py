@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.context_parallel import prepare_context_parallel_batch
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -426,9 +427,14 @@ class MuseGlimmerModel(Decoder):
             enable_sp=parallelism.enable_sequence_parallel
         )
         if parallel_dims.cp_enabled:
-            batch = self._cp_shard_inputs(
-                batch, input_sharding, parallel_dims, parallelism
+            batch, load_balancer = prepare_context_parallel_batch(
+                batch,
+                input_shardings=input_sharding,
+                cp_mesh=parallel_dims.get_mesh("cp"),
+                load_balancer_config=parallelism.context_parallel_load_balancer,
+                ptrr_mask_key=parallelism.context_parallel_ptrr_mask_key,
             )
+            batch = self._prepare_context_parallel_metadata(batch, load_balancer)
         if (
             parallelism.enable_sequence_parallel
             and parallel_dims.tp_enabled

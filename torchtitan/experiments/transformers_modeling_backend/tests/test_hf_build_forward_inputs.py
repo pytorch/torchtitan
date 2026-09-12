@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import ContextParallelLoadBalancerConfig, ParallelismConfig
+from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.experiments.transformers_modeling_backend.model import (
     HFTransformerModel,
@@ -76,14 +77,35 @@ def test_hf_no_mask_when_get_attention_masks_returns_none(monkeypatch):
 def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     calls = []
 
-    def prepare(batch, input_shardings, cp_mesh, *_args):
-        assert input_shardings is None
-        assert cp_mesh == "cp_mesh"
-        calls.append("cp")
+    class LoadBalancer(ContextParallelLoadBalancer):
+        def __init__(self):
+            pass
+
+        def shard_inputs(self, input_dict):
+            calls.append("cp_input")
+            return input_dict
+
+    load_balancer = LoadBalancer()
+
+    def build(_config, **kwargs):
+        assert kwargs["input_shardings"] is None
+        assert kwargs["cp_mesh"] == "cp_mesh"
+        assert kwargs["ptrr_mask_key"] is None
+        assert set(kwargs["input_dict"]) == {
+            "input",
+            "labels",
+            "positions",
+            "attention_masks",
+        }
+        return load_balancer
+
+    def shard_metadata(batch, received_load_balancer):
+        assert received_load_balancer is load_balancer
+        calls.append("cp_metadata")
         return batch
 
     def annotate(_parallel_dims, batch, input_sharding):
-        assert calls == ["cp"]
+        assert calls == ["cp_input", "cp_metadata"]
         assert set(batch) == {"input", "labels", "positions"}
         assert input_sharding["input"].local_type[MeshAxisName.TP] is spmd.R
         assert input_sharding["labels"].local_type[MeshAxisName.TP] is spmd.I
@@ -91,9 +113,11 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         calls.append("spmd")
         return batch
 
+    monkeypatch.setattr(ContextParallelLoadBalancerConfig, "build", build)
     monkeypatch.setattr(
-        "torchtitan.distributed.context_parallel.api.prepare_context_parallel_input",
-        prepare,
+        "torchtitan.models.common.cp_attention."
+        "KVAllGatherCPFlexInnerAttention.cp_shard_metadata",
+        shard_metadata,
     )
     monkeypatch.setattr(
         "torchtitan.distributed.spmd_types.annotate_input_spmd_types", annotate
@@ -121,5 +145,5 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         parallelism=ParallelismConfig(),
     )
 
-    assert calls == ["cp", "spmd"]
+    assert calls == ["cp_input", "cp_metadata", "spmd"]
     assert extra_kwargs["attention_masks"] is dense_attention_mask

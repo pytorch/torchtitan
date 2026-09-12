@@ -16,6 +16,7 @@ from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
 from torchtitan.config import CompileConfig, FSDPSymmMemScope, ParallelismConfig
+from torchtitan.distributed.context_parallel import prepare_context_parallel_batch
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -253,12 +254,6 @@ class MTPDecoder(Decoder):
         dict[str, Any],
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
-        # Function-local import avoids a circular import
-        # (context_parallel.api -> models.common -> decoder).
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
         batch: dict[str, Any] = dict(input_dict)
         tokens = batch["input"]
         labels = batch["labels"]
@@ -310,13 +305,14 @@ class MTPDecoder(Decoder):
                 )
 
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
+            batch, load_balancer = prepare_context_parallel_batch(
                 batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+                input_shardings=input_sharding,
+                cp_mesh=parallel_dims.get_mesh("cp"),
+                load_balancer_config=parallelism.context_parallel_load_balancer,
+                ptrr_mask_key=parallelism.context_parallel_ptrr_mask_key,
             )
+            batch = self._prepare_context_parallel_metadata(batch, load_balancer)
         batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         main_tokens = batch.pop("input")

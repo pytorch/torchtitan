@@ -100,12 +100,14 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         )
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
-        config.parallelism.context_parallel_load_balancer = load_balancer
+        config.parallelism.context_parallel_load_balancer.load_balancer_type = (
+            load_balancer
+        )
         config.training.max_context_length = 512
         return config
 
     def test_rejects_the_default_load_balancer(self):
-        default = ParallelismConfig().context_parallel_load_balancer
+        default = ParallelismConfig().context_parallel_load_balancer.load_balancer_type
         self.assertIsNotNone(default, "the default must stay a reordering balancer")
         config = self._config(load_balancer=default)
         with self.assertRaisesRegex(ValueError, "load_balancer must be"):
@@ -199,7 +201,7 @@ class TestHeadDivisibility(unittest.TestCase):
             )
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
-        config.parallelism.context_parallel_load_balancer = None
+        config.parallelism.context_parallel_load_balancer.load_balancer_type = None
         config.training.max_context_length = 512
         return config
 

@@ -84,7 +84,7 @@ def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
     config = graph_trainer_deepseek_v3_16b()
-    config.parallelism.context_parallel_load_balancer = "headtail"
+    config.parallelism.context_parallel_load_balancer.load_balancer_type = "headtail"
     config.model_spec = model_registry(
         "16B",
         seq_len=config.training.max_context_length,

@@ -36,6 +36,8 @@ import tyro
 FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
 _FSDP_SYMM_MEM_SCOPES = get_args(FSDPSymmMemScope)
 
+from .configurable import Configurable
+
 
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
@@ -122,6 +124,23 @@ class TrainingConfig:
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
     """
+
+
+@dataclass(kw_only=True, slots=True)
+class ContextParallelLoadBalancerConfig(Configurable.Config):
+    load_balancer_type: Literal["headtail", "ptrr"] | None = "headtail"
+    """Type of load balancer to use for sharding.
+
+    Options are ``"headtail"``, ``"ptrr"``, or ``None``. Defaults to
+    ``"headtail"``.
+    """
+
+    def __post_init__(self) -> None:
+        if self.load_balancer_type not in {None, "headtail", "ptrr"}:
+            raise ValueError(
+                "parallelism.context_parallel_load_balancer must be one of: "
+                f"None, 'headtail', 'ptrr' (got {self.load_balancer_type!r})"
+            )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -240,12 +259,14 @@ class ParallelismConfig:
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
-    context_parallel_load_balancer: str | None = "headtail"
+    context_parallel_load_balancer: ContextParallelLoadBalancerConfig = field(
+        default_factory=ContextParallelLoadBalancerConfig
+    )
     """
-    Load balancer type for context parallelism. Options:
+    Per-batch load-balancer configuration for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer for SDPA
     - "ptrr": Use PTRRLoadBalancer for FlexInnerAttention
-    - None: Disable load balancing
+    - None: Shard contiguously without token reordering
     """
 
     context_parallel_ptrr_mask_key: str | None = None
@@ -258,18 +279,6 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
-        if self.context_parallel_load_balancer == "":
-            raise ValueError(
-                "context_parallel_load_balancer cannot be an empty string. "
-                "Use None to disable load balancing."
-            )
-        allowed = frozenset({None, "headtail", "ptrr"})
-        if self.context_parallel_load_balancer not in allowed:
-            raise ValueError(
-                "parallelism.context_parallel_load_balancer must be one of: "
-                f"None, 'headtail', 'ptrr' "
-                f"(got {self.context_parallel_load_balancer!r})"
-            )
         if self.fsdp_symm_mem_scope not in _FSDP_SYMM_MEM_SCOPES:
             raise ValueError(
                 "parallelism.fsdp_symm_mem_scope must be one of: "

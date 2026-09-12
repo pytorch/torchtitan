@@ -512,10 +512,33 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.model_spec.name == "flux"
         assert hasattr(config, "encoder")
-        assert config.parallelism.context_parallel_load_balancer == "headtail"
+        assert (
+            config.parallelism.context_parallel_load_balancer.load_balancer_type is None
+        )
 
     def test_default_context_parallel_load_balancer(self):
-        assert ParallelismConfig().context_parallel_load_balancer == "headtail"
+        assert (
+            ParallelismConfig().context_parallel_load_balancer.load_balancer_type
+            == "headtail"
+        )
+
+    def test_context_parallel_load_balancer_cli(self):
+        for cli_value, expected in (("ptrr", "ptrr"), ("None", None)):
+            with self.subTest(cli_value=cli_value):
+                config = ConfigManager().parse_args(
+                    [
+                        "--module",
+                        "llama3",
+                        "--config",
+                        "llama3_debugmodel",
+                        "--parallelism.context_parallel_load_balancer",
+                        cli_value,
+                    ]
+                )
+                assert (
+                    config.parallelism.context_parallel_load_balancer.load_balancer_type
+                    == expected
+                )
 
     def test_deepseek_config(self):
         """Test that --module deepseek_v3 --config deepseek_v3_debugmodel works."""

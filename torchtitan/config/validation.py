@@ -62,7 +62,10 @@ def validate_context_parallel(
         # backend class definition. We need to revisit a good strategy to
         # define "where" should a validation implementation lives.
         if isinstance(inner_attention, UlyssesCPInnerAttention.Config):
-            if parallelism.context_parallel_load_balancer is not None:
+            if (
+                parallelism.context_parallel_load_balancer.load_balancer_type
+                is not None
+            ):
                 raise ValueError(
                     f"{fqn}.inner_attention uses {cp_config_type.__qualname__}, so "
                     "context_parallel_load_balancer must be None."

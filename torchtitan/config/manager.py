@@ -236,6 +236,37 @@ class ConfigManager:
     @staticmethod
     def register_tyro_rules(registry: tyro.constructors.ConstructorRegistry) -> None:
         @registry.primitive_rule
+        def context_parallel_load_balancer_rule(
+            type_info: tyro.constructors.PrimitiveTypeInfo,
+        ):
+            """Preserve the flat context-parallel load-balancer CLI option."""
+            from torchtitan.config.configs import ContextParallelLoadBalancerConfig
+
+            if type_info.type is not ContextParallelLoadBalancerConfig:
+                return None
+
+            def from_string(args: list[str]) -> ContextParallelLoadBalancerConfig:
+                value = args[0]
+                load_balancer_type = None if value.lower() == "none" else value
+                return ContextParallelLoadBalancerConfig(
+                    load_balancer_type=load_balancer_type  # pyrefly: ignore [bad-argument-type]
+                )
+
+            return tyro.constructors.PrimitiveConstructorSpec(
+                nargs=1,
+                metavar="{None,headtail,ptrr}",
+                instance_from_str=from_string,
+                is_instance=lambda instance: isinstance(
+                    instance, ContextParallelLoadBalancerConfig
+                ),
+                str_from_instance=lambda instance: [
+                    "None"
+                    if instance.load_balancer_type is None
+                    else instance.load_balancer_type
+                ],
+            )
+
+        @registry.primitive_rule
         def list_str_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
             """Support for comma separated string parsing"""
             if type_info.type != list[str]:

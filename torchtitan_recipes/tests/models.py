@@ -332,7 +332,7 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.parallelism.context_parallel_load_balancer = "ptrr"
+    config.parallelism.context_parallel_load_balancer.load_balancer_type = "ptrr"
     config.parallelism.context_parallel_ptrr_mask_key = "basic_mask"
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8

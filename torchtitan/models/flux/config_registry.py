@@ -10,7 +10,12 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import (
+    CompileConfig,
+    ContextParallelLoadBalancerConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
@@ -86,7 +91,12 @@ def flux_debugmodel() -> FluxTrainer.Config:
             collator=FluxCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
-        parallelism=ParallelismConfig(context_parallel_degree=1),
+        parallelism=ParallelismConfig(
+            context_parallel_degree=1,
+            context_parallel_load_balancer=ContextParallelLoadBalancerConfig(
+                load_balancer_type=None
+            ),
+        ),
         activation_checkpoint=FullAC.Config(),
         checkpoint=CheckpointManager.Config(
             interval=10,

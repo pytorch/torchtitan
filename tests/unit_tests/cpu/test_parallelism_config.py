@@ -6,24 +6,36 @@
 
 import pytest
 
-from torchtitan.config import FSDPSymmMemScope, ParallelismConfig
+from torchtitan.config import (
+    ContextParallelLoadBalancerConfig,
+    FSDPSymmMemScope,
+    ParallelismConfig,
+)
 
 
 def test_parallelism_config_default_load_balancer() -> None:
-    assert ParallelismConfig().context_parallel_load_balancer == "headtail"
+    config = ParallelismConfig().context_parallel_load_balancer
+    assert isinstance(config, ContextParallelLoadBalancerConfig)
+    assert config.load_balancer_type == "headtail"
 
 
 def test_parallelism_config_accepts_none_load_balancer() -> None:
-    config = ParallelismConfig(context_parallel_load_balancer=None)
-    assert config.context_parallel_load_balancer is None
+    config = ParallelismConfig(
+        context_parallel_load_balancer=ContextParallelLoadBalancerConfig(
+            load_balancer_type=None
+        )
+    )
+    assert config.context_parallel_load_balancer.load_balancer_type is None
 
 
 def test_parallelism_config_accepts_ptrr_when_cp_disabled() -> None:
     config = ParallelismConfig(
         context_parallel_degree=1,
-        context_parallel_load_balancer="ptrr",
+        context_parallel_load_balancer=ContextParallelLoadBalancerConfig(
+            load_balancer_type="ptrr"
+        ),
     )
-    assert config.context_parallel_load_balancer == "ptrr"
+    assert config.context_parallel_load_balancer.load_balancer_type == "ptrr"
 
 
 def test_parallelism_config_rejects_unknown_load_balancer() -> None:
@@ -31,12 +43,16 @@ def test_parallelism_config_rejects_unknown_load_balancer() -> None:
         ValueError,
         match=r"must be one of: None, 'headtail', 'ptrr' \(got 'foo'\)",
     ):
-        ParallelismConfig(context_parallel_load_balancer="foo")
+        ContextParallelLoadBalancerConfig(
+            load_balancer_type="foo"  # pyrefly: ignore [bad-argument-type]
+        )
 
 
 def test_parallelism_config_rejects_empty_string_load_balancer() -> None:
-    with pytest.raises(ValueError, match="cannot be an empty string"):
-        ParallelismConfig(context_parallel_load_balancer="")
+    with pytest.raises(ValueError, match="must be one of"):
+        ContextParallelLoadBalancerConfig(
+            load_balancer_type=""  # pyrefly: ignore [bad-argument-type]
+        )
 
 
 def test_parallelism_config_rejects_unknown_load_balancer_when_cp_disabled() -> None:
@@ -44,9 +60,8 @@ def test_parallelism_config_rejects_unknown_load_balancer_when_cp_disabled() -> 
         ValueError,
         match=r"must be one of: None, 'headtail', 'ptrr' \(got 'foo'\)",
     ):
-        ParallelismConfig(
-            context_parallel_degree=1,
-            context_parallel_load_balancer="foo",
+        ContextParallelLoadBalancerConfig(
+            load_balancer_type="foo"  # pyrefly: ignore [bad-argument-type]
         )
 
 

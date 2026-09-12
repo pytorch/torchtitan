@@ -6,6 +6,8 @@
 
 """Context-parallel Muse Glimmer recipes."""
 
+from typing import Literal
+
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.models.common.cp_attention import (
@@ -33,11 +35,11 @@ def _muse_glimmer_30b_cp(
     *,
     inner_attention: type[Module],
     cp_degree: int,
-    load_balancer: str | None = "headtail",
+    load_balancer: Literal["headtail", "ptrr"] | None = "headtail",
 ) -> Trainer.Config:
     config = muse_glimmer_30b()
     config.parallelism.context_parallel_degree = cp_degree
-    config.parallelism.context_parallel_load_balancer = load_balancer
+    config.parallelism.context_parallel_load_balancer.load_balancer_type = load_balancer
     return apply_transforms(
         config,
         [ContextParallelTransform(inner_attention=inner_attention)],
@@ -74,7 +76,7 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     config.dataloader.max_num_documents = 64
     config.parallelism.context_parallel_degree = 2
-    config.parallelism.context_parallel_load_balancer = None
+    config.parallelism.context_parallel_load_balancer.load_balancer_type = None
     return apply_transforms(
         config,
         [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
