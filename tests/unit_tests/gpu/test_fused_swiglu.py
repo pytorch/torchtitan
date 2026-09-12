@@ -4,11 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Checkpoint interop tests for the fused-activation SwiGLU override.
+"""Tests for the fused-activation SwiGLU override.
 
 The override replaces ``FeedForward.activation_fn`` while preserving the module
-and its logical ``w1.weight`` / ``w3.weight`` checkpoint layout. These tests run
-on CPU unless marked CUDA.
+and its physical ``w13`` projection. These tests run on CPU unless marked CUDA.
 
 ``TestFusedSwiGLUDistGemmComposition`` covers stacking the override on
 ``tp_gemm_backend="dist_gemm"``, which must keep the TP overlap rather than
@@ -20,7 +19,7 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.activation import ActivationFn, SiTUGLU
+from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -28,9 +27,9 @@ from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.overrides.fused_swiglu import (
-    _fused_silu_and_mul,
     dist_gemm_fused_swiglu,
     fused_swiglu,
+    FusedSwiGLU,
 )
 
 _DIM = 16
@@ -57,9 +56,8 @@ def _logical_w13(feed_forward: FeedForward) -> torch.Tensor:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w1=Linear.Config(in_features=_DIM, out_features=_HIDDEN),
+        w13=Linear.Config(in_features=_DIM, out_features=2 * _HIDDEN),
         w2=Linear.Config(in_features=_HIDDEN, out_features=_DIM),
-        w3=Linear.Config(in_features=_DIM, out_features=_HIDDEN),
     )
 
 
@@ -71,18 +69,16 @@ def _build_native() -> FeedForward:
     return native
 
 
-class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
+class TestFusedSwiGLU(unittest.TestCase):
     def test_replaces_only_activation(self):
         fused = fused_swiglu(_feed_forward_config())
 
         self.assertIs(type(fused), FeedForward.Config)
-        self.assertIs(fused.activation_fn.fn, _fused_silu_and_mul)
+        self.assertIsInstance(fused.activation_fn, FusedSwiGLU.Config)
 
     def test_rejects_non_swiglu_activation(self):
         config = _feed_forward_config()
-        config.activation_fn = ActivationFn.Config(
-            fn=SiTUGLU()  # pyrefly: ignore[bad-argument-type]
-        )
+        config.activation_fn = SiTUGLU.Config()
 
         with self.assertRaisesRegex(ValueError, "requires the default SwiGLU"):
             fused_swiglu(config)
@@ -98,28 +94,23 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
 
     def test_preserves_converted_linear_config(self):
         cfg = FeedForward.Config(
-            w1=_ConvertedLinear.Config(in_features=_DIM, out_features=_HIDDEN),
+            w13=_ConvertedLinear.Config(in_features=_DIM, out_features=2 * _HIDDEN),
             w2=Linear.Config(in_features=_HIDDEN, out_features=_DIM),
-            w3=_ConvertedLinear.Config(in_features=_DIM, out_features=_HIDDEN),
         )
 
         fused = fused_swiglu(cfg)
 
-        self.assertIsInstance(fused.w1, _ConvertedLinear.Config)
-        self.assertIsInstance(fused.w3, _ConvertedLinear.Config)
+        self.assertIsInstance(fused.w13, _ConvertedLinear.Config)
         self.assertIsInstance(fused.build().w13, _ConvertedLinear)
 
-    def test_saves_in_logical_layout(self):
-        """state_dict() emits logical w1/w3 keys, not the physical w13."""
+    def test_saves_physical_layout(self):
         fused = _build_fused()
         sd = fused.state_dict()
-        self.assertEqual(set(sd), {"w1.weight", "w3.weight", "w2.weight"})
-        self.assertTrue(torch.equal(sd["w1.weight"], _logical_w13(fused)[:, 0]))
-        self.assertTrue(torch.equal(sd["w3.weight"], _logical_w13(fused)[:, 1]))
+        self.assertEqual(set(sd), {"w13.weight", "w2.weight"})
+        self.assertTrue(torch.equal(sd["w13.weight"], fused.w13.weight))
 
     @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_triton_checkpoint_loads_into_native(self):
-        """A Triton checkpoint loads into native FeedForward, weights + output."""
         fused = _build_fused().cuda()
         native = _build_native().cuda()
         native.load_state_dict(fused.state_dict())
@@ -135,7 +126,6 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_native_checkpoint_loads_into_triton(self):
-        """A native checkpoint loads into fused SwiGLU, weights + output."""
         native = _build_native().cuda()
         fused = _build_fused().cuda()
         fused.load_state_dict(native.state_dict())
@@ -156,17 +146,6 @@ class TestFusedSwiGLUCheckpointInterop(unittest.TestCase):
         dst.load_state_dict(src.state_dict())
         self.assertTrue(torch.equal(dst.w13.weight, src.w13.weight))
         self.assertTrue(torch.equal(dst.w2.weight, src.w2.weight))
-
-    def test_loads_native_w13(self):
-        """A legacy checkpoint keyed by the native w13 still loads (back-compat)."""
-        src = _build_fused()
-        native = {
-            "w13": _logical_w13(src).detach().clone(),
-            "w2.weight": src.w2.weight.detach().clone(),
-        }
-        dst = _build_fused()
-        dst.load_state_dict(native)
-        self.assertTrue(torch.equal(dst.w13.weight, src.w13.weight))
 
     def test_strict_load_reports_missing(self):
         """strict load still flags a genuinely incomplete checkpoint."""
@@ -200,7 +179,7 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
             _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
         ).build()
         self.assertIsInstance(fused, DistGEMMFeedForward)
-        self.assertIs(fused.activation_fn.fn, _fused_silu_and_mul)
+        self.assertIsInstance(fused.activation_fn, FusedSwiGLU)
 
     def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
         fused = dist_gemm_fused_swiglu(
@@ -209,9 +188,8 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         with torch.no_grad():
             fused.w13.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
         state_dict = fused.state_dict()
-        self.assertEqual(set(state_dict), {"w1.weight", "w2.weight", "w3.weight"})
-        logical_w13 = fused.w13.weight.unflatten(0, (_HIDDEN, 2))
-        torch.testing.assert_close(state_dict["w1.weight"], logical_w13[:, 0])
+        self.assertEqual(set(state_dict), {"w13.weight", "w2.weight"})
+        torch.testing.assert_close(state_dict["w13.weight"], fused.w13.weight)
 
         reloaded = dist_gemm_fused_swiglu(
             _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
@@ -224,9 +202,8 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
     def test_hf_adapter_roundtrip(self):
         """A fused-SwiGLU model interoperates with the HF state-dict adapter.
 
-        The adapter maps HF mlp.gate_proj/up_proj <-> the logical
-        feed_forward.w1/w3 FQNs, which the fused module emits and consumes via
-        its state_dict hooks.
+        The adapter maps HF mlp.gate_proj/up_proj to the physical
+        feed_forward.w13 parameter.
         """
         build_config, max_context_length = llama3_configs["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
@@ -238,23 +215,19 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         model.init_states()
         ffn = model.get_submodule("layers.0.feed_forward")
         self.assertIsInstance(ffn, FeedForward)
-        self.assertIs(ffn.activation_fn.fn, _fused_silu_and_mul)
+        self.assertIsInstance(ffn.activation_fn, FusedSwiGLU)
 
         sd = model.state_dict()
-        # The FFN presents logical checkpoint FQNs, not its physical w13.
-        self.assertTrue(any(k.endswith("feed_forward.w1.weight") for k in sd))
-        self.assertFalse(any("feed_forward.w13" in k for k in sd))
+        self.assertTrue(any(k.endswith("feed_forward.w13.weight") for k in sd))
 
         adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
         hf_sd = adapter.to_hf(sd)
         self.assertIn("model.layers.0.mlp.gate_proj.weight", hf_sd)
         self.assertIn("model.layers.0.mlp.up_proj.weight", hf_sd)
 
-        # Load the HF checkpoint back through the adapter (which reads logical
-        # FQNs) into the fused model; the load hook merges w1/w3 into w13.
         orig_w13 = ffn.w13.weight.detach().clone()
         restored = adapter.from_hf(hf_sd)
-        self.assertIn("layers.0.feed_forward.w1.weight", restored)
+        self.assertIn("layers.0.feed_forward.w13.weight", restored)
         model.load_state_dict(restored, strict=False)
         self.assertTrue(torch.equal(ffn.w13.weight, orig_w13))
 

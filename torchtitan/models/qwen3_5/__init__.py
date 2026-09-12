@@ -138,9 +138,8 @@ def _shared_experts_config(
         w2w3_param_init=_depth_init(layer_id),
     )
     return SigmoidGatedFeedForward.Config(
-        w1=ffn.w1,
+        w13=ffn.w13,
         w2=ffn.w2,
-        w3=ffn.w3,
         gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
     )
 
