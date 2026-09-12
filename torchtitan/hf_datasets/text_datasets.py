@@ -62,10 +62,12 @@ def _require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> N
     """Raise if prompt_tokens is not an exact prefix of full_tokens.
 
     ChatProcessor locates the prompt/response boundary by re-rendering the
-    conversation prefix and requiring it to tokenize to a prefix of the full
-    conversation. That holds only when the chat template and the tokenizer do
-    not merge characters across a turn boundary, which is a property of the
-    template and tokenizer together rather than of an individual sample.
+    prompt alone and requiring it to tokenize to a prefix of the full
+    conversation. That holds only when rendering the prompt with
+    ``add_generation_prompt=True`` produces a textual prefix of the full render
+    and the tokenizer does not merge characters across that seam. Both are
+    properties of the template and tokenizer together rather than of an
+    individual sample.
 
     Raise instead of dropping the sample: a mismatch means the label boundary
     is unknown, and because the cause is systematic it would fire for most
@@ -76,24 +78,17 @@ def _require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> N
         raise ValueError(
             "Prompt tokens are not an exact prefix of the full conversation "
             "tokens, so the prompt/response boundary cannot be located. "
-            "ChatProcessor requires a chat template and tokenizer that do not "
-            "merge characters across a turn boundary. Use a template whose "
-            "turn separators tokenize on their own, or a tokenizer that does "
-            "not merge across them."
+            "ChatProcessor requires that rendering the prompt with "
+            "add_generation_prompt=True yields a textual prefix of the full "
+            "render, and that the tokenizer does not merge characters across "
+            "that seam. A template that rewrites earlier turns when later ones "
+            "are present, or turn separators that only merge in context, break "
+            "this assumption."
         )
 
 
-def _mask_prompt_labels(labels: np.ndarray, prompt_len: int, *, start: int = 0) -> None:
-    """Ignore shifted labels for prompt tokens in [start, prompt_len).
-
-    labels[i] is full_tokens[i + 1], so the single-turn formula
-    labels[:max(prompt_len - 1, 0)] is the start=0 case.
-    """
-    labels[max(start - 1, 0) : max(prompt_len - 1, 0)] = IGNORE_INDEX
-
-
 class ChatProcessor(SampleProcessor):
-    """Tokenizes an alternating user/assistant conversation and masks prompt labels."""
+    """Tokenizes one single-turn chat sample and masks prompt labels."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
@@ -115,39 +110,31 @@ class ChatProcessor(SampleProcessor):
 
     @staticmethod
     def _validate_messages(messages: list[dict[str, str]]) -> None:
-        """Validate even-length user/assistant alternation starting with user."""
-        if len(messages) < 2 or len(messages) % 2 != 0:
+        """Validate that messages are a single-turn [user, assistant] pair."""
+        # TODO(data-sft-multiturn): Multi-turn needs per-turn spans that survive
+        # templates which rewrite earlier turns, so prefix re-rendering is not
+        # enough. See the RFC in #3304 and the implementation in #2769.
+        if len(messages) != 2:
             raise ValueError(
-                "Expected an even-length alternating user/assistant "
-                f"conversation, got {len(messages)} messages"
+                f"Expected single-turn [user, assistant], got {len(messages)} messages"
             )
-        for index, message in enumerate(messages):
-            expected_role = "user" if index % 2 == 0 else "assistant"
-            role = message["role"]
-            if role != expected_role:
-                raise ValueError(
-                    f"Expected messages[{index}] role '{expected_role}', got '{role}'"
-                )
-
-    def _encode_chat_messages(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        add_generation_prompt: bool = False,
-    ) -> list[int]:
-        text = self._tokenizer.apply_chat_template(
-            messages, add_generation_prompt=add_generation_prompt
-        )
-        return self._tokenizer.encode(text, add_bos=True, add_eos=False)
+        if messages[0]["role"] != "user":
+            raise ValueError(
+                f"First message must be 'user', got '{messages[0]['role']}'"
+            )
+        if messages[1]["role"] != "assistant":
+            raise ValueError(
+                f"Second message must be 'assistant', got '{messages[1]['role']}'"
+            )
 
     def _tokenize_sample(self, sample: dict[str, Any]) -> TextSequence | None:
-        """Tokenize a chat conversation and mask user-turn prompt labels.
+        """Tokenize a single-turn sample and mask prompt labels.
 
         Returns None if the sample exceeds `seq_len`, avoiding
         training on truncated responses.
 
-        Each user turn is re-tokenized with add_generation_prompt=True so the
-        prompt/response boundary is taken from an exact token prefix.
+        Uses incremental prefix re-tokenization to find the prompt/response
+        token boundary, avoiding BPE merge errors.
         """
         messages = self._messages_fn(sample)
         self._validate_messages(messages)
@@ -173,24 +160,19 @@ class ChatProcessor(SampleProcessor):
             )
             return None
 
+        # Find prompt/response boundary by tokenizing just the user message
+        # with add_generation_prompt=True.
+        prompt_text = self._tokenizer.apply_chat_template(
+            messages[:1], add_generation_prompt=True
+        )
+        prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+        _require_token_prefix(full_tokens, prompt_tokens)
+        prompt_len = len(prompt_tokens)
+
         tokens = np.asarray(full_tokens, dtype=np.int64)
         input_ids = tokens[:-1]
         labels = tokens[1:].copy()
-        # TODO(data-sft-turn-encode): Each user turn re-renders and re-encodes the
-        # whole conversation prefix, so a T-turn chat does O(T^2) encoding work.
-        # Fine for typical SFT lengths; cache the previous render if long
-        # conversations become common.
-        for turn in range(0, len(messages), 2):
-            prompt_tokens = self._encode_chat_messages(
-                messages[: turn + 1], add_generation_prompt=True
-            )
-            _require_token_prefix(full_tokens, prompt_tokens)
-            start = 0
-            if turn > 0:
-                previous_tokens = self._encode_chat_messages(messages[:turn])
-                _require_token_prefix(full_tokens, previous_tokens)
-                start = len(previous_tokens)
-            _mask_prompt_labels(labels, len(prompt_tokens), start=start)
+        labels[: max(prompt_len - 1, 0)] = IGNORE_INDEX
         return TextSequence(
             input_ids=input_ids,
             labels=labels,

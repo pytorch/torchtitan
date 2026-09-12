@@ -56,20 +56,18 @@ def _load_dataset():
     return Dataset.from_json(_DATA_PATH)
 
 
-def _runtime(max_context_length, tokenizer=None):
+def _runtime(max_context_length):
     return DatasetBuildContext(
-        tokenizer=tokenizer if tokenizer is not None else _load_tokenizer(),
+        tokenizer=_load_tokenizer(),
         max_context_length=max_context_length,
         num_tokens_per_batch=max_context_length,
         read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
     )
 
 
-def _build_processor(
-    max_context_length=2048, messages_fn=_process_sample, tokenizer=None
-):
+def _build_processor(max_context_length=2048, messages_fn=_process_sample):
     return ChatProcessor.Config(messages_fn=messages_fn).build(
-        context=_runtime(max_context_length, tokenizer)
+        context=_runtime(max_context_length)
     )
 
 
@@ -113,13 +111,6 @@ def _legacy_single_turn_labels(tokenizer, messages):
     labels = np.asarray(full_tokens[1:], dtype=np.int64)
     labels[: max(len(prompt_tokens) - 1, 0)] = IGNORE_INDEX
     return np.asarray(full_tokens[:-1], dtype=np.int64), labels
-
-
-def _encode_chat_prefix(tokenizer, messages, *, add_generation_prompt=False):
-    text = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=add_generation_prompt
-    )
-    return tokenizer.encode(text, add_bos=True, add_eos=False)
 
 
 def _build_dataloader(max_context_length=128, world_size=1, rank=0):
@@ -262,37 +253,26 @@ class TestChatDatasetDropOnOverflow(unittest.TestCase):
 
 
 class TestChatDatasetMessageValidation(unittest.TestCase):
-    """Non-alternating user/assistant conversations raise ValueError."""
+    """Non-[user, assistant] messages raise ValueError."""
 
     def test_invalid_messages(self):
         invalid_messages = (
-            (
-                [
-                    {"role": "system", "content": "You are helpful."},
-                    {"role": "assistant", "content": "OK"},
-                ],
-                r"messages\[0\] role 'user'",
-            ),
-            (
-                [
-                    {"role": "user", "content": "hi"},
-                    {"role": "user", "content": "hello again"},
-                ],
-                r"messages\[1\] role 'assistant'",
-            ),
-            (
-                [
-                    {"role": "user", "content": "hi"},
-                    {"role": "assistant", "content": "hello"},
-                    {"role": "user", "content": "bye"},
-                ],
-                "even-length",
-            ),
+            [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "assistant", "content": "OK"},
+            ],
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "user", "content": "hello again"},
+            ],
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"},
+            ],
         )
-        for messages, pattern in invalid_messages:
-            with self.subTest(messages=messages), self.assertRaisesRegex(
-                ValueError, pattern
-            ):
+        for messages in invalid_messages:
+            with self.subTest(messages=messages), self.assertRaises(ValueError):
                 processor = _build_processor(
                     messages_fn=lambda _sample, value=messages: value
                 )
@@ -318,6 +298,8 @@ class TestChatDatasetPrefixValidation(unittest.TestCase):
         original_encode = processor._tokenizer.encode
         call_count = 0
 
+        # _tokenize_sample encodes twice: call 1 is the full conversation,
+        # call 2 is the prompt. Perturbing call 2 breaks the prefix.
         def mismatched_encode(*args, **kwargs):
             nonlocal call_count
             tokens = original_encode(*args, **kwargs)
@@ -329,114 +311,6 @@ class TestChatDatasetPrefixValidation(unittest.TestCase):
         processor._tokenizer.encode = mismatched_encode
         with self.assertRaisesRegex(ValueError, "exact prefix"):
             processor(_load_dataset()[0], np.random.default_rng(0))
-
-
-class TestChatDatasetMultiTurn(unittest.TestCase):
-    """Even-length user/assistant conversations mask only user-turn prompts."""
-
-    _FOUR_TURN = (
-        {"role": "user", "content": "What is 2 + 3?"},
-        {"role": "assistant", "content": "5"},
-        {"role": "user", "content": "Add 4 more."},
-        {"role": "assistant", "content": "9"},
-    )
-
-    # Same as the asset tokenizer's template, but ends every turn with a
-    # newline so the turn separator sits next to the following role header.
-    _NEWLINE_SEPARATED_TEMPLATE = (
-        "{{ bos_token }}"
-        "{% for msg in messages %}{{ msg.role }}\n{{ msg.content }}{{ eos_token }}\n"
-        "{% endfor %}"
-        "{% if add_generation_prompt %}assistant\n{% endif %}"
-    )
-
-    def test_four_message_masks_user_spans_only(self):
-        messages = list(self._FOUR_TURN)
-        processor = _build_processor(messages_fn=lambda _sample: messages)
-        sequence = processor({}, np.random.default_rng(0))
-        tokenizer = _load_tokenizer()
-
-        first_prompt = _encode_chat_prefix(
-            tokenizer, messages[:1], add_generation_prompt=True
-        )
-        first_turn = _encode_chat_prefix(tokenizer, messages[:2])
-        second_prompt = _encode_chat_prefix(
-            tokenizer, messages[:3], add_generation_prompt=True
-        )
-
-        labels = sequence.labels
-        self.assertTrue((labels[: len(first_prompt) - 1] == IGNORE_INDEX).all())
-        self.assertTrue(
-            (labels[len(first_prompt) - 1 : len(first_turn) - 1] != IGNORE_INDEX).all()
-        )
-        self.assertTrue(
-            (labels[len(first_turn) - 1 : len(second_prompt) - 1] == IGNORE_INDEX).all()
-        )
-        self.assertTrue((labels[len(second_prompt) - 1 :] != IGNORE_INDEX).all())
-
-    def test_newline_separated_turns_keep_exact_prefixes(self):
-        """A newline between turns must not break the per-turn prefix check.
-
-        The full conversation is rstripped before encoding while the per-turn
-        prefix renders are not, so this template exercises the seam where a
-        standalone prefix could tokenize differently from the full render.
-        """
-        messages = list(self._FOUR_TURN)
-        tokenizer = _load_tokenizer()
-        tokenizer.set_chat_template(self._NEWLINE_SEPARATED_TEMPLATE)
-        processor = _build_processor(
-            messages_fn=lambda _sample: messages, tokenizer=tokenizer
-        )
-
-        sequence = processor({}, np.random.default_rng(0))
-
-        first_prompt = _encode_chat_prefix(
-            tokenizer, messages[:1], add_generation_prompt=True
-        )
-        first_turn = _encode_chat_prefix(tokenizer, messages[:2])
-        second_prompt = _encode_chat_prefix(
-            tokenizer, messages[:3], add_generation_prompt=True
-        )
-
-        labels = sequence.labels
-        self.assertTrue((labels[: len(first_prompt) - 1] == IGNORE_INDEX).all())
-        self.assertTrue(
-            (labels[len(first_prompt) - 1 : len(first_turn) - 1] != IGNORE_INDEX).all()
-        )
-        self.assertTrue(
-            (labels[len(first_turn) - 1 : len(second_prompt) - 1] == IGNORE_INDEX).all()
-        )
-        self.assertTrue((labels[len(second_prompt) - 1 :] != IGNORE_INDEX).all())
-
-    def test_odd_length_raises(self):
-        messages = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-            {"role": "user", "content": "bye"},
-        ]
-        processor = _build_processor(messages_fn=lambda _sample: messages)
-        with self.assertRaisesRegex(ValueError, "even-length"):
-            processor({}, np.random.default_rng(0))
-
-    def test_starts_with_assistant_raises(self):
-        messages = [
-            {"role": "assistant", "content": "hello"},
-            {"role": "user", "content": "hi"},
-        ]
-        processor = _build_processor(messages_fn=lambda _sample: messages)
-        with self.assertRaisesRegex(ValueError, r"messages\[0\] role 'user'"):
-            processor({}, np.random.default_rng(0))
-
-    def test_two_assistants_in_a_row_raises(self):
-        messages = [
-            {"role": "user", "content": "hi"},
-            {"role": "assistant", "content": "hello"},
-            {"role": "assistant", "content": "again"},
-            {"role": "user", "content": "bye"},
-        ]
-        processor = _build_processor(messages_fn=lambda _sample: messages)
-        with self.assertRaisesRegex(ValueError, r"messages\[2\] role 'user'"):
-            processor({}, np.random.default_rng(0))
 
 
 class TestChatDatasetCheckpointing(unittest.TestCase):

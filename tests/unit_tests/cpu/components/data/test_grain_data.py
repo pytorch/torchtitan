@@ -1280,36 +1280,6 @@ def test_chat_processor_prefix_mismatch_raises():
         )
 
 
-def test_chat_processor_masks_each_user_turn():
-    messages = [
-        {"role": "user", "content": "hi"},
-        {"role": "assistant", "content": "hello"},
-        {"role": "user", "content": "bye"},
-        {"role": "assistant", "content": "ok"},
-    ]
-    tokenizer = FakeTokenizer()
-    sequence = _chat_processor(max_context_length=128)(
-        {"messages": messages},
-        np.random.default_rng(0),
-    )
-
-    def encode_prefix(prefix_messages, *, add_generation_prompt=False):
-        text = tokenizer.apply_chat_template(
-            prefix_messages, add_generation_prompt=add_generation_prompt
-        )
-        return tokenizer.encode(text, add_bos=True, add_eos=False)
-
-    first_prompt = encode_prefix(messages[:1], add_generation_prompt=True)
-    first_turn = encode_prefix(messages[:2])
-    second_prompt = encode_prefix(messages[:3], add_generation_prompt=True)
-
-    labels = sequence.labels
-    assert (labels[: len(first_prompt) - 1] == IGNORE_INDEX).all()
-    assert (labels[len(first_prompt) - 1 : len(first_turn) - 1] != IGNORE_INDEX).all()
-    assert (labels[len(first_turn) - 1 : len(second_prompt) - 1] == IGNORE_INDEX).all()
-    assert (labels[len(second_prompt) - 1 :] != IGNORE_INDEX).all()
-
-
 def test_chat_processor_rejects_non_single_turn_messages():
     processor = ChatProcessor.Config(
         messages_fn=lambda sample: sample["messages"],
