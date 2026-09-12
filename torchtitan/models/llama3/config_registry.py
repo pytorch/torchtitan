@@ -18,6 +18,11 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.transform import (
+    Float8LinearConverter,
+    MXFP8LinearConverter,
+    NVFP4LinearConverter,
+)
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import (
@@ -26,11 +31,6 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
-from torchtitan.quantization import (
-    Float8LinearConverter,
-    MXFP8LinearConverter,
-    NVFP4LinearConverter,
-)
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 

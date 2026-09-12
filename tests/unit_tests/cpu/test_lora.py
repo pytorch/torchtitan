@@ -9,13 +9,13 @@ from dataclasses import dataclass
 import pytest
 import torch
 
+from torchtitan.config.transform import Float8LinearConverter
 from torchtitan.config.transform.lora import _get_lora_cls, LoRAConverter
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.module import Module
-from torchtitan.quantization import Float8LinearConverter
 
 
 def test_lora_model_builds():

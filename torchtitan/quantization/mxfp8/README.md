@@ -165,7 +165,7 @@ Quantization is applied at config time in your `model_registry()` function via t
 To enable MXFP8 training for linear layers, configure it in your config_registry function:
 
 ```python
-from torchtitan.quantization import MXFP8LinearConverter
+from torchtitan.config.transform import MXFP8LinearConverter
 
 # In your model_registry call:
 model_spec = model_registry(
@@ -194,7 +194,7 @@ For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation
 To enable MXFP8 for MoE expert layers, configure it in your config_registry function:
 
 ```python
-from torchtitan.quantization import MXFP8GroupedExpertsConverter
+from torchtitan.config.transform import MXFP8GroupedExpertsConverter
 
 model_spec = model_registry(
     "debugmodel",
@@ -209,7 +209,10 @@ model_spec = model_registry(
 
 **Combined usage**: You can use MXFP8 for both linear modules and grouped GEMMs simultaneously by specifying both converters:
   ```python
-  from torchtitan.quantization import MXFP8LinearConverter, MXFP8GroupedExpertsConverter
+  from torchtitan.config.transform import (
+      MXFP8GroupedExpertsConverter,
+      MXFP8LinearConverter,
+  )
 
   quantization=[
       MXFP8LinearConverter.Config(
@@ -239,7 +242,10 @@ model_spec = model_registry(
 Here's an example configuration for MXFP8 training in a config_registry function:
 
 ```python
-from torchtitan.quantization import MXFP8LinearConverter, MXFP8GroupedExpertsConverter
+from torchtitan.config.transform import (
+    MXFP8GroupedExpertsConverter,
+    MXFP8LinearConverter,
+)
 
 # In your model_registry call:
 model_spec = model_registry(

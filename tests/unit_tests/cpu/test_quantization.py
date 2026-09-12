@@ -9,6 +9,7 @@ import pytest
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint as dcp
+import torchtitan.config.transform.quantization as quantization_transform
 from spmd_types import SpmdType
 
 from torchtitan.components.data import (
@@ -18,19 +19,20 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.config import ConfigManager
+from torchtitan.config.transform import (
+    Float8LinearConverter,
+    MXFP8LinearConverter,
+    NVFP4LinearConverter,
+)
 from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
-from torchtitan.quantization import Float8Linear, Float8LinearConverter
+from torchtitan.quantization import Float8Linear, MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls
-from torchtitan.quantization.mxfp8.converter import (
-    _get_mxfp8_grouped_experts_cls,
-    MXFP8Linear,
-    MXFP8LinearConverter,
-)
+from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
 from torchtitan.quantization.utils import has_quantization
 
 
@@ -70,9 +72,7 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
     pytest.importorskip("torchao")
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
-    import torchtitan.quantization.mxfp8.converter as converter_mod
-
-    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(MXFP8LinearConverter.Config())
     with pytest.raises(ValueError, match="does not support router gates"):
         converter.convert(_router_config_for_quantization(128))
@@ -80,13 +80,9 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
 
 def test_nvfp4_converter_rejects_router_gate(monkeypatch):
     pytest.importorskip("torchao")
-    from torchtitan.quantization import NVFP4Linear, NVFP4LinearConverter
-
     if NVFP4Linear is None:
         pytest.skip("torchao NVFP4 training prototype not available")
-    import torchtitan.quantization.nvfp4 as nvfp4_mod
-
-    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = NVFP4LinearConverter(NVFP4LinearConverter.Config())
     with pytest.raises(ValueError, match="does not support router gate"):
         converter.convert(_router_config_for_quantization(128))
@@ -137,9 +133,7 @@ def test_nvfp4_converter_targets_layers_not_lm_head(
     # Exercise convert() targeting independent of GPU: bypass the sm100 gate
     # that NVFP4LinearConverter.__init__ enforces (hardware is irrelevant to the
     # config-tree transform under test).
-    import torchtitan.quantization.nvfp4 as nvfp4_mod
-
-    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
 
     config_manager = ConfigManager()
     config = config_manager.parse_args(["--module", module, "--config", recipe])
@@ -200,9 +194,7 @@ def test_nvfp4_first_85_pct_layers_converts_only_leading_layers(
         pytest.skip("torchao NVFP4 training prototype not available")
     import math
 
-    import torchtitan.quantization.nvfp4 as nvfp4_mod
-
-    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
 
     config = ConfigManager().parse_args(["--module", module, "--config", recipe])
     model_config = config.model_spec.model
@@ -296,9 +288,7 @@ def test_nvfp4_build_configures_local_spmd_sharding(sharding_config_factory, inp
 )
 def test_nvfp4_recipes_parse(monkeypatch, module, recipe):
     _nvfp4_linear_cls()
-    import torchtitan.quantization.nvfp4 as nvfp4_mod
-
-    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     base_args = ["--module", module, "--config", recipe]
 
     ConfigManager().parse_args(base_args)
@@ -314,9 +304,7 @@ def test_nvfp4_recipes_parse(monkeypatch, module, recipe):
 )
 def test_qwen3_recipes_resolve(monkeypatch, recipe):
     _nvfp4_linear_cls()
-    import torchtitan.quantization.nvfp4 as nvfp4_mod
-
-    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     config = ConfigManager().parse_args(["--module", "qwen3", "--config", recipe])
     assert config.model_spec.name == "qwen3"
     if recipe == "qwen3_8b_first_85_pct_layers_nvfp4":
@@ -373,9 +361,7 @@ def test_nvfp4_stock_checkpoint_loads_before_init_states():
 def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     """The HF export boundary contains only stock keys -- no NVFP4 runtime buffers."""
     NVFP4Linear = _nvfp4_linear_cls()
-    import torchtitan.quantization.nvfp4 as nvfp4_mod
-
-    monkeypatch.setattr(nvfp4_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
     config = ConfigManager().parse_args(
@@ -533,9 +519,7 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
     the one branch that has to return the replacement. Not covered by the FQN
     test below, which passes a FeedForward and so always has a parent.
     """
-    import torchtitan.quantization.mxfp8.converter as converter_mod
-
-    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(
         MXFP8LinearConverter.Config(
             model_compile_enabled=True,
@@ -551,9 +535,7 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
 
 
 def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
-    import torchtitan.quantization.mxfp8.converter as converter_mod
-
-    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(
         MXFP8LinearConverter.Config(
             model_compile_enabled=True,
@@ -577,9 +559,7 @@ def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
 
 
 def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
-    import torchtitan.quantization.mxfp8.converter as converter_mod
-
-    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(
         MXFP8LinearConverter.Config(
             model_compile_enabled=True,
@@ -633,9 +613,7 @@ def test_builtin_mxfp8_configs_assign_input_activation_format_for_backward(
 ):
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
-    import torchtitan.quantization.mxfp8.converter as converter_mod
-
-    monkeypatch.setattr(converter_mod, "has_cuda_capability", lambda *_: True)
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     if config_factory == "llama3":
         from torchtitan.models.llama3.config_registry import (
             llama3_debugmodel_mxfp8 as build_config,

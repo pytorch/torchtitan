@@ -11,6 +11,7 @@ from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
 from torchtitan.models.flux.flux_datasets import (
@@ -28,7 +29,6 @@ from torchtitan.models.flux.utils import (
 )
 from torchtitan.models.flux.validate import FluxValidator
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.quantization import MXFP8LinearConverter
 
 from . import model_registry
 

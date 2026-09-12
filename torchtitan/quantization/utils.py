@@ -67,7 +67,8 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
     from .float8 import _float8_experts_cache, Float8Linear
-    from .mxfp8.converter import _mxfp8_experts_cache, MXFP8Linear
+    from .mxfp8 import MXFP8Linear
+    from .mxfp8.experts import _mxfp8_experts_cache
     from .nvfp4 import NVFP4Linear
 
     quant_linear_types: list[type] = []

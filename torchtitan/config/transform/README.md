@@ -40,10 +40,9 @@ attention metadata format. For example, FlexInnerAttention consumes a `BlockMask
 while VarlenInnerAttention consumes cumulative sequence offsets.
 
 Use a transform for options that replace or wrap configs in the built tree.
-Context parallelism, TP GEMM backends, MoE communication backends, and LoRA
-belong in transforms. Quantization also rewrites the config tree, but its
-implementations and integration code live in `torchtitan/quantization` as a
-standalone subsystem.
+Context parallelism, TP GEMM backends, MoE communication backends,
+quantization, and LoRA belong in transforms. Quantized modules, tensors, and
+kernels live in `torchtitan/quantization`.
 
 A CP transform specializes the selected attention for distributed execution.
 It may change input sharding and preprocessing, but it preserves the selected
