@@ -490,7 +490,9 @@ def test_float8_grouped_experts_dcp_round_trip_needs_no_safe_globals(tmp_path):
     try:
         torch.serialization.clear_safe_globals()
         dcp.save(source.state_dict(), checkpoint_id=tmp_path, no_dist=True)
-        dcp.load(target.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+        target_state = target.state_dict()
+        dcp.load(target_state, checkpoint_id=tmp_path, no_dist=True)
+        target.load_state_dict(target_state)
     finally:
         torch.serialization.clear_safe_globals()
         torch.serialization.add_safe_globals(saved_safe_globals)

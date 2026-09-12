@@ -22,7 +22,13 @@ class ActivationFn(Function[torch.Tensor], ABC):
         pass
 
     @abstractmethod
-    def __call__(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    def __call__(
+        self,
+        gate: torch.Tensor,
+        up: torch.Tensor,
+        *,
+        offsets: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         pass
 
 
@@ -36,7 +42,14 @@ class SwiGLU(ActivationFn):
     def __init__(self, config: Config) -> None:
         pass
 
-    def __call__(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    def __call__(
+        self,
+        gate: torch.Tensor,
+        up: torch.Tensor,
+        *,
+        offsets: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del offsets
         return F.silu(gate) * up
 
 
@@ -52,7 +65,14 @@ class SiTUGLU(ActivationFn):
         self.beta = config.beta
         self.linear_beta = config.linear_beta
 
-    def __call__(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    def __call__(
+        self,
+        gate: torch.Tensor,
+        up: torch.Tensor,
+        *,
+        offsets: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del offsets
         input_dtype = gate.dtype
         gate = gate.float()
         up = up.float()
