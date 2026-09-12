@@ -73,57 +73,81 @@ def _make_fused_linear_init(
     return _init
 
 
+def _split_dense_gate_up_state_dict(state_dict: dict[str, Any]) -> None:
+    """Split dense ``w13`` Linear parameters into logical w1/w3 entries."""
+    for param_name in ("weight", "bias"):
+        suffix = f"w13.{param_name}"
+        for key in tuple(state_dict):
+            if not key.endswith(suffix):
+                continue
+            prefix = key.removesuffix(suffix)
+            gate_up = state_dict.pop(key).unflatten(0, (-1, 2))
+            state_dict[f"{prefix}w1.{param_name}"] = gate_up[:, 0].contiguous()
+            state_dict[f"{prefix}w3.{param_name}"] = gate_up[:, 1].contiguous()
+
+
+def _split_grouped_gate_up_state_dict(state_dict: dict[str, Any]) -> None:
+    """Split grouped ``w13`` parameters into logical w1_EFD/w3_EFD entries."""
+    for key in tuple(state_dict):
+        if not key.endswith("w13"):
+            continue
+        prefix = key.removesuffix("w13")
+        gate_up = state_dict.pop(key)
+        state_dict[f"{prefix}w1_EFD"] = gate_up[:, :, 0, :].contiguous()
+        state_dict[f"{prefix}w3_EFD"] = gate_up[:, :, 1, :].contiguous()
+
+
 def split_fused_gate_up_state_dict(
     state_dict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return a state dict with ``w13`` parameters split into logical w1/w3."""
-    result = dict(state_dict)
-    for param_name in ("weight", "bias"):
-        suffix = f"w13.{param_name}"
-        for key in tuple(result):
-            if not key.endswith(suffix):
-                continue
-            prefix = key[: -len(suffix)]
-            gate_up = result.pop(key).unflatten(0, (-1, 2))
-            result[f"{prefix}w1.{param_name}"] = gate_up[:, 0].contiguous()
-            result[f"{prefix}w3.{param_name}"] = gate_up[:, 1].contiguous()
+    """Translate native fused gate/up state into logical adapter keys.
 
-    for key in tuple(result):
-        if not key.endswith("w13"):
-            continue
-        prefix = key[: -len("w13")]
-        gate_up = result.pop(key)
-        result[f"{prefix}w1_EFD"] = gate_up[:, :, 0, :].contiguous()
-        result[f"{prefix}w3_EFD"] = gate_up[:, :, 1, :].contiguous()
+    Dense ``FeedForward`` parameters use ``w13.{weight,bias}`` with shape
+    ``(2F, ...)`` and become ``w1.{weight,bias}`` / ``w3.{weight,bias}``.
+    ``GroupedExperts.w13`` has shape ``(E, F, 2, D)`` and becomes
+    ``w1_EFD`` / ``w3_EFD``.
+    """
+    result = dict(state_dict)
+    _split_dense_gate_up_state_dict(result)
+    _split_grouped_gate_up_state_dict(result)
     return result
 
 
-def fuse_gate_up_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
-    """Return a state dict with logical w1/w3 parameters packed into ``w13``."""
-    result = dict(state_dict)
+def _fuse_dense_gate_up_state_dict(state_dict: dict[str, Any]) -> None:
+    """Pack logical dense w1/w3 entries into a physical ``w13`` Linear."""
     for param_name in ("weight", "bias"):
         suffix = f"w1.{param_name}"
-        for gate_key in tuple(result):
+        for gate_key in tuple(state_dict):
             if not gate_key.endswith(suffix):
                 continue
-            prefix = gate_key[: -len(suffix)]
+            prefix = gate_key.removesuffix(suffix)
             up_key = f"{prefix}w3.{param_name}"
-            if up_key not in result:
+            if up_key not in state_dict:
                 continue
-            result[f"{prefix}w13.{param_name}"] = torch.stack(
-                [result.pop(gate_key), result.pop(up_key)], dim=1
+            state_dict[f"{prefix}w13.{param_name}"] = torch.stack(
+                [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=1
             ).flatten(0, 1)
 
-    for gate_key in tuple(result):
+
+def _fuse_grouped_gate_up_state_dict(state_dict: dict[str, Any]) -> None:
+    """Pack logical grouped w1_EFD/w3_EFD entries into physical ``w13``."""
+    for gate_key in tuple(state_dict):
         if not gate_key.endswith("w1_EFD"):
             continue
-        prefix = gate_key[: -len("w1_EFD")]
+        prefix = gate_key.removesuffix("w1_EFD")
         up_key = f"{prefix}w3_EFD"
-        if up_key not in result:
+        if up_key not in state_dict:
             continue
-        result[f"{prefix}w13"] = torch.stack(
-            [result.pop(gate_key), result.pop(up_key)], dim=2
+        state_dict[f"{prefix}w13"] = torch.stack(
+            [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=2
         )
+
+
+def fuse_gate_up_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    """Translate logical adapter keys into native fused gate/up state."""
+    result = dict(state_dict)
+    _fuse_dense_gate_up_state_dict(result)
+    _fuse_grouped_gate_up_state_dict(result)
     return result
 
 
