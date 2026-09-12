@@ -241,6 +241,7 @@ class TokenChoiceTopKRouter(Module):
         self.route_scale = config.route_scale
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
         self._debug_force_load_balance = config._debug_force_load_balance
+        # Track expert usage and update the expert bias for load balancing.
         self.register_buffer(
             "tokens_per_expert_E",
             torch.zeros(config.num_experts, dtype=torch.float32),
