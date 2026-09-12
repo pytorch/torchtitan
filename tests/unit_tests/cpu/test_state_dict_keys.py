@@ -56,7 +56,7 @@ _LAYER0_ANCHORS = (
     # single fused ``wqkv`` (state_dict() splits it back to wq/wk/wv via a hook).
     "layers.0.attention.qkv_linear.wqkv.weight",
     "layers.0.attention.wo.weight",
-    # FeedForward physically fuses gate/up while state_dict() exposes w1/w3.
+    # FeedForward stores gate/up in one physical w13 parameter.
     "layers.0.feed_forward.w13.weight",
     "layers.0.feed_forward.w2.weight",
     "layers.0.attention_norm.weight",

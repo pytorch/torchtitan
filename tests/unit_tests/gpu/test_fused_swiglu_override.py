@@ -17,7 +17,7 @@ from torchtitan.models.deepseek_v3.config_registry import (
 )
 from torchtitan.overrides.fused_swiglu import (
     fused_grouped_experts,
-    FusedSwiGLUGroupedExperts,
+    FusedSwiGLU,
     silu_and_mul_backward_kernel,
     silu_and_mul_forward_kernel,
     silu_and_mul_op,
@@ -29,11 +29,12 @@ _HIDDEN = 32
 _E = 4
 
 
-def _build_fused_swiglu_grouped_experts() -> FusedSwiGLUGroupedExperts:
-    fused = FusedSwiGLUGroupedExperts.Config(
+def _build_fused_swiglu_grouped_experts() -> GroupedExperts:
+    fused = GroupedExperts.Config(
         dim=_DIM,
         hidden_dim=_HIDDEN,
         num_experts=_E,
+        activation_fn=FusedSwiGLU.Config(),
     ).build()
     with torch.no_grad():
         fused.w13.copy_(torch.randn(_E, 2 * _HIDDEN, _DIM))
@@ -63,21 +64,18 @@ class TestFusedSwiGLUOverride(unittest.TestCase):
 
         replacement = fused_grouped_experts(cfg)
 
-        self.assertIsInstance(replacement, FusedSwiGLUGroupedExperts.Config)
+        self.assertIsInstance(replacement, GroupedExperts.Config)
+        self.assertIsInstance(replacement.activation_fn, FusedSwiGLU.Config)
 
 
 class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
     """Checkpoint interop and configuration for the fused activation override."""
 
-    def test_saves_and_loads_stock_layout(self):
-        """tests save and load checkpoint"""
+    def test_saves_and_loads_physical_layout(self):
         src = _build_fused_swiglu_grouped_experts()
         sd = src.state_dict()
 
-        self.assertEqual(set(sd), {"w1_EFD", "w3_EFD", "w2_EDF"})
-        logical_w13 = _logical_w13(src)
-        self.assertTrue(torch.equal(sd["w1_EFD"], logical_w13[:, :, 0, :]))
-        self.assertTrue(torch.equal(sd["w3_EFD"], logical_w13[:, :, 1, :]))
+        self.assertEqual(set(sd), {"w13", "w2_EDF"})
 
         dst = _build_fused_swiglu_grouped_experts()
         dst.load_state_dict(sd)
@@ -225,10 +223,11 @@ class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
             .cuda()
         )
         fused = (
-            FusedSwiGLUGroupedExperts.Config(
+            GroupedExperts.Config(
                 dim=_DIM,
                 hidden_dim=_HIDDEN,
                 num_experts=_E,
+                activation_fn=FusedSwiGLU.Config(),
             )
             .build()
             .cuda()
