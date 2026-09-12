@@ -9,7 +9,11 @@ from copy import deepcopy
 
 import torch
 from torch.utils.flop_counter import FlopCounterMode
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import (
+    _has_cacheable_effect,
+    FullAC,
+    SelectiveAC,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -67,6 +71,9 @@ class TransformerBlock(Module):
 
 
 class TestApplyAC(unittest.TestCase):
+    def test_low_level_c10d_launch_is_not_cached(self):
+        self.assertFalse(_has_cacheable_effect(torch.ops.c10d.alltoall_.default))
+
     def test_effectful_ops_are_not_recomputed(self):
         class EffectfulBlock(Module):
             def forward(self, x):
