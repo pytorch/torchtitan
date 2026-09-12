@@ -54,6 +54,7 @@ def flux_debugmodel_hsdp2x2_cp2_validation() -> FluxTrainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = None
     validation_dataset = DATASETS["cc12m-test-validation"]
     validation_processor = validation_dataset.processor
     assert isinstance(validation_processor, FluxSampleProcessor.Config)

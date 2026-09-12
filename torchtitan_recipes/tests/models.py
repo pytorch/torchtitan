@@ -12,6 +12,7 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import CompileConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
+from torchtitan.distributed.context_parallel import PTRRLoadBalancer
 
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
@@ -341,8 +342,9 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.parallelism.context_parallel_load_balancer = "ptrr"
-    config.parallelism.context_parallel_ptrr_mask_key = "basic_mask"
+    config.parallelism.context_parallel_load_balancer = PTRRLoadBalancer.Config(
+        mask_key="basic_mask"
+    )
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"

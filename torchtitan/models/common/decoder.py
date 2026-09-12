@@ -6,7 +6,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
@@ -34,6 +34,9 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher_config
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
+
+if TYPE_CHECKING:
+    from torchtitan.distributed.context_parallel import ContextParallelPartitioner
 
 __all__ = ["Decoder", "TransformerBlock"]
 
@@ -368,23 +371,33 @@ class Decoder(BaseModel):
 
         input_sharding = decoder_input_sharding()
         if parallel_dims.cp_enabled:
-            batch = self._cp_shard_inputs(
-                batch, input_sharding, parallel_dims, parallelism
+            from torchtitan.distributed.context_parallel import (
+                ContextParallelPartitioner,
             )
+
+            partitioner = ContextParallelPartitioner(
+                input_dict=batch,
+                input_shardings=input_sharding,
+                cp_mesh=parallel_dims.get_mesh("cp"),
+                load_balancer_config=parallelism.context_parallel_load_balancer,
+            )
+            batch = partitioner.shard_inputs(batch)
+            batch = self._prepare_context_parallel_metadata(batch, partitioner)
         batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")
         return inputs, labels, batch
 
-    def _cp_shard_inputs(
+    def _prepare_context_parallel_metadata(
         self,
         batch: dict[str, Any],
-        input_shardings: dict[str, Any],
-        parallel_dims: ParallelDims,
-        parallelism: ParallelismConfig,
+        partitioner: "ContextParallelPartitioner",
     ) -> dict[str, Any]:
-        from torchtitan.models.common.cp_attention import CPInnerAttention
+        from torchtitan.models.common.cp_attention import (
+            CPInnerAttention,
+            LoadBalancedCPInnerAttention,
+        )
 
         inner_attention = self.config.first_full_attention_backend
         owner = cast(
@@ -392,13 +405,9 @@ class Decoder(BaseModel):
             inner_attention._owner if inner_attention is not None else None,
         )
         assert owner is not None and issubclass(owner, CPInnerAttention)
-        return owner.cp_shard(
-            batch,
-            input_shardings,
-            parallel_dims.get_mesh("cp"),
-            parallelism.context_parallel_load_balancer,
-            parallelism.context_parallel_ptrr_mask_key,
-        )
+        if not issubclass(owner, LoadBalancedCPInnerAttention):
+            return batch
+        return owner.cp_shard_metadata(batch, partitioner)
 
     def get_attention_masks(
         self,
