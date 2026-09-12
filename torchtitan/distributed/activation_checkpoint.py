@@ -105,9 +105,20 @@ def _full_ac_policy(
     **_kwargs,
 ) -> CheckpointPolicy:
     """Save effectful operations while recomputing pure operations."""
-    if has_effects(op):
+    if _has_cacheable_effect(op):
         return CheckpointPolicy.MUST_SAVE
     return CheckpointPolicy.PREFER_RECOMPUTE
+
+
+def _has_cacheable_effect(op) -> bool:
+    """Return whether SAC can preserve an effect by caching the op output.
+
+    Low-level ``c10d`` operations return an asynchronous ``Work`` handle and
+    are implementation details of functional collectives. Caching one without
+    its enclosing functional collective skips the launch while leaving freshly
+    allocated outputs uninitialized during recomputation.
+    """
+    return has_effects(op) and getattr(op, "namespace", None) != "c10d"
 
 
 def _disable_dynamo_lru_cache() -> None:
@@ -265,7 +276,7 @@ class SelectiveAC(ActivationCheckpointing):
             meta = {"forward_mm_count": 0, "recompute_mm_count": 0}
 
             def wrapped_policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
-                if has_effects(func):
+                if _has_cacheable_effect(func):
                     return CheckpointPolicy.MUST_SAVE
 
                 # Always save CUDA→CPU results to avoid recomputing them

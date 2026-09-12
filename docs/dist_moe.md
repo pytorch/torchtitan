@@ -48,6 +48,13 @@ recipes use CUDA-graph-compatible varlen attention. The MXFP8 recipes also use
 TorchTitan's `MXFP8LinearConverter` for attention projections, shared experts,
 dense feed-forward layers, and the language-model head.
 
+The common routed-expert call accepts an optional route-output callable. A
+callable may define `to_dist_moe_postprocess()` to return an annex-native typed
+descriptor. The adapter otherwise preserves it as an eager callback under the
+expert mesh context. This keeps model-specific normalization outside the OSS
+adapter while allowing supported typed transforms to remain inside Dist-MoE's
+ordered autograd operation.
+
 ## Model and checkpoint contract
 
 `DistMoeConverter` accepts the stock `RoutedExperts.Config` backed by

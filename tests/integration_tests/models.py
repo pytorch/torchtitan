@@ -62,6 +62,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt"
             ),
+            use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4],
