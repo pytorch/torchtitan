@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 
 
 def _build_hash_routing_table(
@@ -89,13 +89,3 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
             expert_bias_E,
             **router_kwargs,
         )
-
-
-class DeepSeekV4MoE(MoE):
-    """DeepSeek V4 MoE that forwards token IDs to hash-routing layers."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(MoE.Config):
-        # Narrow the router type so hash-routing fields (layer_id, tid2eid)
-        # are visible to config builders.
-        router: DeepSeekV4Router.Config  # pyrefly: ignore [bad-override]

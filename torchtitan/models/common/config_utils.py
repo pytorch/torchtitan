@@ -345,8 +345,6 @@ def make_router_config(
     score_func: Literal["sigmoid", "softmax", "sqrtsoftplus"] = "sigmoid",
     route_norm: bool = False,
     route_scale: float = 1.0,
-    num_expert_groups: int | None = None,
-    num_limited_groups: int | None = None,
     bias: bool = False,
 ) -> TokenChoiceTopKRouter.Config:
     """Build a fully-specified TokenChoiceTopKRouter.Config."""
@@ -362,8 +360,6 @@ def make_router_config(
         score_func=score_func,
         route_norm=route_norm,
         route_scale=route_scale,
-        num_expert_groups=num_expert_groups,
-        num_limited_groups=num_limited_groups,
     )
 
 

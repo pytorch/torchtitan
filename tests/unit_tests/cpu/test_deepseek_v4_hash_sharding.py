@@ -7,6 +7,8 @@
 import unittest
 from types import SimpleNamespace
 
+import torch
+
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import (
@@ -17,6 +19,7 @@ from torchtitan.models.common.decoder_sharding import (
     token_id_placement,
     token_id_sequence_parallel_placement,
 )
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v4 import model_registry
 
 
@@ -33,6 +36,16 @@ def _runtime(*, tp: int, ep: int, sp: bool) -> SimpleNamespace:
 
 
 class TestDeepSeekV4HashRoutingSharding(unittest.TestCase):
+    def test_uses_common_moe(self):
+        model_config = model_registry("debugmodel").model
+        moe_config = model_config.layers[0].moe
+        assert moe_config is not None
+        self.assertIs(type(moe_config), MoE.Config)
+
+        with torch.device("meta"):
+            moe = moe_config.build()
+        self.assertIs(type(moe), MoE)
+
     def test_sp_ep_shards_hash_input_ids_with_activations(self):
         model_config = model_registry("debugmodel").model
         model_config.update_from_config(config=_runtime(tp=2, ep=2, sp=True))

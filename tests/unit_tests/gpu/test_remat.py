@@ -180,8 +180,6 @@ class TestRematRegions(unittest.TestCase):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
-            num_expert_groups=2,
-            num_limited_groups=1,
             top_k=1,
         ).build()
 
