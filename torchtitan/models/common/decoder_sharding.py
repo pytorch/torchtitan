@@ -136,26 +136,13 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
     }
 
 
-def colwise_config(*, input_layout: SpmdType | None = None) -> ShardingConfig:
-    """ColwiseParallel: optional input all-gather, weight S(0), output S(-1)."""
+def colwise_config() -> ShardingConfig:
+    """ColwiseParallel: weight S(0), output S(-1)."""
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
-        in_src_shardings=(
-            {"input": input_layout} if input_layout is not None else None
-        ),
-        in_dst_shardings=(
-            {
-                "input": dense_activation_placement(
-                    tp=spmd.R,
-                    cp=spmd.S(0),
-                )
-            }
-            if input_layout is not None
-            else None
-        ),
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
     )
 
@@ -240,23 +227,28 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    # Config converters may wrap GQAttention.Config (for example, LoRA freezes
-    # the parent config) without changing the module it builds. Use the owner
-    # rather than the concrete config type so those wrappers keep the same
-    # communication boundary.
-    qkv_owns_input_redistribution = attention_cfg._owner is GQAttention
+    common_gqa = attention_cfg._owner is GQAttention
     if isinstance(
         attention_cfg.qkv_linear.wqkv, AsyncAllGatherLinear.Config
     ) or isinstance(attention_cfg.wo, AsyncLinearReduceScatter.Config):
         validate_async_tp_preconditions(enable_sp=enable_sp)
 
-    # Communication-aware QKV linears move the input redistribution inside the
-    # qkv remat region. Other attention implementations retain the established
-    # attention-boundary redistribution.
-    attention_cfg.sharding_config = (
-        None
-        if qkv_owns_input_redistribution
-        else ShardingConfig(
+    if common_gqa:
+        # GQAttention consumes these pairs explicitly inside its qkv and wo
+        # remat regions. The generic wrapper only checks the rewritten source
+        # and output contracts after the module is parallelized.
+        attention_cfg.sharding_config = ShardingConfig(
+            in_src_shardings={
+                "x_TD": attn_x_layout,
+            },
+            in_dst_shardings={
+                "x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+            },
+            out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
+            out_dst_shardings=attn_x_layout,
+        )
+    else:
+        attention_cfg.sharding_config = ShardingConfig(
             in_src_shardings={
                 "x_TD": attn_x_layout,
             },
@@ -264,15 +256,17 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
                 "x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
             },
         )
-    )
     if attention_cfg.rope is not None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
-    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config(
-        input_layout=attn_x_layout if qkv_owns_input_redistribution else None
-    )
-    attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
+    wo_config = rowwise_config(output_sp=enable_sp)
+    if common_gqa:
+        wo_config.out_dst_shardings = None
+        if isinstance(attention_cfg.wo, AsyncLinearReduceScatter.Config):
+            wo_config.out_src_shardings = attn_x_layout
+    attention_cfg.wo.sharding_config = wo_config
 
 
 def set_gqa_inner_attention_local_map(inner_attention_cfg) -> None:
@@ -319,26 +313,34 @@ def set_dense_ffn_sharding(
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    # Config converters may wrap FeedForward.Config without changing the
-    # module it builds. Model-specific FeedForward subclasses remain on their
-    # established outer boundary until their shared-input paths are audited.
-    w13_owns_input_redistribution = feed_forward_cfg._owner is FeedForward
+    common_feed_forward = feed_forward_cfg._owner is FeedForward
     if isinstance(feed_forward_cfg.w1, AsyncAllGatherLinear.Config) or isinstance(
         feed_forward_cfg.w2, AsyncLinearReduceScatter.Config
     ):
         validate_async_tp_preconditions(enable_sp=enable_sp)
-    feed_forward_cfg.sharding_config = (
-        None
-        if w13_owns_input_redistribution
-        else ShardingConfig(
+    if common_feed_forward:
+        # FeedForward consumes these pairs explicitly inside its w13 and w2
+        # remat regions. Model-specific subclasses retain their established
+        # outer input boundary until their shared-input paths are audited.
+        feed_forward_cfg.sharding_config = ShardingConfig(
+            in_src_shardings={"x": attn_x_layout},
+            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+            out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
+            out_dst_shardings=attn_x_layout,
+        )
+    else:
+        feed_forward_cfg.sharding_config = ShardingConfig(
             in_src_shardings={"x": attn_x_layout},
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         )
-    )
-    w13_input_layout = attn_x_layout if w13_owns_input_redistribution else None
-    feed_forward_cfg.w1.sharding_config = colwise_config(input_layout=w13_input_layout)
-    feed_forward_cfg.w3.sharding_config = colwise_config(input_layout=w13_input_layout)
-    feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
+    feed_forward_cfg.w1.sharding_config = colwise_config()
+    feed_forward_cfg.w3.sharding_config = colwise_config()
+    w2_config = rowwise_config(output_sp=enable_sp)
+    if common_feed_forward:
+        w2_config.out_dst_shardings = None
+        if isinstance(feed_forward_cfg.w2, AsyncLinearReduceScatter.Config):
+            w2_config.out_src_shardings = attn_x_layout
+    feed_forward_cfg.w2.sharding_config = w2_config
 
 
 def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:

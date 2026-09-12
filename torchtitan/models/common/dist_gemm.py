@@ -19,7 +19,7 @@ from torchtitan.distributed.linear import (
 )
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.models.common.linear import AllGatherLinear, LinearReduceScatter
+from torchtitan.models.common.linear import Linear
 from torchtitan.tools.logging import logger
 
 
@@ -63,19 +63,22 @@ def validate_async_tp_preconditions(*, enable_sp: bool) -> None:
         )
 
 
-class AsyncAllGatherLinear(AllGatherLinear):
+class AsyncAllGatherLinear(Linear):
     """Overlap the input all-gather with a column-parallel GEMM."""
 
+    performs_tp_input_all_gather = True
+
     @dataclass(kw_only=True, slots=True)
-    class Config(AllGatherLinear.Config):
+    class Config(Linear.Config):
         pass
 
-    def _uses_explicit_tp_input_redistribution(self) -> bool:
-        return type(self) is AsyncAllGatherLinear
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.performs_tp_input_all_gather = False
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if not self._uses_explicit_tp_input_redistribution():
-            return super().forward(input)
+        if type(self) is not AsyncAllGatherLinear:
+            return Linear.forward(self, input)
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
@@ -89,19 +92,22 @@ class AsyncAllGatherLinear(AllGatherLinear):
         )
 
 
-class AsyncLinearReduceScatter(LinearReduceScatter):
+class AsyncLinearReduceScatter(Linear):
     """Overlap a row-parallel GEMM with its output reduce-scatter."""
 
+    performs_tp_output_reduce_scatter = True
+
     @dataclass(kw_only=True, slots=True)
-    class Config(LinearReduceScatter.Config):
+    class Config(Linear.Config):
         pass
 
-    def _uses_explicit_tp_output_redistribution(self) -> bool:
-        return type(self) is AsyncLinearReduceScatter
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.performs_tp_output_reduce_scatter = False
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if not self._uses_explicit_tp_output_redistribution():
-            return super().forward(input)
+        if type(self) is not AsyncLinearReduceScatter:
+            return Linear.forward(self, input)
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()

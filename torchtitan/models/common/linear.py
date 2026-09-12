@@ -13,7 +13,7 @@
   from ``Configurable.Config``.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
@@ -22,12 +22,6 @@ import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
-from torchtitan.distributed.spmd_types import (
-    spmd_mesh_group,
-    spmd_type_for_axis,
-    spmd_validate_redistributions,
-)
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend for the router gate:
@@ -36,6 +30,9 @@ from torchtitan.protocols.module import Module
 
 class Linear(nn.Linear, Module):
     """Configurable nn.Linear."""
+
+    performs_tp_input_all_gather = False
+    performs_tp_output_reduce_scatter = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -49,136 +46,6 @@ class Linear(nn.Linear, Module):
             config.out_features,
             bias=config.bias,
         )
-
-
-class AllGatherLinear(Linear):
-    """TP column-parallel linear that owns its input redistribution.
-
-    Under ``spmd_types``, the configured input redistribution is performed
-    explicitly in ``forward`` so activation-checkpoint regions around this
-    module include both communication and compute. The legacy DTensor backend
-    continues to use the generic module-forward wrapper.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self._tp_input_redistribution: (
-            tuple[spmd.PerMeshAxisSpmdType, spmd.PerMeshAxisSpmdType] | None
-        ) = None
-
-    def _uses_explicit_tp_input_redistribution(self) -> bool:
-        """Return whether this concrete forward owns the input collective.
-
-        Wrappers such as LoRA must keep the generic module boundary around
-        their complete forward instead of gathering only the base projection.
-        Subclasses that replace the complete forward may opt in themselves.
-        """
-        return type(self) is AllGatherLinear
-
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
-        sharding_config = self._sharding_config
-        if (
-            self._uses_explicit_tp_input_redistribution()
-            and parallel_dims.spmd_backend == "spmd_types"
-            and sharding_config is not None
-        ):
-            in_src = sharding_config.in_src_shardings or {}
-            in_dst = sharding_config.in_dst_shardings or {}
-            if "input" in in_src and "input" in in_dst:
-                spmd_validate_redistributions(sharding_config)
-                self._tp_input_redistribution = (
-                    spmd_type_for_axis(in_src["input"], MeshAxisName.TP),
-                    spmd_type_for_axis(in_dst["input"], MeshAxisName.TP),
-                )
-                # Keep the source contract for type checking, but prevent the
-                # generic wrapper from replaying the redistribution.
-                self._sharding_config = replace(
-                    sharding_config,
-                    in_dst_shardings=None,
-                )
-        super().parallelize(parallel_dims)
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None and self._tp_input_redistribution is not None:
-            src, dst = self._tp_input_redistribution
-            input = spmd.redistribute(
-                input,
-                tp_group,
-                src=src,
-                dst=dst,
-                backward_options={"op_dtype": input.dtype},
-            )
-        return super().forward(input)
-
-
-class LinearReduceScatter(Linear):
-    """TP row-parallel linear that owns its output redistribution.
-
-    Under ``spmd_types``, the local GEMM and its reduce-scatter or all-reduce
-    execute in this module. The legacy DTensor backend continues to use the
-    generic module-forward wrapper.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self._tp_output_redistribution: (
-            tuple[spmd.PerMeshAxisSpmdType, spmd.PerMeshAxisSpmdType] | None
-        ) = None
-
-    def _uses_explicit_tp_output_redistribution(self) -> bool:
-        """Return whether this concrete forward owns the output collective.
-
-        Wrappers such as LoRA must reduce the combined base and adapter output
-        at the generic module boundary. Subclasses may opt in themselves.
-        """
-        return type(self) is LinearReduceScatter
-
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
-        sharding_config = self._sharding_config
-        if (
-            self._uses_explicit_tp_output_redistribution()
-            and parallel_dims.spmd_backend == "spmd_types"
-            and sharding_config is not None
-            and sharding_config.out_src_shardings is not None
-            and sharding_config.out_dst_shardings is not None
-        ):
-            assert not isinstance(sharding_config.out_src_shardings, tuple)
-            spmd_validate_redistributions(sharding_config)
-            self._tp_output_redistribution = (
-                spmd_type_for_axis(sharding_config.out_src_shardings, MeshAxisName.TP),
-                spmd_type_for_axis(sharding_config.out_dst_shardings, MeshAxisName.TP),
-            )
-            # The explicit collective returns the final layout. Keep that as
-            # the wrapper's output contract and remove its redistribution.
-            self._sharding_config = replace(
-                sharding_config,
-                out_src_shardings=sharding_config.out_dst_shardings,
-                out_dst_shardings=None,
-            )
-        super().parallelize(parallel_dims)
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = super().forward(input)
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None and self._tp_output_redistribution is not None:
-            src, dst = self._tp_output_redistribution
-            output = spmd.redistribute(
-                output,
-                tp_group,
-                src=src,
-                dst=dst,
-                backward_options={"op_dtype": output.dtype},
-            )
-        return output
 
 
 @spmd.register_local_autograd_function
@@ -284,9 +151,7 @@ class ScaledBiasRowwiseLinear(Linear):
 
 
 __all__ = [
-    "AllGatherLinear",
     "Linear",
-    "LinearReduceScatter",
     "RouterGateLinear",
     "ScaledBiasRowwiseLinear",
 ]

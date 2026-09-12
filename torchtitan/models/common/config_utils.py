@@ -26,11 +26,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import _make_fused_linear_init, FeedForward
-from torchtitan.models.common.linear import (
-    AllGatherLinear,
-    LinearReduceScatter,
-    RouterGateLinear,
-)
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
@@ -206,8 +202,8 @@ def make_gqa_config(
     ``rope=None`` builds a NoPE layer (no positional encoding); see
     :class:`GQAttention`.
 
-    TP communication is owned by the projection modules. A model-config
-    transform may replace the synchronous implementations with async variants.
+    TP communication is owned by the attention module. A model-config transform
+    may replace the synchronous projection implementation with an async variant.
     """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
@@ -217,7 +213,7 @@ def make_gqa_config(
         head_dim=per_head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv,
-        wqkv=AllGatherLinear.Config(
+        wqkv=Linear.Config(
             in_features=dim,
             out_features=(n_heads + 2 * n_kv) * per_head_dim,
             param_init=fused_qkv_param_init(
@@ -235,7 +231,7 @@ def make_gqa_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=LinearReduceScatter.Config(
+        wo=Linear.Config(
             in_features=n_heads * per_head_dim,
             out_features=dim,
             param_init=wo_param_init,
@@ -255,13 +251,13 @@ def make_ffn_config(
 ) -> FeedForward.Config:
     """Build a fully-specified FeedForward.Config."""
     return FeedForward.Config(
-        w1=AllGatherLinear.Config(
+        w1=Linear.Config(
             in_features=dim, out_features=hidden_dim, param_init=w1_param_init
         ),
-        w2=LinearReduceScatter.Config(
+        w2=Linear.Config(
             in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init
         ),
-        w3=AllGatherLinear.Config(
+        w3=Linear.Config(
             in_features=dim, out_features=hidden_dim, param_init=w2w3_param_init
         ),
     )

@@ -49,7 +49,7 @@ from torchtitan.models.common.dist_gemm import (
     AsyncAllGatherLinear,
     AsyncLinearReduceScatter,
 )
-from torchtitan.models.common.linear import AllGatherLinear, LinearReduceScatter
+from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
@@ -75,14 +75,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
         return model_registry("debugmodel").model
 
-    def test_default_uses_synchronous_communication_linears(self):
+    def test_default_uses_standard_linears(self):
         for layer in self._model_config().layers:
-            self.assertIsInstance(
-                layer.attention.qkv_linear.wqkv, AllGatherLinear.Config
-            )
-            self.assertIsInstance(layer.attention.wo, LinearReduceScatter.Config)
-            self.assertIsInstance(layer.feed_forward.w1, AllGatherLinear.Config)
-            self.assertIsInstance(layer.feed_forward.w2, LinearReduceScatter.Config)
+            self.assertIs(type(layer.attention.qkv_linear.wqkv), Linear.Config)
+            self.assertIs(type(layer.attention.wo), Linear.Config)
+            self.assertIs(type(layer.feed_forward.w1), Linear.Config)
+            self.assertIs(type(layer.feed_forward.w2), Linear.Config)
 
     def test_transform_selects_async_linears(self):
         model = transform_model_config_(
@@ -153,18 +151,21 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             set_gqa_attention_sharding(stock, enable_sp=True)
             set_gqa_attention_sharding(fused, enable_sp=True)
 
-        self.assertIsNone(stock.sharding_config)
-        self.assertIsNone(fused.sharding_config)
+        self.assertIsNotNone(stock.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(stock.sharding_config.out_dst_shardings)
+        self.assertIsNotNone(fused.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(fused.sharding_config.out_dst_shardings)
 
-        self.assertIsNotNone(stock.qkv_linear.wqkv.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(fused.qkv_linear.wqkv.sharding_config.in_dst_shardings)
+        self.assertIsNone(stock.qkv_linear.wqkv.sharding_config.in_dst_shardings)
+        self.assertIsNone(fused.qkv_linear.wqkv.sharding_config.in_dst_shardings)
         self.assertIsNotNone(stock.wo.sharding_config.out_src_shardings)
+        self.assertIsNone(stock.wo.sharding_config.out_dst_shardings)
         self.assertIsNotNone(fused.wo.sharding_config.out_src_shardings)
-        self.assertIsNotNone(fused.wo.sharding_config.out_dst_shardings)
+        self.assertIsNone(fused.wo.sharding_config.out_dst_shardings)
         self.assertIn("weight", fused.wo.sharding_config.state_shardings)
 
-    def test_sync_boundaries_survive_lora_config_wrappers(self):
-        """LoRA's frozen parent configs still build the common GQA/FFN path."""
+    def test_model_boundaries_survive_lora_config_wrappers(self):
+        """LoRA does not move TP communication onto the converted linears."""
         model = LoRAConverter.Config().build().convert(self._model_config())
         layer = model.layers[0]
         with use_spmd_backend("spmd_types"):
@@ -175,12 +176,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
                 enable_sp=True,
             )
 
-        self.assertIsNone(layer.attention.sharding_config)
-        self.assertIsNotNone(
+        self.assertIsNotNone(layer.attention.sharding_config.in_dst_shardings)
+        self.assertIsNone(
             layer.attention.qkv_linear.wqkv.sharding_config.in_dst_shardings
         )
-        self.assertIsNone(layer.feed_forward.sharding_config)
-        self.assertIsNotNone(layer.feed_forward.w1.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(layer.feed_forward.sharding_config.in_dst_shardings)
+        self.assertIsNone(layer.feed_forward.w1.sharding_config.in_dst_shardings)
 
 
 class TestAsyncTensorParallelSharding(DTensorTestBase):
@@ -212,7 +213,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         return parallel_dims
 
     @with_comms
-    def test_parallelize_moves_redistribution_into_async_linears(self):
+    def test_parallelize_moves_redistribution_into_attention_regions(self):
         """The generic wrapper keeps only boundary checks under spmd_types."""
         from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 
@@ -227,10 +228,11 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             attn = attn_cfg.build().to(self.device_type)
             attn.parallelize(parallel_dims)
 
-        self.assertIsNone(attn._sharding_config)
-        self.assertIsNotNone(attn.qkv_linear.wqkv._tp_input_redistribution)
+        self.assertIsNotNone(attn._tp_input_redistribution)
+        self.assertIsNotNone(attn._tp_output_redistribution)
+        self.assertIsNone(attn._sharding_config.in_dst_shardings)
+        self.assertIsNone(attn._sharding_config.out_dst_shardings)
         self.assertIsNone(attn.qkv_linear.wqkv._sharding_config.in_dst_shardings)
-        self.assertIsNotNone(attn.wo._tp_output_redistribution)
         self.assertIsNotNone(attn.wo._sharding_config.out_src_shardings)
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)

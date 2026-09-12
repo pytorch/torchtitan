@@ -60,8 +60,8 @@ change execution.
 
 ## Tensor-parallel communication boundaries
 
-The common `GQAttention` and `FeedForward` projections use
-communication-aware linear modules:
+The common `GQAttention` and `FeedForward` projection regions own their TP
+communication boundaries:
 
 ```text
 qkv or w13 region:
@@ -73,14 +73,11 @@ wo or w2 region:
     output reduce-scatter or all-reduce
 ```
 
-Under `spmd_types`, `AllGatherLinear` and `LinearReduceScatter` issue the
-redistribution explicitly in their forwards. This keeps communication inside
-the surrounding remat region. The legacy DTensor backend retains the same
-boundary through its module-forward redistribution wrapper.
-
-Linear implementations installed by converters retain the redistribution on
-their own module-forward wrapper. The sharding setup attaches that wrapper to
-the projection leaf, so it remains inside the same remat region.
+Under `spmd_types`, the common attention and feed-forward implementations issue
+these redistributions explicitly around their projection modules. This keeps
+the complete operation inside the surrounding remat region and works for
+projection implementations installed by converters such as LoRA or
+quantization.
 
 `AsyncTensorParallelTransform` replaces these synchronous projections with
 symmetric-memory implementations that overlap the same communication and

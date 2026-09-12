@@ -7,9 +7,16 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.spmd_types import (
+    spmd_mesh_group,
+    spmd_type_for_axis,
+    spmd_validate_redistributions,
+)
 from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
@@ -90,6 +97,13 @@ class FeedForward(Module):
     Llama3/4-style dim computation.
     """
 
+    _tp_input_redistribution: (
+        tuple[spmd.PerMeshAxisSpmdType, spmd.PerMeshAxisSpmdType] | None
+    ) = None
+    _tp_output_redistribution: (
+        tuple[spmd.PerMeshAxisSpmdType, spmd.PerMeshAxisSpmdType] | None
+    ) = None
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         w1: Linear.Config
@@ -125,16 +139,81 @@ class FeedForward(Module):
         self.register_state_dict_post_hook(self._split_w13_on_save)
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
+    def parallelize(self, parallel_dims: ParallelDims) -> None:
+        sharding_config = self._sharding_config
+        if (
+            type(self) is FeedForward
+            and parallel_dims.spmd_backend == "spmd_types"
+            and sharding_config is not None
+        ):
+            in_src = sharding_config.in_src_shardings or {}
+            in_dst = sharding_config.in_dst_shardings or {}
+            out_src = sharding_config.out_src_shardings
+            out_dst = sharding_config.out_dst_shardings
+            if (
+                "x" in in_src
+                and "x" in in_dst
+                and out_src is not None
+                and not isinstance(out_src, tuple)
+                and out_dst is not None
+            ):
+                spmd_validate_redistributions(sharding_config)
+                self._tp_input_redistribution = (
+                    spmd_type_for_axis(in_src["x"], MeshAxisName.TP),
+                    spmd_type_for_axis(in_dst["x"], MeshAxisName.TP),
+                )
+                self._tp_output_redistribution = (
+                    spmd_type_for_axis(out_src, MeshAxisName.TP),
+                    spmd_type_for_axis(out_dst, MeshAxisName.TP),
+                )
+                self._sharding_config = replace(
+                    sharding_config,
+                    in_dst_shardings=None,
+                    out_src_shardings=out_dst,
+                    out_dst_shardings=None,
+                )
+        super().parallelize(parallel_dims)
+
+    @staticmethod
+    def _redistribute_tp(
+        x: torch.Tensor,
+        redistribution: (
+            tuple[spmd.PerMeshAxisSpmdType, spmd.PerMeshAxisSpmdType] | None
+        ),
+    ) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None or redistribution is None:
+            return x
+        src, dst = redistribution
+        return spmd.redistribute(
+            x,
+            tp_group,
+            src=src,
+            dst=dst,
+            backward_options={"op_dtype": x.dtype},
+        )
+
+    def _gate_up_projection(self, x_TD: torch.Tensor) -> torch.Tensor:
+        if not getattr(self.w13, "performs_tp_input_all_gather", False):
+            x_TD = self._redistribute_tp(x_TD, self._tp_input_redistribution)
+        return self.w13(x_TD)
+
+    def _output_projection(self, h_TF: torch.Tensor) -> torch.Tensor:
+        out_TD = self.w2(h_TF)
+        if not getattr(self.w2, "performs_tp_output_reduce_scatter", False):
+            out_TD = self._redistribute_tp(out_TD, self._tp_output_redistribution)
+        return out_TD
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up_TF = remat.region(
-            self.w13,
+            self._gate_up_projection,
             self.remat_region_name("w13"),
             recompute=self.remat_should_recompute("w13"),
         )(x)
         gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
         remat.recompute_needs_tensor(gate_TF, up_TF)
         out_TD = remat.region(
-            self.w2,
+            self._output_projection,
             self.remat_region_name("w2"),
             recompute=self.remat_should_recompute("w2"),
         )(self._activation(gate_TF, up_TF))
