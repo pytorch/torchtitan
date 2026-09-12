@@ -161,7 +161,7 @@ class GraphTrainerCompileConfig(CompileConfig):
             offload/recompute conflict constraint the greedy pass cannot express.
     """
 
-    host_memory_fraction: float = 0.80
+    host_memory_fraction: float = 0.80  # between 0.0 and 1.0
     """The fraction of the free host memory (CPU memory) to be pinned for offloaded activations.
     """
 

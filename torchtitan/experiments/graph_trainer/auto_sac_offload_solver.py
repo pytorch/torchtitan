@@ -1024,7 +1024,7 @@ def plan_outer(
     _by_split = defaultdict(list)
     for b in layer_ids:
         _by_split[tuple(round(v, 3) for v in alloc[b])].append(b)
-    for (kv, rv, ov), bs in sorted(_by_split.items(), key=lambda kv: -len(kv[1])):
+    for (kv, rv, ov), bs in sorted(_by_split.items(), key=lambda e: -len(e[1])):
         solver_debugs(
             "outer: k=%.3f r=%.3f o=%.3f -> %d layer(s) %s",
             kv,
@@ -1660,9 +1660,9 @@ def get_fixed_bytes(
             storages_by_prod_node[prod].append(new_object)
             storages.append(new_object)
 
-    per_layer_node_bytes: defaultdict[int, defaultdict[torch.fx.Node, int]] = (
-        defaultdict(lambda: defaultdict(int))
-    )
+    per_layer_node_bytes: defaultdict[
+        int, defaultdict[torch.fx.Node, int]
+    ] = defaultdict(lambda: defaultdict(int))
     total_freeable = 0
 
     # gradient bytes owned by each layer

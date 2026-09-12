@@ -156,6 +156,7 @@ def tag_must_save(
 ) -> torch.fx.GraphModule:
     """Tagging necessary nodes before regional inductor"""
     from torch.utils.checkpoint import CheckpointPolicy
+
     from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
 
     logger.info("Tagging `MUST_SAVE` nodes before inductor pass")

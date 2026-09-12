@@ -14,8 +14,9 @@ entry point selects a tagging strategy via ``--compile.memory_policy``.
 """
 
 from __future__ import annotations
-import os
+
 import operator
+import os
 from collections import defaultdict
 from collections.abc import Callable
 from typing import TYPE_CHECKING
