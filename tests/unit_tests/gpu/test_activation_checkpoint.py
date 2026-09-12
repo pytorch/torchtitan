@@ -14,6 +14,29 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
 
+_effectful_call_count = 0
+
+
+@torch.library.custom_op("torchtitan_test::effectful_identity", mutates_args=())
+def _effectful_identity(x: torch.Tensor) -> torch.Tensor:
+    global _effectful_call_count
+    _effectful_call_count += 1
+    return x.clone()
+
+
+@_effectful_identity.register_fake
+def _effectful_identity_fake(x: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+def _effectful_identity_backward(_ctx, grad_output):
+    return grad_output
+
+
+_effectful_identity.register_autograd(_effectful_identity_backward)
+_effectful_identity.register_effect(torch.library.EffectType.ORDERED)
+
+
 class ToyModule(Module):
     def __init__(self):
         super().__init__()
@@ -44,6 +67,33 @@ class TransformerBlock(Module):
 
 
 class TestApplyAC(unittest.TestCase):
+    def test_effectful_ops_are_not_recomputed(self):
+        class EffectfulBlock(Module):
+            def forward(self, x):
+                return _effectful_identity(x).sin()
+
+        class EffectfulModel(Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = ModuleDict({"0": EffectfulBlock()})
+
+            def forward(self, x):
+                return self.layers["0"](x)
+
+        global _effectful_call_count
+        for policy in (FullAC.Config(), SelectiveAC.Config()):
+            with self.subTest(policy=type(policy).__qualname__):
+                _effectful_call_count = 0
+                model = EffectfulModel()
+                policy.build().apply(model)
+                for iteration in range(2):
+                    x = torch.randn(8, requires_grad=True)
+                    output = model(x).sum()
+                    output.backward()
+                    torch.testing.assert_close(output, x.sin().sum())
+                    torch.testing.assert_close(x.grad, x.cos())
+                    self.assertEqual(_effectful_call_count, iteration + 1)
+
     def test_flops(self):
         def get_bw_flops(model_fn):
             x = torch.randn(512, 512, requires_grad=True)
