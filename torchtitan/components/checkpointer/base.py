@@ -301,6 +301,21 @@ class BaseCheckpointManager(Configurable, ABC):
                     raise FileNotFoundError(
                         f"--checkpoint.load_step={step} not found at {checkpoint_id}"
                     )
+                # Fault-tolerance restart: an existing folder checkpoint wins
+                # over initial_* so the same job args can be reused.
+                if (
+                    self.initial_load_path
+                    or self.initial_load_in_hf
+                    or self.initial_load_in_hf_quantized
+                ):
+                    logger.warning(
+                        "Resuming from checkpoint.folder %s at step %s "
+                        "(fault-tolerance restart); ignoring "
+                        "initial_load_path / initial_load_in_hf / "
+                        "initial_load_in_hf_quantized.",
+                        self.folder,
+                        step,
+                    )
 
             logger.info("Loading the checkpoint from %s.", checkpoint_id)
             begin = time.monotonic()

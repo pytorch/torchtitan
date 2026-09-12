@@ -482,15 +482,15 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertTrue(res)
         manager.close()
 
-    @mock.patch("torchtitan.components.checkpointer.dcp.logger")
+    @mock.patch("torchtitan.components.checkpointer.base.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "load")
     def test_initial_load_path_ignored_when_folder_has_valid_checkpoints(
         self, mock_load, mock_rank, mock_logger
     ):
         # Resuming from checkpoint.folder is the fault-tolerance path: all
-        # initial_* options are silently ignored so a job can keep the same
-        # arguments across automatic restarts.
+        # initial_* options are ignored so a job can keep the same arguments
+        # across automatic restarts. Warn so users notice the skip.
         initial_load_path = os.path.join(self.base_temp_dir, "initial", "step-100")
         os.makedirs(initial_load_path, exist_ok=True)
         ckpt_folder = os.path.join(self.test_folder, "checkpoints")
@@ -519,7 +519,52 @@ class TestCheckpointManager(unittest.TestCase):
         mock_load.assert_called_once()
         _, kwargs = mock_load.call_args
         self.assertEqual(kwargs.get("checkpoint_id"), step_dir)
-        mock_logger.warning.assert_not_called()
+        mock_logger.warning.assert_called()
+        warning_text = " ".join(
+            str(arg) for call in mock_logger.warning.call_args_list for arg in call.args
+        )
+        self.assertRegex(warning_text, r"initial_load|ignored")
+        self.assertRegex(warning_text, r"folder|step")
+        manager.close()
+
+    @mock.patch("torchtitan.components.checkpointer.base.logger")
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "load")
+    def test_initial_load_in_hf_ignored_when_folder_has_valid_checkpoints(
+        self, mock_load, mock_rank, mock_logger
+    ):
+        ckpt_folder = os.path.join(self.test_folder, "checkpoints")
+        step_dir = os.path.join(ckpt_folder, "step-5")
+        os.makedirs(step_dir, exist_ok=True)
+        open(os.path.join(step_dir, ".metadata"), "w").close()
+
+        cfg = self.trainer_config.checkpoint
+        cfg.folder = "checkpoints"
+        cfg.initial_load_in_hf = True
+        cfg.initial_load_model_only = True
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states=self.states,
+            config=self.trainer_config.checkpoint,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        res = manager.load(step=-1)
+
+        self.assertTrue(res)
+        mock_load.assert_called_once()
+        _, kwargs = mock_load.call_args
+        self.assertEqual(kwargs.get("checkpoint_id"), step_dir)
+        mock_logger.warning.assert_called()
+        warning_text = " ".join(
+            str(arg) for call in mock_logger.warning.call_args_list for arg in call.args
+        )
+        self.assertRegex(warning_text, r"initial_load|ignored")
+        self.assertRegex(warning_text, r"folder|step")
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
