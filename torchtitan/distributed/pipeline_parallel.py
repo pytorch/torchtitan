@@ -154,27 +154,12 @@ def llm_split_with_pinned_modules(
     first_stage_module_fqns: Sequence[str] = (),
     last_stage_module_fqns: Sequence[str] = (),
 ) -> tuple[list[list[str]], ParallelismConfig]:
-    """The split ``pipeline_llm`` generates, with modules pinned to both ends.
+    """The split ``pipeline_llm`` generates, with the present
+    ``first_stage_module_fqns`` prepended to the first stage and
+    ``last_stage_module_fqns`` appended to the last; neither counts as a layer.
 
-    The auto-generated LLM stage split only knows about decoder modules
-    (``tok_embeddings``, ``layers.*``, ``norm``, ``lm_head``). A model with
-    more than that says so here: ``first_stage_module_fqns`` are prepended to
-    the first stage (those the model actually has -- e.g. a vision encoder
-    whose features are spliced into the embeddings), and
-    ``last_stage_module_fqns`` are appended to the last (e.g. modules that
-    aggregate the whole model's output and must run where ``lm_head`` does).
-    Neither counts as a layer, so the layer distribution is unchanged.
-
-    Returns the split, and a copy of ``parallelism`` that spells it out:
-    ``pipeline_parallel_layers_per_stage``, which would otherwise derive one, is
-    cleared, because it has been read by now and ``pipeline_llm`` takes the
-    explicit split in preference to it. Clearing it here is also what keeps the
-    config's invariant that at most one field describes the split, so every
-    caller that spells a split out gets that right by construction.
-
-    A caller passes the config on to ``pipeline_llm`` and may read the split
-    for itself; ``pipeline_with_first_stage_modules`` is the common case,
-    where it does not need to look at it.
+    Returns the split and a copy of ``parallelism`` that spells it out, with
+    ``pipeline_parallel_layers_per_stage`` cleared since the split replaces it.
     """
     (
         num_virtual_stages,
@@ -219,11 +204,7 @@ def pipeline_with_first_stage_modules(
     stage's FQN list before delegating to ``pipeline_llm``. On other stages, the
     modules are pruned to ``None``; the model's ``forward`` must tolerate that.
 
-    ``last_stage_module_fqns`` does the same at the other end, for a model
-    whose output is aggregated next to the head. A caller that needs the split
-    itself calls ``llm_split_with_pinned_modules`` and hands the result over
-    through ``parallelism.module_fqns_per_model_part``, which is what this
-    function does for it.
+    ``last_stage_module_fqns`` does the same at the last stage, after the head.
 
     NOTE: This adds load to stage 0 that the auto split does not model
     (``input_weight`` only accounts for ``tok_embeddings``). Use
@@ -429,9 +410,8 @@ def _generate_llm_fqn_per_model_part(
         num_layers: Total number of transformer layers in the model
         input_weight: Weight for input modules (tok_embeddings) in layer calculation
         output_weight: Weight for output modules (norm + output) in layer calculation
-        last_stage_modules: Extra module names pinned to the last stage, after
-            ``norm`` and ``lm_head`` (e.g. modules that aggregate the whole
-            model's output). They do not count as layers.
+        last_stage_modules: Module names pinned to the last stage after
+            ``norm`` and ``lm_head``; they do not count as layers.
 
     Returns:
         List of lists containing module names for each model part

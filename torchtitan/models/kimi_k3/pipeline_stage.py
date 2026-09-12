@@ -4,39 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""A pipeline stage that carries the block attention residual.
+"""A pipeline stage that carries Kimi K3's block attention residual.
 
-A block committed at one stage is read by every later stage, which the
-``PipelineStage`` protocol -- outputs to the next stage, gradients from it --
-does not express. This subclass keeps that protocol on the wire and adds the
-two things the residual needs:
-
-* **Routing.** The hop between adjacent stages carries ``(hidden, delta)``,
-  where ``delta`` holds only the blocks the receiving rank has not seen
-  (:class:`BlockLayoutTables`). A rank keeps every block it committed or
-  received in a store shared by its stages, and a stage assembles the full
-  stack its model expects from that store plus the delta it received. The
-  model itself takes and returns the full stack, so it knows nothing of this.
-
-* **Gradients on a rank.** A stage's backward returns the gradient of the
-  stack it assembled. The columns it received go back over the wire as the
-  gradient of the delta, like any stage input. The columns it took from the
-  store are deposited in the store, and the stage that brought that block onto
-  the rank -- by committing it, or by receiving it -- adds the deposits to its
-  own gradient for the block when its backward runs, which the schedule
-  orders after every later stage's backward. The routing tables say how many
-  deposits each block must have, so a lost gradient raises instead of
-  training quietly.
-
-Across ranks nothing new happens: the gradient of a received delta is sent
-to the stage that produced it by the schedule's own backward P2P, and there it
-is the gradient of that stage's payload, which autograd carries into the
-model's graph or, for a relayed block, into that stage's own input gradient.
-
-Everything a stage learns about the micro-batch comes with the chunk id the
-schedule passes to ``forward_one_chunk`` and ``backward_one_chunk``; the
-blocks of a micro-batch are released after the rank's last stage has run its
-forward for it.
+Each hop carries ``(hidden, delta)``, where ``delta`` holds the blocks the
+receiving rank does not hold yet (:class:`BlockLayoutTables`). A rank keeps the
+blocks it has seen in a store shared by its stages; a stage's gradient for a
+block it read from the store is deposited there and added in by the stage that
+brought the block onto the rank.
 
 Tensor suffixes: ``T`` tokens, ``N`` blocks, ``D`` model dimension.
 """
@@ -53,13 +27,8 @@ from torchtitan.models.kimi_k3.layout import BlockLayoutTables
 
 
 class PPRankLocalCache:
-    """The blocks a rank holds per micro-batch, and the gradient deposits.
-
-    One instance per rank, shared by every pipeline stage the rank runs. The
-    blocks stay on the device they were produced or received on (no host
-    copy); a micro-batch's blocks are released once the rank's last stage
-    that reads them has run its backward.
-    """
+    """The blocks a rank holds per micro-batch, kept on device, and the gradient
+    deposits; one per rank, shared by its stages."""
 
     def __init__(self) -> None:
         self._blocks: dict[int, dict[int, torch.Tensor]] = {}
@@ -98,13 +67,8 @@ def assemble_stack(
     delta_blocks: list[int],
     store_blocks: dict[int, torch.Tensor],
 ) -> tuple[torch.Tensor, list[int]]:
-    """The full block stack a stage's model expects, in block order.
-
-    Returns the stack as a fresh autograd leaf and the block index of each
-    column. A leaf, because the stage's backward reads ``.grad`` of its inputs
-    and hands out the columns itself: the received ones over the wire, the
-    stored ones as deposits.
-    """
+    """The full block stack in block order, as a fresh autograd leaf so the
+    stage's backward can split its gradient, and each column's block index."""
     if delta_TND.shape[1] != len(delta_blocks):
         raise ValueError(
             f"received {delta_TND.shape[1]} block(s) but the routing expects "

@@ -4,20 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Routing of the block attention residual across pipeline stages.
+"""Routing tables for the block attention residual across pipeline stages.
 
-A block committed at stage ``S`` is read by every later stage. Torch's
-pipeline stages only talk to their neighbours, so the block travels along the
-chain: each hop carries the blocks the receiving rank does not hold yet, and a
-rank keeps what it has seen for its later stages. ``BlockLayoutTables``
-simulates one micro-batch's forward in stage order and tabulates, per stage,
-the blocks it commits, the blocks its rank holds when it runs, the blocks its
-hop carries, and the stages that read a block from their rank's store. The
-tables are a pure function of the split and the stage-to-rank map, so every
-rank computes the same ones and nothing but the blocks travels on the wire.
-
-With ``cache=False`` no rank keeps anything and every hop carries the whole
-stack: the plain transport, kept for comparison.
+Each hop carries the blocks the receiving rank does not hold yet, and a rank
+keeps what it has seen for its later stages; with ``cache=False`` every hop
+carries the whole stack.
 """
 
 
@@ -85,15 +76,8 @@ class BlockLayoutTables:
         return list(self._cache_readers.get(block_idx, ()))
 
     def deposits_expected(self, block_idx: int, owner_stage: int) -> int:
-        """How many later stages on ``owner_stage``'s rank read ``block_idx``
-        from the store.
-
-        The owner is the stage that brought the block onto the rank, by
-        committing or by receiving it. Each such reader deposits the block's
-        gradient into the rank store for the owner's backward to collect, so
-        the owner compares the deposits it finds against this count: a
-        missing one is a lost gradient no loss curve shows.
-        """
+        """How many gradient deposits for ``block_idx`` the stage that brought it
+        onto the rank must collect: one per later stage there reading the store."""
         rank = self.stage_to_rank[owner_stage]
         return sum(
             1
@@ -153,15 +137,8 @@ def infer_block_layout_tables_from_stages(
     layer_to_stage: dict[int, int],
     cache: bool = True,
 ) -> BlockLayoutTables:
-    """Build :class:`BlockLayoutTables` for the stages a rank holds.
-
-    ``layer_to_stage`` is the global map, layer id to stage id, that
-    :func:`layer_to_stage_from_split` reads off the split. Any split is accepted
-    as long as every layer sits on exactly one stage and each stage holds a
-    contiguous run of layers in stage order, which is what the routing
-    assumes; anything else raises rather than producing tables that are wrong
-    in a way only the gradients would show.
-    """
+    """Build :class:`BlockLayoutTables`; every layer must sit on one stage, in
+    contiguous runs in stage order."""
     if len(stages) < 1:
         raise ValueError("need at least one stage to infer layout")
     num_stages = len(stage_to_rank)
@@ -197,12 +174,7 @@ def infer_block_layout_tables_from_stages(
 
 
 def layer_to_stage_from_split(module_fqns_per_model_part) -> dict[int, int]:
-    """The global layer-to-stage map, read off the split.
-
-    ``module_fqns_per_model_part`` is the split core applies (the config's, or
-    the generated one), a pure function of the config that every rank computes
-    identically, so no collective is needed to learn where a layer sits.
-    """
+    """The layer-to-stage map, read off the split core applies."""
     layer_to_stage: dict[int, int] = {}
     for stage_idx, names in enumerate(module_fqns_per_model_part):
         for name in names:
