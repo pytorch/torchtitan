@@ -39,7 +39,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
-from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLUGroupedExperts
+from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -316,9 +316,8 @@ def _linear_config(in_features: int, out_features: int) -> Linear.Config:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w1=_linear_config(4, 8),
+        w13=_linear_config(4, 16),
         w2=_linear_config(8, 4),
-        w3=_linear_config(4, 8),
     )
 
 
@@ -502,9 +501,8 @@ class TestRematRegions(unittest.TestCase):
     def test_feed_forward_variants_use_expected_region_boundaries(self):
         feed_forward_config = _feed_forward_config()
         sigmoid_config = SigmoidGatedFeedForward.Config(
-            w1=feed_forward_config.w1,
+            w13=feed_forward_config.w13,
             w2=feed_forward_config.w2,
-            w3=feed_forward_config.w3,
             gate=_linear_config(4, 4),
         )
 
@@ -572,7 +570,12 @@ class TestRematRegions(unittest.TestCase):
         configs = (
             GroupedExperts.Config(dim=4, hidden_dim=8, num_experts=1),
             GptOssGroupedExperts.Config(dim=4, hidden_dim=8, num_experts=1),
-            FusedSwiGLUGroupedExperts.Config(dim=4, hidden_dim=8, num_experts=1),
+            GroupedExperts.Config(
+                dim=4,
+                hidden_dim=8,
+                num_experts=1,
+                activation_fn=FusedSwiGLU.Config(),
+            ),
         )
 
         def grouped_mm(

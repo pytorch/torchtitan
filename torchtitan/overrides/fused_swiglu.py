@@ -28,13 +28,13 @@ import triton.language as tl
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.experimental import local_map
 
-from torchtitan.config import derive, override
+from torchtitan.config import override
 from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.moe import GroupedExperts
 
 __all__ = [
-    "FusedSwiGLUGroupedExperts",
+    "FusedSwiGLU",
     "fused_grouped_experts",
     "silu_and_mul_backward_kernel",
     "silu_and_mul_forward_kernel",
@@ -328,8 +328,15 @@ silu_and_mul_op.register_autograd(
 )
 
 
-def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def _fused_silu_and_mul(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    *,
+    offsets: torch.Tensor | None = None,
+) -> torch.Tensor:
     """``silu(gate) * up`` via the fused ``torchtitan::silu_and_mul`` op."""
+    if offsets is not None:
+        return silu_and_mul_op(gate, up, offsets)
     if isinstance(gate, DTensor):
         assert isinstance(up, DTensor)
         placements = gate.placements
@@ -342,6 +349,26 @@ def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         )
         return mapped(gate, up)
     return _silu_and_mul_2d(gate, up)
+
+
+class FusedSwiGLU(ActivationFn):
+    """SwiGLU activation implemented by the fused Triton operation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ActivationFn.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    def __call__(
+        self,
+        gate: torch.Tensor,
+        up: torch.Tensor,
+        *,
+        offsets: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return _fused_silu_and_mul(gate, up, offsets=offsets)
 
 
 def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -366,14 +393,14 @@ def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 
 def _replace_swiglu_activation(cfg: FeedForward.Config) -> FeedForward.Config:
     """Replace the torch-native SwiGLU callable with the fused implementation."""
-    if not isinstance(cfg.activation_fn.fn, SwiGLU):
+    if not isinstance(cfg.activation_fn, SwiGLU.Config):
         raise ValueError(
             "The fused_swiglu override requires the default SwiGLU activation, "
-            f"but found {type(cfg.activation_fn.fn).__name__}."
+            f"but found {type(cfg.activation_fn).__name__}."
         )
     return replace(
         cfg,
-        activation_fn=ActivationFn.Config(fn=_fused_silu_and_mul),
+        activation_fn=FusedSwiGLU.Config(),
     )
 
 
@@ -386,22 +413,6 @@ def fused_swiglu(cfg: FeedForward.Config) -> FeedForward.Config:
     return _replace_swiglu_activation(cfg)
 
 
-class FusedSwiGLUGroupedExperts(GroupedExperts):
-    """GroupedExperts using the fused Triton SiLU-and-multiply operation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(GroupedExperts.Config):
-        pass
-
-    def _activation(
-        self,
-        gate_RF: torch.Tensor,
-        up_RF: torch.Tensor,
-        offsets_E: torch.Tensor,
-    ) -> torch.Tensor:
-        return silu_and_mul_op(gate_RF, up_RF, offsets_E)
-
-
 @override(
     target=GroupedExperts.Config,
     exact=True,
@@ -410,4 +421,9 @@ class FusedSwiGLUGroupedExperts(GroupedExperts):
 def fused_grouped_experts(
     cfg: GroupedExperts.Config,
 ) -> GroupedExperts.Config:
-    return derive(cfg, FusedSwiGLUGroupedExperts.Config)
+    if not isinstance(cfg.activation_fn, SwiGLU.Config):
+        raise ValueError(
+            "The fused_swiglu override requires the default SwiGLU activation, "
+            f"but found {type(cfg.activation_fn).__name__}."
+        )
+    return replace(cfg, activation_fn=FusedSwiGLU.Config())

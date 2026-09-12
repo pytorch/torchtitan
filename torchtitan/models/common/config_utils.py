@@ -169,6 +169,18 @@ def fused_qkv_param_init(
     return out
 
 
+def fused_gate_up_param_init(
+    gate_param_init: dict[str, Callable],
+    up_param_init: dict[str, Callable],
+) -> dict[str, Callable] | None:
+    """Initialize the logical gate and up slices of a fused ``w13`` weight."""
+    gate_init = gate_param_init.get("weight")
+    up_init = up_param_init.get("weight")
+    if gate_init is None or up_init is None:
+        return None
+    return {"weight": _make_fused_linear_init(gate_init, up_init)}
+
+
 def fused_grouped_experts_param_init(
     param_init: dict[str, Callable],
 ) -> dict[str, Callable]:
@@ -251,14 +263,13 @@ def make_ffn_config(
 ) -> FeedForward.Config:
     """Build a fully-specified FeedForward.Config."""
     return FeedForward.Config(
-        w1=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w1_param_init
+        w13=Linear.Config(
+            in_features=dim,
+            out_features=2 * hidden_dim,
+            param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
         w2=Linear.Config(
             in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init
-        ),
-        w3=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w2w3_param_init
         ),
     )
 

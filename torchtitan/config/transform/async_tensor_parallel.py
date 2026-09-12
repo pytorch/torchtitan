@@ -55,17 +55,10 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
             if traversed._owner is not FeedForward:
                 continue
             feed_forward = cast(FeedForward.Config, traversed)
-            feed_forward.w1 = cast(
+            feed_forward.w13 = cast(
                 Linear.Config,
                 convert_config_type(
-                    feed_forward.w1,
-                    AsyncAllGatherLinear,
-                ),
-            )
-            feed_forward.w3 = cast(
-                Linear.Config,
-                convert_config_type(
-                    feed_forward.w3,
+                    feed_forward.w13,
                     AsyncAllGatherLinear,
                 ),
             )

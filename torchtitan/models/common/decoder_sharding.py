@@ -314,7 +314,7 @@ def set_dense_ffn_sharding(
     a no-op redistribute when placements already agree.
     """
     common_feed_forward = feed_forward_cfg._owner is FeedForward
-    if isinstance(feed_forward_cfg.w1, AsyncAllGatherLinear.Config) or isinstance(
+    if isinstance(feed_forward_cfg.w13, AsyncAllGatherLinear.Config) or isinstance(
         feed_forward_cfg.w2, AsyncLinearReduceScatter.Config
     ):
         validate_async_tp_preconditions(enable_sp=enable_sp)
@@ -333,8 +333,7 @@ def set_dense_ffn_sharding(
             in_src_shardings={"x": attn_x_layout},
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         )
-    feed_forward_cfg.w1.sharding_config = colwise_config()
-    feed_forward_cfg.w3.sharding_config = colwise_config()
+    feed_forward_cfg.w13.sharding_config = colwise_config()
     w2_config = rowwise_config(output_sp=enable_sp)
     if common_feed_forward:
         w2_config.out_dst_shardings = None

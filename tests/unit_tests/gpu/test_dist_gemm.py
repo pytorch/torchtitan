@@ -79,7 +79,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         for layer in self._model_config().layers:
             self.assertIs(type(layer.attention.qkv_linear.wqkv), Linear.Config)
             self.assertIs(type(layer.attention.wo), Linear.Config)
-            self.assertIs(type(layer.feed_forward.w1), Linear.Config)
+            self.assertIs(type(layer.feed_forward.w13), Linear.Config)
             self.assertIs(type(layer.feed_forward.w2), Linear.Config)
 
     def test_transform_selects_async_linears(self):
@@ -92,7 +92,9 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
                 layer.attention.qkv_linear.wqkv, AsyncAllGatherLinear.Config
             )
             self.assertIsInstance(layer.attention.wo, AsyncLinearReduceScatter.Config)
-            self.assertIsInstance(layer.feed_forward.w1, AsyncAllGatherLinear.Config)
+            self.assertIsInstance(
+                layer.feed_forward.w13, AsyncAllGatherLinear.Config
+            )
             self.assertIsInstance(
                 layer.feed_forward.w2, AsyncLinearReduceScatter.Config
             )
@@ -181,7 +183,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             layer.attention.qkv_linear.wqkv.sharding_config.in_dst_shardings
         )
         self.assertIsNotNone(layer.feed_forward.sharding_config.in_dst_shardings)
-        self.assertIsNone(layer.feed_forward.w1.sharding_config.in_dst_shardings)
+        self.assertIsNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
 
 
 class TestAsyncTensorParallelSharding(DTensorTestBase):
