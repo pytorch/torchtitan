@@ -87,9 +87,9 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
+from torchtitan.observability.logging import init_logger
 from torchtitan.tools import utils
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -941,4 +941,5 @@ class TestBitwiseParityGptOssVarlen(BitwiseParityTestBase):
 
 
 if __name__ == "__main__":
+    init_logger()
     unittest.main()

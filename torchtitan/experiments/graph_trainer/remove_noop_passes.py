@@ -21,6 +21,7 @@ separate mandatory pass, and all sub-passes remain public so they can be tested
 (and reasoned about) in isolation.
 """
 
+import logging
 import sys
 
 import torch
@@ -29,12 +30,14 @@ from torch.fx.experimental.symbolic_shapes import guard_or_false
 from torchtitan.experiments.graph_trainer.common_utils import (
     PARAMETER_GRADIENT_FQNS_META,
 )
-from torchtitan.tools.logging import logger
 
 # Op overloads that are registered side-effectful but that we want DCE to treat
 # as pure (so unused instances, and their now-orphaned input chains, are dropped).
 # Currently just the ``aten._assert_async`` runtime asserts; add other removable
 # side-effect ops here as they come up.
+logger = logging.getLogger(__name__)
+
+
 _FORCE_PURE_TARGETS = (
     torch.ops.aten._assert_async.msg,
     torch.ops.aten._assert_async.default,

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import math
 from dataclasses import dataclass, fields
 
@@ -17,7 +18,9 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _lora_adapter_sharding(

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import math
 import os
 from abc import abstractmethod
@@ -25,8 +26,10 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module, device_type
+
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims

@@ -17,6 +17,7 @@ Additionally supports pre-compile via --compile.precompile_artifact_dir:
 - Generate artifacts with precompile_main.py
 """
 
+import logging
 import warnings
 
 import torch
@@ -32,7 +33,9 @@ from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConf
 from torchtitan.experiments.graph_trainer.jit_backend import (
     get_compile_backend_with_passes,
 )
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _apply_jit_compile(

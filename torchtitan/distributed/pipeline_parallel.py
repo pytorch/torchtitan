@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 import copy
 import dataclasses
+import logging
 import math
 import os
 from collections.abc import Callable, Sequence
@@ -31,10 +32,12 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
-from torchtitan.tools.logging import logger
 
 # These are the public entrypoints for model-specific PP setup. Helpers in this
 # module are implementation details and stay private.
+logger = logging.getLogger(__name__)
+
+
 __all__ = ["pipeline_llm", "pipeline_with_first_stage_modules"]
 
 

@@ -6,6 +6,7 @@
 
 """Lightweight CUDA graph wrapper for training steps."""
 
+import logging
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -17,7 +18,9 @@ from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
 
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 ForwardBackwardFn = Callable[

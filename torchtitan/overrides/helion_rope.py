@@ -36,6 +36,8 @@ checkpoints.
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from functools import cache
 from typing import Any, TYPE_CHECKING
@@ -46,7 +48,10 @@ import torch
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE, CosSinRoPE
-from torchtitan.tools.logging import logger, warn_once
+from torchtitan.observability.logging import warn_once
+
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     # The type checker always sees helion as importable (resolved to Any via

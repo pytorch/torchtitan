@@ -7,21 +7,25 @@
 """Kineto profiler + memory-snapshot lifecycle."""
 
 import inspect
+import logging
 import os
 import pickle
 import time
 from dataclasses import dataclass
 
 import torch
+
 from torchtitan.config import Configurable
 from torchtitan.distributed.cudagraph import get_cudagraph_annotations
 from torchtitan.observability import structured_logger as sl
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
 
 # torch's export_chrome_trace gained cuda_graph_annotations when the offline joiner
 # (torch.cuda._annotate_cuda_graph_trace) was removed. Older versions still export, just
 # without the CUDA graph annotations baked in.
+logger = logging.getLogger(__name__)
+
+
 _EXPORT_SUPPORTS_ANNOTATIONS = (
     "cuda_graph_annotations"
     in inspect.signature(torch.profiler.profile.export_chrome_trace).parameters

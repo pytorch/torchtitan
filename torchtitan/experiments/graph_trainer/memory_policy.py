@@ -15,6 +15,8 @@ entry point selects a tagging strategy via ``--compile.memory_policy``.
 
 from __future__ import annotations
 
+import logging
+
 import operator
 from collections import defaultdict
 from collections.abc import Callable
@@ -55,7 +57,9 @@ from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
     register_memory_policy,
 )
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig

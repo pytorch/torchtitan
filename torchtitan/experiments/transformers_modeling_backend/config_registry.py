@@ -15,13 +15,13 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
-from torchtitan.tools.profiler import Profiler
+from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 from . import model_registry
 from .tokenizer import HFBackendTokenizer

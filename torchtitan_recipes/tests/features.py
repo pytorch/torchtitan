@@ -6,6 +6,7 @@
 
 """Configurations for the ``features`` integration test suite."""
 
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, fields
@@ -31,10 +32,12 @@ from torchtitan.models.llama3.config_registry import (
     sft_debugmodel,
 )
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
-from torchtitan.tools.logging import logger
 from torchtitan.trainer import Trainer
 
 from . import _set_spmd_typechecking
+
+
+logger = logging.getLogger(__name__)
 
 
 class SDCReplayMismatchTrainer(Trainer):

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from dataclasses import dataclass, field, fields
 from functools import partial
 from importlib.util import find_spec
@@ -15,10 +16,12 @@ from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
 from .utils import module_filter_fn, swap_token_dispatcher
+
+
+logger = logging.getLogger(__name__)
 
 
 try:

@@ -4,15 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
+
 import torch
 
 import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.config import ConfigManager
-from torchtitan.tools.logging import logger
+from torchtitan.observability.logging import init_logger
 
 from transformers import AutoModelForCausalLM
+
+logger = logging.getLogger(__name__)
+
 
 device_type = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -102,6 +107,8 @@ def forward_tt(model_name, config_name, checkpoint_path, test_set):
 
 
 if __name__ == "__main__":
+    init_logger()
+
     # hf params
     hf_model_name = "meta-llama/Meta-Llama-3-8B"
 

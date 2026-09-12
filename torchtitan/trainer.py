@@ -6,6 +6,7 @@
 
 import dataclasses
 import json
+import logging
 import os
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -28,7 +29,6 @@ from torchtitan.components.checkpointer import BaseCheckpointManager, Checkpoint
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -57,12 +57,15 @@ from torchtitan.models.common.token_dispatcher import (
     LocalTokenDispatcher,
 )
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
+from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
-from torchtitan.tools.profiler import Profiler
+
+
+logger = logging.getLogger(__name__)
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):

@@ -26,6 +26,8 @@ sequence length.
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 
 import torch
@@ -42,7 +44,9 @@ from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.attention import FusedQKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 _WARNED_NO_TP = False

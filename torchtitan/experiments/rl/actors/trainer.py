@@ -37,9 +37,9 @@ from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.logging import init_logger
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
-from torchtitan.tools.logging import init_logger
 
 logger = logging.getLogger(__name__)
 

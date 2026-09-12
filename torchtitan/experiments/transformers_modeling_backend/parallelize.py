@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from typing import Any
 
 import torch
@@ -33,7 +34,9 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:

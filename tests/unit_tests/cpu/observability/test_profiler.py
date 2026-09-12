@@ -7,7 +7,7 @@
 import unittest
 from unittest import mock
 
-from torchtitan.tools.profiler import Profiler
+from torchtitan.observability.profiler import Profiler
 
 
 class TestProfilerConfig(unittest.TestCase):
@@ -175,7 +175,7 @@ class TestProfilerEnabledPaths(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch(
-                "torchtitan.tools.profiler.MemoryProfiler"
+                "torchtitan.observability.profiler.MemoryProfiler"
             ) as memory_profiler_cls:
                 profiler = Profiler(
                     Profiler.Config(
@@ -198,7 +198,7 @@ class TestProfilerEnabledPaths(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch(
-                "torchtitan.tools.profiler.MemoryProfiler"
+                "torchtitan.observability.profiler.MemoryProfiler"
             ) as memory_profiler_cls:
                 profiler = Profiler(
                     Profiler.Config(

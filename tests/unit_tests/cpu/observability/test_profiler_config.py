@@ -6,7 +6,7 @@
 
 import pytest
 
-from torchtitan.tools.profiler import Profiler
+from torchtitan.observability.profiler import Profiler
 
 
 def test_profiler_config_rejects_profile_period_shorter_than_cycle() -> None:

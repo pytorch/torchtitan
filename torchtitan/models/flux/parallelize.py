@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from typing import Any
 
 import torch
@@ -36,7 +37,9 @@ from torchtitan.distributed.fsdp import (
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
 from torchtitan.models.flux.model.model import FluxModel
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def parallelize_flux(

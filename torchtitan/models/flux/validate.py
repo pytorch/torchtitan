@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import os
 from dataclasses import dataclass, field, replace
 
@@ -13,7 +14,6 @@ from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.loss import LossFunction
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import (
     iterate_and_close_dataloader,
@@ -22,7 +22,7 @@ from torchtitan.components.validate import (
 )
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.tools.logging import logger
+from torchtitan.observability.metrics import MetricsProcessor
 
 from .configs import SamplingConfig
 from .flux_datasets import FluxValidationDatasetConfig
@@ -31,6 +31,9 @@ from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
 from .tokenizer import FluxTokenizerContainer
 from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
+
+
+logger = logging.getLogger(__name__)
 
 
 class FluxValidator(Validator):

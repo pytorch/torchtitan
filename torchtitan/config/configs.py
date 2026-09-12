@@ -8,10 +8,10 @@
 Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
-  - Profiler.Config                 (in tools/profiler.py)
+  - Profiler.Config                 (in observability/profiler.py)
   - OptimizersContainer.Config      (in components/optimizer/optimizer.py)
   - LRSchedulersContainer.Config    (in components/optimizer/lr_scheduler.py)
-  - MetricsProcessor.Config         (in components/metrics.py)
+  - MetricsProcessor.Config         (in observability/metrics.py)
   - CheckpointManager.Config        (in components/checkpointer/dcp.py)
 
 Configs without a clear single owner (or with circular-import constraints)

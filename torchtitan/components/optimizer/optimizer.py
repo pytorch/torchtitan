@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import re
 from collections import defaultdict
 from collections.abc import Callable, Iterator
@@ -19,13 +20,15 @@ from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.flex_shard import build_dist_muon
-from torchtitan.tools.logging import logger
 
 from .utils import (
     get_flat_optim_state_dict,
     init_optim_state,
     load_flat_optim_state_dict,
 )
+
+logger = logging.getLogger(__name__)
+
 
 __all__ = [
     "OptimizersContainer",

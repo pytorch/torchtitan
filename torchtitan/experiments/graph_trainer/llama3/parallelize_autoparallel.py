@@ -12,6 +12,7 @@ graph_trainer trace and compile the placed model through its normal
 `aot_fx_trace` train-step pipeline.
 """
 
+import logging
 import time
 
 import torch
@@ -31,8 +32,10 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     validate_autoparallel_config,
 )
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
+
+
+logger = logging.getLogger(__name__)
 
 
 def parallelize_autoparallel_llama(

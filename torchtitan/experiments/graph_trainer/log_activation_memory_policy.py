@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import operator
 import re
 from collections import defaultdict
@@ -22,7 +24,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     _NOT_IN_LAYERS,
 )
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 _PASSTHROUGH_TARGETS = frozenset(
     {
