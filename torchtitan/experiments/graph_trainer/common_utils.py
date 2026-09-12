@@ -523,20 +523,25 @@ def apply_simple_fsdp(
             moe = getattr(transformer_block, "moe", None)
             if moe is None:
                 continue
-            inner_experts = moe.routed_experts.inner_experts
+            routed_experts = moe.routed_experts
+            inner_experts = routed_experts.expert_parameters_module()
             experts_shard_dim = 0
             if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
                 experts_shard_dim = 1
 
-            moe.routed_experts.inner_experts = data_parallel(
-                inner_experts,
-                edp_mesh,
-                dp_mode,
-                mp_policy=mp_policy,
-                shard_dim=experts_shard_dim,
-                non_dp_mesh=(
-                    parallel_dims.get_optional_mesh("ep") if use_spmd_types else None
-                ),
+            moe.routed_experts = routed_experts.replace_expert_parameters_module(
+                data_parallel(
+                    inner_experts,
+                    edp_mesh,
+                    dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=experts_shard_dim,
+                    non_dp_mesh=(
+                        parallel_dims.get_optional_mesh("ep")
+                        if use_spmd_types
+                        else None
+                    ),
+                )
             )
 
     model = data_parallel(
