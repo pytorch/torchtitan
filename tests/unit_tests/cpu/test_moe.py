@@ -43,7 +43,65 @@ class _FixedRouter(nn.Module):
         return topk_scores_TK, topk_expert_ids_TK, scores_TE
 
 
+class _IdentityDispatcher(nn.Module):
+    """Return dispatched and combined rows without changing their order."""
+
+    def dispatch(
+        self,
+        x_TD,
+        topk_scores_TK,
+        topk_expert_ids_TK,
+        num_local_tokens_per_expert_E,
+    ):
+        """Return the input rows and supplied per-expert counts."""
+        del topk_scores_TK, topk_expert_ids_TK
+        return x_TD, num_local_tokens_per_expert_E, None
+
+    def combine(self, routed_output_RD, metadata, x_TD):
+        """Return the routed rows presented to the combine boundary."""
+        del metadata, x_TD
+        return routed_output_RD
+
+
+class _AddOneExperts(nn.Module):
+    """Apply a visible transformation at the expert-compute boundary."""
+
+    def forward(self, x_RD, num_tokens_per_expert_E):
+        """Increment every route row by one."""
+        del num_tokens_per_expert_E
+        return x_RD + 1
+
+
 class TestMoE(unittest.TestCase):
+    def test_routed_experts_postprocesses_routes_before_combine(self):
+        """The optional callback transforms expert rows before combine."""
+        config = make_routed_experts_config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=2,
+            top_k=1,
+            param_init={},
+            comm_backend="standard",
+        )
+        routed_experts = config.build()
+        routed_experts.inner_experts = _AddOneExperts()
+        routed_experts.token_dispatcher = _IdentityDispatcher()
+        scale = nn.Parameter(torch.tensor(3.0))
+        x = torch.arange(8, dtype=torch.float32).reshape(2, 4).requires_grad_()
+
+        output = routed_experts(
+            x,
+            torch.ones(2, 1),
+            torch.zeros(2, 1, dtype=torch.int64),
+            torch.tensor([2, 0]),
+            expert_output_postprocess=lambda value: value * scale,
+        )
+        torch.testing.assert_close(output, (x + 1) * scale)
+
+        output.sum().backward()
+        torch.testing.assert_close(x.grad, torch.full_like(x, 3.0))
+        torch.testing.assert_close(scale.grad, (x.detach() + 1).sum())
+
     def test_routed_experts_expose_parameter_owner(self):
         config = make_routed_experts_config(
             dim=4,
