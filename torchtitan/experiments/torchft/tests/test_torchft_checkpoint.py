@@ -4,12 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import os
 import shutil
 import tempfile
 import time
 import unittest
 from concurrent.futures import Future
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -17,7 +19,9 @@ import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from torchtitan.components.optimizer import LRSchedulersContainer, ParamGroupConfig
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
+from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 
 
 class FakeOptimizersContainer:
@@ -245,6 +249,126 @@ class TestFTCheckpointManager(unittest.TestCase):
             self.assertFalse(manager.load())
 
         ft_load.assert_not_called()
+
+    def _build_replica(self, replica_id):
+        model = nn.Linear(1, 1, bias=False)
+        ft_manager = DummyFTManager(replica_id=replica_id)
+        ft_manager.use_async_quorum = True
+        ft_manager.manager.should_commit.return_value = True
+        optimizers = TorchFTOptimizersContainer(
+            TorchFTOptimizersContainer.Config(
+                implementation="for-loop",
+                param_groups=[
+                    ParamGroupConfig(
+                        pattern=r".*",
+                        optimizer_name="AdamW",
+                        optimizer_kwargs={"lr": 0.08, "weight_decay": 0.0},
+                    )
+                ],
+            ),
+            model_parts=[model],
+            ft_manager=ft_manager,
+        )
+        schedulers = LRSchedulersContainer.Config(warmup_steps=0).build(
+            optimizers=optimizers, training_steps=8
+        )
+        checkpoint = TorchFTCheckpointManager(
+            TorchFTCheckpointManager.Config(
+                enable=True,
+                folder=os.path.join(self.test_folder, str(replica_id)),
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                enable_ft_dataloader_checkpoints=False,
+            ),
+            dataloader=None,
+            model_parts=[model],
+            optimizers=optimizers,
+            lr_schedulers=schedulers,
+            states={},
+            sd_adapter=None,
+            ft_manager=ft_manager,
+        )
+        self.addCleanup(checkpoint.close)
+        (
+            load_state_dict,
+            state_dict,
+        ) = ft_manager.manager.set_state_dict_fns.call_args.args
+        return SimpleNamespace(
+            model=model,
+            optimizer=optimizers,
+            scheduler=schedulers,
+            state_dict=state_dict,
+            load_state_dict=load_state_dict,
+        )
+
+    def test_optimizer_cache_metadata_changes_only_after_explicit_refresh(self):
+        replica = self._build_replica(replica_id=0)
+        cached_state = replica.optimizer.state_dict()
+        cached_tensors = {
+            key: cached_state[key]
+            for key in (
+                "state.weight.step",
+                "state.weight.exp_avg",
+                "state.weight.exp_avg_sq",
+            )
+        }
+
+        param_group = replica.optimizer.optimizers[0].param_groups[0]
+        param_group["lr"] = 0.04
+        param_group["weight_decay"] = 0.1
+        exported_state = replica.optimizer.state_dict()
+
+        self.assertIs(exported_state, cached_state)
+        self.assertEqual(exported_state["param_groups.weight.lr"], 0.08)
+        self.assertEqual(exported_state["param_groups.weight.weight_decay"], 0.0)
+
+        replica.optimizer._refresh_cached_state_dict()
+
+        self.assertIs(replica.optimizer.state_dict(), cached_state)
+        self.assertEqual(cached_state["param_groups.weight.lr"], 0.04)
+        self.assertEqual(cached_state["param_groups.weight.weight_decay"], 0.1)
+        for key, tensor in cached_tensors.items():
+            with self.subTest(state_key=key):
+                self.assertIs(cached_state[key], tensor)
+
+    def test_joining_replica_restores_healthy_replica_learning_rate(self):
+        healthy = self._build_replica(replica_id=0)
+        joining = self._build_replica(replica_id=1)
+        # Advance beyond the LR captured by a newly initialized optimizer cache.
+        healthy.model.weight.grad = torch.ones_like(healthy.model.weight)
+        for _ in range(3):
+            healthy.optimizer.step()
+            healthy.scheduler.step()
+        healthy_lr = healthy.optimizer.optimizers[0].param_groups[0]["lr"]
+        self.assertNotEqual(
+            joining.optimizer.optimizers[0].param_groups[0]["lr"], healthy_lr
+        )
+
+        # Use the registered recovery callback and an independent transfer payload.
+        payload = copy.deepcopy(healthy.state_dict())
+        self.assertEqual(payload["optimizer"]["param_groups.weight.lr"], healthy_lr)
+        joining.load_state_dict(payload)
+
+        self.assertEqual(
+            joining.optimizer.optimizers[0].param_groups[0]["lr"], healthy_lr
+        )
+
+    def test_first_rejoined_update_matches_healthy_replica(self):
+        healthy = self._build_replica(replica_id=0)
+        joining = self._build_replica(replica_id=1)
+        healthy.model.weight.grad = torch.ones_like(healthy.model.weight)
+        for _ in range(3):
+            healthy.optimizer.step()
+            healthy.scheduler.step()
+
+        joining.load_state_dict(copy.deepcopy(healthy.state_dict()))
+        joining.model.weight.grad = torch.ones_like(joining.model.weight)
+        healthy.optimizer.step()
+        joining.optimizer.step()
+
+        torch.testing.assert_close(
+            joining.model.weight, healthy.model.weight, rtol=0, atol=0
+        )
 
 
 if __name__ == "__main__":
