@@ -7,7 +7,6 @@
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.quantization import (
     Float8GroupedExpertsConverter,
@@ -23,6 +22,7 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
+from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 from . import model_registry

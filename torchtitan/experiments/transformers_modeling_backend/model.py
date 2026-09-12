@@ -6,6 +6,7 @@
 
 import copy
 import importlib
+import logging
 import math
 import os
 from dataclasses import dataclass, field, fields, MISSING
@@ -33,7 +34,9 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class HFFlexKernel(Module):

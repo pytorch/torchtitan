@@ -7,6 +7,7 @@
 # This file provides the util functions to apply activation checkpointing to the model.
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Annotated, cast
@@ -27,7 +28,9 @@ from torch.utils.checkpoint import (
 
 from torchtitan.config import Configurable
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _get_default_save_ops() -> set:

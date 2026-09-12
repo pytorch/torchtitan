@@ -16,7 +16,6 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import (
     LRSchedulersContainer,
     OptimizersContainer,
@@ -44,6 +43,7 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
+from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 

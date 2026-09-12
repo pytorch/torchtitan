@@ -16,6 +16,7 @@ parallelism the block boundary keeps its stock bf16 collectives (all-gather /
 reduce-scatter); NVFP4 does not move fp4 codes over the wire.
 """
 
+import logging
 import math
 from dataclasses import dataclass, field, replace
 from typing import cast
@@ -29,8 +30,10 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
+
+logger = logging.getLogger(__name__)
+
 
 TP = MeshAxisName.TP
 

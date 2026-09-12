@@ -9,7 +9,6 @@ from dataclasses import replace
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.quantization import MXFP8LinearConverter
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
@@ -29,6 +28,7 @@ from torchtitan.models.flux.utils import (
     PATCH_WIDTH,
 )
 from torchtitan.models.flux.validate import FluxValidator
+from torchtitan.observability.metrics import MetricsProcessor
 
 from . import model_registry
 

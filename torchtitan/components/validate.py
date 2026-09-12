@@ -16,12 +16,12 @@ from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLo
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.loss import LossFunction
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model import BaseModel
 from torchtitan.tools import utils
 

@@ -29,6 +29,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 from __future__ import annotations
 
 import functools
+import logging
 import time
 import warnings
 from collections.abc import Callable
@@ -92,7 +93,9 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 c10d = torch.ops._c10d_functional
 

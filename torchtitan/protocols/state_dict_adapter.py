@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
+
+import logging
 import os
 import re
 from abc import ABC, abstractmethod
@@ -12,8 +14,10 @@ from typing import Any
 
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
-from torchtitan.tools.logging import logger
 from .model import BaseModel
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseStateDictAdapter(ABC):

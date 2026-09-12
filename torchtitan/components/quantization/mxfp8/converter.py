@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from dataclasses import dataclass, field, fields
 from importlib.util import find_spec
 from typing import Literal
@@ -13,10 +14,12 @@ import torch
 from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
 from ..utils import swap_token_dispatcher
+
+logger = logging.getLogger(__name__)
+
 
 _mxfp8_linear_import_error: ImportError | None = None
 

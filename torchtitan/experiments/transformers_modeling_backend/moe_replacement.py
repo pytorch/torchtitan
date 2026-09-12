@@ -16,6 +16,7 @@ Two-phase replacement:
       happens later via ``model.parallelize(parallel_dims)``.
 """
 
+import logging
 from dataclasses import replace
 from functools import partial
 
@@ -44,7 +45,9 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class _HFBatchedMoE(MoE):

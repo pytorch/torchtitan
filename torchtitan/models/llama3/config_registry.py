@@ -15,7 +15,6 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.quantization import (
     Float8LinearConverter,
@@ -31,7 +30,8 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.tools.profiler import Profiler
+from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 from . import model_registry

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import logging
 import warnings
 from collections.abc import Callable
 
@@ -17,12 +18,14 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.tools.logging import logger
 
 
 # TODO: Remove this monkeypatch once FakeTensorMode.__init__ is decorated with
 # @torch.compiler.disable(recursive=True) upstream.
 # See https://github.com/pytorch/pytorch/issues/178887
+logger = logging.getLogger(__name__)
+
+
 FakeTensorMode.__init__ = torch.compiler.disable(  # type: ignore[method-assign]
     FakeTensorMode.__init__, recursive=True
 )

@@ -21,6 +21,7 @@ The EP passes use this module as their common contract layer:
 from __future__ import annotations
 
 import fnmatch
+import logging
 
 import operator
 from collections import defaultdict
@@ -32,7 +33,9 @@ import torch.fx as fx
 from torch.utils._pytree import tree_leaves, tree_map
 
 from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 aten = torch.ops.aten
 CHUNK_SYMBOL_HINTS_META = "torchtitan_chunk_symbol_hints"

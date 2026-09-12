@@ -8,6 +8,8 @@
 # various training techniques (e.g. activation checkpointing and compile) to the
 # Muse Glimmer model.
 
+import logging
+
 from torchtitan.config import (
     CompileConfig,
     ParallelismConfig,
@@ -22,9 +24,11 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_vision_encoder,
     resolve_fsdp_mesh,
 )
-from torchtitan.tools.logging import logger
 
 from .model import MuseGlimmerModel
+
+
+logger = logging.getLogger(__name__)
 
 
 def parallelize_muse_glimmer(

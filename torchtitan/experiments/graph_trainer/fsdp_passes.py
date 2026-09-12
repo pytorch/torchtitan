@@ -14,6 +14,7 @@ collectives.  They are no-ops when the graph contains no FSDP collectives.
 from __future__ import annotations
 
 import heapq
+import logging
 import operator
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
@@ -33,6 +34,7 @@ try:
     from torch._inductor.fx_passes.overlap_manual_scheduling import _move_overlap_nodes
 except ImportError:
     _move_overlap_nodes = None
+
 from torch._inductor.fx_passes.overlap_manual_scheduling import (
     manual_overlap_bucketing,
     ManualOverlapPreservingBucketer,
@@ -49,7 +51,9 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
 )
 from torchtitan.experiments.graph_trainer.fsdp_patterns import find_fsdp_unshard_outputs
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 _FSDP_BUCKET_META = "fsdp_bucket"

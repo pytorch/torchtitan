@@ -10,6 +10,7 @@ Handles image decoding, resizing, normalization, and patch extraction for the
 vision encoder.
 """
 
+import logging
 import math
 from collections.abc import Callable
 
@@ -23,7 +24,8 @@ import torchvision.transforms.v2.functional as TVF
 
 from PIL import Image
 
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
 
 
 def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:

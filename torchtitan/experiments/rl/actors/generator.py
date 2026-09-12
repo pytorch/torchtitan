@@ -56,8 +56,8 @@ from torchtitan.experiments.rl.routing.intra_generator_router import (
 from torchtitan.experiments.rl.types import Completion
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.logging import init_logger
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.tools.logging import init_logger
 from torchtitan.tools.utils import has_cuda_capability
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig

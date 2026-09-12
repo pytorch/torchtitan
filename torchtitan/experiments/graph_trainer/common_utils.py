@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import fnmatch
+import logging
 import time
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
@@ -26,7 +27,9 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 )
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 BOXED_CODEGEN_META = "graph_trainer_boxed_codegen"

@@ -19,6 +19,7 @@ are handled by ``model.parallelize()`` directly.
 """
 
 import inspect
+import logging
 
 import spmd_types as spmd
 import torch.nn as nn
@@ -31,7 +32,8 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
 )
 from torchtitan.protocols.sharding import ShardingConfig
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP

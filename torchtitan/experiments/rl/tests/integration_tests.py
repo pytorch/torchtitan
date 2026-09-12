@@ -18,6 +18,8 @@ Usage:
 """
 
 import argparse
+
+import logging
 import os
 import subprocess
 import sys
@@ -25,7 +27,10 @@ import time
 
 from tests.integration_tests import OverrideDefinitions
 
-from torchtitan.tools.logging import logger
+from torchtitan.observability.logging import init_logger
+
+
+logger = logging.getLogger(__name__)
 
 
 _KEEP_ZERO_STD_REWARD_GROUPS = (
@@ -325,6 +330,7 @@ def run_tests(args, test_list: list[OverrideDefinitions]) -> None:
 
 
 def main():
+    init_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir", help="Directory to dump results")
     parser.add_argument(
