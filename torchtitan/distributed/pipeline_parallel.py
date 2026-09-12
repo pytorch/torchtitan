@@ -8,6 +8,7 @@ import dataclasses
 import math
 import os
 from collections.abc import Callable
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -101,6 +102,7 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
+        pass_pipeline_metadata=True,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -320,12 +322,18 @@ def _build_pipeline_schedule(
         return loss
 
     if looped_schedule:
+        schedule_kwargs: dict[str, Any] = {
+            "defer_pp_recv": parallelism.pipeline_parallel_defer_recv,
+            "reuse_recv_buffers": parallelism.pipeline_parallel_reuse_recv_buffers,
+            "max_active_stages": parallelism.pipeline_parallel_max_active_stages,
+        }
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
             n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
+            **schedule_kwargs,
         )
     else:
         schedule = schedule_class(
@@ -576,6 +584,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
+    pass_pipeline_metadata: bool = False,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -599,6 +608,9 @@ def _pipeline_module_split(
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
                                - "lm_head" for the output projection layer
+        get_mesh: Callback used to reconstruct DTensor inputs after PP receives.
+        pass_pipeline_metadata: Pass canonical stage and microbatch indices to
+            every executed stage forward.
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -629,6 +641,7 @@ def _pipeline_module_split(
             device,
             group=pp_mesh.get_group("pp"),
             get_mesh=get_mesh,
+            pass_pipeline_metadata=pass_pipeline_metadata,
         )
         logger.info(
             f"PP rank {pp_rank} is building stage_idx {stage_idx} "
