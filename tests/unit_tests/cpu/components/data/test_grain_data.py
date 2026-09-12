@@ -1285,7 +1285,7 @@ def test_chat_processor_rejects_non_single_turn_messages():
         messages_fn=lambda sample: sample["messages"],
     ).build(context=CONTEXT)
 
-    with pytest.raises(ValueError, match="even-length"):
+    with pytest.raises(ValueError, match="Expected single-turn"):
         processor(
             {"messages": [{"role": "user", "content": "hello"}]},
             np.random.default_rng(0),
