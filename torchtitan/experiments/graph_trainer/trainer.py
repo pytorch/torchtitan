@@ -304,6 +304,7 @@ class GraphTrainer(Trainer):
                     self._traced_step,
                     self.config,
                     parallel_dims=self.parallel_dims,
+                    model_parts=self.model_parts,
                 )
             else:
                 passes = construct_mandatory_graph_passes()
