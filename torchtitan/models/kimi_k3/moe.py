@@ -126,13 +126,13 @@ class KimiLatentMoE(MoE):
         self,
         x_TD: torch.Tensor,
         *,
-        padding_mask: torch.Tensor | None = None,
+        padding_mask_T: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
             x_TD,
             self.expert_bias_E,
-            padding_mask=padding_mask,
+            padding_mask_T=padding_mask_T,
             **router_kwargs,
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)

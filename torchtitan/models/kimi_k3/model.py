@@ -279,7 +279,7 @@ class KimiK3TransformerBlock(Module):
         )
         h_TD = self.ffn_norm(h_TD)
         if self.moe is not None:
-            h_TD = self.moe(h_TD, padding_mask=padding_mask)
+            h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)

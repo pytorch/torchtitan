@@ -15,10 +15,7 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
-from torchtitan.models.common.decoder_sharding import (
-    token_id_placement,
-    token_id_sequence_parallel_placement,
-)
+from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.moe_sharding import _moe_sharding_config
 
 
@@ -43,8 +40,8 @@ class _CapturingAuxLoss(nn.Module):
         super().__init__()
         self.routing_map_TE = None
 
-    def forward(self, scores_TE, routing_map_TE, *, carrier, padding_mask=None):
-        del scores_TE, padding_mask
+    def forward(self, scores_TE, routing_map_TE, *, carrier, padding_mask_T=None):
+        del scores_TE, padding_mask_T
         self.routing_map_TE = routing_map_TE
         return carrier
 
@@ -85,25 +82,24 @@ class TestMoE(unittest.TestCase):
         moe.train()
         moe(x_TD)
         self.assertEqual(moe.router.tokens_per_expert_E.sum().item(), 2 * 3 * top_k)
-        self.assertIs(moe.tokens_per_expert_E, moe.router.tokens_per_expert_E)
-        training_counts = moe.tokens_per_expert_E.clone()
+        training_counts = moe.router.tokens_per_expert_E.clone()
 
         moe.eval()
         with torch.no_grad():
             moe(x_TD)
 
         torch.testing.assert_close(
-            moe.tokens_per_expert_E,
+            moe.router.tokens_per_expert_E,
             training_counts,
         )
 
     def test_padding_is_excluded_from_counts_but_still_dispatched(self):
         moe = self._build_moe()
         x_TD = torch.randn(6, 4)
-        padding_mask = torch.tensor([False, False, False, True, True, True])
+        padding_mask_T = torch.tensor([False, False, False, True, True, True])
 
         moe.train()
-        moe(x_TD, padding_mask=padding_mask)
+        moe(x_TD, padding_mask_T=padding_mask_T)
 
         self.assertEqual(moe.router.tokens_per_expert_E.sum().item(), 3)
         self.assertEqual(moe.routed_experts.num_tokens_per_expert_E.sum().item(), 6)
@@ -120,25 +116,25 @@ class TestMoE(unittest.TestCase):
         router.aux_loss = aux_loss
         router.train()
 
-        padding_mask = torch.tensor([False, False, True, True])
+        padding_mask_T = torch.tensor([False, False, True, True])
         _, _, routing_map_TE = router(
             torch.randn(4, 4),
-            padding_mask=padding_mask,
+            padding_mask_T=padding_mask_T,
         )
 
-        self.assertTrue(routing_map_TE[padding_mask].any())
+        self.assertTrue(routing_map_TE[padding_mask_T].any())
         self.assertIsNotNone(aux_loss.routing_map_TE)
-        self.assertFalse(aux_loss.routing_map_TE[padding_mask].any())
+        self.assertFalse(aux_loss.routing_map_TE[padding_mask_T].any())
         torch.testing.assert_close(
-            aux_loss.routing_map_TE[~padding_mask],
-            routing_map_TE[~padding_mask],
+            aux_loss.routing_map_TE[~padding_mask_T],
+            routing_map_TE[~padding_mask_T],
         )
         torch.testing.assert_close(
             router.tokens_per_expert_E,
             aux_loss.routing_map_TE.sum(dim=0).to(torch.float32),
         )
 
-    def test_router_validates_padding_mask_before_routing(self):
+    def test_router_validates_padding_mask(self):
         router = make_router_config(
             dim=4,
             num_experts=2,
@@ -148,16 +144,16 @@ class TestMoE(unittest.TestCase):
         x_TD = torch.randn(4, 4)
 
         with self.assertRaisesRegex(ValueError, "dtype bool"):
-            router(x_TD, padding_mask=torch.zeros(4))
-        with self.assertRaisesRegex(ValueError, "input token axis"):
-            router(x_TD, padding_mask=torch.zeros(3, dtype=torch.bool))
+            router(x_TD, padding_mask_T=torch.zeros(4))
+        with self.assertRaisesRegex(ValueError, "routing-map token axis"):
+            router(x_TD, padding_mask_T=torch.zeros(3, dtype=torch.bool))
 
     def test_padding_mask_sharding_matches_router_token_layout(self):
         config = _moe_sharding_config(enable_ep=True, enable_sp=False)
         assert config.in_src_shardings is not None
         assert config.in_dst_shardings is not None
-        padding_mask_src = config.in_src_shardings["padding_mask"]
-        padding_mask_dst = config.in_dst_shardings["padding_mask"]
+        padding_mask_src = config.in_src_shardings["padding_mask_T"]
+        padding_mask_dst = config.in_dst_shardings["padding_mask_T"]
 
         self.assertEqual(
             _per_axis_types(padding_mask_src),
@@ -165,7 +161,18 @@ class TestMoE(unittest.TestCase):
         )
         self.assertEqual(
             _per_axis_types(padding_mask_dst),
-            _per_axis_types(token_id_sequence_parallel_placement()),
+            _per_axis_types(token_id_placement(enable_sp=True)),
+        )
+
+        config = _moe_sharding_config(
+            enable_ep=True,
+            enable_sp=True,
+            padding_mask_sequence_sharded=True,
+        )
+        assert config.in_src_shardings is not None
+        self.assertEqual(
+            _per_axis_types(config.in_src_shardings["padding_mask_T"]),
+            _per_axis_types(token_id_placement(enable_sp=True)),
         )
 
 

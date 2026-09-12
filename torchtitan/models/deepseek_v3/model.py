@@ -188,7 +188,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     ):
         x = x + self.attention(self.attention_norm(x), attention_masks, positions)
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x), padding_mask=padding_mask)
+            x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
             x = x + self.feed_forward(self.ffn_norm(x))
         return x

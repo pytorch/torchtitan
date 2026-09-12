@@ -148,17 +148,18 @@ class MTPTransformerBlock(TransformerBlock):
         self,
         mtp_input_embed: torch.Tensor,
         prev_embed: torch.Tensor,
-        mtp_input_valid_mask: torch.Tensor,
+        mtp_input_valid_mask_T: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
         *,
-        padding_mask: torch.Tensor | None = None,
+        padding_mask_T: torch.Tensor | None = None,
     ):
-        mtp_padding_mask = ~mtp_input_valid_mask
-        if padding_mask is not None:
-            mtp_padding_mask = mtp_padding_mask | padding_mask
-        valid_scale_T1 = mtp_input_valid_mask.unsqueeze(-1).to(dtype=prev_embed.dtype)
-        prev_embed = prev_embed * valid_scale_T1
+        mtp_padding_mask_T = ~mtp_input_valid_mask_T
+        if padding_mask_T is not None:
+            mtp_padding_mask_T = mtp_padding_mask_T | padding_mask_T
+        prev_embed = prev_embed * mtp_input_valid_mask_T.unsqueeze(-1).to(
+            dtype=prev_embed.dtype
+        )
         h = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
@@ -166,7 +167,7 @@ class MTPTransformerBlock(TransformerBlock):
         if self.moe_enabled:
             h = h + self.moe(
                 self.ffn_norm(h),
-                padding_mask=mtp_padding_mask,
+                padding_mask_T=mtp_padding_mask_T,
             )
         else:
             h = h + self.feed_forward(self.ffn_norm(h))
@@ -377,7 +378,7 @@ class MTPDecoder(Decoder):
                 mtp_input_valid_mask,
                 attention_masks,
                 positions,
-                padding_mask=padding_mask,
+                padding_mask_T=padding_mask,
             )
             mtp_outputs.append(prev_depth_hidden)
 

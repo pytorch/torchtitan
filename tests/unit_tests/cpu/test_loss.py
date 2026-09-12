@@ -522,14 +522,14 @@ class _AddMTPBlock(nn.Module):
         self,
         mtp_input_embed,
         prev_embed,
-        mtp_input_valid_mask,
+        mtp_input_valid_mask_T,
         attention_masks,
         positions,
         *,
-        padding_mask=None,
+        padding_mask_T=None,
     ):
-        del attention_masks, positions, padding_mask
-        return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
+        del attention_masks, positions, padding_mask_T
+        return mtp_input_embed + prev_embed * mtp_input_valid_mask_T.unsqueeze(-1)
 
 
 class _FakeMTPDecoder(MTPDecoder):

@@ -16,7 +16,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     token_id_placement,
-    token_id_sequence_parallel_placement,
 )
 from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
 
@@ -272,7 +271,12 @@ def _routed_experts_sharding_configs(
     )
 
 
-def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
+def _moe_sharding_config(
+    *,
+    enable_ep: bool,
+    enable_sp: bool,
+    padding_mask_sequence_sharded: bool = False,
+) -> ShardingConfig:
     """``ShardingConfig`` at the MoE boundary.
 
     Input arrives at sp_layout and is redistributed to desired_input_layouts.
@@ -292,21 +296,21 @@ def _moe_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConfig:
         if enable_sp
         else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
-    padding_mask_src_layout = token_id_placement()
-    padding_mask_dst_layout = (
-        token_id_sequence_parallel_placement() if enable_ep else token_id_placement()
+    padding_mask_src_layout = token_id_placement(
+        enable_sp=padding_mask_sequence_sharded
     )
+    padding_mask_dst_layout = token_id_placement(enable_sp=enable_ep)
     return ShardingConfig(
         state_shardings={
             "expert_bias_E": dense_param_placement(tp=spmd.R),
         },
         in_src_shardings={
             "x_TD": sp_layout,
-            "padding_mask": padding_mask_src_layout,
+            "padding_mask_T": padding_mask_src_layout,
         },
         in_dst_shardings={
             "x_TD": desired_input_layout,
-            "padding_mask": padding_mask_dst_layout,
+            "padding_mask_T": padding_mask_dst_layout,
         },
         out_src_shardings=output_layout,
         out_dst_shardings=sp_layout,
@@ -318,6 +322,7 @@ def set_moe_sharding_config(
     *,
     enable_ep: bool,
     enable_sp: bool,
+    padding_mask_sequence_sharded: bool = False,
     expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
 ) -> None:
     """Populate ``sharding_config`` on every MoE submodule.
@@ -346,6 +351,8 @@ def set_moe_sharding_config(
         enable_ep: Whether expert parallelism is enabled.
         enable_sp: Whether sequence parallelism is enabled (affects the
             wrapper's enter/exit TP layout).
+        padding_mask_sequence_sharded: Whether the input padding mask is
+            already sequence-sharded across the TP axis.
         expert_param_layout: ``{param_name: tp_placement}`` for the
             routed experts' weight params (used on the EP-disabled +
             TP-enabled path).
@@ -353,7 +360,9 @@ def set_moe_sharding_config(
     # Always set sharding configs regardless of whether TP is enabled.
     # ``resolve_mesh`` filters out disabled axes at runtime.
     moe_cfg.sharding_config = _moe_sharding_config(
-        enable_ep=enable_ep, enable_sp=enable_sp
+        enable_ep=enable_ep,
+        enable_sp=enable_sp,
+        padding_mask_sequence_sharded=padding_mask_sequence_sharded,
     )
     moe_cfg.router.sharding_config = ShardingConfig(
         state_shardings={

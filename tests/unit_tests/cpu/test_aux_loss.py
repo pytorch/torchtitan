@@ -61,7 +61,7 @@ def _reference_loss(
     top_k: int,
     *,
     coeff: float = 1.0,
-    padding_mask: torch.Tensor | None = None,
+    padding_mask_T: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Explicit DeepSeek-V3 Eqs 17-20 reference, in the loss's token-mode form.
 
@@ -71,9 +71,9 @@ def _reference_loss(
     in, and ``coeff`` stands for the framework's ``coeff / denominator``.
     """
     E = scores_TE.size(-1)
-    T = scores_TE.size(0) if padding_mask is None else (~padding_mask).sum()
+    T = scores_TE.size(0) if padding_mask_T is None else (~padding_mask_T).sum()
     counts_E = routing_map_TE.sum(dim=0).to(scores_TE.dtype)
-    probs_TE = scores_TE if padding_mask is None else scores_TE[~padding_mask]
+    probs_TE = scores_TE if padding_mask_T is None else scores_TE[~padding_mask_T]
     probs_TE = probs_TE / probs_TE.sum(dim=-1, keepdim=True)
     f_E = counts_E * (E / (top_k * T))
     p_E = probs_TE.sum(dim=0) / T
@@ -187,12 +187,12 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         routing_map_TE[self.T // 2 :] = False
         loss = _make_loss(self.coeff, self.denominator)
 
-        padding_mask = ~routing_map_TE.any(dim=-1)
+        padding_mask_T = ~routing_map_TE.any(dim=-1)
         out_TK = loss(
             scores_TE,
             routing_map_TE,
             carrier=carrier_TK,
-            padding_mask=padding_mask,
+            padding_mask_T=padding_mask_T,
         )
         out_TK.sum().backward()
         _zero_aux_losses([loss])
@@ -203,7 +203,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
             routing_map_TE,
             self.K,
             coeff=self.coeff / self.denominator,
-            padding_mask=padding_mask,
+            padding_mask_T=padding_mask_T,
         )
         (ref_aux + (ref_scores_TE * full_routing_map_TE).sum()).backward()
 
@@ -211,7 +211,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
             scores_TE.detach(),
             routing_map_TE,
             self.K,
-            padding_mask=padding_mask,
+            padding_mask_T=padding_mask_T,
         )
         self.assertAlmostEqual(
             AuxLoss.group_acc[_METRIC_KEY].item(),

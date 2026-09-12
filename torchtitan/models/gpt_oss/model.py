@@ -184,7 +184,7 @@ class GptOssTransformerBlock(TransformerBlock):
             attention_masks = attention_masks[self.attn_mask_key]
 
         x = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        x = x + self.moe(self.ffn_norm(x), padding_mask=padding_mask)
+        x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         return x
 
 

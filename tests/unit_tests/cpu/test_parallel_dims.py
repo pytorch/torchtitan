@@ -37,7 +37,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_sequence_parallel_placement,
     token_id_placement,
-    token_id_sequence_parallel_placement,
 )
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
@@ -269,7 +268,7 @@ class TestSpmdLayout(DTensorTestBase):
             ((MeshAxisName.DP, MeshAxisName.CP),),
         )
         self.assertEqual(
-            token_id_sequence_parallel_placement().partition_spec,
+            token_id_placement(enable_sp=True).partition_spec,
             ((MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP),),
         )
         self.assertEqual(
@@ -466,7 +465,7 @@ class TestSpmdLayout(DTensorTestBase):
         )
         x = torch.arange(8, device=self.device_type)
         src = token_id_placement()
-        dst = token_id_sequence_parallel_placement()
+        dst = token_id_placement(enable_sp=True)
         spmd_validate_redistributions(
             ShardingConfig(
                 in_src_shardings={"input_ids_T": src},

@@ -70,10 +70,14 @@ class ParamGroupConfig:
 T = TypeVar("T", bound=Optimizer)
 
 
+class _MoERouterLike(Protocol):
+    tokens_per_expert_E: torch.Tensor  # noqa: N815
+
+
 class _MoELike(Protocol):
     load_balance_coeff: float | None
-    tokens_per_expert_E: torch.Tensor  # noqa: N815
     expert_bias_E: torch.Tensor  # noqa: N815
+    router: _MoERouterLike
 
 
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
@@ -463,7 +467,7 @@ def register_moe_load_balancing_hook(
         tokens_per_expert_E_list = []
         dtensor_mesh = None
         for transformer_block, moe in _iter_moe_layers(model_parts):
-            tokens_per_expert_E = moe.tokens_per_expert_E
+            tokens_per_expert_E = moe.router.tokens_per_expert_E
             if isinstance(tokens_per_expert_E, torch.distributed.tensor.DTensor):
                 dtensor_mesh = tokens_per_expert_E.device_mesh
                 tokens_per_expert_E = tokens_per_expert_E.to_local()
@@ -517,7 +521,7 @@ def register_moe_load_balancing_hook(
                 )
                 expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
                 moe.expert_bias_E.add_(expert_bias_delta_E)
-                moe.tokens_per_expert_E.zero_()
+                moe.router.tokens_per_expert_E.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(

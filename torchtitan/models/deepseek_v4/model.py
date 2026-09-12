@@ -94,11 +94,11 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
             if getattr(self.moe.router, "hash", False):
                 x = self.moe(
                     ffn_input,
-                    padding_mask=padding_mask,
+                    padding_mask_T=padding_mask,
                     input_ids_T=input_ids_T,
                 )
             else:
-                x = self.moe(ffn_input, padding_mask=padding_mask)
+                x = self.moe(ffn_input, padding_mask_T=padding_mask)
         else:
             x = self.feed_forward(self.ffn_norm(x))
         x = self.hc_post(x, residual, post, comb)
@@ -309,7 +309,7 @@ class DeepSeekV4Model(Decoder):
                 valid_mask,
                 attention_masks,
                 positions,
-                padding_mask=padding_mask,
+                padding_mask_T=padding_mask,
             )
             mtp_outputs.append(prediction_hidden)
         return mtp_outputs

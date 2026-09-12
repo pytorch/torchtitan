@@ -241,7 +241,7 @@ class Qwen35TransformerBlock(Module):
 
         h_TD = self.ffn_norm(x_TD)
         if self.moe_enabled:
-            x_TD = x_TD + self.moe(h_TD, padding_mask=padding_mask)
+            x_TD = x_TD + self.moe(h_TD, padding_mask_T=padding_mask)
         else:
             x_TD = x_TD + self.feed_forward(h_TD)
         return x_TD

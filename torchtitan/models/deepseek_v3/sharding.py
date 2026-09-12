@@ -20,7 +20,6 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_map,
     token_id_placement,
-    token_id_sequence_parallel_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
@@ -76,6 +75,7 @@ def _set_deepseek_v3_layer_sharding(
     *,
     enable_sp: bool,
     enable_ep: bool,
+    padding_mask_sequence_sharded: bool = False,
 ) -> None:
     """Set sharding on one DeepSeek V3 transformer layer.
 
@@ -148,6 +148,7 @@ def _set_deepseek_v3_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
+            padding_mask_sequence_sharded=padding_mask_sequence_sharded,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
 
@@ -170,16 +171,17 @@ def _set_deepseek_v3_mtp_sharding(
             mtp_layer_cfg,
             enable_sp=enable_sp,
             enable_ep=enable_ep,
+            padding_mask_sequence_sharded=enable_sp,
         )
         if enable_sp:
             mtp_layer_cfg.sharding_config = ShardingConfig(
                 in_src_shardings={
-                    "mtp_input_valid_mask": token_id_placement(),
-                    "padding_mask": token_id_placement(),
+                    "mtp_input_valid_mask_T": token_id_placement(),
+                    "padding_mask_T": token_id_placement(),
                 },
                 in_dst_shardings={
-                    "mtp_input_valid_mask": token_id_sequence_parallel_placement(),
-                    "padding_mask": token_id_sequence_parallel_placement(),
+                    "mtp_input_valid_mask_T": token_id_placement(enable_sp=True),
+                    "padding_mask_T": token_id_placement(enable_sp=True),
                 },
             )
         mtp_layer_cfg.enorm.sharding_config = norm
