@@ -7,15 +7,14 @@
 """
 Context Parallel APIs
 
-``cp_shard`` is only used by Flux, which has a different input pattern from LLMs.
+``cp_shard`` is only used by Flux, which has a different input pattern from
+LLMs.
 
-``prepare_context_parallel_input`` is the main API.
+``prepare_context_parallel_input`` is the main decoder API. It shards named
+model input tensors without modifying attention metadata.
 TODO: we should generalize this API to cover even Flux's use case.
 """
 
 from .api import cp_shard, prepare_context_parallel_input
 
-__all__ = [
-    "cp_shard",
-    "prepare_context_parallel_input",
-]
+__all__ = ["cp_shard", "prepare_context_parallel_input"]

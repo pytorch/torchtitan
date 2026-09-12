@@ -77,11 +77,17 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     def prepare(batch, input_shardings, cp_mesh, *_args):
         assert input_shardings is None
         assert cp_mesh == "cp_mesh"
-        calls.append("cp")
+        calls.append("cp_input")
+        return batch, "load_balancer"
+
+    def shard_metadata(batch, cp_mesh, load_balancer):
+        assert cp_mesh == "cp_mesh"
+        assert load_balancer == "load_balancer"
+        calls.append("cp_metadata")
         return batch
 
     def annotate(_parallel_dims, batch, input_sharding):
-        assert calls == ["cp"]
+        assert calls == ["cp_input", "cp_metadata"]
         assert set(batch) == {"input", "labels", "positions"}
         assert input_sharding["input"].local_type[MeshAxisName.TP] is spmd.R
         assert input_sharding["labels"].local_type[MeshAxisName.TP] is spmd.I
@@ -92,6 +98,11 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     monkeypatch.setattr(
         "torchtitan.distributed.context_parallel.api.prepare_context_parallel_input",
         prepare,
+    )
+    monkeypatch.setattr(
+        "torchtitan.models.common.cp_attention."
+        "KVAllGatherCPFlexInnerAttention.cp_shard",
+        shard_metadata,
     )
     monkeypatch.setattr(
         "torchtitan.distributed.spmd_types.annotate_input_spmd_types", annotate
@@ -119,5 +130,5 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         parallelism=ParallelismConfig(spmd_backend="spmd_types"),
     )
 
-    assert calls == ["cp", "spmd"]
+    assert calls == ["cp_input", "cp_metadata", "spmd"]
     assert extra_kwargs["attention_masks"] is dense_attention_mask

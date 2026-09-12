@@ -427,7 +427,10 @@ class MuseGlimmerModel(Decoder):
         )
         if parallel_dims.cp_enabled:
             batch = self._cp_shard_inputs(
-                batch, input_sharding, parallel_dims, parallelism
+                batch,
+                input_sharding,
+                parallel_dims.get_mesh("cp"),
+                parallelism,
             )
         if parallelism.spmd_backend == "spmd_types":
             if (

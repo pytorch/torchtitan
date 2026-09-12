@@ -13,6 +13,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor.experimental._attention import (
     _context_parallel_shard,
     _HeadTailLoadBalancer,
+    _LoadBalancer,
     _PTRRLoadBalancer,
 )
 from torch.nn.attention.flex_attention import BlockMask
@@ -20,6 +21,8 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import AttentionMasksType
+
+ContextParallelLoadBalancer = _LoadBalancer | None
 
 
 def _cp_shard_dims(input_sharding: dict[str, SpmdType]) -> dict[str, int]:
@@ -36,27 +39,87 @@ def _cp_shard_dims(input_sharding: dict[str, SpmdType]) -> dict[str, int]:
     return dims
 
 
+def _create_context_parallel_load_balancer(
+    cp_mesh: DeviceMesh,
+    seq_len: int,
+    attention_masks: AttentionMasksType | None,
+    load_balancer_type: str | None = "headtail",
+    ptrr_mask_key: str | None = None,
+) -> ContextParallelLoadBalancer:
+    """Create the load balancer shared by input and metadata sharding."""
+    cp_world_size = cp_mesh.size(0)
+
+    load_balancer = None
+    if load_balancer_type:
+        match load_balancer_type:
+            case "headtail":
+                # For SDPA, we use the _HeadTailLoadBalancer.
+                load_balancer = _HeadTailLoadBalancer(
+                    seq_len, cp_world_size, cp_mesh.device_type
+                )
+            case "ptrr":
+                # For FlexInnerAttention, we use _PTRRLoadBalancer.
+                # _PTRRLoadBalancer is built from a single BlockMask. When the
+                # attention masks are a dict[str, BlockMask], the caller must
+                # specify which mask to build the balancer from via
+                # ``ptrr_mask_key``; the resulting balancer is then used to
+                # shard every mask in the dict as well as the inputs.
+                if attention_masks is None:
+                    raise ValueError(
+                        "PTRRLoadBalancer requires attention_masks to be a "
+                        "BlockMask or dict[str, BlockMask], but got None"
+                    )
+                if isinstance(attention_masks, dict):
+                    if ptrr_mask_key is None:
+                        raise ValueError(
+                            "PTRRLoadBalancer received a dict[str, BlockMask] "
+                            "but no mask key was specified. Set "
+                            "--parallelism.context_parallel_ptrr_mask_key to "
+                            f"one of: {sorted(attention_masks.keys())}"
+                        )
+                    if ptrr_mask_key not in attention_masks:
+                        raise ValueError(
+                            f"context_parallel_ptrr_mask_key '{ptrr_mask_key}' "
+                            f"is not a key in attention_masks. Available keys: "
+                            f"{sorted(attention_masks.keys())}"
+                        )
+                    ptrr_mask = attention_masks[ptrr_mask_key]
+                else:
+                    ptrr_mask = attention_masks
+                if not isinstance(ptrr_mask, BlockMask):
+                    raise ValueError(
+                        f"PTRRLoadBalancer requires the mask to be a "
+                        f"BlockMask, but got {type(ptrr_mask)}"
+                    )
+                load_balancer = _PTRRLoadBalancer(ptrr_mask, cp_world_size)
+            case _:
+                raise ValueError(
+                    f"Invalid load_balancer_type '{load_balancer_type}'. "
+                    f"Must be one of: 'headtail', 'ptrr', or None"
+                )
+    return load_balancer
+
+
 def prepare_context_parallel_input(
     input_dict: dict[str, Any],
     input_shardings: dict[str, SpmdType] | None,
     cp_mesh: DeviceMesh,
     load_balancer_type: str | None = "headtail",
     ptrr_mask_key: str | None = None,
-) -> dict[str, Any]:
-    """Shard named tensors and attention masks for Context Parallel.
+) -> tuple[dict[str, Any], ContextParallelLoadBalancer]:
+    """Shard named tensors for Context Parallel.
 
     Each tensor named in ``shard_dims`` (resolved against ``input_dict``) is
     sharded along its declared sequence dimension using a single shared load
-    balancer. Attention masks (``BlockMask``) are sharded separately along their
-    Q sequence dimension. Position resolution (per-document vs sequential) is
-    handled upstream (the model's ``preprocess_inputs`` / the trainer).
+    balancer. Attention metadata is left unchanged for attention backends to
+    shard. Position resolution (per-document vs sequential) is handled upstream
+    (the model's ``preprocess_inputs`` / the trainer).
 
     Args:
         input_dict: Model-forward inputs keyed by name, containing 'input',
             'labels', and any extra kwargs. Tensor entries named in
             ``shard_dims`` (e.g. 'input', 'labels', 'positions') are sharded and
-            written back; 'attention_masks', if present, is sharded along its Q
-            seq dim.
+            written back; 'attention_masks', if present, is left unchanged.
         input_shardings: Per-input SPMD layout; the CP sequence dim for each
             input is derived via ``_cp_shard_dims`` (inputs whose CP axis is
             Replicate/Partial are omitted and left untouched). When None,
@@ -70,10 +133,8 @@ def prepare_context_parallel_input(
             PTRRLoadBalancer is built from. Ignored otherwise.
 
     Returns:
-        The same ``input_dict`` object, mutated in place with its sharded tensor
-        entries (e.g. 'input', 'labels', 'positions') and 'attention_masks'
-        updated. When no named tensor is present to shard, it is returned
-        unchanged.
+        The same ``input_dict`` object with its named tensors sharded, together
+        with the load balancer that attention backends must use for metadata.
     """
     if input_shardings is not None:
         shard_dims = _cp_shard_dims(input_shardings)
@@ -86,25 +147,29 @@ def prepare_context_parallel_input(
 
     shard_names = [n for n in shard_dims if n in named]
     if not shard_names:
-        return input_dict
+        return input_dict, None
+
     buffers = tuple(named[n] for n in shard_names)
     seq_dims = tuple(shard_dims[n] for n in shard_names)
-
-    attention_masks = input_dict.get("attention_masks", None)
-    sharded_buffers, attention_masks = cp_shard(
+    load_balancer = _create_context_parallel_load_balancer(
         cp_mesh,
-        buffers,
-        attention_masks,
+        buffers[0].size(seq_dims[0]),
+        input_dict.get("attention_masks"),
         load_balancer_type,
-        input_seq_dims=seq_dims,
-        ptrr_mask_key=ptrr_mask_key,
+        ptrr_mask_key,
     )
-
+    sharded_buffers = cast(
+        "tuple[torch.Tensor, ...]",
+        _context_parallel_shard(
+            mesh=cp_mesh,
+            buffers=buffers,
+            seq_dims=seq_dims,
+            load_balancer=load_balancer,
+        ),
+    )
     for n, buf in zip(shard_names, sharded_buffers):
         input_dict[n] = buf
-    if attention_masks is not None:
-        input_dict["attention_masks"] = attention_masks
-    return input_dict
+    return input_dict, load_balancer
 
 
 def cp_shard(
@@ -159,60 +224,15 @@ def cp_shard(
         seq_dims = input_seq_dims
     else:
         seq_dims = tuple(input_seq_dims for _ in inputs)
-    seq_len = inputs[0].size(seq_dims[0])
-    cp_world_size = cp_mesh.size(0)
-
-    load_balancer = None
-    if load_balancer_type:
-        match load_balancer_type:
-            case "headtail":
-                # For SDPA, we use the _HeadTailLoadBalancer.
-                load_balancer = _HeadTailLoadBalancer(
-                    seq_len, cp_world_size, cp_mesh.device_type
-                )
-            case "ptrr":
-                # For FlexInnerAttention, we use _PTRRLoadBalancer.
-                # _PTRRLoadBalancer is built from a single BlockMask. When the
-                # attention masks are a dict[str, BlockMask], the caller must
-                # specify which mask to build the balancer from via
-                # ``ptrr_mask_key``; the resulting balancer is then used to
-                # shard every mask in the dict as well as the inputs.
-                if attention_masks is None:
-                    raise ValueError(
-                        "PTRRLoadBalancer requires attention_masks to be a "
-                        "BlockMask or dict[str, BlockMask], but got None"
-                    )
-                if isinstance(attention_masks, dict):
-                    if ptrr_mask_key is None:
-                        raise ValueError(
-                            "PTRRLoadBalancer received a dict[str, BlockMask] "
-                            "but no mask key was specified. Set "
-                            "--parallelism.context_parallel_ptrr_mask_key to "
-                            f"one of: {sorted(attention_masks.keys())}"
-                        )
-                    if ptrr_mask_key not in attention_masks:
-                        raise ValueError(
-                            f"context_parallel_ptrr_mask_key '{ptrr_mask_key}' "
-                            f"is not a key in attention_masks. Available keys: "
-                            f"{sorted(attention_masks.keys())}"
-                        )
-                    ptrr_mask = attention_masks[ptrr_mask_key]
-                else:
-                    ptrr_mask = attention_masks
-                if not isinstance(ptrr_mask, BlockMask):
-                    raise ValueError(
-                        f"PTRRLoadBalancer requires the mask to be a "
-                        f"BlockMask, but got {type(ptrr_mask)}"
-                    )
-                load_balancer = _PTRRLoadBalancer(ptrr_mask, cp_world_size)
-            case _:
-                raise ValueError(
-                    f"Invalid load_balancer_type '{load_balancer_type}'. "
-                    f"Must be one of: 'headtail', 'ptrr', or None"
-                )
-
+    load_balancer = _create_context_parallel_load_balancer(
+        cp_mesh,
+        inputs[0].size(seq_dims[0]),
+        attention_masks,
+        load_balancer_type,
+        ptrr_mask_key,
+    )
     inputs = cast(
-        tuple[torch.Tensor, ...],
+        "tuple[torch.Tensor, ...]",
         _context_parallel_shard(
             mesh=cp_mesh,
             buffers=inputs,
