@@ -33,11 +33,10 @@ if TYPE_CHECKING:
     )
 
 
-# Routed-expert layout for the shared ``GroupedExperts`` (w1/w2/w3).
+# Routed-expert layout for the shared ``GroupedExperts`` (w13/w2).
 _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
+    "w13": spmd.S(1),
     "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
 }
 
 

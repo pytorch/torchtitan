@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Literal
 
 import spmd_types as spmd
@@ -29,7 +29,6 @@ from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import ShardingConfig
 
 from .token_dispatcher import (
     AllToAllTokenDispatcher,
@@ -51,35 +50,12 @@ from .token_dispatcher import (
 #        for the up/gate projections and (E, D, F) for the down one)
 
 
-def _fuse_grouped_experts_sharding(
-    sharding_config: ShardingConfig | None,
-) -> ShardingConfig | None:
-    """Map logical w1/w3 shardings onto the physical w13 parameter."""
-    if sharding_config is None:
-        return None
-    state_shardings = dict(sharding_config.state_shardings)
-    gate_sharding = state_shardings.get("w1_EFD")
-    up_sharding = state_shardings.get("w3_EFD")
-    if (gate_sharding is None) != (up_sharding is None):
-        raise ValueError("w1_EFD and w3_EFD must both define state shardings")
-    if gate_sharding is None:
-        return sharding_config
-    if gate_sharding != up_sharding:
-        raise ValueError("w1_EFD and w3_EFD must use the same state sharding")
-    if "w13" in state_shardings:
-        raise ValueError("state_shardings cannot define both w13 and w1_EFD/w3_EFD")
-
-    del state_shardings["w1_EFD"]
-    del state_shardings["w3_EFD"]
-    state_shardings["w13"] = gate_sharding
-    return replace(sharding_config, state_shardings=state_shardings)
-
-
 class GroupedExperts(Module):
     """SwiGLU experts with one physical interleaved gate-up parameter.
 
-    ``w13`` has shape ``(E, 2F, D)`` for one grouped GEMM. Its logical view is
-    ``(E, F, 2, D)``, with gate and up interleaved on the size-2 axis.
+    ``w13`` has shape ``(E, F, 2, D)``, with gate and up stored on the size-2
+    axis. Forward flattens the middle dimensions to ``(E, 2F, D)`` for one
+    grouped GEMM.
     Model state-dict adapters translate the physical ``w13`` parameter to the
     external checkpoint layout.
     """
@@ -91,20 +67,14 @@ class GroupedExperts(Module):
         num_experts: int
         activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
 
-        def build(self, **kwargs):
-            physical_config = replace(
-                self,
-                sharding_config=_fuse_grouped_experts_sharding(self.sharding_config),
-            )
-            return Module.Config.build(physical_config, **kwargs)
-
     def __init__(self, config: Config):
         super().__init__()
         self.num_experts = config.num_experts
         self.w13 = nn.Parameter(
             torch.empty(
                 config.num_experts,
-                2 * config.hidden_dim,
+                config.hidden_dim,
+                2,
                 config.dim,
             )
         )
@@ -129,11 +99,11 @@ class GroupedExperts(Module):
         if isinstance(self.w13, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w13_E2FD = self.w13.to_local()
+            w13_E_F_2_D = self.w13.to_local()
             assert isinstance(self.w2_EDF, DTensor)
             w2_EDF = self.w2_EDF.to_local()
         else:
-            w13_E2FD = self.w13
+            w13_E_F_2_D = self.w13
             w2_EDF = self.w2_EDF
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
@@ -149,18 +119,18 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        E, F2, D = w13_E2FD.shape
-        F = F2 // 2
-        gate_up_R2F = remat.region(
+        E, F, _, D = w13_E_F_2_D.shape
+        w13_E_2F_D = w13_E_F_2_D.reshape(E, F * 2, D)
+        gate_up_R_2F = remat.region(
             self._grouped_mm,
             self.remat_region_name("w13"),
             recompute=self.remat_should_recompute("w13"),
         )(
             A=x_RD.bfloat16(),
-            weight_EOI=w13_E2FD.bfloat16(),
+            weight_EOI=w13_E_2F_D.bfloat16(),
             offs=offsets_E,
         )
-        gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
+        gate_RF, up_RF = gate_up_R_2F.reshape(-1, F, 2).unbind(-1)
         remat.recompute_needs_tensor(gate_RF, up_RF)
         h_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
         out_RD = remat.region(
