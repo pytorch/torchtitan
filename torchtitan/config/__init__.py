@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import TYPE_CHECKING
+
 import torch
 
 TORCH_DTYPE_MAP = {
@@ -17,7 +19,6 @@ from .configs import (
     CompileConfig,
     DebugConfig,
     FSDPSymmMemScope,
-    ParallelismConfig,
     TrainingConfig,
 )
 from .configurable import Configurable
@@ -31,6 +32,18 @@ from .override import (
     override,
     OverrideConfig,
 )
+
+if TYPE_CHECKING:
+    from .parallelism import ParallelismConfig
+
+
+def __getattr__(name: str) -> object:
+    if name == "ParallelismConfig":
+        from .parallelism import ParallelismConfig
+
+        return ParallelismConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "ConfigManager",

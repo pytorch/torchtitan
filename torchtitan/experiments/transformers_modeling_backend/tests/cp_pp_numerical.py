@@ -37,7 +37,7 @@ import torch
 
 from scripts._checkpoint_test_config import configure_checkpoint
 
-_MODULE = "transformers_modeling_backend"
+_MODULE = "torchtitan_recipes.tests.transformers_modeling_backend"
 # cp=2; seq_len 256 -> 2 flex Q-blocks so ptrr (blocks % cp == 0) holds; 1 step;
 # fp32 so CP/PP reduction-order noise isn't masked by bf16. Small on purpose.
 _COMMON = (
@@ -47,8 +47,7 @@ _COMMON = (
     "--training.mixed_precision_param float32 --debug.seed 42 --debug.deterministic"
 )
 # The flex BlockMask requires the ptrr CP load balancer.
-_CONFIG = "transformers_modeling_backend_debugmodel"
-_BALANCER = "ptrr"
+_CONFIG = "transformers_backend_dense_cp_pp"
 _TOL = 2e-2  # bf16/flex reduction-order noise (fp32 run is ~5e-7 in practice)
 
 
@@ -119,8 +118,8 @@ def _compare(ref_dir: str, cp_pp_dir: str) -> None:
 
 
 def _run_case(work: str) -> None:
-    config, balancer = _CONFIG, _BALANCER
-    print(f"\n==== CP+PP numerical (config={config} balancer={balancer}) ====")
+    config = _CONFIG
+    print(f"\n==== CP+PP numerical (config={config}) ====")
     seed = os.path.join(work, "seed")
     co, pp = os.path.join(work, "co"), os.path.join(work, "pp")
     os.makedirs(co, exist_ok=True)
@@ -156,15 +155,14 @@ def _run_case(work: str) -> None:
         mode="load",
         initial_load_path=f"{seed}/checkpoint/step-0",
     )
-    bal = f"--parallelism.context_parallel_load_balancer {balancer}"
-
     print("  [2/4] CP-only run (cp=2, pp=1)")
     _run(
         _torchrun(
             2,
             load_module,
             load_config,
-            f"{_COMMON} {bal} --parallelism.data_parallel_shard_degree 1 "
+            f"{_COMMON} --parallelism.data_parallel_shard_degree 1 "
+            "--parallelism.pipeline_parallel_degree 1 "
             f"--dump_folder {os.path.join(work, 'out_co')}",
         ),
         env={**load_env, "HF_BACKEND_LOGIT_DUMP": co},
@@ -176,7 +174,7 @@ def _run_case(work: str) -> None:
             4,
             load_module,
             load_config,
-            f"{_COMMON} {bal} --parallelism.pipeline_parallel_degree 2 "
+            f"{_COMMON} --parallelism.pipeline_parallel_degree 2 "
             f"--parallelism.num_pp_microbatches 4 "
             f"--training.num_tokens_per_microbatch_per_dp_rank 256 "
             f"--parallelism.pipeline_parallel_schedule 1F1B "

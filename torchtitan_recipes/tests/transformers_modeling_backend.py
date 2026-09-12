@@ -6,6 +6,7 @@
 
 """Configurations for the Transformers modeling backend integration tests."""
 
+from torchtitan.distributed.context_parallel import PTRRLoadBalancer
 from torchtitan.experiments.transformers_modeling_backend.config_registry import (
     transformers_modeling_backend_debugmodel,
     transformers_modeling_backend_debugmodel_moe,
@@ -20,7 +21,7 @@ def transformers_backend_moe_fsdp_tp_ep_cp() -> TransformersBackendConfig:
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.parallelism.context_parallel_load_balancer = "ptrr"
+    config.parallelism.context_parallel_load_balancer = PTRRLoadBalancer.Config()
     config.training.disable_cuda_graphs = True
     config.training.steps = 2
     return config
@@ -46,7 +47,7 @@ def transformers_backend_dense_cp_pp() -> TransformersBackendConfig:
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 2
     config.parallelism.pipeline_parallel_schedule = "1F1B"
-    config.parallelism.context_parallel_load_balancer = "ptrr"
+    config.parallelism.context_parallel_load_balancer = PTRRLoadBalancer.Config()
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.disable_cuda_graphs = True
     config.training.steps = 2

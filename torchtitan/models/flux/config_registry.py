@@ -89,7 +89,9 @@ def flux_debugmodel() -> FluxTrainer.Config:
             collator=FluxCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
-        parallelism=ParallelismConfig(context_parallel_degree=1),
+        parallelism=ParallelismConfig(
+            context_parallel_degree=1,
+        ),
         activation_checkpoint=FullAC.Config(),
         checkpointer=None,
         validator=None,
