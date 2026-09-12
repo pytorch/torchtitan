@@ -315,14 +315,42 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         for optim in self.optimizers:
             init_optim_state(optim)
             result.update(get_flat_optim_state_dict(optim))
+        self._apply_module_state_dict_adapters(
+            result,
+            method_name="_optimizer_state_dict_post_hook",
+        )
         return result
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        state_dict = dict(state_dict)
+        self._apply_module_state_dict_adapters(
+            state_dict,
+            method_name="_optimizer_load_state_dict_pre_hook",
+        )
         # init_optim_state must run first: the unflatten step reads each
         # optimizer's live state to learn which state tensors to expect.
         for optim in self.optimizers:
             init_optim_state(optim)
             load_flat_optim_state_dict(optim, state_dict)
+
+    def _apply_module_state_dict_adapters(
+        self,
+        state_dict: dict[str, Any],
+        *,
+        method_name: str,
+    ) -> None:
+        """Apply optional flat optimizer-state adapters once per module."""
+        visited: set[int] = set()
+        for model in self.model_parts:
+            for fqn, module in model.named_modules():
+                if id(module) in visited:
+                    continue
+                visited.add(id(module))
+                adapter = getattr(module, method_name, None)
+                if adapter is None:
+                    continue
+                canonical = canonical_fqn(fqn)
+                adapter(state_dict, f"{canonical}." if canonical else "")
 
     def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
