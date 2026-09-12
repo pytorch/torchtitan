@@ -30,7 +30,7 @@ for all four parallelism configurations (EP on/off × SP on/off).
   `desired_input_layouts`. Output is `Partial`, reduced to `sp_layout`
   at the boundary.
 - **Router gate**: weights `Replicate`, output stays DTensor.
-- **Shared experts** (w1/w2/w3): dense-family TP plan. Colwise for w1/w3,
+- **Shared experts** (w13/w2): dense-family TP plan. Colwise for w13,
   rowwise for w2. Output stays `Partial` — reduction happens once at
   the MoE boundary.
 - **Routed experts** (`RoutedExperts`): `LocalMapConfig` converts DTensor

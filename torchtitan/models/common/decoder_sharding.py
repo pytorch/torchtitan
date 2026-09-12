@@ -330,8 +330,7 @@ def set_dense_ffn_sharding(
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         )
     )
-    feed_forward_cfg.w1.sharding_config = colwise_config()
-    feed_forward_cfg.w3.sharding_config = colwise_config()
+    feed_forward_cfg.w13.sharding_config = colwise_config()
     w2_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
         w2_config = ShardingConfig(state_shardings=w2_config.state_shardings)
