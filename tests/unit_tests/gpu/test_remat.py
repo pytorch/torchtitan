@@ -25,7 +25,7 @@ from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
 from torchtitan.overrides.fused_swiglu import (
     dist_gemm_fused_swiglu,
     fused_swiglu,
-    FusedSwiGLUGroupedExperts,
+    FusedSwiGLU,
 )
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -359,7 +359,12 @@ class TestRematRegions(unittest.TestCase):
         configs = (
             GroupedExperts.Config(dim=4, hidden_dim=8, num_experts=1),
             GptOssGroupedExperts.Config(dim=4, hidden_dim=8, num_experts=1),
-            FusedSwiGLUGroupedExperts.Config(dim=4, hidden_dim=8, num_experts=1),
+            GroupedExperts.Config(
+                dim=4,
+                hidden_dim=8,
+                num_experts=1,
+                activation_fn=FusedSwiGLU.Config(),
+            ),
         )
 
         def grouped_mm(

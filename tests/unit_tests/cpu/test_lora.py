@@ -88,24 +88,22 @@ def test_lora_targets_fused_feed_forward_projection():
     """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w1=Linear.Config(in_features=4, out_features=8, param_init=init),
+        w13=Linear.Config(in_features=4, out_features=16, param_init=init),
         w2=Linear.Config(in_features=8, out_features=4, param_init=init),
-        w3=Linear.Config(in_features=4, out_features=8, param_init=init),
     )
     config = LoRAConverter(
         LoRAConverter.Config(
             rank=2,
             alpha=4.0,
-            target_modules=["w1", "w3"],
+            target_modules=["w13"],
         )
     ).convert(config)
     feed_forward = config.build()
     feed_forward.init_states()
 
     assert set(feed_forward.state_dict()) == {
-        "w1.weight",
+        "w13.weight",
         "w2.weight",
-        "w3.weight",
         "w13.lora_a.weight",
         "w13.lora_b.weight",
     }
@@ -146,9 +144,8 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w1=Linear.Config(in_features=16, out_features=32, param_init=init),
+        w13=Linear.Config(in_features=16, out_features=64, param_init=init),
         w2=Linear.Config(in_features=32, out_features=16, param_init=init),
-        w3=Linear.Config(in_features=16, out_features=32, param_init=init),
     )
     config = Float8LinearConverter(
         Float8LinearConverter.Config(emulate=True, model_compile_enabled=False)
@@ -157,7 +154,7 @@ def test_float8_lora_targets_fused_feed_forward_projection():
         LoRAConverter.Config(
             rank=4,
             alpha=8.0,
-            target_modules=["w1", "w3"],
+            target_modules=["w13"],
         )
     ).convert(config)
     feed_forward = config.build()
@@ -165,9 +162,8 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
     assert isinstance(feed_forward.w13, Float8Linear)
     assert set(feed_forward.state_dict()) == {
-        "w1.weight",
+        "w13.weight",
         "w2.weight",
-        "w3.weight",
         "w13.lora_a.weight",
         "w13.lora_b.weight",
     }

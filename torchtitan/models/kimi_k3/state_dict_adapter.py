@@ -12,6 +12,11 @@ from typing import Any
 import torch
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.feed_forward import (
+    fuse_gate_up_state_dict,
+    split_fused_gate_up_state_dict,
+)
+
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from .model import KimiK3Model
@@ -135,6 +140,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
+        state_dict = split_fused_gate_up_state_dict(state_dict)
         to_hf_map = {
             tt_key: hf_key
             for mapping in (
@@ -376,4 +382,4 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 "KimiK3StateDictAdapter received an incomplete set of "
                 f"routed-expert weights: {expert_weights_by_layer.keys()}."
             )
-        return state_dict
+        return fuse_gate_up_state_dict(state_dict)

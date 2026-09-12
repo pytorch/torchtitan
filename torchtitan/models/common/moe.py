@@ -76,8 +76,8 @@ class GroupedExperts(Module):
 
     ``w13`` has shape ``(E, 2F, D)`` for one grouped GEMM. Its logical view is
     ``(E, F, 2, D)``, with gate and up interleaved on the size-2 axis.
-    Checkpoints retain the logical ``w1_EFD`` and ``w3_EFD`` keys used by model
-    state-dict adapters.
+    Model state-dict adapters translate the physical ``w13`` parameter to the
+    external checkpoint layout.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -85,11 +85,7 @@ class GroupedExperts(Module):
         dim: int
         hidden_dim: int
         num_experts: int
-        activation_fn: ActivationFn.Config = field(
-            default_factory=lambda: ActivationFn.Config(
-                fn=SwiGLU()  # pyrefly: ignore[bad-argument-type]
-            )
-        )
+        activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
 
         def build(self, **kwargs):
             physical_config = replace(
@@ -112,8 +108,6 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.dim, config.hidden_dim)
         )
         self.activation_fn = config.activation_fn.build()
-        self.register_state_dict_post_hook(self._split_w13_on_save)
-        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
     def forward(
         self,
@@ -164,7 +158,7 @@ class GroupedExperts(Module):
         )
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
         remat.recompute_needs_tensor(gate_RF, up_RF)
-        h_RF = self._activation(gate_RF, up_RF, offsets_E)
+        h_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
         out_RD = remat.region(
             self._grouped_mm,
             self.remat_region_name("w2"),
@@ -172,32 +166,6 @@ class GroupedExperts(Module):
         )(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E)
         remat.recompute_needs_tensor(out_RD)
         return out_RD.type_as(x_RD)
-
-    def _activation(
-        self,
-        gate_RF: torch.Tensor,
-        up_RF: torch.Tensor,
-        offsets_E: torch.Tensor,
-    ) -> torch.Tensor:
-        del offsets_E
-        return self.activation_fn(gate_RF, up_RF)
-
-    @staticmethod
-    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Expose the physical w13 parameter as logical w1 and w3 keys."""
-        w13_EF2D = state_dict.pop(f"{prefix}w13").unflatten(1, (-1, 2))
-        state_dict[f"{prefix}w1_EFD"] = w13_EF2D[:, :, 0, :].contiguous()
-        state_dict[f"{prefix}w3_EFD"] = w13_EF2D[:, :, 1, :].contiguous()
-
-    @staticmethod
-    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
-        """Merge logical w1 and w3 checkpoint keys into physical w13."""
-        w1_key = f"{prefix}w1_EFD"
-        w3_key = f"{prefix}w3_EFD"
-        if w1_key in state_dict and w3_key in state_dict:
-            state_dict[f"{prefix}w13"] = torch.stack(
-                [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=2
-            ).flatten(1, 2)
 
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
