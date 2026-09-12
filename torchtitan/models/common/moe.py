@@ -47,6 +47,15 @@ from .token_dispatcher import LocalTokenDispatcher
 
 
 class GroupedExperts(Module):
+    """SwiGLU experts with one physical interleaved gate-up parameter.
+
+    ``w13`` has shape ``(E, F, 2, D)``, with gate and up stored on the size-2
+    axis. Forward flattens the middle dimensions to ``(E, 2F, D)`` for one
+    grouped GEMM.
+    Model state-dict adapters translate the physical ``w13`` parameter to the
+    external checkpoint layout.
+    """
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
@@ -57,14 +66,16 @@ class GroupedExperts(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.num_experts = config.num_experts
-        self.w1_EFD = nn.Parameter(
-            torch.empty(config.num_experts, config.hidden_dim, config.dim)
+        self.w13 = nn.Parameter(
+            torch.empty(
+                config.num_experts,
+                config.hidden_dim,
+                2,
+                config.dim,
+            )
         )
         self.w2_EDF = nn.Parameter(
             torch.empty(config.num_experts, config.dim, config.hidden_dim)
-        )
-        self.w3_EFD = nn.Parameter(
-            torch.empty(config.num_experts, config.hidden_dim, config.dim)
         )
         self.activation_fn = config.activation_fn.build()
 
@@ -81,18 +92,15 @@ class GroupedExperts(Module):
         local token shard. Keep logical capital suffixes here to avoid encoding
         a specific parallel layout in these local tensor names.
         """
-        if isinstance(self.w1_EFD, DTensor):
+        if isinstance(self.w13, DTensor):
             # Convert parameters from DTensors to plain Tensors, to work with
             # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            w1_EFD = self.w1_EFD.to_local()
+            w13_E_F_2_D = self.w13.to_local()
             assert isinstance(self.w2_EDF, DTensor)
             w2_EDF = self.w2_EDF.to_local()
-            assert isinstance(self.w3_EFD, DTensor)
-            w3_EFD = self.w3_EFD.to_local()
         else:
-            w1_EFD = self.w1_EFD
+            w13_E_F_2_D = self.w13
             w2_EDF = self.w2_EDF
-            w3_EFD = self.w3_EFD
 
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if (
@@ -107,9 +115,15 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        gate_RF = self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
-        up_RF = self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E)
-        h_RF = self.activation_fn(gate_RF, up_RF)
+        E, F, _, D = w13_E_F_2_D.shape
+        w13_E_2F_D = w13_E_F_2_D.reshape(E, F * 2, D)
+        gate_up_R_2F = self._grouped_mm(
+            A=x_RD.bfloat16(),
+            weight_EOI=w13_E_2F_D.bfloat16(),
+            offs=offsets_E,
+        )
+        gate_RF, up_RF = gate_up_R_2F.reshape(-1, F, 2).unbind(-1)
+        h_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
         return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
 
     def _grouped_mm(

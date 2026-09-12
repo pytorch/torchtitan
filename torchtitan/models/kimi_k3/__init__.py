@@ -21,6 +21,7 @@ from torchtitan.models.common import (
     SiTUGLU,
 )
 from torchtitan.models.common.config_utils import (
+    fused_grouped_experts_param_init,
     get_attention_config,
     make_ffn_config,
     make_token_dispatcher_config,
@@ -263,11 +264,13 @@ def _latent_moe_config(
                 hidden_dim=expert_hidden_dim,
                 num_experts=num_experts,
                 activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
-                param_init={
-                    "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
-                    "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
-                    "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
-                },
+                param_init=fused_grouped_experts_param_init(
+                    {
+                        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
+                        "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
+                        "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
+                    }
+                ),
             ),
             # core's dispatcher factory: standard / deepep / hybridep /
             # minimal_async_ep per spec, as deepseek_v3; falls back to local

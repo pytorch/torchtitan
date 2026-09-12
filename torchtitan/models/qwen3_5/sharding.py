@@ -106,9 +106,8 @@ def _conv_weight_sharding() -> ShardingConfig:
 
 
 _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
+    "w13": spmd.S(1),
     "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
 }
 
 
@@ -215,7 +214,7 @@ def _set_shared_expert_gate_sharding(
 ) -> None:
     """Shard Qwen3.5's shared-expert sigmoid gate.
 
-    The common MoE sharding handles the shared FFN (w1/w2/w3) and the
+    The common MoE sharding handles the shared FFN (w13/w2) and the
     module-boundary gather that feeds the gate a Replicate ``x``. Here we only
     add the gate: its weight and local output are Replicate. With SP, the output
     is sliced into the sequence-sharded layout produced by the shared FFN. With

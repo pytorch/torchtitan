@@ -17,20 +17,15 @@ Two complementary pieces live here:
   that convert MoE expert weights between HF and Titan layouts after the Titan
   MoE replacement (fused ``gate_up_proj`` <-> separate gate/up split, plus router
   and shared-expert key renames). Non-MoE keys pass through. Used by the
-  numerical-equivalence and round-trip tests. Parameter names (e.g. ``w1`` vs
-  ``w1_EFD``) are discovered dynamically from ``GroupedExperts`` so this stays
-  compatible across naming conventions.
+  numerical-equivalence and round-trip tests. These conversions use
+  ``GroupedExperts``' stable logical checkpoint names.
 """
 
 import re
 from typing import Any
 
-import spmd_types as spmd
 import torch
 
-from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
-    _get_expert_param_info,
-)
 from torchtitan.models.common.feed_forward import (
     fuse_gate_up_state_dict,
     split_fused_gate_up_state_dict,
@@ -95,15 +90,8 @@ class HFTransformerStateDictAdapter(StateDictAdapter):
 
 
 def _expert_names() -> tuple[str, str, str]:
-    """Return ``(gate_name, down_name, up_name)`` for routed expert params.
-
-    Maps canonical roles to actual ``GroupedExperts`` parameter names
-    (e.g. ``w1`` or ``w1_EFD`` depending on the torchtitan version).
-    """
-    _, layout = _get_expert_param_info()
-    colwise = [n for n, p in layout.items() if p == spmd.S(1)]
-    rowwise = [n for n, p in layout.items() if p == spmd.S(2)]
-    return colwise[0], rowwise[0], colwise[1]
+    """Return logical checkpoint names for gate, down, and up projections."""
+    return "w1_EFD", "w2_EDF", "w3_EFD"
 
 
 def _build_hf_to_titan_patterns() -> list[tuple[str, str, bool]]:
@@ -115,7 +103,8 @@ def _build_hf_to_titan_patterns() -> list[tuple[str, str, bool]]:
         (r"^(.*\.)router\.proj\.weight$", r"\1router.gate.weight", False),
         (r"^(.*\.)gate\.e_score_correction_bias$", r"\1expert_bias", False),
         (r"^(.*\.)experts\.down_proj$", rf"\1{_TITAN_EXPERTS_PREFIX}.{down}", False),
-        # Shared experts use FeedForward (w1/w2/w3 attribute names, not params)
+        # Shared experts use logical w1/w2/w3 adapter keys, which are packed
+        # into the native FeedForward w13/w2 state after these renames.
         (r"^(.*\.shared_experts)\.gate_proj\.weight$", r"\1.w1.weight", False),
         (r"^(.*\.shared_experts)\.up_proj\.weight$", r"\1.w3.weight", False),
         (r"^(.*\.shared_experts)\.down_proj\.weight$", r"\1.w2.weight", False),

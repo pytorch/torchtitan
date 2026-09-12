@@ -20,15 +20,18 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
-from torchtitan.overrides.fused_swiglu import fused_grouped_experts, FusedGroupedExperts
+from torchtitan.overrides.fused_swiglu import (
+    fused_grouped_experts,
+    FusedSwiGLU,
+)
 from torchtitan.overrides.moe_token_dispatcher import deepep_override
 
 _DIM = 16
 _HIDDEN = 32
 _E = 4
 
-# fused_swiglu registers both the dense-FFN and routed-experts (fused_grouped_experts)
-# overrides; each is activated by its own module.function target.
+# fused_swiglu registers Triton activation overrides for both the dense FFN and
+# routed experts; each is activated by its own module.function target.
 _FUSED_SWIGLU = (
     "torchtitan.overrides.fused_swiglu.fused_swiglu",
     "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
@@ -97,8 +100,9 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         )
 
         self.assertEqual(len(replacements), 2)
+        self.assertIsInstance(cfg.routed_experts.inner_experts, GroupedExperts.Config)
         self.assertIsInstance(
-            cfg.routed_experts.inner_experts, FusedGroupedExperts.Config
+            cfg.routed_experts.inner_experts.activation_fn, FusedSwiGLU.Config
         )
         self.assertIsInstance(
             cfg.routed_experts.token_dispatcher, DeepEPTokenDispatcher.Config
@@ -115,8 +119,9 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         )
 
         self.assertEqual(len(replacements), 1)
+        self.assertIsInstance(cfg.routed_experts.inner_experts, GroupedExperts.Config)
         self.assertIsInstance(
-            cfg.routed_experts.inner_experts, FusedGroupedExperts.Config
+            cfg.routed_experts.inner_experts.activation_fn, FusedSwiGLU.Config
         )
 
     def test_composition_is_order_independent(self):
@@ -124,6 +129,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         def summarize(ge):
             return (
                 type(ge.inner_experts).__qualname__,
+                type(ge.inner_experts.activation_fn).__qualname__,
                 type(ge.token_dispatcher).__qualname__,
                 ge.token_dispatcher.cudagraphable,
             )
@@ -137,7 +143,8 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         b.inner_experts = fused_grouped_experts(b.inner_experts)
 
         self.assertEqual(summarize(a), summarize(b))
-        self.assertIsInstance(a.inner_experts, FusedGroupedExperts.Config)
+        self.assertIsInstance(a.inner_experts, GroupedExperts.Config)
+        self.assertIsInstance(a.inner_experts.activation_fn, FusedSwiGLU.Config)
         self.assertTrue(a.token_dispatcher.cudagraphable)
 
     def test_trainer_uses_only_experts_fusion(self):
@@ -146,8 +153,9 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         # Trainer imports only fused_swiglu: experts fused, dispatcher left compact.
         apply_overrides(OverrideConfig(imports=[*_FUSED_SWIGLU]), cfg)
 
+        self.assertIsInstance(cfg.routed_experts.inner_experts, GroupedExperts.Config)
         self.assertIsInstance(
-            cfg.routed_experts.inner_experts, FusedGroupedExperts.Config
+            cfg.routed_experts.inner_experts.activation_fn, FusedSwiGLU.Config
         )
         self.assertFalse(cfg.routed_experts.token_dispatcher.cudagraphable)
 
