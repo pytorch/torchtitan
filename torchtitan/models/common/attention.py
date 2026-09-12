@@ -52,9 +52,7 @@ from torchtitan.tools.utils import round_up
 
 
 __all__ = [
-    "BaseQKVLinear",
     "FlexInnerAttention",
-    "FusedQKVLinear",
     "GQAttention",
     "InnerAttention",
     "QKVLinear",
@@ -712,76 +710,7 @@ class BaseAttention(Module):
             assert self.n_heads > 0, "n_heads must be > 0"
 
 
-class BaseQKVLinear(Module):
-    """Base class for Q/K/V projection strategies.
-
-    Subclasses implement different projection approaches (separate or fused)
-    while providing a uniform interface to :class:`GQAttention`.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        head_dim: int
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.head_dim = config.head_dim
-
-    def forward(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Project input into Q, K, V tensors.
-
-        Returns:
-            xq and xk have shape ``[T, H, K]``; xv has shape ``[T, H, V]``.
-        """
-        raise NotImplementedError
-
-
-class QKVLinear(BaseQKVLinear):
-    """Three separate linear projections for Q, K, V."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(BaseQKVLinear.Config):
-        wq: Linear.Config
-        wkv: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.wq = config.wq.build()
-        self.wk = config.wkv.build()
-        self.wv = config.wkv.build()
-
-    def forward(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_tokens = x.shape[0]
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-        # Use -1 instead of n_heads (or n_kv_heads) to infer the
-        # actual local heads from sizes as TP may have sharded them.
-
-        def local_qkv_head_split(x):
-            # Drop into local region, we can't propagate S(1) -> qkv head unflatten.
-            # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
-            with spmd.local():
-                x = x.view(num_tokens, -1, self.head_dim)
-                if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                    spmd.assert_type(
-                        x,
-                        spmd.V,
-                        spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                    )
-            return x
-
-        xq, xk, xv = (
-            local_qkv_head_split(xq),
-            local_qkv_head_split(xk),
-            local_qkv_head_split(xv),
-        )
-        return xq, xk, xv
-
-
-class FusedQKVLinear(BaseQKVLinear):
+class QKVLinear(Module):
     """Single fused linear projection, split along R dimension.
 
     Uses a single linear layer and splits the output along the R dimension,
@@ -790,19 +719,20 @@ class FusedQKVLinear(BaseQKVLinear):
 
     Compatible with ColwiseParallel on the ``wqkv`` linear layer.
 
-    Checkpoints in the stock ``QKVLinear`` layout (``wq.weight`` / ``wk.weight`` /
-    ``wv.weight``) via state_dict hooks, so checkpoints interoperate with the
-    non-fused module and the HF adapter.
+    Checkpoints expose logical ``wq.weight`` / ``wk.weight`` / ``wv.weight``
+    keys via state_dict hooks so they interoperate with external formats.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseQKVLinear.Config):
+    class Config(Module.Config):
+        head_dim: int
         n_heads: int
         n_kv_heads: int
         wqkv: Linear.Config
 
     def __init__(self, config: Config):
-        super().__init__(config)
+        super().__init__()
+        self.head_dim = config.head_dim
         if config.n_heads % config.n_kv_heads != 0:
             raise ValueError(
                 f"n_heads ({config.n_heads}) must be divisible by "
@@ -823,7 +753,7 @@ class FusedQKVLinear(BaseQKVLinear):
         )
         * 3
     )
-    def forward(  # pyrefly: ignore[bad-override]
+    def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_tokens = x.shape[0]
@@ -930,11 +860,7 @@ class FusedQKVLinear(BaseQKVLinear):
 
 
 class GQAttention(BaseAttention):
-    """Grouped-Query Attention with pluggable Q/K/V projection.
-
-    The QKV projection strategy is determined by the ``qkv_linear`` config field:
-    use :class:`QKVLinear` for three independent projections, or
-    :class:`FusedQKVLinear` for a single fused projection.
+    """Grouped-Query Attention with a fused Q/K/V projection.
 
     ``rope=None`` selects NoPE (no positional encoding) for this layer: q/k go to
     the inner attention unrotated, and positional information reaches the layer
@@ -946,7 +872,7 @@ class GQAttention(BaseAttention):
     class Config(BaseAttention.Config):
         n_heads: int
         dim: int
-        qkv_linear: BaseQKVLinear.Config
+        qkv_linear: QKVLinear.Config
         wo: Linear.Config
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None

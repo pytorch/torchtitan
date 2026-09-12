@@ -40,7 +40,7 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
-from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.attention import QKVLinear
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -595,8 +595,8 @@ class VLLMModelWrapper(Module):
                     for proj_name in ("w1", "w3"):
                         layouts[f"{module_prefix}{proj_name}.weight"] = w13_layout
 
-            if isinstance(module, FusedQKVLinear):
-                # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
+            if isinstance(module, QKVLinear):
+                # QKVLinear exposes split wq/wk/wv state-dict keys while
                 # the layout is declared on the fused wqkv parameter.
                 wqkv_sharding_config = getattr(
                     module.wqkv,
