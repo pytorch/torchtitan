@@ -24,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
+import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
@@ -84,7 +85,19 @@ class VisionMLP(Module):
         self.act_fn = config.act_fn.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+        hidden_TF = remat.region(
+            self.linear_fc1,
+            self.remat_region_name("fc1"),
+            recompute=self.remat_should_recompute("fc1"),
+        )(x)
+        remat.recompute_needs_tensor(hidden_TF)
+        out_TD = remat.region(
+            self.linear_fc2,
+            self.remat_region_name("fc2"),
+            recompute=self.remat_should_recompute("fc2"),
+        )(self.act_fn(hidden_TF))
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 class VisionAttention(Module):
@@ -122,6 +135,14 @@ class VisionAttention(Module):
         self.proj = config.proj.build()
         self.flex_attention = config.inner_attention.build()
 
+    def _qkv(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q_THDh = local_head_split(self.wq(x_TD), self.head_dim)
+        k_THDh = local_head_split(self.wk(x_TD), self.head_dim)
+        v_THDh = local_head_split(self.wv(x_TD), self.head_dim)
+        return q_THDh, k_THDh, v_THDh
+
     def forward(
         self,
         x: torch.Tensor,
@@ -134,17 +155,29 @@ class VisionAttention(Module):
 
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
-        q_THDh = local_head_split(self.wq(x), self.head_dim)
-        k_THDh = local_head_split(self.wk(x), self.head_dim)
-        v_THDh = local_head_split(self.wv(x), self.head_dim)
+        q_THDh, k_THDh, v_THDh = remat.region(
+            self._qkv,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x)
 
+        remat.recompute_needs_tensor(q_THDh, k_THDh)
         q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
 
-        out_THDh = self.flex_attention(
-            q_THDh, k_THDh, v_THDh, attention_masks=attention_mask
-        )
+        out_THDh = remat.region(
+            self.flex_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(q_THDh, k_THDh, v_THDh, attention_masks=attention_mask)
+        remat.recompute_needs_tensor(out_THDh)
         out_TD = out_THDh.reshape(num_tokens, -1)
-        return self.proj(out_TD)
+        out_TD = remat.region(
+            self.proj,
+            self.remat_region_name("proj"),
+            recompute=self.remat_should_recompute("proj"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 class VisionTransformerBlock(Module):
