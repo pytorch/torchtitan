@@ -24,7 +24,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.linear import AllGatherLinear, LinearReduceScatter
+from torchtitan.distributed.linear import AsyncAllGatherLinear, AsyncLinearReduceScatter
 
 
 @unittest.skipUnless(
@@ -64,7 +64,7 @@ class TestDistLinearPrimitives(DTensorTestBase):
 
         xs = x.chunk(W, 0)[self.rank].clone().requires_grad_()
         ws = w.chunk(W, 0)[self.rank].clone().requires_grad_()
-        y = AllGatherLinear.apply(xs, ws, None, group, group.group_name)
+        y = AsyncAllGatherLinear.apply(xs, ws, None, group, group.group_name)
         y.backward(dy.chunk(W, 1)[self.rank])
 
         # y holds every token but only this rank's output features
@@ -87,7 +87,7 @@ class TestDistLinearPrimitives(DTensorTestBase):
 
         xs = x.chunk(W, 1)[self.rank].contiguous().clone().requires_grad_()
         ws = w.chunk(W, 1)[self.rank].contiguous().clone().requires_grad_()
-        y = LinearReduceScatter.apply(xs, ws, None, group, group.group_name)
+        y = AsyncLinearReduceScatter.apply(xs, ws, None, group, group.group_name)
         y.backward(dy.chunk(W, 0)[self.rank])
 
         # y holds this rank's slice of the sequence but all output features
@@ -116,7 +116,7 @@ class TestDistLinearPrimitives(DTensorTestBase):
 
         xs = x.chunk(W, 1)[self.rank].contiguous()
         ws = w.chunk(W, 1)[self.rank].contiguous()
-        y = LinearReduceScatter.apply(xs, ws, b, group, group.group_name)
+        y = AsyncLinearReduceScatter.apply(xs, ws, b, group, group.group_name)
 
         ref = F.linear(x, w, b).chunk(W, 0)[self.rank]
         torch.testing.assert_close(y, ref, atol=self.TOL, rtol=self.TOL)

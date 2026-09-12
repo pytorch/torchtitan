@@ -31,6 +31,9 @@ from torchtitan.protocols.module import Module
 class Linear(nn.Linear, Module):
     """Configurable nn.Linear."""
 
+    performs_tp_input_all_gather = False
+    performs_tp_output_reduce_scatter = False
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         in_features: int

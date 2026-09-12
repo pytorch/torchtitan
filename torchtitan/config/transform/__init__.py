@@ -7,11 +7,13 @@
 """Model config transforms. See README.md for what belongs here."""
 
 from .apply import apply_transforms, transform_model_config_
+from .async_tensor_parallel import AsyncTensorParallelTransform
 from .base import convert_config_type, ModelConfigTransform
 from .context_parallel import ContextParallelTransform
 
 __all__ = [
     "ModelConfigTransform",
+    "AsyncTensorParallelTransform",
     "apply_transforms",
     "transform_model_config_",
     "convert_config_type",

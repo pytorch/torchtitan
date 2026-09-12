@@ -13,7 +13,7 @@
 #   K = query/key head dimension, V = value head dimension.
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, NamedTuple
 
 import spmd_types as spmd
@@ -43,6 +43,12 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.compile import maybe_regional_inductor
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.spmd_types import (
+    spmd_mesh_group,
+    spmd_type_for_axis,
+    spmd_validate_redistributions,
+)
 from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -868,6 +874,13 @@ class GQAttention(BaseAttention):
     per layer.
     """
 
+    _tp_input_redistribution: (
+        tuple[spmd.PerMeshAxisSpmdType, spmd.PerMeshAxisSpmdType] | None
+    ) = None
+    _tp_output_redistribution: (
+        tuple[spmd.PerMeshAxisSpmdType, spmd.PerMeshAxisSpmdType] | None
+    ) = None
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseAttention.Config):
         n_heads: int
@@ -924,6 +937,74 @@ class GQAttention(BaseAttention):
         # Scaling factor (needed when head_dim differs from dim // n_heads)
         self.scaling = self.head_dim**-0.5 if config.head_dim is not None else None
 
+    def parallelize(self, parallel_dims: ParallelDims) -> None:
+        sharding_config = self._sharding_config
+        if (
+            type(self) is GQAttention
+            and parallel_dims.spmd_backend == "spmd_types"
+            and sharding_config is not None
+        ):
+            in_src = sharding_config.in_src_shardings or {}
+            in_dst = sharding_config.in_dst_shardings or {}
+            out_src = sharding_config.out_src_shardings
+            out_dst = sharding_config.out_dst_shardings
+            if (
+                "x_TD" in in_src
+                and "x_TD" in in_dst
+                and out_src is not None
+                and not isinstance(out_src, tuple)
+                and out_dst is not None
+            ):
+                spmd_validate_redistributions(sharding_config)
+                self._tp_input_redistribution = (
+                    spmd_type_for_axis(in_src["x_TD"], MeshAxisName.TP),
+                    spmd_type_for_axis(in_dst["x_TD"], MeshAxisName.TP),
+                )
+                self._tp_output_redistribution = (
+                    spmd_type_for_axis(out_src, MeshAxisName.TP),
+                    spmd_type_for_axis(out_dst, MeshAxisName.TP),
+                )
+                self._sharding_config = replace(
+                    sharding_config,
+                    in_dst_shardings=None,
+                    out_src_shardings=out_dst,
+                    out_dst_shardings=None,
+                )
+        super().parallelize(parallel_dims)
+
+    @staticmethod
+    def _redistribute_tp(
+        x: torch.Tensor,
+        redistribution: (
+            tuple[spmd.PerMeshAxisSpmdType, spmd.PerMeshAxisSpmdType] | None
+        ),
+    ) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None or redistribution is None:
+            return x
+        src, dst = redistribution
+        return spmd.redistribute(
+            x,
+            tp_group,
+            src=src,
+            dst=dst,
+            backward_options={"op_dtype": x.dtype},
+        )
+
+    def _qkv_projection(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        projection = getattr(self.qkv_linear, "wqkv", self.qkv_linear)
+        if not getattr(projection, "performs_tp_input_all_gather", False):
+            x_TD = self._redistribute_tp(x_TD, self._tp_input_redistribution)
+        return self.qkv_linear(x_TD)
+
+    def _output_projection(self, out_TD: torch.Tensor) -> torch.Tensor:
+        out_TD = self.wo(out_TD)
+        if not getattr(self.wo, "performs_tp_output_reduce_scatter", False):
+            out_TD = self._redistribute_tp(out_TD, self._tp_output_redistribution)
+        return out_TD
+
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -931,7 +1012,7 @@ class GQAttention(BaseAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         xq_THK, xk_THK, xv_THV = remat.region(
-            self.qkv_linear,
+            self._qkv_projection,
             self.remat_region_name("qkv"),
             recompute=self.remat_should_recompute("qkv"),
         )(x_TD)
@@ -965,7 +1046,7 @@ class GQAttention(BaseAttention):
         out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
         out_TD = remat.region(
-            self.wo,
+            self._output_projection,
             self.remat_region_name("wo"),
             recompute=self.remat_should_recompute("wo"),
         )(out_TD)
