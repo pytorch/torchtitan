@@ -19,7 +19,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.config.configs import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import (
     MeshAxisName,
