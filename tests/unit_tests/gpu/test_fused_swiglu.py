@@ -9,9 +9,8 @@
 The override replaces ``FeedForward.activation_fn`` while preserving the module
 and its physical ``w13`` projection. These tests run on CPU unless marked CUDA.
 
-``TestFusedSwiGLUDistGemmComposition`` covers stacking the override on
-``tp_gemm_backend="dist_gemm"``, which must keep the TP overlap rather than
-silently replacing the overlapping FFN with the plain fused one.
+``TestFusedSwiGLUDistGemmComposition`` covers stacking the override on the
+async tensor-parallel transform, which must preserve the TP overlap.
 """
 
 import unittest
@@ -19,18 +18,18 @@ from dataclasses import dataclass
 
 import torch
 
+from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.models.common.activation import SiTUGLU
-from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
+from torchtitan.models.common.dist_gemm import (
+    AsyncAllGatherLinear,
+    AsyncLinearReduceScatter,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
-from torchtitan.overrides.fused_swiglu import (
-    dist_gemm_fused_swiglu,
-    fused_swiglu,
-    FusedSwiGLU,
-)
+from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 
 _DIM = 16
 _HIDDEN = 32
@@ -175,25 +174,26 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         self.assertIsInstance(
             fused_swiglu(_dist_gemm_ffn_config()).build(), FeedForward
         )
-        fused = dist_gemm_fused_swiglu(
-            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
-        ).build()
-        self.assertIsInstance(fused, DistGEMMFeedForward)
+        config = _dist_gemm_ffn_config()
+        AsyncTensorParallelTransform().transform(config)
+        fused = fused_swiglu(config).build()
+        self.assertIsInstance(fused.w13, AsyncAllGatherLinear)
+        self.assertIsInstance(fused.w2, AsyncLinearReduceScatter)
         self.assertIsInstance(fused.activation_fn, FusedSwiGLU)
 
     def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
-        fused = dist_gemm_fused_swiglu(
-            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
-        ).build()
+        config = _dist_gemm_ffn_config()
+        AsyncTensorParallelTransform().transform(config)
+        fused = fused_swiglu(config).build()
         with torch.no_grad():
             fused.w13.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
         state_dict = fused.state_dict()
         self.assertEqual(set(state_dict), {"w13.weight", "w2.weight"})
         torch.testing.assert_close(state_dict["w13.weight"], fused.w13.weight)
 
-        reloaded = dist_gemm_fused_swiglu(
-            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
-        ).build()
+        reload_config = _dist_gemm_ffn_config()
+        AsyncTensorParallelTransform().transform(reload_config)
+        reloaded = fused_swiglu(reload_config).build()
         reloaded.load_state_dict(state_dict)
         torch.testing.assert_close(reloaded.w13.weight, fused.w13.weight)
 

@@ -25,6 +25,7 @@ from torchtitan.components.quantization import (
 from torchtitan.components.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.transform import apply_transforms, AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import (
@@ -132,8 +133,9 @@ def llama3_debugmodel_dist_gemm(
     are being deprecated and are not supported here.
     """
     config = llama3_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry(
-        "debugmodel", seq_len=seq_len, tp_gemm_backend="dist_gemm"
+    config = apply_transforms(
+        config,
+        [AsyncTensorParallelTransform()],
     )
     config.parallelism.spmd_backend = "spmd_types"
     return config
