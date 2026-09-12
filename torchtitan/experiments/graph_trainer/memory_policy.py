@@ -29,6 +29,7 @@ from torch._functorch.partitioners import (
     get_default_op_list,
     NodeInfo,
 )
+from torch._higher_order_ops.effects import has_effects
 from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import CheckpointPolicy
 
@@ -265,6 +266,10 @@ def tag_sac_policy(
         # remat pass only supports one region with must_recompute deps.
         fqn = node.meta.get("custom", {}).get(_MODULE_FQN, "")
         if fqn.startswith(("lm_head", "loss")):
+            continue
+
+        if has_effects(node.target):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
 
         if node in force_save_nodes:
