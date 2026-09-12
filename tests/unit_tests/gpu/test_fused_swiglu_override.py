@@ -37,13 +37,13 @@ def _build_fused_swiglu_grouped_experts() -> GroupedExperts:
         activation_fn=FusedSwiGLU.Config(),
     ).build()
     with torch.no_grad():
-        fused.w13.copy_(torch.randn(_E, 2 * _HIDDEN, _DIM))
+        fused.w13.copy_(torch.randn(_E, _HIDDEN, 2, _DIM))
         fused.w2_EDF.copy_(torch.randn(_E, _DIM, _HIDDEN))
     return fused
 
 
 def _logical_w13(experts: GroupedExperts) -> torch.Tensor:
-    return experts.w13.unflatten(1, (_HIDDEN, 2))
+    return experts.w13
 
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
@@ -87,17 +87,16 @@ class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
         fused = _build_fused_swiglu_grouped_experts()
         names = {name for name, _ in fused.named_parameters(recurse=False)}
         self.assertEqual(names, {"w13", "w2_EDF"})
-        self.assertEqual(tuple(fused.w13.shape), (_E, 2 * _HIDDEN, _DIM))
+        self.assertEqual(tuple(fused.w13.shape), (_E, _HIDDEN, 2, _DIM))
 
-    def test_param_init_and_sharding_remapped_to_w13(self):
-        """Building remaps logical initialization and sharding onto w13."""
-        colwise = dense_param_placement(tp=spmd.S(1))  # w1_EFD/w3_EFD: shard hidden
+    def test_param_init_and_native_sharding_use_w13(self):
+        """Building uses logical initialization and native w13 sharding."""
+        colwise = dense_param_placement(tp=spmd.S(1))
         rowwise = dense_param_placement(tp=spmd.S(2))  # w2_EDF
         base_sharding = ShardingConfig(
             state_shardings={
-                "w1_EFD": colwise,
+                "w13": colwise,
                 "w2_EDF": rowwise,
-                "w3_EFD": colwise,
             },
             in_src_shardings={"x_RD": colwise},
             local_map=LocalMapConfig(in_grad_placements=None),
@@ -127,8 +126,7 @@ class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
         self.assertTrue(torch.all(logical_w13[:, :, 1, :] == 2.0))
         self.assertTrue(torch.all(module.w2_EDF == 0.0))
 
-        # state_shardings: w13 inherits w1_EFD's placement; w2_EDF kept; the
-        # rest of the sharding config is preserved (same objects via replace()).
+        # The native w13/w2 shardings and the rest of the config are preserved.
         sc = module._sharding_config
         assert sc is not None
         self.assertEqual(set(sc.state_shardings), {"w13", "w2_EDF"})
@@ -200,7 +198,7 @@ class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
         torch.testing.assert_close(
             actual_input_RD.grad, expected_input_RD.grad, atol=2e-2, rtol=2e-2
         )
-        logical_w13_grad = experts.w13.grad.unflatten(1, (_HIDDEN, 2))
+        logical_w13_grad = experts.w13.grad
         torch.testing.assert_close(
             logical_w13_grad[:, :, 0, :], w1_EFD.grad, atol=2e-2, rtol=2e-2
         )

@@ -26,7 +26,7 @@ from torchtitan.models.common.moe import MoE
 
 def _expert_weights(experts):
     """Return logical gate, down, and up expert-weight tensors."""
-    logical_w13 = experts.w13.unflatten(1, (-1, 2))
+    logical_w13 = experts.w13
     return logical_w13[:, :, 0, :], experts.w2_EDF, logical_w13[:, :, 1, :]
 
 

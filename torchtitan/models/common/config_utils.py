@@ -25,7 +25,11 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.feed_forward import _make_fused_linear_init, FeedForward
+from torchtitan.models.common.feed_forward import (
+    _make_fused_gate_up_init,
+    _make_fused_linear_init,
+    FeedForward,
+)
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
@@ -188,10 +192,10 @@ def fused_grouped_experts_param_init(
     if not param_init:
         return param_init
     return {
-        "w13": _make_fused_linear_init(
+        "w13": _make_fused_gate_up_init(
             param_init["w1_EFD"],
             param_init["w3_EFD"],
-            output_axis=1,
+            gate_up_axis=2,
         ),
         "w2_EDF": param_init["w2_EDF"],
     }
