@@ -62,6 +62,19 @@ def hc_head_input_sequence_parallel_placement():
     )
 
 
+def hc_head_input_placement(*, enable_sp: bool):
+    if enable_sp:
+        return hc_head_input_sequence_parallel_placement()
+    return SpmdType(
+        {
+            DP: spmd.V,
+            CP: spmd.V,
+            TP: spmd.I,
+        },
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
+    )
+
+
 def hc_mix_sequence_parallel_placement():
     return SpmdType(
         {
@@ -202,7 +215,7 @@ def set_deepseek_v4_layer_sharding(
     hc_branch_layout = (
         hc_head_input_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+        else hc_head_input_placement(enable_sp=False)
     )
     hc_dense_layout = (
         dense_sequence_parallel_placement()
@@ -298,7 +311,7 @@ def set_deepseek_v4_sharding_config(
     hc_head_input = (
         hc_head_input_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+        else hc_head_input_placement(enable_sp=False)
     )
     hc_head_output = (
         dense_sequence_parallel_placement()
@@ -321,7 +334,13 @@ def set_deepseek_v4_sharding_config(
         )
 
     if config.mtp_layers is not None:
-        replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        mtp_activation = (
+            dense_sequence_parallel_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+        )
+        mtp_hc_activation = hc_head_input_placement(enable_sp=enable_sp)
+        mtp_token_ids = token_id_placement()
         for mtp_cfg in config.mtp_layers:
             set_deepseek_v4_layer_sharding(
                 mtp_cfg, enable_sp=enable_sp, enable_ep=enable_ep
@@ -337,19 +356,15 @@ def set_deepseek_v4_sharding_config(
                     "hc_base": _dense_param_rep,
                     "hc_scale": _dense_param_rep,
                 },
-                in_src_shardings={"x": replicated_activation},
-                out_src_shardings=replicated_activation,
+                in_src_shardings={"x": mtp_hc_activation},
+                out_src_shardings=mtp_activation,
             )
             mtp_cfg.sharding_config = ShardingConfig(
                 in_src_shardings={
-                    "mtp_input_embed": replicated_activation,
-                    "prev_hc_hidden": replicated_activation,
-                    "mtp_input_ids_T": dense_activation_placement(
-                        tp=spmd.R, cp=spmd.S(0)
-                    ),
-                    "mtp_input_valid_mask": dense_activation_placement(
-                        tp=spmd.R, cp=spmd.S(0)
-                    ),
+                    "mtp_input_embed": mtp_activation,
+                    "prev_hc_hidden": mtp_hc_activation,
+                    "mtp_input_ids_T": mtp_token_ids,
+                    "mtp_input_valid_mask": mtp_token_ids,
                 },
-                out_src_shardings=replicated_activation,
+                out_src_shardings=mtp_activation,
             )
