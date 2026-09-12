@@ -4,14 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
 )
-
 from torch.distributed.pipelining.stage import _PipelineStageBase, PipelineStage
 
 from torchtitan.config import (
@@ -28,7 +26,6 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
-
 from torchtitan.distributed.pipeline_parallel import (
     llm_split_with_pinned_modules,
     pipeline_llm,
@@ -153,8 +150,6 @@ def parallelize_kimi_k3(
 
 
 _KIMI_ATTN_RES_LAST_STAGE_FQNS = ("output_res_proj", "output_res_norm")
-# The vision tower rides with the embedding; core prunes it on the stages
-# that do not hold it, and a text-only model does not have it at all.
 _KIMI_K3_FIRST_STAGE_FQNS = ("vision_encoder",)
 
 
@@ -164,15 +159,7 @@ def _kimi_k3_last_stage_modules(model: nn.Module) -> tuple[str, ...]:
 
 
 def _as_attn_res_stage(stage: _PipelineStageBase) -> AttnResPipelineStage:
-    """``stage`` rebuilt as an :class:`AttnResPipelineStage` from its own fields.
-
-    Core builds plain ``PipelineStage``s and K3 swaps each for its subclass
-    here, rather than threading a stage class through core's pipelining. The
-    rebuilt stage wraps the same, already parallelized module, so the model
-    parts core returned are still the objects the stages run. Building a stage
-    only reads its process group (the per-direction P2P groups, when enabled,
-    are cached per group), so nothing collective runs a second time.
-    """
+    """``stage`` rebuilt as an :class:`AttnResPipelineStage` around the same module."""
     assert isinstance(stage, PipelineStage)
     rebuilt = AttnResPipelineStage(
         stage.submod,
@@ -191,11 +178,7 @@ def _as_attn_res_stage(stage: _PipelineStageBase) -> AttnResPipelineStage:
 def _swap_in_attn_res_stages(
     schedule: _PipelineSchedule,
 ) -> list[AttnResPipelineStage]:
-    """Replace the stages a schedule holds on this rank with AttnRes stages.
-
-    A schedule keeps its stages in ``_stage`` (one per rank) or ``_stages``
-    (several per rank) and nowhere else, so replacing those is the whole swap.
-    """
+    """Replace the stages a schedule holds on this rank with AttnRes stages."""
     if isinstance(schedule, PipelineScheduleSingle):
         rebuilt = _as_attn_res_stage(schedule._stage)
         schedule._stage = rebuilt
@@ -209,35 +192,13 @@ def _swap_in_attn_res_stages(
 
 
 def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs):
-    """``pipelining_fn`` for Kimi K3.
+    """``pipelining_fn`` for Kimi K3: core's split and schedule, each stage rebuilt
+    as an :class:`AttnResPipelineStage` and routed by tables built from that split.
 
-    Builds the schedule with core's pipelining over core's split with this
-    model's pinned modules, rebuilds each stage it holds on this rank as an
-    :class:`AttnResPipelineStage` from the constructed stage's own fields (a
-    small local swap instead of an intrusive change to core's stage
-    construction; whether a stage subclass is the right abstraction for the
-    attention residual is still open), then gives every stage the routing tables
-    computed from that split: the layer-to-stage map is read off the split
-    and the stage-to-rank map is the schedule's own.
-
-    ``attn_res_cache`` is a property of the transport, not of the model: with
-    it, a hop carries only the blocks the receiving rank has not seen and the
-    rank's store serves its later stages; without it, every hop carries the
-    whole stack. A recipe turns it off with
-    ``functools.partial(pipeline_kimi_k3, attn_res_cache=False)`` as the
-    ``pipelining_fn``. The two transports sum the block gradients in a
-    different order, so they are not bitwise against each other. Every rank
-    must resolve it identically: a rank routing differently from its peers
-    hangs the first hop with nothing pointing at the cause.
+    ``attn_res_cache=False`` sends the whole block stack on every hop instead of
+    only the blocks the receiving rank lacks; every rank must pass the same value.
     """
-    # Core's split places the embedding, the layers and the head. On top of
-    # it the vision tower goes to the stage that holds the embedding (vision
-    # features are spliced into the embeddings; nothing vision-side crosses a
-    # stage boundary) and the AttnRes aggregation modules to the stage that
-    # holds the head, since the final block attention runs there. Core builds
-    # that split; this function keeps the one object and both hands it over
-    # and reads the layer map off it, so no rank recomputes it and none of
-    # them can disagree.
+    # The vision tower goes with the embedding, the AttnRes aggregation with the head.
     parallelism = kwargs.pop("parallelism")
     module_fqns_per_model_part = parallelism.module_fqns_per_model_part
     if module_fqns_per_model_part is None:
@@ -262,10 +223,7 @@ def pipeline_kimi_k3(model: nn.Module, *, attn_res_cache: bool = True, **kwargs)
     n_layers = len(layer_cfgs)
     layers_per_block = layer_cfgs[0].attn_res_block_size
     num_blocks = -(-n_layers // layers_per_block)
-    # The split is whatever core applied, uneven stages included: the
-    # config's FQNs, or the generated ones from the same metadata and the same
-    # pinned modules, so every rank reads the same layer-to-stage map off it
-    # with no collective; the schedule owns stage-to-rank.
+    # Every rank reads the same layer map off the applied split; no collective.
     layer_to_stage = layer_to_stage_from_split(module_fqns_per_model_part)
     layout = infer_block_layout_tables_from_stages(
         stages,
