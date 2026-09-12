@@ -249,6 +249,7 @@ class Decoder(BaseModel):
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        *,
         padding_mask: torch.Tensor | None = None,
     ):
         # positions is listed before attention_masks so AutoParallel's input_fn,

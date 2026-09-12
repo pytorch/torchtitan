@@ -38,24 +38,6 @@ class _PassthroughRoutedExperts(nn.Module):
         return x_TD
 
 
-class _FixedRouter(nn.Module):
-    def __init__(self, num_experts: int, top_k: int):
-        super().__init__()
-        self.num_experts = num_experts
-        self.top_k = top_k
-
-    def forward(self, x_TD, expert_bias_E, *, padding_mask=None):
-        num_tokens = x_TD.shape[0]
-        topk_scores_TK = x_TD.new_ones(num_tokens, self.top_k)
-        topk_expert_ids_TK = torch.zeros(
-            num_tokens, self.top_k, dtype=torch.int64, device=x_TD.device
-        )
-        routing_map_TE = torch.zeros(
-            num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
-        ).scatter_(-1, topk_expert_ids_TK, True)
-        return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
-
-
 class _CapturingAuxLoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -89,7 +71,8 @@ class TestMoE(unittest.TestCase):
                 comm_backend="standard",
             ),
         ).build()
-        moe.router = _FixedRouter(num_experts, top_k)
+        with torch.no_grad():
+            moe.router.gate.weight.zero_()
         moe.routed_experts = _PassthroughRoutedExperts()
         return moe
 
@@ -101,10 +84,8 @@ class TestMoE(unittest.TestCase):
         x_TD = torch.randn(6, dim)
         moe.train()
         moe(x_TD)
-        torch.testing.assert_close(
-            moe.tokens_per_expert_E,
-            moe.tokens_per_expert_E.new_tensor([2 * 3 * top_k, 0]),
-        )
+        self.assertEqual(moe.router.tokens_per_expert_E.sum().item(), 2 * 3 * top_k)
+        self.assertIs(moe.tokens_per_expert_E, moe.router.tokens_per_expert_E)
         training_counts = moe.tokens_per_expert_E.clone()
 
         moe.eval()
@@ -124,14 +105,8 @@ class TestMoE(unittest.TestCase):
         moe.train()
         moe(x_TD, padding_mask=padding_mask)
 
-        torch.testing.assert_close(
-            moe.tokens_per_expert_E,
-            moe.tokens_per_expert_E.new_tensor([3, 0]),
-        )
-        torch.testing.assert_close(
-            moe.routed_experts.num_tokens_per_expert_E,
-            torch.tensor([6, 0]),
-        )
+        self.assertEqual(moe.router.tokens_per_expert_E.sum().item(), 3)
+        self.assertEqual(moe.routed_experts.num_tokens_per_expert_E.sum().item(), 6)
 
     def test_router_masks_padding_only_for_aux_loss(self):
         router = make_router_config(
@@ -157,6 +132,10 @@ class TestMoE(unittest.TestCase):
         torch.testing.assert_close(
             aux_loss.routing_map_TE[~padding_mask],
             routing_map_TE[~padding_mask],
+        )
+        torch.testing.assert_close(
+            router.tokens_per_expert_E,
+            aux_loss.routing_map_TE.sum(dim=0).to(torch.float32),
         )
 
     def test_padding_mask_sharding_matches_router_token_layout(self):

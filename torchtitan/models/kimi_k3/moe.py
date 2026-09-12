@@ -136,7 +136,6 @@ class KimiLatentMoE(MoE):
             **router_kwargs,
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
-        self._accumulate_valid_tokens_per_expert(routing_map_TE, padding_mask)
 
         routed_TD = self.routed_experts(
             self.routed_down(x_TD),

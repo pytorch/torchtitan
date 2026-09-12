@@ -50,8 +50,9 @@ def _moe_buffer(moe, prefix):
     ``tokens_per_expert_E``, ``expert_bias_E``), so match by prefix instead of
     hardcoding the exact name.
     """
-    for name, buf in moe.named_buffers(recurse=False):
-        if name == prefix or name.startswith(prefix + "_"):
+    for name, buf in moe.named_buffers():
+        leaf_name = name.rsplit(".", 1)[-1]
+        if leaf_name == prefix or leaf_name.startswith(prefix + "_"):
             return buf
     raise AttributeError(f"{type(moe).__name__} has no buffer matching '{prefix}*'")
 
