@@ -6,48 +6,34 @@
 
 import pytest
 
-from torchtitan.config import FSDPSymmMemScope, ParallelismConfig
+from torchtitan.config import (
+    ContextParallelLoadBalancerConfig,
+    FSDPSymmMemScope,
+    ParallelismConfig,
+)
+from torchtitan.distributed.context_parallel import PTRRLoadBalancer
 
 
 def test_parallelism_config_default_load_balancer() -> None:
-    assert ParallelismConfig().context_parallel_load_balancer == "headtail"
+    config = ParallelismConfig().context_parallel_load_balancer
+    assert type(config) is ContextParallelLoadBalancerConfig
 
 
-def test_parallelism_config_accepts_none_load_balancer() -> None:
-    config = ParallelismConfig(context_parallel_load_balancer=None)
-    assert config.context_parallel_load_balancer is None
+def test_parallelism_config_accepts_contiguous_load_balancer() -> None:
+    config = ParallelismConfig(
+        context_parallel_load_balancer=ContextParallelLoadBalancerConfig()
+    )
+    assert (
+        type(config.context_parallel_load_balancer) is ContextParallelLoadBalancerConfig
+    )
 
 
 def test_parallelism_config_accepts_ptrr_when_cp_disabled() -> None:
     config = ParallelismConfig(
         context_parallel_degree=1,
-        context_parallel_load_balancer="ptrr",
+        context_parallel_load_balancer=PTRRLoadBalancer.Config(),
     )
-    assert config.context_parallel_load_balancer == "ptrr"
-
-
-def test_parallelism_config_rejects_unknown_load_balancer() -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"must be one of: None, 'headtail', 'ptrr' \(got 'foo'\)",
-    ):
-        ParallelismConfig(context_parallel_load_balancer="foo")
-
-
-def test_parallelism_config_rejects_empty_string_load_balancer() -> None:
-    with pytest.raises(ValueError, match="cannot be an empty string"):
-        ParallelismConfig(context_parallel_load_balancer="")
-
-
-def test_parallelism_config_rejects_unknown_load_balancer_when_cp_disabled() -> None:
-    with pytest.raises(
-        ValueError,
-        match=r"must be one of: None, 'headtail', 'ptrr' \(got 'foo'\)",
-    ):
-        ParallelismConfig(
-            context_parallel_degree=1,
-            context_parallel_load_balancer="foo",
-        )
+    assert isinstance(config.context_parallel_load_balancer, PTRRLoadBalancer.Config)
 
 
 def test_parallelism_config_default_schedule() -> None:

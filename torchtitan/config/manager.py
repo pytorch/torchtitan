@@ -236,6 +236,51 @@ class ConfigManager:
     @staticmethod
     def register_tyro_rules(registry: tyro.constructors.ConstructorRegistry) -> None:
         @registry.primitive_rule
+        def context_parallel_load_balancer_rule(
+            type_info: tyro.constructors.PrimitiveTypeInfo,
+        ):
+            """Preserve the flat context-parallel load-balancer CLI option."""
+            from torchtitan.config.configs import ContextParallelLoadBalancerConfig
+            from torchtitan.distributed.context_parallel import (
+                HeadTailLoadBalancer,
+                PTRRLoadBalancer,
+            )
+
+            if type_info.type is not ContextParallelLoadBalancerConfig:
+                return None
+
+            def from_string(args: list[str]) -> ContextParallelLoadBalancerConfig:
+                config_types = {
+                    "none": ContextParallelLoadBalancerConfig,
+                    "headtail": HeadTailLoadBalancer.Config,
+                    "ptrr": PTRRLoadBalancer.Config,
+                }
+                value = args[0].lower()
+                if value not in config_types:
+                    raise ValueError(
+                        "context_parallel_load_balancer must be one of: "
+                        f"None, 'headtail', 'ptrr' (got {args[0]!r})"
+                    )
+                return config_types[value]()
+
+            def to_string(instance: ContextParallelLoadBalancerConfig) -> list[str]:
+                if isinstance(instance, PTRRLoadBalancer.Config):
+                    return ["ptrr"]
+                if isinstance(instance, HeadTailLoadBalancer.Config):
+                    return ["headtail"]
+                return ["None"]
+
+            return tyro.constructors.PrimitiveConstructorSpec(
+                nargs=1,
+                metavar="{None,headtail,ptrr}",
+                instance_from_str=from_string,
+                is_instance=lambda instance: isinstance(
+                    instance, ContextParallelLoadBalancerConfig
+                ),
+                str_from_instance=to_string,
+            )
+
+        @registry.primitive_rule
         def list_str_rule(type_info: tyro.constructors.PrimitiveTypeInfo):
             """Support for comma separated string parsing"""
             if type_info.type != list[str]:

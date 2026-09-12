@@ -13,7 +13,16 @@ from unittest import mock
 
 import pytest
 import tyro
-from torchtitan.config import ConfigManager, ParallelismConfig, TrainingConfig
+from torchtitan.config import (
+    ConfigManager,
+    ContextParallelLoadBalancerConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
+from torchtitan.distributed.context_parallel import (
+    HeadTailLoadBalancer,
+    PTRRLoadBalancer,
+)
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )
@@ -512,10 +521,35 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.model_spec.name == "flux"
         assert hasattr(config, "encoder")
-        assert config.parallelism.context_parallel_load_balancer == "headtail"
+        assert type(config.parallelism.context_parallel_load_balancer) is (
+            ContextParallelLoadBalancerConfig
+        )
 
     def test_default_context_parallel_load_balancer(self):
-        assert ParallelismConfig().context_parallel_load_balancer == "headtail"
+        assert type(ParallelismConfig().context_parallel_load_balancer) is (
+            ContextParallelLoadBalancerConfig
+        )
+
+    def test_context_parallel_load_balancer_cli(self):
+        for cli_value, expected in (
+            ("headtail", HeadTailLoadBalancer.Config),
+            ("ptrr", PTRRLoadBalancer.Config),
+            ("None", ContextParallelLoadBalancerConfig),
+        ):
+            with self.subTest(cli_value=cli_value):
+                config = ConfigManager().parse_args(
+                    [
+                        "--module",
+                        "llama3",
+                        "--config",
+                        "llama3_debugmodel",
+                        "--parallelism.context_parallel_load_balancer",
+                        cli_value,
+                    ]
+                )
+                assert (
+                    type(config.parallelism.context_parallel_load_balancer) is expected
+                )
 
     def test_deepseek_config(self):
         """Test that --module deepseek_v3 --config deepseek_v3_debugmodel works."""

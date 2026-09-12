@@ -8,6 +8,10 @@
 
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+from torchtitan.distributed.context_parallel import (
+    ContextParallelLoadBalancer,
+    HeadTailLoadBalancer,
+)
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
@@ -33,7 +37,7 @@ def _muse_glimmer_30b_cp(
     *,
     inner_attention: type[Module],
     cp_degree: int,
-    load_balancer: str | None = "headtail",
+    load_balancer: ContextParallelLoadBalancer.Config,
 ) -> Trainer.Config:
     config = muse_glimmer_30b()
     config.parallelism.context_parallel_degree = cp_degree
@@ -47,7 +51,9 @@ def _muse_glimmer_30b_cp(
 def muse_glimmer_30b_allgather_cp8() -> Trainer.Config:
     """Muse Glimmer 30B with all-gather CP degree 8."""
     return _muse_glimmer_30b_cp(
-        inner_attention=KVAllGatherCPFlexInnerAttention, cp_degree=8
+        inner_attention=KVAllGatherCPFlexInnerAttention,
+        cp_degree=8,
+        load_balancer=HeadTailLoadBalancer.Config(),
     )
 
 
@@ -60,7 +66,7 @@ def muse_glimmer_30b_ulysses_cp2() -> Trainer.Config:
         inner_attention=UlyssesCPFlexInnerAttention,
         cp_degree=2,
         # Ulysses does not support token reordering.
-        load_balancer=None,
+        load_balancer=ContextParallelLoadBalancer.Config(),
     )
 
 
@@ -74,7 +80,9 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     config.dataloader.max_num_documents = 64
     config.parallelism.context_parallel_degree = 2
-    config.parallelism.context_parallel_load_balancer = None
+    config.parallelism.context_parallel_load_balancer = (
+        ContextParallelLoadBalancer.Config()
+    )
     return apply_transforms(
         config,
         [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
