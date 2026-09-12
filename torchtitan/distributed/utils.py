@@ -11,6 +11,7 @@ import math
 import os
 from abc import abstractmethod
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Protocol, TYPE_CHECKING
 
@@ -27,13 +28,24 @@ from torch.distributed.tensor.placement_types import Placement, Shard
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import device_module, device_type
+from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
 
 
 _spmd_backend = "spmd_types"
+
+
+@dataclass(frozen=True)
+class _RealPPFakeSpmdState:
+    """Process-local state for the testing-only hybrid communication mode."""
+
+    pp_mesh: DeviceMesh
+    physical_world_size: int
+
+
+_real_pp_fake_spmd_state: _RealPPFakeSpmdState | None = None
 
 
 def set_spmd_backend(spmd_backend: str) -> None:
@@ -465,6 +477,96 @@ def init_fake_mode(
     )
 
 
+def _init_real_pp_fake_spmd(
+    logical_world_size: int,
+    timeout: timedelta,
+) -> int:
+    """Initialize a fake logical world and a real physical PP process group."""
+    global _real_pp_fake_spmd_state
+    if _real_pp_fake_spmd_state is not None:
+        raise RuntimeError("real-PP/fake-SPMD mode is already initialized")
+
+    try:
+        physical_world_size = int(os.environ["WORLD_SIZE"])
+        physical_rank = int(os.environ["RANK"])
+    except (KeyError, ValueError) as error:
+        raise ValueError(
+            "real-PP/fake-SPMD mode requires integer WORLD_SIZE and RANK values"
+        ) from error
+    if physical_world_size < 2:
+        raise ValueError("real-PP/fake-SPMD mode requires at least two PP ranks")
+    if not 0 <= physical_rank < physical_world_size:
+        raise ValueError(
+            f"RANK must be in [0, {physical_world_size}), got {physical_rank}"
+        )
+    if logical_world_size % physical_world_size != 0:
+        raise ValueError(
+            f"Logical world size {logical_world_size} must be divisible by "
+            f"physical world size {physical_world_size}"
+        )
+
+    spmd_world_size = logical_world_size // physical_world_size
+    logical_ranks = [rank * spmd_world_size for rank in range(physical_world_size)]
+    init_fake_mode(logical_world_size, rank=logical_ranks[physical_rank])
+
+    rendezvous = dist.rendezvous(
+        "env://",
+        rank=physical_rank,
+        world_size=physical_world_size,
+        timeout=timeout,
+    )
+    store, rendezvous_rank, rendezvous_world_size = next(rendezvous)
+    if (rendezvous_rank, rendezvous_world_size) != (
+        physical_rank,
+        physical_world_size,
+    ):
+        raise RuntimeError("Physical PP rendezvous returned inconsistent topology")
+
+    group_name = c10d.GroupName("torchtitan_real_pp")
+    pp_group, _ = c10d._new_process_group_helper(
+        group_size=physical_world_size,
+        group_rank=physical_rank,
+        global_ranks_in_group=logical_ranks,
+        backend="nccl",
+        store=store,
+        group_name=group_name,
+        timeout=timeout,
+        pg_tag=group_name,
+        device_id=get_local_device(),
+        group_desc="TorchTitan testing-only real PP group",
+    )
+    if not isinstance(pp_group, dist.ProcessGroup):
+        raise RuntimeError("Failed to construct the real PP process group")
+
+    c10d._world.pg_group_ranks[pp_group] = {
+        logical_rank: rank for rank, logical_rank in enumerate(logical_ranks)
+    }
+    pp_mesh = DeviceMesh.from_group(
+        pp_group,
+        device_type,
+        mesh=logical_ranks,
+        mesh_dim_names=("pp",),
+    )
+    _real_pp_fake_spmd_state = _RealPPFakeSpmdState(
+        pp_mesh=pp_mesh,
+        physical_world_size=physical_world_size,
+    )
+    return logical_world_size
+
+
+def get_real_pp_mesh(pp_degree: int) -> DeviceMesh:
+    """Return the physical PP mesh for the hybrid testing backend."""
+    state = _real_pp_fake_spmd_state
+    if state is None:
+        raise RuntimeError("real-PP/fake-SPMD mode has not been initialized")
+    if state.physical_world_size != pp_degree:
+        raise ValueError(
+            "real-PP/fake-SPMD mode requires one physical process per PP rank: "
+            f"WORLD_SIZE={state.physical_world_size}, PP={pp_degree}."
+        )
+    return state.pp_mesh
+
+
 def init_distributed(
     comm_config: CommConfig,
     enable_cpu_backend: bool = False,
@@ -486,7 +588,7 @@ def init_distributed(
     # cannot access PGs, e.g. current_spmd_mesh().get_group("tp") to perform the collectives they need.
     torch.autograd.set_multithreading_enabled(False)
 
-    if comm_config.mode == "fake_backend":
+    if comm_config.mode in {"fake_backend", "real_pp_fake_spmd_backend"}:
         ngpu_str = os.environ.get("NGPU")
         if ngpu_str is None:
             raise ValueError(
@@ -498,6 +600,12 @@ def init_distributed(
             raise ValueError(
                 f"NGPU environment variable must be a valid integer, got: {ngpu_str}"
             ) from e
+        if comm_config.mode == "real_pp_fake_spmd_backend":
+            return _init_real_pp_fake_spmd(
+                world_size,
+                timedelta(seconds=comm_config.init_timeout_seconds),
+            )
+
         rank_str = os.environ.get("RANK", "0")
         try:
             rank = int(rank_str)

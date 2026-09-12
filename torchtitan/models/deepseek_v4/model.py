@@ -223,8 +223,12 @@ class DeepSeekV4Model(Decoder):
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        *,
+        pipeline_stage_index: int | None = None,
+        pipeline_microbatch_index: int | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
+        del pipeline_stage_index, pipeline_microbatch_index
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
             raise ValueError("DeepSeek V4 MTP forward requires token embeddings.")
         if len(self.mtp_layers) > 0 and self._skip_lm_head:
