@@ -192,6 +192,7 @@ def run_single_test(
     *,
     use_fake_pg: bool = False,
     export_numerics: bool = False,
+    gpu_arch_type: str = "cuda",
     # ``gpu_ids`` is set only in parallel mode; sequential runs leave the
     # child process to use all visible GPUs.
     gpu_ids: list[int] | None = None,
@@ -244,8 +245,11 @@ def run_single_test(
             # compares them with the mode-specific golden (or exports them).
             assert config_fn is not None and config is not None
             execution_mode = "fake_pg" if use_fake_pg else "real_pg"
+            gpu_arch = "a10g" if gpu_arch_type == "cuda" else "mi350x"
             golden_numerics_path = Path(
-                test_flavor.golden_numerics_path.format(execution_mode=execution_mode)
+                test_flavor.golden_numerics_path.format(
+                    execution_mode=execution_mode, gpu_arch=gpu_arch
+                )
             )
             if export_numerics:
                 steps = config.training.steps
@@ -415,6 +419,7 @@ def run_tests(
                     args.output_dir,
                     use_fake_pg=execution_mode == "fake_pg",
                     export_numerics=export_numerics,
+                    gpu_arch_type=getattr(args, "gpu_arch_type", "cuda"),
                     gpu_ids=gpus,
                 )
             finally:
@@ -440,6 +445,7 @@ def run_tests(
                     args.output_dir,
                     use_fake_pg=execution_mode == "fake_pg",
                     export_numerics=export_numerics,
+                    gpu_arch_type=getattr(args, "gpu_arch_type", "cuda"),
                 )
             except Exception as e:
                 logger.error(str(e))
