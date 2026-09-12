@@ -18,6 +18,10 @@ from typing import Any
 
 from torch.distributed.tensor import DTensor
 
+from torchtitan.models.common.feed_forward import (
+    fuse_gate_up_state_dict,
+    split_fused_gate_up_state_dict,
+)
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
 from .model import Qwen3Model
@@ -54,6 +58,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         }
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        state_dict = split_fused_gate_up_state_dict(state_dict)
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's wegiht.
@@ -203,4 +208,4 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     continue
                 state_dict[new_key] = value
 
-        return state_dict
+        return fuse_gate_up_state_dict(state_dict)

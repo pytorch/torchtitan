@@ -4,36 +4,53 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
 
+from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
 
 
-class ActivationFn(Function[torch.Tensor]):
+class ActivationFn(Function[torch.Tensor], ABC):
     """Base class for configurable two-input activation functions."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Function.Config):
+    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+        pass
+
+    @abstractmethod
+    def __call__(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         pass
 
 
-@dataclass(frozen=True, slots=True)
-class SwiGLU:
+class SwiGLU(ActivationFn):
     """SwiGLU activation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ActivationFn.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
 
     def __call__(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         return F.silu(gate) * up
 
 
-@dataclass(frozen=True, slots=True)
-class SiTUGLU:
+class SiTUGLU(ActivationFn):
     """Kimi's SiTU-GLU activation, evaluated in FP32."""
 
-    beta: float = 1.0
-    linear_beta: float | None = None
+    @dataclass(kw_only=True, slots=True)
+    class Config(ActivationFn.Config):
+        beta: float = 1.0
+        linear_beta: float | None = None
+
+    def __init__(self, config: Config) -> None:
+        self.beta = config.beta
+        self.linear_beta = config.linear_beta
 
     def __call__(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         input_dtype = gate.dtype
