@@ -133,7 +133,7 @@ class TestGenerateLLMFqnPerModelPart(unittest.TestCase):
     def test_the_shared_debug_model_keeps_its_depth(self):
         """This change deepens no flavor but the pipeline stress cell's."""
         from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
-        from torchtitan_recipes.tests.features import (
+        from torchtitan_recipes.tests.b200 import (
             kimi_k3_debugmodel_pp2_vp2,
             kimi_k3_debugmodel_pp8_vp4,
         )

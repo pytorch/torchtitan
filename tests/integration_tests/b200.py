@@ -24,4 +24,16 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
             test_name="mxfp8_linear_fsdp",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            configs=[recipes.kimi_k3_debugmodel_pp2_vp2],
+            test_descr="Kimi K3, pipeline parallel pp2 x vp2",
+            test_name="kimi_k3_pp2_vp2",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.kimi_k3_debugmodel_pp8_vp4],
+            test_descr="Kimi K3, pipeline parallel pp8 x vp4",
+            test_name="kimi_k3_pp8_vp4",
+            ngpu=8,
+        ),
     ]
