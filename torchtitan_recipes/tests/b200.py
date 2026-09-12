@@ -20,6 +20,17 @@ def kimi_k3_debugmodel_mm_fsdp2() -> Trainer.Config:
     return config
 
 
+def kimi_k3_debugmodel_mm_tp2() -> Trainer.Config:
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+
+    config = kimi_k3_debugmodel()
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.enable_sequence_parallel = True
+    return config
+
+
 def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
     from torchtitan.models.llama3.config_registry import llama3_debugmodel_mxfp8
 
