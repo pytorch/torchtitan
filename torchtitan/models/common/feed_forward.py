@@ -6,10 +6,8 @@
 
 from dataclasses import dataclass, field
 
-import spmd_types as spmd
 import torch
 
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
@@ -80,26 +78,6 @@ class FeedForward(Module):
             state_dict[f"{prefix}w13.{param_name}"] = torch.stack(
                 [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=1
             ).flatten(0, 1)
-
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
-        w13_sharding_config = self.w13._sharding_config
-        if parallel_dims.tp_enabled and w13_sharding_config is not None:
-            weight_layout = w13_sharding_config.state_shardings.get("weight")
-            if weight_layout is not None:
-                tp_type = weight_layout.local_type.get(MeshAxisName.TP)
-                if (
-                    isinstance(tp_type, spmd.Shard)
-                    and tp_type.dim in (0, -self.w13.weight.ndim)
-                    and self.w2.in_features % parallel_dims.tp
-                ):
-                    raise ValueError(
-                        "FeedForward hidden dimension "
-                        f"({self.w2.in_features}) must be divisible by TP degree "
-                        f"({parallel_dims.tp}) when w13 is sharded colwise. "
-                        "Checking only the fused w13 output dimension would allow "
-                        "TP to split an interleaved gate/up pair."
-                    )
-        super().parallelize(parallel_dims)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_TF, up_TF = self.w13(x).unflatten(-1, (-1, 2)).unbind(-1)
