@@ -14,6 +14,7 @@
 """
 
 from dataclasses import dataclass
+from math import prod
 
 import spmd_types as spmd
 import torch
@@ -42,6 +43,123 @@ class Linear(nn.Linear, Module):
             config.in_features,
             config.out_features,
             bias=config.bias,
+        )
+
+
+class GroupedLinear(Module):
+    """A collection of linears selected by cumulative group offsets.
+
+    Structured output features let fused projections retain semantic axes in
+    parameter storage while presenting a flattened right operand to grouped
+    GEMM. For example, a fused gate/up projection stores ``[E, 2, F, D]`` and
+    returns ``[R, 2, F]`` without copying either tensor.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        num_groups: int
+        in_features: int
+        out_features: int | tuple[int, ...]
+        bias: bool = False
+
+    def __init__(self, config: Config):
+        super().__init__()
+        output_shape = (
+            (config.out_features,)
+            if isinstance(config.out_features, int)
+            else config.out_features
+        )
+        if not output_shape or any(size <= 0 for size in output_shape):
+            raise ValueError(f"out_features must be positive, got {output_shape}")
+
+        self.num_groups = config.num_groups
+        self.in_features = config.in_features
+        self.out_features = config.out_features
+        self.output_shape = output_shape
+        self.weight = nn.Parameter(
+            torch.empty(config.num_groups, *output_shape, config.in_features)
+        )
+        if config.bias:
+            self.bias = nn.Parameter(torch.empty(config.num_groups, *output_shape))
+        else:
+            self.register_parameter("bias", None)
+
+    def forward(self, input: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+        """Apply each grouped linear to rows selected by ``offsets``.
+
+        Args:
+            input: Input rows with shape ``[R, in_features]``.
+            offsets: Inclusive cumulative row counts for each group.
+
+        Returns:
+            Output rows with shape ``[R, *output_shape]``.
+        """
+        weight = (
+            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+        )
+        bias = self.bias
+        if isinstance(bias, DTensor):
+            bias = bias.to_local()
+
+        flat_out_features = prod(self.output_shape)
+        flat_weight = weight.reshape(
+            self.num_groups, flat_out_features, self.in_features
+        )
+        flat_bias = (
+            bias.reshape(self.num_groups, flat_out_features)
+            if bias is not None
+            else None
+        )
+        output = self._grouped_mm(
+            input=input,
+            weight=flat_weight,
+            offsets=offsets,
+        )
+        if flat_bias is not None:
+            output = self._add_grouped_bias(output, flat_bias, offsets)
+        return output.reshape(*output.shape[:-1], *self.output_shape)
+
+    def _grouped_mm(
+        self,
+        *,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        offsets: torch.Tensor,
+    ) -> torch.Tensor:
+        """Execute ``input @ weight.transpose(-2, -1)`` by group."""
+        return torch._grouped_mm(
+            input,
+            weight.bfloat16().transpose(-2, -1),
+            offs=offsets,
+        )
+
+    def _add_grouped_bias(
+        self,
+        output: torch.Tensor,
+        bias: torch.Tensor,
+        offsets: torch.Tensor,
+    ) -> torch.Tensor:
+        """Add each group bias while keeping capacity-padding rows unbiased."""
+        return output + self._expand_grouped_bias(bias, offsets, output.shape[0]).to(
+            output.dtype
+        )
+
+    def _expand_grouped_bias(
+        self,
+        bias: torch.Tensor,
+        offsets: torch.Tensor,
+        output_rows: int,
+    ) -> torch.Tensor:
+        """Expand per-group bias to routed rows plus zero-valued tail padding."""
+        counts = torch.diff(
+            torch.cat((offsets.new_zeros(1), offsets)),
+        )
+        tail = (output_rows - offsets[-1]).unsqueeze(0).to(counts.dtype)
+        padded_bias = torch.cat((bias, bias.new_zeros(1, bias.shape[-1])))
+        return padded_bias.repeat_interleave(
+            torch.cat((counts, tail)).long(),
+            dim=0,
+            output_size=output_rows,
         )
 
 
@@ -148,6 +266,7 @@ class ScaledBiasRowwiseLinear(Linear):
 
 
 __all__ = [
+    "GroupedLinear",
     "Linear",
     "RouterGateLinear",
     "ScaledBiasRowwiseLinear",

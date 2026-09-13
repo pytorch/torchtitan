@@ -22,6 +22,15 @@ from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.moe import RoutedExperts
 
 
+def _parameter_initializers() -> dict[str, Any]:
+    """Return the logical routed-expert initializers required by the builder."""
+    return {
+        "gate": torch.nn.init.zeros_,
+        "up": torch.nn.init.zeros_,
+        "down": torch.nn.init.zeros_,
+    }
+
+
 def _runtime(prefetch: Any) -> _DistMoeRuntime:
     return _DistMoeRuntime(
         config=cast(Any, object()),
@@ -72,11 +81,13 @@ def test_dist_moe_converter_rejects_specialized_routed_experts():
         hidden_dim=64,
         num_experts=4,
         top_k=2,
-        param_init={},
+        param_init=_parameter_initializers(),
         comm_backend="standard",
     )
     specialized = SpecializedConfig(
-        inner_experts=stock.inner_experts,
+        w13=stock.w13,
+        w2=stock.w2,
+        activation=stock.activation,
         token_dispatcher=stock.token_dispatcher,
     )
 
@@ -92,7 +103,7 @@ def test_dist_moe_forwards_expert_output_postprocess(dtype):
         hidden_dim=64,
         num_experts=4,
         top_k=2,
-        param_init={},
+        param_init=_parameter_initializers(),
         comm_backend="standard",
     )
     config = DistMoeConverter(
@@ -138,7 +149,7 @@ def test_dist_moe_preserves_typed_expert_output_postprocess(dtype):
         hidden_dim=64,
         num_experts=4,
         top_k=2,
-        param_init={},
+        param_init=_parameter_initializers(),
         comm_backend="standard",
     )
     config = DistMoeConverter(
