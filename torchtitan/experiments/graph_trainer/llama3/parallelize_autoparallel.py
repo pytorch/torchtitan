@@ -12,6 +12,7 @@ graph_trainer trace and compile the placed model through its normal
 `aot_fx_trace` train-step pipeline.
 """
 
+import logging
 import time
 
 import torch
@@ -31,8 +32,10 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     validate_autoparallel_config,
 )
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
+
+
+logger = logging.getLogger(__name__)
 
 
 def parallelize_autoparallel_llama(
@@ -59,7 +62,9 @@ def parallelize_autoparallel_llama(
     if parallel_dims.pp_enabled:
         raise ValueError("AutoParallel Llama3 does not support PP yet")
 
-    dense_names = ["dp_replicate", "fsdp", "tp"]
+    # CP is rejected above, so the former flattened ``fsdp = dp_shard * cp``
+    # axis maps exactly to ``dp_shard`` here.
+    dense_names = ["dp_replicate", "dp_shard", "tp"]
     dense_names = [
         name
         for name in dense_names
@@ -104,7 +109,7 @@ def parallelize_autoparallel_llama(
 
     possible_input_shardings = {
         "dp_replicate": Shard(0),
-        "fsdp": Shard(0),
+        "dp_shard": Shard(0),
         "tp": Replicate(),
     }
     unsupported_axes = [

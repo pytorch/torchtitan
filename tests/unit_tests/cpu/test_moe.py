@@ -72,22 +72,22 @@ class TestMoE(unittest.TestCase):
 
         self.assertEqual(
             {name for name, _ in experts.named_parameters(recurse=False)},
-            {"w13", "w2_EDF"},
+            {"w13_EF2D", "w2_EDF"},
         )
-        self.assertEqual(tuple(experts.w13.shape), (2, 8, 2, 4))
+        self.assertEqual(tuple(experts.w13_EF2D.shape), (2, 8, 2, 4))
 
-    def test_grouped_experts_checkpoint_uses_physical_projection_keys(self):
+    def test_grouped_experts_checkpoint_uses_logical_projection_keys(self):
         source = GroupedExperts.Config(
             dim=4,
             hidden_dim=8,
             num_experts=2,
         ).build()
         with torch.no_grad():
-            source.w13.copy_(torch.randn_like(source.w13))
+            source.w13_EF2D.copy_(torch.randn_like(source.w13_EF2D))
             source.w2_EDF.copy_(torch.randn_like(source.w2_EDF))
 
         state_dict = source.state_dict()
-        self.assertEqual(set(state_dict), {"w13", "w2_EDF"})
+        self.assertEqual(set(state_dict), {"w1_EFD", "w2_EDF", "w3_EFD"})
 
         target = GroupedExperts.Config(
             dim=4,
@@ -95,7 +95,7 @@ class TestMoE(unittest.TestCase):
             num_experts=2,
         ).build()
         target.load_state_dict(state_dict)
-        torch.testing.assert_close(target.w13, source.w13)
+        torch.testing.assert_close(target.w13_EF2D, source.w13_EF2D)
         torch.testing.assert_close(target.w2_EDF, source.w2_EDF)
 
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):

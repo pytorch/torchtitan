@@ -13,10 +13,8 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
-from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.protocols.module import Module
 
@@ -108,39 +106,9 @@ class GptOssGroupedExperts(GroupedExperts):
         Keep logical capital suffixes here to avoid encoding a specific
         parallel layout in these local tensor names.
         """
-        if isinstance(self.mlp1_weight_EGD, DTensor):
-            # Convert parameters from DTensors to plain Tensors, to work with
-            # dynamic-shape inputs in EP which cannot be easily expressed as DTensors.
-            mlp1_weight_EGD = self.mlp1_weight_EGD.to_local()
-            # pyrefly: ignore [missing-attribute]
-            mlp1_bias_EG = self.mlp1_bias_EG.to_local()
-            # pyrefly: ignore [missing-attribute]
-            mlp2_weight_EDF = self.mlp2_weight_EDF.to_local()
-            # pyrefly: ignore [missing-attribute]
-            mlp2_bias_ED = self.mlp2_bias_ED.to_local()
-        else:
-            mlp1_weight_EGD = self.mlp1_weight_EGD
-            mlp1_bias_EG = self.mlp1_bias_EG
-            mlp2_weight_EDF = self.mlp2_weight_EDF
-            mlp2_bias_ED = self.mlp2_bias_ED
+        tp_degree = spmd_mesh_size("tp")
 
-        # Determine tp_degree from the active backend's device mesh.
-        tp_degree = 1
-        if get_spmd_backend() == "spmd_types":
-            tp_degree = spmd_mesh_size("tp")
-        elif isinstance(self.mlp1_weight_EGD, DTensor):
-            mesh_dim_names = self.mlp1_weight_EGD.device_mesh.mesh_dim_names
-            # pyrefly: ignore[not-iterable]
-            if "tp" in mesh_dim_names:
-                # pyrefly: ignore [missing-attribute]
-                tp_dim_idx = mesh_dim_names.index("tp")
-                tp_degree = self.mlp1_weight_EGD.device_mesh.size(tp_dim_idx)
-
-        if (
-            get_spmd_backend() == "spmd_types"
-            and spmd.is_type_checking()
-            and spmd_mesh_size("ep") == 1
-        ):
+        if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
             spmd.mutate_type(
                 num_tokens_per_expert_E,
                 src=spmd.P,
@@ -167,11 +135,14 @@ class GptOssGroupedExperts(GroupedExperts):
             recompute=self.remat_should_recompute("w13"),
         )(
             A=x_RD.bfloat16(),
-            weight_EOI=mlp1_weight_EGD,
+            weight_EOI=self.mlp1_weight_EGD,
             offs=offsets_E,
         )
         bias_PG = torch.cat(
-            [mlp1_bias_EG, mlp1_bias_EG.new_zeros(1, mlp1_bias_EG.shape[-1])]
+            [
+                self.mlp1_bias_EG,
+                self.mlp1_bias_EG.new_zeros(1, self.mlp1_bias_EG.shape[-1]),
+            ]
         )
         bias_RG = bias_PG.repeat_interleave(
             num_tokens_per_expert_P, dim=0, output_size=x_RD.shape[0]
@@ -179,18 +150,20 @@ class GptOssGroupedExperts(GroupedExperts):
         remat.recompute_needs_tensor(h_RG)
         h_RG = h_RG + bias_RG.to(h_RG.dtype)
         h_RF = swiglu(h_RG, limit=self.swiglu_limit)
-
         out_RD = remat.region(
             self._grouped_mm,
             self.remat_region_name("w2"),
             recompute=self.remat_should_recompute("w2"),
         )(
             A=h_RF,
-            weight_EOI=mlp2_weight_EDF,
+            weight_EOI=self.mlp2_weight_EDF,
             offs=offsets_E,
         )
         bias_PD = torch.cat(
-            [mlp2_bias_ED, mlp2_bias_ED.new_zeros(1, mlp2_bias_ED.shape[-1])]
+            [
+                self.mlp2_bias_ED,
+                self.mlp2_bias_ED.new_zeros(1, self.mlp2_bias_ED.shape[-1]),
+            ]
         )
         bias_RD = bias_PD.repeat_interleave(
             num_tokens_per_expert_P, dim=0, output_size=x_RD.shape[0]
