@@ -128,9 +128,9 @@ class GroupedExperts(Module):
         )
         gate_RF, up_RF = gate_up_R_2F.reshape(-1, F, 2).unbind(-1)
         h_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
-        return self._grouped_mm(
-            A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E
-        ).type_as(x_RD)
+        return self._grouped_mm(A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E).type_as(
+            x_RD
+        )
 
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
