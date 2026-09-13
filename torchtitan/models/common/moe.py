@@ -4,7 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from typing import Literal
 
 import spmd_types as spmd
@@ -13,8 +15,14 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 
-from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.distributed.spmd_types import (
+    maybe_set_sparse_mesh,
+    spmd_local_context,
+    spmd_mesh_size,
+    spmd_sparse_mesh,
+)
+from torchtitan.models.common.activation import ActivationFn, SwiGLU
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import GroupedLinear, RouterGateLinear
 from torchtitan.protocols.module import Module
@@ -35,50 +43,34 @@ from .token_dispatcher import LocalTokenDispatcher
 #        for the up/gate projections and (E, D, F) for the down one)
 
 
-class ExpertActivation(Module):
-    """Activation applied to fused gate and up expert projections."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__()
-
-    def forward(
-        self,
-        gate_RF: torch.Tensor,
-        up_RF: torch.Tensor,
-        offsets_E: torch.Tensor,
-    ) -> torch.Tensor:
-        """Return ``silu(gate) * up`` for routed rows."""
-        del offsets_E
-        return F.silu(gate_RF) * up_RF
-
-
 class RoutedExperts(Module):
-    """Routed-expert local-map region with directly owned projections."""
+    """Local SPMD region with first-class grouped expert projections."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         w13: GroupedLinear.Config
         w2: GroupedLinear.Config
-        activation: ExpertActivation.Config
         token_dispatcher: LocalTokenDispatcher.Config
+        activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
+
+        def __post_init__(self) -> None:
+            if self.w13.group_size != self.w2.group_size:
+                raise ValueError("w13 and w2 must contain the same number of experts")
+            if self.token_dispatcher.num_experts != self.w13.group_size:
+                raise ValueError(
+                    "token dispatcher and grouped linears must contain the same "
+                    "number of experts"
+                )
+            if self.w13.in_features != self.w2.out_features:
+                raise ValueError("w13 input and w2 output dimensions must match")
+            if self.w13.out_features != (2, self.w2.in_features):
+                raise ValueError("w13 output must contain gate and up projections")
 
     def __init__(self, config: Config):
         super().__init__()
-        if config.w13.num_groups != config.w2.num_groups:
-            raise ValueError("w13 and w2 must contain the same number of experts")
-        if config.w13.in_features != config.w2.out_features:
-            raise ValueError("w13 input and w2 output dimensions must match")
-        if config.w13.out_features != (2, config.w2.in_features):
-            raise ValueError("w13 output must contain gate and up projections")
-
-        self.num_experts = config.w13.num_groups
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
-        self.activation = config.activation.build()
+        self.activation_fn = config.activation_fn.build()
         self.token_dispatcher = config.token_dispatcher.build()
 
     def forward(
@@ -90,9 +82,8 @@ class RoutedExperts(Module):
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
-        When parallelized, ``local_map`` (from ``sharding_config``) handles
-        DTensor→local conversion on entry and local→DTensor(Partial) wrapping
-        on exit. The forward body operates on plain local tensors.
+        When parallelized, ``local_spmd`` (from ``sharding_config``) establishes
+        the local SPMD types for the forward body.
         """
         (
             routed_input_RD,
@@ -109,18 +100,15 @@ class RoutedExperts(Module):
             dim=0,
             dtype=torch.int32,
         )
-        if (
-            get_spmd_backend() == "spmd_types"
-            and spmd.is_type_checking()
-            and spmd_mesh_size("ep") == 1
-        ):
+        if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
             for axis in ("dp", "cp"):
+                # grouped_mm cannot mix Partial offsets with Varying operands.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         with maybe_set_sparse_mesh():
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
-            hidden_RF = self.activation(gate_RF, up_RF, offsets_E)
+            hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E).type_as(routed_input_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
@@ -143,35 +131,29 @@ class RoutedExperts(Module):
 
 class TokenChoiceTopKRouter(Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
-        routed to top K experts based on the router scores.
-
-    Optionally supports node-limited (group-limited) routing where experts are divided into groups
-    (e.g., by node), and only num_limited_groups groups are considered before selecting top_k experts.
-    This reduces cross-node communication in distributed settings.
+    routed to top K experts based on the router scores.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
         gate: RouterGateLinear.Config
-        num_expert_groups: int | None = None  # must be a divisor of num_experts
-        num_limited_groups: int | None = None
         top_k: int = 1
         score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid"
         route_norm: bool = False
         route_scale: float = 1.0
+        aux_loss: AuxLoss.Config | None = None
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
         self.gate = config.gate.build()
         self.num_experts = config.num_experts
-        self.num_expert_groups = config.num_expert_groups
-        self.num_limited_groups = config.num_limited_groups
         self.top_k = config.top_k
         self.score_func = config.score_func
         self.route_norm = config.route_norm
         self.route_scale = config.route_scale
+        self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
         self._debug_force_load_balance = config._debug_force_load_balance
 
     def _debug_force_load_balance_routing(
@@ -193,48 +175,6 @@ class TokenChoiceTopKRouter(Module):
         topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
         return topk_expert_ids_TK, topk_scores_TK
 
-    def _get_node_limited_routing_scores(
-        self,
-        scores_for_choice_TE: torch.Tensor,
-    ) -> torch.Tensor:
-        """Select num_limited_groups groups based on group scores,
-        and set expert scores in non-selected groups as -inf.
-
-        Args:
-            scores_for_choice_TE: Router scores with expert_bias, shape ``(T, E)``.
-
-        Returns:
-            Router scores with shape ``(T, E)``.
-        """
-        if self.num_limited_groups is None:
-            raise ValueError(
-                "num_limited_groups must be set when num_expert_groups is set"
-            )
-        assert self.num_expert_groups is not None
-        if self.num_experts % self.num_expert_groups != 0:
-            raise ValueError(
-                f"num_experts ({self.num_experts}) must be divisible by num_expert_groups ({self.num_expert_groups})"
-            )
-        experts_per_group = self.num_experts // self.num_expert_groups
-        if experts_per_group < 2:
-            raise ValueError(f"experts_per_group ({experts_per_group}) must be >= 2")
-        scores_grouped = scores_for_choice_TE.unflatten(
-            -1, (self.num_expert_groups, experts_per_group)
-        )
-        top2_scores_in_group, _ = scores_grouped.topk(2, dim=-1)
-        group_scores = top2_scores_in_group.sum(dim=-1)
-        _, group_idx = torch.topk(
-            group_scores, k=self.num_limited_groups, dim=-1, sorted=False
-        )
-        group_mask = torch.ones_like(group_scores, dtype=torch.bool)
-        group_mask.scatter_(-1, group_idx, False)  # False = selected groups (keep)
-        # Mask out experts from non-selected groups
-        scores_for_choice_TE = scores_grouped.masked_fill(
-            group_mask.unsqueeze(-1), float("-inf")
-        ).flatten(-2)
-
-        return scores_for_choice_TE
-
     def _select_experts(
         self,
         scores_TE: torch.Tensor,
@@ -244,10 +184,6 @@ class TokenChoiceTopKRouter(Module):
         scores_for_choice_TE = (
             scores_TE if expert_bias_E is None else scores_TE + expert_bias_E
         )
-        if self.num_expert_groups is not None:
-            scores_for_choice_TE = self._get_node_limited_routing_scores(
-                scores_for_choice_TE
-            )
         return torch.topk(
             scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
         ).indices
@@ -266,7 +202,7 @@ class TokenChoiceTopKRouter(Module):
         Returns:
             topk_scores_TK: Routing scores ``(T, K)``.
             topk_expert_ids_TK: Expert indices ``(T, K)``.
-            scores_TE: Full routing scores ``(T, E)``.
+            routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
         scores_TE = self.gate(x_TD)
 
@@ -292,10 +228,10 @@ class TokenChoiceTopKRouter(Module):
                 "routing_decision",
                 recompute=False,
             )(scores_TE, expert_bias_E, **router_kwargs)
-            remat.recompute_needs_tensor(topk_expert_ids_TK)
 
             # The expert bias is only used for routing. The gating value is
             # still derived from the original scores.
+            remat.recompute_needs_tensor(topk_expert_ids_TK)
             topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
@@ -303,19 +239,168 @@ class TokenChoiceTopKRouter(Module):
             topk_scores_TK = topk_scores_TK / denominator
         topk_scores_TK = topk_scores_TK * self.route_scale
 
+        # Build a one-hot boolean routing map (T, E) marking the experts each
+        # token is routed to. Under TP/SP the router outputs are sharded on the
+        # token dimension; scatter_ writes along the replicated expert
+        # dimension and therefore needs no redistribution.
+        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
+            -1,
+            topk_expert_ids_TK,
+            True,
+        )
+
+        # Auxiliary load-balance loss (DeepSeek-V3 Sec 2.1.2 Eqs 17-20).
+        # The gradient is injected into topk_scores_TK on backward; the loss
+        # itself keeps its forward-side metric accumulation from being re-run
+        # by activation checkpointing (see ``AuxLoss.inject``).  The
+        # routing map is passed in so the loss counts exactly the tokens this
+        # router counted: once the router masks padding positions out of the
+        # map, the loss and its token count follow without further changes.
+        if self.training and self.aux_loss is not None:
+            topk_scores_TK = self.aux_loss(
+                scores_TE,
+                routing_map_TE,
+                carrier=topk_scores_TK,
+            )
+
         return (
             topk_scores_TK,
             topk_expert_ids_TK,
-            scores_TE,
+            routing_map_TE,
         )
+
+
+class MicrobatchWiseLoadBalanceLoss(AuxLoss):
+    """Per-forward MoE load-balance gradient (DeepSeek-V3 Sec 2.1.2 Eqs 17-20).
+
+    The balancing unit is one forward's folded token stream (a DP-local
+    microbatch).  Global (corpus-level) balance is left to the
+    auxiliary-loss-free bias path (``expert_bias_E``); this loss only
+    discourages extreme load imbalance within individual forwards (samples),
+    per the DeepSeek-V3 design (Sec 2.1.2, "Complementary Sequence-Wise
+    Auxiliary Loss").
+
+    With ``E`` experts, top-``K`` selection and ``T`` tokens per forward:
+
+    Eq. 18: ``f_i = (E / (K T)) * sum_t 1[token t routes to expert i]``
+    Eq. 19: ``p_i = (1 / T) * sum_t s'_t,i``,
+            where ``s'_t,i = s_t,i / sum_j s_t,j`` is the per-token
+            normalized score.
+    Eq. 17: ``L_bal = sum_i f_i * p_i``
+
+    The returned value is ``T * L_bal`` (token-mode): Eqs 17-20 define a
+    per-token-normalized value, while ``AuxLoss`` scales every auxiliary
+    loss by ``1 / global_valid_tokens`` (the step's valid-token count), so the
+    sum-type form keeps the injected weight at ``coeff * L_bal``.
+
+    The counts (Eq. 18) and normalized-score sums (Eq. 19) are sums over the
+    folded token dim, hence Partial over the mesh axes that shard it (CP
+    always, plus TP under EP).  They are all-reduced to Invariant before
+    the formula, so every rank computes the same per-forward loss.  The
+    one-hot counts are non-differentiable: the gradient reaches the router
+    only through the normalized-score sums and the top-k score carrier.
+    ``T`` is the forward's token count: the code evaluates Eq. 18 in the
+    T-free form ``f_i = E * counts_i / sum_j counts_j``, which equals
+    ``(E / (K T)) * counts_i`` because each token contributes K entries, so
+    ``sum_j counts_j = K T``.  That needs no shape or mesh-degree assumption
+    and follows any masking the router applies to the routing map.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(AuxLoss.Config):
+        """Same fields as ``AuxLoss.Config``; this loss adds no knobs.
+
+        A distinct Config is required even without new fields: ``Config.build()``
+        constructs the class that owns the config (``__init_subclass__`` sets
+        ``_owner``), so a router configured with ``AuxLoss.Config`` would
+        build a plain ``AuxLoss``, which has no ``forward``.
+        """
+
+    def _reduce_token_partials(
+        self, partial_E: torch.Tensor, axes: tuple[str, ...]
+    ) -> torch.Tensor:
+        """Partial -> Invariant all-reduce over the token-partition axes.
+
+        Axes are passed by name, so spmd_types resolves them against the
+        ambient mesh and no DeviceMesh escapes into model code; an inactive
+        axis is skipped rather than run as a no-op collective.  ``P -> I`` is
+        an all-reduce in forward with an identity backward: the reduced sums,
+        and hence the loss and its gradient, are identical on every rank of
+        the reduction group.
+        """
+        for axis in axes:
+            if spmd_mesh_size(axis) == 1:
+                # No mesh context or a size-1 axis: nothing shards the tokens.
+                continue
+            partial_E = spmd.redistribute(
+                partial_E,
+                axis,
+                src=spmd.Partial,
+                dst=spmd.Invariant,
+                backward_options={"op_dtype": partial_E.dtype},
+            )
+        return partial_E
+
+    def forward(
+        self,
+        scores_TE: torch.Tensor,
+        routing_map_TE: torch.Tensor,
+        *,
+        carrier: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute the per-forward balance loss and inject its gradient.
+
+        Args:
+            scores_TE: Router scores ``(T, E)`` for the forward's tokens.
+            routing_map_TE: One-hot routing map ``(T, E)`` for the same tokens,
+                as counted by the router.
+            carrier: Tensor whose backward path carries the injected
+                gradient (the router's top-k scores).
+
+        Returns:
+            ``carrier`` unchanged (identity forward).
+        """
+        # Mark DP local for the counts arithmetic: each DP rank owns an
+        # independent token stream, so DP must not be reduced; only the
+        # global axes that shard the stream (CP, TP under EP) are.
+        with spmd_local_context("dp"):
+            E = scores_TE.size(-1)
+            # Axes that shard the router output's token dim: CP in every
+            # layout, TP only under EP, which distributes tokens over TP (the
+            # gate computes and emits dense_sequence_parallel_placement
+            # whenever EP is on, and tokens_per_expert_E is TP-Partial for the
+            # same reason).
+            axes = ("cp", "tp") if spmd_sparse_mesh() is not None else ("cp",)
+
+            # Eq. 18: per-expert routing frequency counts_i over the forward's
+            # tokens, then f_i = E * counts_i / sum_j counts_j (so
+            # sum_i f_i = E).  The latter is the (E / (K T)) form with
+            # T = sum_j counts_j / K, so it needs no token count, shape or mesh
+            # degree and follows any masking the router applies to the map.
+            # The map is cast to float before the reduction: casting a Partial
+            # tensor is non-linear and rejected by spmd_types.
+            counts_E = self._reduce_token_partials(
+                routing_map_TE.to(scores_TE.dtype).sum(dim=0), axes
+            )
+            f_E = F.normalize(counts_E, p=1, dim=0) * E
+
+            # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
+            # scores.  F.normalize's eps clamp only guards an all-zero score
+            # row: the scores are non-negative, so the norm is a plain sum.
+            probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+            p_E = self._reduce_token_partials(probs_TE.sum(dim=0), axes)
+
+            # Eq. 17: L_bal = sum_i f_i * p_i
+            loss = (f_E * p_E).sum()
+            return self.inject(loss, carrier=carrier)
 
 
 class MoE(Module):
     """Mixture of Experts layer.
 
     The forward pass proceeds as:
-    1. Router computes expert assignments (stays on DTensor)
-    2. RoutedExperts.forward() converts DTensor to local, then handles:
+    1. Router computes expert assignments.
+    2. RoutedExperts.forward() enters a local SPMD region, then handles:
        a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
           With EP, also performs all-to-all communication to send tokens
           to expert-owning ranks.
@@ -336,6 +421,20 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+
+        def __post_init__(self) -> None:
+            expert_counts = {
+                "moe": self.num_experts,
+                "router": self.router.num_experts,
+                "routed_experts": self.routed_experts.w13.group_size,
+            }
+            if len(set(expert_counts.values())) != 1:
+                raise ValueError(
+                    "MoE expert counts must match: "
+                    + ", ".join(
+                        f"{owner}={count}" for owner, count in expert_counts.items()
+                    )
+                )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -368,11 +467,7 @@ class MoE(Module):
             persistent=False,
         )
 
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        **router_kwargs,
-    ) -> torch.Tensor:
+    def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
         """
         Args:
             x_TD: Input ``(T, D)``.
@@ -383,28 +478,17 @@ class MoE(Module):
         Under TP, the MoE wrapper's ``sharding_config`` (set by
         ``set_moe_sharding_config``) handles input/output redistribution:
         input is redistributed from sp_layout to desired_input_layouts;
-        output is redistributed to sp_layout. MoE.forward() operates on
-        DTensors; the DTensor-to-local conversion happens at the routed-expert
-        boundary. Grouped linears operate on local tensors. When EP internally
-        sequence-shards tokens across TP, the caller must provide a TP-divisible
-        token count.
+        output is redistributed to sp_layout. Routed expert computation runs
+        in a local SPMD region. When EP internally sequence-shards tokens across
+        TP, the caller must provide a TP-divisible token count.
         """
-        # topk scores and expert IDs have shape (T, K); scores have shape (T, E).
+        # topk scores and expert IDs have shape (T, K); the routing map (T, E)
+        # marks the experts each token is routed to (built inside the router).
         (
             topk_scores_TK,
             topk_expert_ids_TK,
-            scores_TE,
+            routing_map_TE,
         ) = self.router(x_TD, self.expert_bias_E, **router_kwargs)
-
-        # Build a one-hot routing map (T, E) marking the experts each token
-        # is routed to. Under TP/SP the router outputs are DTensors sharded on
-        # the token dim; scatter_ writes along the (replicated) expert dim, so
-        # DTensor runs it as a local op with no redistribution.
-        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
-            -1,
-            topk_expert_ids_TK,
-            True,
-        )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
         # tokens_per_expert_E will be used to update the expert bias for load balancing,
@@ -439,9 +523,9 @@ class MoE(Module):
 
         with torch.device(buffer_device):
             self.tokens_per_expert_E = torch.zeros(
-                self.routed_experts.num_experts, dtype=torch.float32
+                self.router.num_experts, dtype=torch.float32
             )
             if self.load_balance_coeff is not None:
                 self.expert_bias_E = torch.zeros(
-                    self.routed_experts.num_experts, dtype=torch.float32
+                    self.router.num_experts, dtype=torch.float32
                 )

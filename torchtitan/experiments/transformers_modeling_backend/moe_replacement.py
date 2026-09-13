@@ -16,6 +16,7 @@ Two-phase replacement:
       happens later via ``model.parallelize(parallel_dims)``.
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
@@ -44,8 +45,11 @@ from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
 from torchtitan.protocols.sharding import ShardingConfig
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class _HFBatchedMoE(MoE):
@@ -145,7 +149,7 @@ def build_and_swap_native_moe(
             out_dst_shardings=hf_sp_layout,
         )
 
-        # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but
+        # set_moe_sharding_config shards the shared FFN (w13/w2) but
         # leaves the SigmoidGatedFeedForward gate to model-specific code.
         shared = moe_config.shared_experts
         if isinstance(shared, SigmoidGatedFeedForward.Config):
@@ -495,12 +499,23 @@ _LINEAR_INIT = {
 def _get_expert_param_init() -> dict[str, Callable]:
     """Return initializers for the three logical expert projections."""
     init_fn = partial(nn.init.trunc_normal_, std=0.02)
-    return {"gate": init_fn, "up": init_fn, "down": init_fn}
+    return {"w1_EFD": init_fn, "w2_EDF": init_fn, "w3_EFD": init_fn}
 
 
 def _build_moe_config(params: dict, config) -> MoE.Config:
     """Build a fully-specified MoE.Config from probed parameters."""
-    router = make_router_config(
+    router_config_factory = (
+        make_deepseek_v3_router_config
+        if params["num_expert_groups"] is not None
+        else make_router_config
+    )
+    router_kwargs = {}
+    if params["num_expert_groups"] is not None:
+        router_kwargs = {
+            "num_expert_groups": params["num_expert_groups"],
+            "num_limited_groups": params["num_limited_groups"],
+        }
+    router = router_config_factory(
         dim=params["dim"],
         num_experts=params["num_experts"],
         gate_param_init=_LINEAR_INIT,
@@ -508,8 +523,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         score_func=params["score_func"],
         route_norm=params["route_norm"],
         route_scale=params["route_scale"],
-        num_expert_groups=params["num_expert_groups"],
-        num_limited_groups=params["num_limited_groups"],
+        **router_kwargs,
     )
 
     routed_experts = make_routed_experts_config(
@@ -531,13 +545,13 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
-            # SigmoidGatedFeedForward is a FeedForward subclass, so w1/w2/w3 stay flat
+            # SigmoidGatedFeedForward is a FeedForward subclass, so w13/w2 stay flat
             # (no nested ``ffn.`` level) and are directly shardable by
             # set_moe_sharding_config.
             shared_experts = SigmoidGatedFeedForward.Config(
-                w1=ffn_config.w1,
+                w13=ffn_config.w13,
                 w2=ffn_config.w2,
-                w3=ffn_config.w3,
+                activation_fn=ffn_config.activation_fn,
                 gate=Linear.Config(
                     in_features=shared_info["dim"],
                     out_features=1,

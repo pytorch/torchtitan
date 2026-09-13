@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from collections.abc import Iterable
 from fractions import Fraction
 
@@ -21,7 +22,9 @@ from torch.distributed.tensor.placement_types import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe import MoE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def validate_converter_order(converters: list) -> None:
@@ -30,8 +33,7 @@ def validate_converter_order(converters: list) -> None:
     Raises ``ValueError`` if a quantization converter appears after a LoRA
     converter in the list.
     """
-    from torchtitan.components.lora import LoRAConverter
-    from torchtitan.components.quantization import QuantizationConverter
+    from torchtitan.config.transform import LoRAConverter, QuantizationConverter
 
     _BEFORE_LORA = (QuantizationConverter.Config,)
 
@@ -80,9 +82,9 @@ class MoEStateDictAdapter(StateDictAdapter):
             if not key.endswith("routed_experts.w13.weight"):
                 continue
             weight = logical.pop(key)
-            prefix = key.removesuffix("weight")
-            logical[f"{prefix}gate"] = weight.select(1, 0)
-            logical[f"{prefix}up"] = weight.select(1, 1)
+            prefix = key.removesuffix("w13.weight")
+            logical[f"{prefix}w1_EFD"] = weight.select(1, 0)
+            logical[f"{prefix}w3_EFD"] = weight.select(1, 1)
         return logical
 
     @staticmethod
@@ -91,13 +93,13 @@ class MoEStateDictAdapter(StateDictAdapter):
     ) -> dict[str, torch.Tensor]:
         """Combine logical gate/up tensors into the canonical W13 parameter."""
         native = dict(state_dict)
-        gate_keys = [key for key in native if key.endswith("routed_experts.w13.gate")]
+        gate_keys = [key for key in native if key.endswith("routed_experts.w1_EFD")]
         for gate_key in gate_keys:
-            prefix = gate_key.removesuffix("gate")
-            up_key = f"{prefix}up"
+            prefix = gate_key.removesuffix("w1_EFD")
+            up_key = f"{prefix}w3_EFD"
             if up_key not in native:
                 raise ValueError(f"Missing routed-expert up weight for {gate_key}")
-            native[f"{prefix}weight"] = torch.stack(
+            native[f"{prefix}w13.weight"] = torch.stack(
                 (native.pop(gate_key), native.pop(up_key)),
                 dim=1,
             )
@@ -106,8 +108,12 @@ class MoEStateDictAdapter(StateDictAdapter):
     @staticmethod
     def _is_expert_weight_key(key: str) -> bool:
         """Return whether ``key`` is a canonical or logical expert projection."""
-        return ".moe.routed_experts.w13." in key or key.endswith(
-            ".moe.routed_experts.w2.weight"
+        return key.endswith(
+            (
+                ".moe.routed_experts.w1_EFD",
+                ".moe.routed_experts.w2.weight",
+                ".moe.routed_experts.w3_EFD",
+            )
         )
 
     def _calculate_strided_shard_shard_indices(

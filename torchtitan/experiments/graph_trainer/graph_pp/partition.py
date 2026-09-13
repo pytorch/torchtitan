@@ -362,7 +362,7 @@ def _flatten_saved_values_for_backward(
 ) -> list[fx.Node]:
     """Expose saved tuple intermediates as tensor leaves.
 
-    Higher-order ops such as FlexAttention can return nested tuples whose tensor
+    Higher-order ops such as FlexInnerAttention can return nested tuples whose tensor
     leaves are consumed by backward. Keeping the raw tuple as a forward output
     works for interpreted FX, but standalone regional Inductor expects compiled
     regions to expose plain tensor outputs. If backward only observes the tuple

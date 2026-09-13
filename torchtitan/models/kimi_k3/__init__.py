@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
+from dataclasses import replace
 from functools import partial
 
 import torch
@@ -14,15 +15,17 @@ from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.models.common import (
     Conv1d,
     Embedding,
-    GroupedLinear,
+    FeedForward,
     Linear,
     RouterGateLinear,
+    SiTUGLU,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
-    make_token_dispatcher_config,
+    make_ffn_config,
+    make_routed_experts_config,
 )
-from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
@@ -36,7 +39,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
-from .moe import KimiExpertActivation, KimiFeedForward, KimiLatentMoE
+from .moe import KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
@@ -126,13 +129,15 @@ def _feed_forward_config(
     *,
     dim: int,
     hidden_dim: int,
-) -> KimiFeedForward.Config:
-    return KimiFeedForward.Config(
-        w1=_linear(dim, hidden_dim),
-        w2=_linear(hidden_dim, dim),
-        w3=_linear(dim, hidden_dim),
-        beta=4.0,
-        linear_beta=25.0,
+) -> FeedForward.Config:
+    return replace(
+        make_ffn_config(
+            dim=dim,
+            hidden_dim=hidden_dim,
+            w1_param_init=_LINEAR_INIT,
+            w2w3_param_init=_LINEAR_INIT,
+        ),
+        activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
     )
 
 
@@ -248,38 +253,20 @@ def _latent_moe_config(
             route_scale=1.0,
         ),
         routed_down=_linear(dim, latent_dim),
-        routed_experts=RoutedExperts.Config(
-            w13=GroupedLinear.Config(
-                num_groups=num_experts,
-                in_features=latent_dim,
-                out_features=(2, expert_hidden_dim),
-                param_init={
-                    "weight": partial(nn.init.trunc_normal_, std=0.02),
-                },
-            ),
-            w2=GroupedLinear.Config(
-                num_groups=num_experts,
-                in_features=expert_hidden_dim,
-                out_features=latent_dim,
-                param_init={
-                    "weight": partial(nn.init.trunc_normal_, std=0.02),
-                },
-            ),
-            activation=KimiExpertActivation.Config(
-                beta=4.0,
-                linear_beta=25.0,
-            ),
-            # core's dispatcher factory: standard / deepep / hybridep /
-            # minimal_async_ep per spec, as deepseek_v3; falls back to local
-            # dispatch when the ep mesh is None.
-            token_dispatcher=make_token_dispatcher_config(
+        routed_experts=replace(
+            make_routed_experts_config(
+                dim=latent_dim,
+                hidden_dim=expert_hidden_dim,
                 num_experts=num_experts,
                 top_k=top_k,
+                param_init={
+                    "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
+                    "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
+                    "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
+                },
                 comm_backend=moe_comm_backend,
-                # The routed experts consume the LATENT stream, so the
-                # dispatcher buffers size by latent_dim, not model dim.
-                hidden_dim=latent_dim,
             ),
+            activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
         ),
         routed_norm=_norm(latent_dim),
         routed_up=_linear(latent_dim, dim),

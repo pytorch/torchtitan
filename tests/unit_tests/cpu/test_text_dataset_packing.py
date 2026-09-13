@@ -46,7 +46,7 @@ class TestTextDatasetPacking(unittest.TestCase):
         try:
             iterator = iter(dataloader)
             for _ in range(100):
-                input_dict, _labels = next(iterator)
+                input_dict = next(iterator)
                 positions = input_dict["positions"]
                 steps = positions[1:] - positions[:-1]
                 # Each position either continues the current document (+1) or
@@ -63,7 +63,8 @@ class TestTextDatasetPacking(unittest.TestCase):
         try:
             iterator = iter(dataloader)
             for _ in range(100):
-                input_dict, labels = next(iterator)
+                input_dict = next(iterator)
+                labels = input_dict["labels"]
                 input_ids = input_dict["input"]
                 positions = input_dict["positions"]
 
@@ -106,16 +107,16 @@ class TestTextDatasetBufferCheckpointing(unittest.TestCase):
         finally:
             resumed.close()
 
-        for (expected_inputs, expected_labels), (actual_inputs, actual_labels) in zip(
-            expected, actual, strict=True
-        ):
+        for expected_inputs, actual_inputs in zip(expected, actual, strict=True):
             self.assertTrue(
                 torch.equal(expected_inputs["input"], actual_inputs["input"])
             )
             self.assertTrue(
                 torch.equal(expected_inputs["positions"], actual_inputs["positions"])
             )
-            self.assertTrue(torch.equal(expected_labels, actual_labels))
+            self.assertTrue(
+                torch.equal(expected_inputs["labels"], actual_inputs["labels"])
+            )
 
 
 if __name__ == "__main__":
