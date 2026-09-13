@@ -122,7 +122,7 @@ class GroupedExperts(Module):
         F = self.w13_E_2F_D.shape[1] // 2
         gate_up_R_2F = self._grouped_mm(
             A=x_RD.bfloat16(),
-            weight_EOI=self.w13_E_2F_D.bfloat16(),
+            weight_EOI=self.w13_E_2F_D,
             offs=offsets_E,
         )
         gate_RF, up_RF = gate_up_R_2F.reshape(-1, F, 2).unbind(-1)
