@@ -41,7 +41,8 @@ while VarlenInnerAttention consumes cumulative sequence offsets.
 
 Use a transform for options that replace or wrap configs in the built tree.
 Context parallelism, TP GEMM backends, MoE communication backends,
-quantization, and LoRA belong in transforms.
+quantization, and LoRA belong in transforms. Quantized modules, tensors, and
+kernels live in `torchtitan/quantization`.
 
 A CP transform specializes the selected attention for distributed execution.
 It may change input sharding and preprocessing, but it preserves the selected

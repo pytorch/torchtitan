@@ -21,7 +21,6 @@ from torchtitan.distributed.spmd_types import (
     set_current_spmd_mesh,
     spmd_local_context,
 )
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -439,14 +438,13 @@ class Qwen35Model(Decoder):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        if parallelism.spmd_backend == "spmd_types":
-            batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
-            # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
-            # nested inside attention_masks, must be annotated at its container.
-            attention_masks = batch.get("attention_masks")
-            if attention_masks is not None:
-                with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
-                    annotate_deltanet_cu_seqlens(attention_masks)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
+        # nested inside attention_masks, must be annotated at its container.
+        attention_masks = batch.get("attention_masks")
+        if attention_masks is not None:
+            with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+                annotate_deltanet_cu_seqlens(attention_masks)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")
@@ -621,7 +619,7 @@ class Qwen35Model(Decoder):
             else:
                 x = tokens
 
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        if spmd.is_type_checking():
             spmd.assert_type(
                 x,
                 {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},

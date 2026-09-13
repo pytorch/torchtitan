@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
@@ -20,7 +21,9 @@ from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
 
 from torchtitan.config import Configurable
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 if importlib.util.find_spec("torchft") is not None:
     import torchft

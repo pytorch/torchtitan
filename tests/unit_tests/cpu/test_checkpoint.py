@@ -38,9 +38,9 @@ from torchtitan.components.checkpointer.dcp import (
     AsyncMode,
     CheckpointManager,
 )
-from torchtitan.components.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.config import Function
 from torchtitan.observability import structured_logger as sl
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
 
 class FakeOptimizersContainer:

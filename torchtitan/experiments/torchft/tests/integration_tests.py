@@ -12,7 +12,9 @@ import subprocess
 
 from tests.integration_tests import OverrideDefinitions
 
-logging.basicConfig(level=logging.INFO)
+from torchtitan.observability.logging import init_logger
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,6 +117,7 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
 
 
 def main():
+    init_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(

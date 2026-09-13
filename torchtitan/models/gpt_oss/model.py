@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.common.attention import (
@@ -125,10 +124,7 @@ class Attention(BaseAttention):
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""
-        sinks = self.sinks
-        if isinstance(sinks, DTensor):
-            sinks = sinks.to_local(grad_placements=sinks.placements)
-        return apply_attention_sink_rescale(out, lse, sinks)
+        return apply_attention_sink_rescale(out, lse, self.sinks)
 
 
 class GptOssTransformerBlock(TransformerBlock):

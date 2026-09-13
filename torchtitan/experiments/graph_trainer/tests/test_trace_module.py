@@ -20,6 +20,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _maybe_materialize_grad_for_param_layout,
     accumulate_param_grads_,
     compute_parameter_gradients,
+    get_simple_fsdp_mesh,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.gradient_accumulation import (
@@ -174,6 +175,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         )
         from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
             build_minimal_trainer,
+            single_device_parallel_dims,
         )
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
@@ -181,6 +183,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         model_default = nn.Linear(3, 2, device="cuda")
         model_inplace = deepcopy(model_default)
         model_config = SimpleNamespace(layers=[])
+        parallel_dims = self.enterContext(single_device_parallel_dims())
 
         def make_trainer(model, *, inplace):
             trainer = build_minimal_trainer(
@@ -189,6 +192,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 GraphTrainer,
                 compile_enable_inplace_graph_gradient_accumulation=inplace,
                 compile_inductor_compilation="full",
+                parallel_dims=parallel_dims,
             )
             trainer.optimizers = OptimizersContainer(
                 OptimizersContainer.Config(
@@ -2267,7 +2271,6 @@ class TestTraceFSDP(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
     def test_graph_gradient_accumulation_preserves_fsdp_layout(self):
@@ -2282,7 +2285,7 @@ class TestTraceFSDP(FSDPTest):
 
         torch.manual_seed(42)
         self._setup()
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         model_ref = nn.Linear(8, 4, device="cuda")
         model_test = nn.Linear(8, 4, device="cuda")
         model_test.load_state_dict(model_ref.state_dict())
@@ -2398,7 +2401,11 @@ class TestTraceFSDP(FSDPTest):
         # (in the child process) to keep flex kernels within the H100 shared
         # memory limit. No restore needed: each rank is a fresh subprocess.
         _disable_flex_autotune()
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
 
         model_ref = create_model(config_cls, model_config, "cuda", dtype)
         model_test = create_model(config_cls, model_config, "cuda", dtype)
@@ -2562,8 +2569,7 @@ class TestTraceFSDP(FSDPTest):
         )
 
 
-# TODO: Re-enable after graph_trainer adopts spmd_types; partial_dtensor does
-# not apply the CP placements declared in ShardingConfig.
+# TODO: Re-enable after graph_trainer supports context parallel tracing.
 @unittest.skip("Context Parallel is not supported by graph_trainer")
 @unittest.skipIf(torch.cuda.device_count() < 2, "CP trace test requires 2 GPUs")
 class TestTraceContextParallel(FSDPTest):
@@ -2675,7 +2681,7 @@ class TestTraceContextParallel(FSDPTest):
                     else None
                 )
                 fsdp_pg_name = (
-                    trainer.parallel_dims.get_mesh("fsdp").get_group().group_name
+                    get_simple_fsdp_mesh(trainer.parallel_dims).get_group().group_name
                 )
                 code = trainer._traced_step.gm.graph.python_code("self").src
                 trainer.close()
@@ -2748,9 +2754,12 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
                 pp=1,
                 ep=1,
                 world_size=self.world_size,
-                spmd_backend="partial_dtensor",
             )
-            fsdp_mesh = parallel_dims.get_mesh("fsdp")
+            from torchtitan.experiments.graph_trainer.common_utils import (
+                get_simple_fsdp_mesh,
+            )
+
+            fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
 
             model_backward = create_model(Llama3Model, config, "cuda", torch.bfloat16)
             model_grad = create_model(Llama3Model, config, "cuda", torch.bfloat16)

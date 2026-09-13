@@ -61,6 +61,7 @@ Workflow overview::
                      special_tokens: dict[str, int]}, labels
 """
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -80,10 +81,11 @@ from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
-
-from torchtitan.tools.logging import logger
 from .utils.image import calculate_vision_tokens, process_image, resize_to_pixel_budget
 from .utils.text import insert_vision_placeholders
+
+
+logger = logging.getLogger(__name__)
 
 
 def _process_mm_sample(

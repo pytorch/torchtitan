@@ -14,13 +14,17 @@ invokes ``standalone_compile`` once without additional overhead.
 
 from __future__ import annotations
 
+import logging
+
 import torch
 from torch.fx.passes.regional_inductor import _dummy_wrapper, regional_inductor
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     set_graph_module_boxed_codegen,
 )
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _ops_filter_with_distributed(name: str) -> bool:
