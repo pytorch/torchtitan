@@ -138,7 +138,7 @@ def test_lora_targets_fused_feed_forward_projection():
 def test_float8_lora_targets_fused_feed_forward_projection():
     """Quantized w13 uses one LoRA adapter."""
     pytest.importorskip("torchao")
-    from torchtitan.components.quantization import Float8Linear
+    from torchtitan.quantization import Float8Linear
 
     if Float8Linear is None:
         pytest.skip("torchao Float8Linear is unavailable")
