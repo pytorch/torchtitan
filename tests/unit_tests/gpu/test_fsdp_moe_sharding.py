@@ -68,6 +68,7 @@ def _get_expert_shard_dims(model: Qwen3Model) -> tuple[int | None, int | None]:
     """Return the W13 and W2 shard dimensions."""
     for layer in model.layers.values():
         if layer.moe_enabled:
+            # pyrefly: ignore [missing-attribute]
             routed_experts = layer.moe.routed_experts
 
             def shard_dim(param):
@@ -88,13 +89,13 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
     @property
     def world_size(self):
-        return 8
+        return 4
 
     @with_comms
     def test_no_ep_fsdp_gt_num_experts_shards_feature_dimensions(self):
         """When FSDP cannot shard E, it shards each linear's feature dim."""
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
-        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=2).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
@@ -109,9 +110,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
     @with_comms
     def test_no_ep_fsdp_le_num_experts_shards_dim0(self):
-        """ep_degree=1, fsdp_size(8) <= num_experts(8) → Shard(0)."""
+        """FSDP shards the expert axis when it does not require padding."""
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
-        model = _build_qwen3_moe_model(num_experts=8).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
@@ -127,12 +128,12 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     @with_comms
     def test_with_ep_fsdp_gt_num_experts_shards_feature_dimensions(self):
         """Sparse FSDP also falls back to each linear's feature dim."""
-        # edp_mesh: 2D mesh [efsdp=4, ep=2], dp_mesh: 1D mesh [8]
+        # edp_mesh: 2D mesh [efsdp=2, ep=2], dp_mesh: 1D mesh [4]
         edp_mesh = init_device_mesh(
-            self.device_type, (4, 2), mesh_dim_names=("efsdp", "ep")
+            self.device_type, (2, 2), mesh_dim_names=("efsdp", "ep")
         )
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
-        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=2).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
