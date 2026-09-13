@@ -27,7 +27,6 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.spmd_types import current_spmd_mesh, set_current_spmd_mesh
 from torchtitan.protocols.module import Module
 
 
@@ -345,28 +344,11 @@ class RegionAC(ActivationCheckpointing):
     ) -> nn.Module:
         config = cast("RegionAC.Config", self.config)
         checkpoint_region_name = base_fqn or type(module).__name__
-        forward = module.forward
-        forward_spmd_mesh = None
-
-        def forward_with_spmd_mesh(*args, **kwargs):
-            # torch_remat may replay the forward outside the caller's
-            # set_current_spmd_mesh context. Capture the original mesh and
-            # restore it only for such replays.
-            nonlocal forward_spmd_mesh
-            active_mesh = current_spmd_mesh()
-            if active_mesh is not None:
-                forward_spmd_mesh = active_mesh
-                return forward(*args, **kwargs)
-            if forward_spmd_mesh is None:
-                return forward(*args, **kwargs)
-            with set_current_spmd_mesh(forward_spmd_mesh):
-                return forward(*args, **kwargs)
-
         checkpointed_forward = remat.checkpoint(
             region_name=checkpoint_region_name,
             determinism_check=config.determinism_check,
             preserve_rng_state=False,
-        )(forward_with_spmd_mesh)
+        )(module.forward)
         module.forward = checkpointed_forward
         return module
 
