@@ -6,6 +6,7 @@
 
 import copy
 import importlib
+import logging
 import math
 import os
 from dataclasses import dataclass, field, fields, MISSING
@@ -33,24 +34,24 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class HFFlexKernel(Module):
     """Flex-attention kernel wrapped as a titan Module for declarative TP.
 
     Runs the flex HOP over q/k/v. Under TP the Module protocol wraps this
-    forward with ``local_map`` (driven by the ``ShardingConfig`` set in
-    hf_sharding.py): q/k/v arrive head-sharded as DTensors, are converted to
-    local tensors so the document ``mask_mod`` -- which closes over a plain
-    ``positions`` tensor -- sees plain tensors, and the output is wrapped back
-    head-sharded. Expressing the sharding declaratively
-    (``ShardingConfig``/``LocalMapConfig``) keeps it consistent with Titan's own
-    attention and lets it ride the ``spmd_types`` backend switch, instead of a
-    hand-rolled ``local_map`` call.
+    forward in a local SPMD region (driven by the ``ShardingConfig`` set in
+    hf_sharding.py): q/k/v are plain local tensors carrying head-sharded SPMD
+    annotations, and the output receives the corresponding head-sharded
+    annotation. Expressing the sharding declaratively
+    ``ShardingConfig`` keeps it consistent with Titan's own
+    attention instead of requiring a hand-rolled local wrapper.
 
     The HF attention module and the BlockMask ride as passthrough keyword args
-    (non-tensors, so ``local_map`` leaves them untouched). CP is not handled
+    (non-tensors, so the wrapper leaves them untouched). CP is not handled
     here (guarded in ``parallelize_hf_transformers``).
     """
 
@@ -64,7 +65,7 @@ class HFFlexKernel(Module):
     def forward(self, query, key, value, *, module, block_mask=None, **kwargs):
         # flex_attention_forward returns (output, lse); output is already
         # transposed to (b, seq, heads, dim). Return the single tensor so the
-        # local_map out_placements is a 1-tuple.
+        # The local SPMD region has one tensor output.
         out, _ = flex_attention_forward(module, query, key, value, block_mask, **kwargs)
         return out
 
@@ -74,7 +75,7 @@ def _flex_attention_torchtitan(module, query, key, value, attention_mask, **kwar
 
     Delegates to the per-attention-module ``HFFlexKernel`` when present (attached
     under TP/EP in hf_sharding.py) so the Module protocol applies the declarative
-    ``local_map``. When no kernel is attached (e.g. FSDP-only, where the sharding
+    local SPMD region. When no kernel is attached (e.g. FSDP-only, where the sharding
     pass does not run), q/k/v are plain tensors and flex runs directly -- no
     mapping needed. CP is not handled here (see the guard in
     ``parallelize_hf_transformers``).
@@ -1172,14 +1173,18 @@ class HFTransformerModel(BaseModel):
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""
+        del max_num_documents, max_context_length
         # Function-local import avoids a circular import.
         from torchtitan.distributed.context_parallel.api import (
             prepare_context_parallel_input,
         )
 
         batch: dict[str, Any] = dict(input_dict)
+        batch.pop("padding_mask", None)
         if "attention_masks" not in batch:
             positions = batch.get("positions")
             if positions is not None:
@@ -1195,19 +1200,18 @@ class HFTransformerModel(BaseModel):
                 parallelism.context_parallel_load_balancer,
                 parallelism.context_parallel_ptrr_mask_key,
             )
-        if parallelism.spmd_backend == "spmd_types":
-            from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-            from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
-            input_sharding = decoder_input_sharding()
-            # DSA attention masks are dense tensors but are not decoder inputs;
-            # preserve the old trainer behavior by annotating only declared names.
-            annotated = annotate_input_spmd_types(
-                parallel_dims,
-                {name: batch[name] for name in input_sharding if name in batch},
-                input_sharding,
-            )
-            batch.update(annotated)
+        input_sharding = decoder_input_sharding()
+        # DSA attention masks are dense tensors but are not decoder inputs;
+        # preserve the old trainer behavior by annotating only declared names.
+        annotated = annotate_input_spmd_types(
+            parallel_dims,
+            {name: batch[name] for name in input_sharding if name in batch},
+            input_sharding,
+        )
+        batch.update(annotated)
         inputs = batch.pop("input")
         labels = batch.pop("labels")
         return inputs, labels, batch

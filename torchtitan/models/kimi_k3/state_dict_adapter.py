@@ -46,13 +46,13 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             "language_model.model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
             # MoE.
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w1.weight": (
-                "layers.{}.moe.routed_experts.w13.gate"
+                "layers.{}.moe.routed_experts.w1_EFD"
             ),
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w2.weight": (
                 "layers.{}.moe.routed_experts.w2.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w3.weight": (
-                "layers.{}.moe.routed_experts.w13.up"
+                "layers.{}.moe.routed_experts.w3_EFD"
             ),
             "language_model.model.layers.{}.block_sparse_moe.gate.weight": "layers.{}.moe.router.gate.weight",
             "language_model.model.layers.{}.block_sparse_moe.gate.e_score_correction_bias": "layers.{}.moe.expert_bias_E",

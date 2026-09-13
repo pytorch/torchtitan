@@ -213,8 +213,14 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-`ChatProcessor` applies the tokenizer's chat template, creates next-token input
-and label pairs, and sets prompt labels to `IGNORE_INDEX`.
+`ChatProcessor` applies the tokenizer's chat template to a single-turn
+`[user, assistant]` pair, creates next-token input and label pairs, and sets
+prompt labels to `IGNORE_INDEX`. It locates the prompt/response boundary by
+rendering the prompt with `add_generation_prompt=True` and requiring that to be
+an exact token prefix of the full render, raising a `ValueError` when it is not.
+Templates that rewrite earlier turns, or turn separators that only merge in
+context, break that assumption; multi-turn support needs per-turn spans that do
+not rely on prefix rendering.
 
 # Mixing datasets
 

@@ -15,7 +15,6 @@ from spmd_types.checker import typecheck
 from torch.nn.attention.flex_attention import create_mask
 
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
@@ -62,11 +61,12 @@ class TestPackedVision(unittest.TestCase):
             },
         ]
 
-        inputs_T, labels_T, positions_T = collator.collate_text(batch)
+        inputs_T, labels_T, positions_T, padding_mask_T = collator.collate_text(batch)
 
         torch.testing.assert_close(inputs_T, torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
         torch.testing.assert_close(labels_T, torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
         torch.testing.assert_close(positions_T, torch.tensor([0, 1, 2, 3, 4, 0, 1, 2]))
+        self.assertFalse(padding_mask_T.any())
 
     def test_collator_resets_long_padding_positions(self) -> None:
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
@@ -88,12 +88,14 @@ class TestPackedVision(unittest.TestCase):
             }
         ]
 
-        _, labels, positions = collator.collate_text(batch)
+        _, labels, positions, padding_mask = collator.collate_text(batch)
 
         torch.testing.assert_close(labels[3:], torch.full((7,), IGNORE_INDEX))
         torch.testing.assert_close(
             positions, torch.tensor([0, 1, 2, 0, 1, 2, 3, 0, 1, 2])
         )
+        # The tail is padding regardless of how its positions were filled in.
+        torch.testing.assert_close(padding_mask, torch.tensor([False] * 3 + [True] * 7))
 
     def test_collator_concatenates_patches(self) -> None:
         patches_0 = torch.arange(12).view(3, 4)
@@ -291,31 +293,26 @@ class TestPackedVision(unittest.TestCase):
         token_spec = spmd.PartitionSpec((dp_axis, cp_axis, tp_axis), None)
         index_spec = spmd.PartitionSpec((dp_axis, cp_axis, tp_axis))
 
-        previous_backend = get_spmd_backend()
-        set_spmd_backend("spmd_types")
-        try:
-            with spmd.set_current_mesh(
-                {"dp": dp_axis, "cp": cp_axis, "tp": tp_axis},
-                local_axes=(dp_axis,),
-            ):
-                spmd.assert_type(inputs_TD, token_type, token_spec)
-                spmd.assert_type(
-                    vision_bank_VD,
-                    {dp_axis: spmd.V, cp_axis: spmd.R, tp_axis: spmd.R},
+        with spmd.set_current_mesh(
+            {"dp": dp_axis, "cp": cp_axis, "tp": tp_axis},
+            local_axes=(dp_axis,),
+        ):
+            spmd.assert_type(inputs_TD, token_type, token_spec)
+            spmd.assert_type(
+                vision_bank_VD,
+                {dp_axis: spmd.V, cp_axis: spmd.R, tp_axis: spmd.R},
+            )
+            spmd.assert_type(
+                vision_bank_indices_T,
+                token_type,
+                index_spec,
+            )
+            with typecheck(strict_mode="strict", local=False):
+                result_TD = gather_vision_embeds(
+                    inputs_TD,
+                    vision_bank_VD=vision_bank_VD,
+                    vision_bank_indices_T=vision_bank_indices_T,
                 )
-                spmd.assert_type(
-                    vision_bank_indices_T,
-                    token_type,
-                    index_spec,
-                )
-                with typecheck(strict_mode="strict", local=False):
-                    result_TD = gather_vision_embeds(
-                        inputs_TD,
-                        vision_bank_VD=vision_bank_VD,
-                        vision_bank_indices_T=vision_bank_indices_T,
-                    )
-        finally:
-            set_spmd_backend(previous_backend)
 
         self.assertEqual(spmd.get_local_type(result_TD), token_type)
         self.assertEqual(spmd.get_partition_spec(result_TD), token_spec)
