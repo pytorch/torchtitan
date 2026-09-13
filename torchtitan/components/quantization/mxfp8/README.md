@@ -194,12 +194,12 @@ For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation
 To enable MXFP8 for MoE expert layers, configure it in your config_registry function:
 
 ```python
-from torchtitan.components.quantization import MXFP8GroupedExpertsConverter
+from torchtitan.components.quantization import MXFP8GroupedLinearConverter
 
 model_spec = model_registry(
     "debugmodel",
     quantization=[
-        MXFP8GroupedExpertsConverter.Config(
+        MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
             model_compile_enabled=True,
         ),
@@ -209,14 +209,14 @@ model_spec = model_registry(
 
 **Combined usage**: You can use MXFP8 for both linear modules and grouped GEMMs simultaneously by specifying both converters:
   ```python
-  from torchtitan.components.quantization import MXFP8LinearConverter, MXFP8GroupedExpertsConverter
+  from torchtitan.components.quantization import MXFP8GroupedLinearConverter, MXFP8LinearConverter
 
   quantization=[
       MXFP8LinearConverter.Config(
           fqns=["double_blocks", "single_blocks"],
           model_compile_enabled=True,
       ),
-      MXFP8GroupedExpertsConverter.Config(
+      MXFP8GroupedLinearConverter.Config(
           recipe_name="mxfp8_rceil",
           model_compile_enabled=True,
       ),
@@ -239,7 +239,7 @@ model_spec = model_registry(
 Here's an example configuration for MXFP8 training in a config_registry function:
 
 ```python
-from torchtitan.components.quantization import MXFP8LinearConverter, MXFP8GroupedExpertsConverter
+from torchtitan.components.quantization import MXFP8GroupedLinearConverter, MXFP8LinearConverter
 
 # In your model_registry call:
 model_spec = model_registry(
@@ -249,7 +249,7 @@ model_spec = model_registry(
             fqns=["double_blocks", "single_blocks"],
             model_compile_enabled=True,
         ),
-        MXFP8GroupedExpertsConverter.Config(
+        MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
             model_compile_enabled=True,
         ),

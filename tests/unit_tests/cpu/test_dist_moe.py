@@ -29,6 +29,15 @@ from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.deepseek_v3 import config_registry as eager_configs
 
 
+def _parameter_initializers() -> dict[str, Any]:
+    """Return the logical routed-expert initializers required by the builder."""
+    return {
+        "gate": torch.nn.init.zeros_,
+        "up": torch.nn.init.zeros_,
+        "down": torch.nn.init.zeros_,
+    }
+
+
 def _runtime(prefetch: Any) -> _DistMoeRuntime:
     return _DistMoeRuntime(
         config=cast(Any, object()),
@@ -79,11 +88,13 @@ def test_dist_moe_converter_rejects_specialized_routed_experts():
         hidden_dim=64,
         num_experts=4,
         top_k=2,
-        param_init={},
+        param_init=_parameter_initializers(),
         comm_backend="standard",
     )
     specialized = SpecializedConfig(
-        inner_experts=stock.inner_experts,
+        w13=stock.w13,
+        w2=stock.w2,
+        activation=stock.activation,
         token_dispatcher=stock.token_dispatcher,
     )
 
@@ -99,7 +110,7 @@ def test_dist_moe_forwards_expert_output_postprocess(dtype):
         hidden_dim=64,
         num_experts=4,
         top_k=2,
-        param_init={},
+        param_init=_parameter_initializers(),
         comm_backend="standard",
     )
     config = DistMoeConverter(
@@ -145,7 +156,7 @@ def test_dist_moe_preserves_typed_expert_output_postprocess(dtype):
         hidden_dim=64,
         num_experts=4,
         top_k=2,
-        param_init={},
+        param_init=_parameter_initializers(),
         comm_backend="standard",
     )
     config = DistMoeConverter(
@@ -209,7 +220,7 @@ def _routed_experts_config() -> DistMoeRoutedExperts.Config:
         hidden_dim=64,
         num_experts=4,
         top_k=2,
-        param_init={},
+        param_init=_parameter_initializers(),
         comm_backend="standard",
     )
     return DistMoeConverter(DistMoeConverter.Config()).convert(stock)
@@ -228,13 +239,13 @@ def _optimizer_config() -> OptimizersContainer.Config:
     )
 
 
-def test_dist_moe_converter_owns_fused_params_with_stock_checkpoint_keys():
+def test_dist_moe_converter_preserves_native_grouped_linear_checkpoint_keys():
     stock_config = make_routed_experts_config(
         dim=32,
         hidden_dim=64,
         num_experts=4,
         top_k=2,
-        param_init={},
+        param_init=_parameter_initializers(),
         comm_backend="standard",
     )
     stock = stock_config.build()
@@ -245,7 +256,7 @@ def test_dist_moe_converter_owns_fused_params_with_stock_checkpoint_keys():
     converted = _routed_experts_config().build()
     converted.load_state_dict(stock.state_dict())
 
-    assert list(dict(converted.named_parameters())) == ["w13_EGFD", "w2_EDF"]
+    assert list(dict(converted.named_parameters())) == ["w13.weight", "w2.weight"]
     converted_state = converted.state_dict()
     assert converted_state.keys() == stock.state_dict().keys()
     for key, value in converted_state.items():
@@ -253,16 +264,31 @@ def test_dist_moe_converter_owns_fused_params_with_stock_checkpoint_keys():
         torch.testing.assert_close(value, stock.state_dict()[key], rtol=0, atol=0)
 
 
-def test_dist_moe_mxfp8_keeps_plain_stock_checkpoint_values():
+def test_dist_moe_mxfp8_uses_native_keys_and_loads_plain_values():
+    source = _routed_experts_config().build()
+    with torch.no_grad():
+        for value, parameter in enumerate(source.parameters(), start=1):
+            parameter.fill_(value)
+
     config = _routed_experts_config()
     config.backend = DistMoeBackendConfig(dtype="mxfp8")
-    module = config.build()
+    target = config.build()
+    target.load_state_dict(source.state_dict())
 
-    assert all(isinstance(param, _ShardedFSDPTensor) for param in module.parameters())
-    assert all(type(value) is torch.Tensor for value in module.state_dict().values())
+    assert list(target.state_dict()) == ["w13.weight", "w2.weight"]
+    for target_parameter, source_parameter in zip(
+        target.parameters(), source.parameters(), strict=True
+    ):
+        assert isinstance(target_parameter, _ShardedFSDPTensor)
+        torch.testing.assert_close(
+            target_parameter._tensor,
+            source_parameter,
+            rtol=0,
+            atol=0,
+        )
 
 
-def test_dist_moe_optimizer_state_round_trips_through_stock_keys():
+def test_dist_moe_optimizer_state_round_trips_through_native_keys():
     config = _routed_experts_config()
     source = config.build()
     source_optimizer = _optimizer_config().build(model_parts=[source])
@@ -271,9 +297,9 @@ def test_dist_moe_optimizer_state_round_trips_through_stock_keys():
     source_optimizer.step()
 
     state = source_optimizer.state_dict()
-    assert not any("w13_EGFD" in key for key in state)
-    assert any("inner_experts.w1_EFD" in key for key in state)
-    assert any("inner_experts.w3_EFD" in key for key in state)
+    assert any("w13.weight" in key for key in state)
+    assert any("w2.weight" in key for key in state)
+    assert not any("inner_experts" in key for key in state)
 
     target = config.build()
     target_optimizer = _optimizer_config().build(model_parts=[target])
