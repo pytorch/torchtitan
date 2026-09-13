@@ -492,8 +492,8 @@ for the full recipe.
 - `torchtitan/overrides/fused_swiglu.py` -- **the custom Triton activation
   example.** It replaces the default torch-native SiLU and multiply operations
   while retaining the core `FeedForward` parameter layout and checkpoint
-  behavior. The same file also demonstrates the larger grouped-expert
-  parametrization override.
+  behavior. Because the override targets `SwiGLU.Config`, it also applies to
+  grouped experts and dist-GEMM feed-forwards that use that activation.
 - `torchtitan/overrides/helion_rope.py` — **the custom-kernel example.** Swaps
   `CosSinRoPE` for a fused Helion kernel (forward + backward) wrapped in a
   `torch.library.custom_op` (with `register_fake` / `register_autograd`), the

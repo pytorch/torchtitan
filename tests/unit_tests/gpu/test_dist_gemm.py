@@ -21,7 +21,6 @@ Both classes here run in CI. Note there is no GPU unit-test job, so anything
 CUDA-guarded is developer-run only.
 """
 
-import contextlib
 import unittest
 from unittest.mock import patch
 
@@ -32,14 +31,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.components.lora import LoRAConverter
-
 from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
+    LoRAConverter,
     transform_model_config_,
 )
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_dense_ffn_sharding,
@@ -53,17 +50,6 @@ from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
-
-
-@contextlib.contextmanager
-def use_spmd_backend(backend: str):
-    """Temporarily select an SPMD backend without leaking test state."""
-    previous_backend = get_spmd_backend()
-    set_spmd_backend(backend)
-    try:
-        yield
-    finally:
-        set_spmd_backend(previous_backend)
 
 
 class TestAsyncTensorParallelConfig(unittest.TestCase):
@@ -92,9 +78,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
                 layer.attention.qkv_linear.wqkv, AsyncAllGatherLinear.Config
             )
             self.assertIsInstance(layer.attention.wo, AsyncLinearReduceScatter.Config)
-            self.assertIsInstance(
-                layer.feed_forward.w13, AsyncAllGatherLinear.Config
-            )
+            self.assertIsInstance(layer.feed_forward.w13, AsyncAllGatherLinear.Config)
             self.assertIsInstance(
                 layer.feed_forward.w2, AsyncLinearReduceScatter.Config
             )
@@ -116,19 +100,6 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         self.assertEqual(fused.wo.in_features, stock.wo.in_features)
         self.assertEqual(fused.wo.out_features, stock.wo.out_features)
 
-    def test_dtensor_backend_is_rejected(self):
-        """dist-GEMM is spmd_types-only; the DTensor backends are deprecated."""
-        model = transform_model_config_(
-            self._model_config(),
-            [AsyncTensorParallelTransform()],
-        )
-        attn = model.layers[0].attention
-        with use_spmd_backend("partial_dtensor"):
-            with self.assertRaisesRegex(
-                ValueError, "requires parallelism.spmd_backend"
-            ):
-                set_gqa_attention_sharding(attn, enable_sp=True)
-
     def test_sequence_parallel_disabled_is_rejected(self):
         """The fused GEMMs *are* the SP collectives, so SP off has nothing to fuse
         and wo would reduce-scatter where it must all-reduce."""
@@ -137,9 +108,8 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             [AsyncTensorParallelTransform()],
         )
         attn = model.layers[0].attention
-        with use_spmd_backend("spmd_types"):
-            with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
-                set_gqa_attention_sharding(attn, enable_sp=False)
+        with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
+            set_gqa_attention_sharding(attn, enable_sp=False)
 
     def test_sharding_setup_declares_common_communication_contracts(self):
         """Synchronous and async linears receive the same redistribution specs."""
@@ -149,9 +119,8 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             [AsyncTensorParallelTransform()],
         )
         fused = async_model.layers[0].attention
-        with use_spmd_backend("spmd_types"):
-            set_gqa_attention_sharding(stock, enable_sp=True)
-            set_gqa_attention_sharding(fused, enable_sp=True)
+        set_gqa_attention_sharding(stock, enable_sp=True)
+        set_gqa_attention_sharding(fused, enable_sp=True)
 
         self.assertIsNotNone(stock.sharding_config.in_dst_shardings)
         self.assertIsNotNone(stock.sharding_config.out_dst_shardings)
@@ -170,13 +139,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         """LoRA does not move TP communication onto the converted linears."""
         model = LoRAConverter.Config().build().convert(self._model_config())
         layer = model.layers[0]
-        with use_spmd_backend("spmd_types"):
-            set_gqa_attention_sharding(layer.attention, enable_sp=True)
-            set_dense_ffn_sharding(
-                layer.feed_forward,
-                attn_x_layout=dense_sequence_parallel_placement(),
-                enable_sp=True,
-            )
+        set_gqa_attention_sharding(layer.attention, enable_sp=True)
+        set_dense_ffn_sharding(
+            layer.feed_forward,
+            attn_x_layout=dense_sequence_parallel_placement(),
+            enable_sp=True,
+        )
 
         self.assertIsNotNone(layer.attention.sharding_config.in_dst_shardings)
         self.assertIsNone(
@@ -225,10 +193,9 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             .model_spec.model.layers[0]
             .attention
         )
-        with use_spmd_backend("spmd_types"):
-            set_gqa_attention_sharding(attn_cfg, enable_sp=True)
-            attn = attn_cfg.build().to(self.device_type)
-            attn.parallelize(parallel_dims)
+        set_gqa_attention_sharding(attn_cfg, enable_sp=True)
+        attn = attn_cfg.build().to(self.device_type)
+        attn.parallelize(parallel_dims)
 
         self.assertIsNotNone(attn._tp_input_redistribution)
         self.assertIsNotNone(attn._tp_output_redistribution)
@@ -303,10 +270,9 @@ class TestDistGEMMFeedForwardNumerics(DTensorTestBase):
 
         # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
-        with use_spmd_backend("spmd_types"):
-            with set_current_spmd_mesh(mesh):
-                x_shard = x.chunk(R, 0)[self.rank].contiguous()
-                out_shard = dist_gemm(x_shard)
+        with set_current_spmd_mesh(mesh):
+            x_shard = x.chunk(R, 0)[self.rank].contiguous()
+            out_shard = dist_gemm(x_shard)
 
         # DistGEMM returns this rank's sequence shard of the full result.
         torch.testing.assert_close(
@@ -352,7 +318,8 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
         native = make().build().to(dev)
         async_config = make()
         AsyncTensorParallelTransform().transform(async_config)
-        fused = fused_swiglu(async_config).build().to(dev)
+        async_config.activation_fn = fused_swiglu(async_config.activation_fn)
+        fused = async_config.build().to(dev)
         self.assertIsInstance(fused.w13, AsyncAllGatherLinear)
         self.assertIsInstance(fused.w2, AsyncLinearReduceScatter)
 
@@ -375,7 +342,7 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
             )
 
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
-        with use_spmd_backend("spmd_types"), set_current_spmd_mesh(mesh):
+        with set_current_spmd_mesh(mesh):
             out_shard = fused(x.chunk(R, 0)[self.rank].contiguous())
 
         torch.testing.assert_close(

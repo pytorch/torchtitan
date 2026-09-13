@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 
 import torch
@@ -18,9 +20,10 @@ from torchtitan.distributed.linear import (
     AsyncLinearReduceScatter as AsyncLinearReduceScatterFunction,
 )
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.linear import Linear
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 _WARNED_NO_TP = False
@@ -38,7 +41,16 @@ def _warn_once_no_tp_overlap() -> None:
 
 
 def _tp_group_from_context() -> dist.ProcessGroup | None:
-    """Return the active multi-rank TP process group, if one exists."""
+    """The TP process group from the current spmd_types mesh context, or None.
+
+    Resolved per forward rather than captured at parallelize time. The mesh
+    context is only entered inside the trainer's ``train_context``, so it is
+    unavailable during ``__init__`` and ``parallelize`` -- and reading it here
+    means these modules need no ``parallelize`` override and hold no group state.
+
+    None means "run the stock projection": either no mesh context or TP is degree
+    1, in which case there is no collective to fuse.
+    """
     mesh = current_spmd_mesh()
     if mesh is None or "tp" not in (mesh.mesh_dim_names or ()):
         return None
@@ -47,13 +59,13 @@ def _tp_group_from_context() -> dist.ProcessGroup | None:
 
 
 def validate_async_tp_preconditions(*, enable_sp: bool) -> None:
-    """Reject configurations unsupported by the async TP linear modules."""
-    backend = get_spmd_backend()
-    if backend != "spmd_types":
-        raise ValueError(
-            "Async tensor parallelism requires "
-            f"parallelism.spmd_backend='spmd_types', got {backend!r}."
-        )
+    """Reject configurations the fused modules cannot serve.
+
+    Called from the sharding setup, which is the first point that sees both the
+    selected modules and the parallelism settings. Neither condition is detectable
+    from inside a module at runtime: under spmd_types an activation is a plain
+    local tensor with no placements to inspect.
+    """
     if not enable_sp:
         raise ValueError(
             "Async tensor parallelism requires "

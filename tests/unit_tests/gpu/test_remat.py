@@ -506,7 +506,10 @@ class TestRematRegions(unittest.TestCase):
             gate=_linear_config(4, 4),
         )
 
-        def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        def silu_and_mul(
+            gate: torch.Tensor, up: torch.Tensor, **kwargs
+        ) -> torch.Tensor:
+            del kwargs
             return torch.nn.functional.silu(gate) * up
 
         with patch(
@@ -515,11 +518,17 @@ class TestRematRegions(unittest.TestCase):
         ):
             async_config = deepcopy(feed_forward_config)
             AsyncTensorParallelTransform().transform(async_config)
+            fused_config = deepcopy(feed_forward_config)
+            fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)
+            fused_async_config = deepcopy(async_config)
+            fused_async_config.activation_fn = fused_swiglu(
+                fused_async_config.activation_fn
+            )
             variants = (
                 (sigmoid_config.build(), ["w13", "w2", "gate"]),
                 (async_config.build(), ["w13", "w2"]),
-                (fused_swiglu(feed_forward_config).build(), ["w13", "w2"]),
-                (fused_swiglu(async_config).build(), ["w13", "w2"]),
+                (fused_config.build(), ["w13", "w2"]),
+                (fused_async_config.build(), ["w13", "w2"]),
             )
             for feed_forward, expected_names in variants:
                 with self.subTest(feed_forward=type(feed_forward).__name__):
@@ -704,8 +713,6 @@ class TestRematRegions(unittest.TestCase):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
-            num_expert_groups=2,
-            num_limited_groups=1,
             top_k=1,
         ).build()
 

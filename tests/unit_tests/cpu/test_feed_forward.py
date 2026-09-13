@@ -6,11 +6,14 @@
 
 from collections.abc import Callable
 
+import pytest
 import torch
 import torch.nn.functional as F
 
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.config_utils import fused_gate_up_param_init
+from torchtitan.models.common.decoder_sharding import colwise_config
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
@@ -44,9 +47,10 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
 
     assert set(feed_forward._modules) == {"w13", "w2"}
     assert set(feed_forward.state_dict()) == {
-        "w13.weight",
+        "w1.weight",
         "w2.weight",
         "w2.bias",
+        "w3.weight",
     }
 
     w13_H2D = feed_forward.w13.weight.unflatten(0, (8, 2))
@@ -54,7 +58,7 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
     torch.testing.assert_close(w13_H2D[:, 1], 5 * torch.ones_like(w13_H2D[:, 1]))
 
 
-def test_feed_forward_loads_fused_checkpoint_and_matches_reference():
+def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     config = FeedForward.Config(
         w13=Linear.Config(in_features=4, out_features=16),
         w2=Linear.Config(in_features=8, out_features=4),
@@ -63,8 +67,9 @@ def test_feed_forward_loads_fused_checkpoint_and_matches_reference():
     w1_HD = torch.randn(8, 4)
     w3_HD = torch.randn(8, 4)
     state_dict = {
-        "w13.weight": torch.stack([w1_HD, w3_HD], dim=1).flatten(0, 1),
+        "w1.weight": w1_HD,
         "w2.weight": torch.randn(4, 8),
+        "w3.weight": w3_HD,
     }
     feed_forward.load_state_dict(state_dict)
 
@@ -100,8 +105,9 @@ def test_feed_forward_uses_configured_activation():
     feed_forward = config.build()
     feed_forward.load_state_dict(
         {
-            "w13.weight": torch.randn(16, 4),
+            "w1.weight": torch.randn(8, 4),
             "w2.weight": torch.randn(4, 8),
+            "w3.weight": torch.randn(8, 4),
         }
     )
 
@@ -110,3 +116,27 @@ def test_feed_forward_uses_configured_activation():
     gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
     expected_TD = feed_forward.w2(activation_fn.build()(gate_TF, up_TF))
     torch.testing.assert_close(feed_forward(x_TD), expected_TD)
+
+
+def test_feed_forward_rejects_tp_that_splits_gate_up_pairs():
+    config = FeedForward.Config(
+        w13=Linear.Config(
+            in_features=4,
+            out_features=6,
+            sharding_config=colwise_config(),
+        ),
+        w2=Linear.Config(in_features=3, out_features=4),
+    )
+    feed_forward = config.build()
+    parallel_dims = ParallelDims(
+        dp_replicate=1,
+        dp_shard=1,
+        cp=1,
+        tp=2,
+        pp=1,
+        ep=1,
+        world_size=2,
+    )
+
+    with pytest.raises(ValueError, match="hidden dimension .* TP degree"):
+        feed_forward.parallelize(parallel_dims)

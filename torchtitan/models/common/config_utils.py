@@ -25,11 +25,7 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.feed_forward import (
-    _make_fused_gate_up_init,
-    _make_fused_linear_init,
-    FeedForward,
-)
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
@@ -45,13 +41,45 @@ from torchtitan.models.common.token_dispatcher import (
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
-    MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 
 
 DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
+
+
+def _make_fused_gate_up_init(
+    gate_init: Callable,
+    up_init: Callable,
+    *,
+    gate_up_axis: int,
+) -> Callable:
+    """Build an initializer for a fused gate/up weight."""
+
+    def _init(t: torch.Tensor) -> None:
+        gate_idx: list[int | slice] = [slice(None)] * t.ndim
+        up_idx: list[int | slice] = [slice(None)] * t.ndim
+        gate_idx[gate_up_axis] = 0
+        up_idx[gate_up_axis] = 1
+        gate_init(t[tuple(gate_idx)])
+        up_init(t[tuple(up_idx)])
+
+    return _init
+
+
+def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
+    """Build an initializer for an interleaved 2D gate/up linear weight."""
+    init_logical_weight = _make_fused_gate_up_init(
+        gate_init,
+        up_init,
+        gate_up_axis=1,
+    )
+
+    def _init(t: torch.Tensor) -> None:
+        init_logical_weight(t.unflatten(0, (-1, 2)))
+
+    return _init
 
 
 def decoder_vocab_size(model_spec: ModelSpec) -> int:
@@ -188,11 +216,11 @@ def fused_gate_up_param_init(
 def fused_grouped_experts_param_init(
     param_init: dict[str, Callable],
 ) -> dict[str, Callable]:
-    """Pack logical grouped-expert initializers for the physical w13 weight."""
+    """Pack logical grouped-expert initializers for the physical w13_EF2D weight."""
     if not param_init:
         return param_init
     return {
-        "w13": _make_fused_gate_up_init(
+        "w13_EF2D": _make_fused_gate_up_init(
             param_init["w1_EFD"],
             param_init["w3_EFD"],
             gate_up_axis=2,
@@ -311,8 +339,6 @@ def make_router_config(
     score_func: Literal["sigmoid", "softmax", "sqrtsoftplus"] = "sigmoid",
     route_norm: bool = False,
     route_scale: float = 1.0,
-    num_expert_groups: int | None = None,
-    num_limited_groups: int | None = None,
     bias: bool = False,
 ) -> TokenChoiceTopKRouter.Config:
     """Build a fully-specified TokenChoiceTopKRouter.Config."""
@@ -328,8 +354,6 @@ def make_router_config(
         score_func=score_func,
         route_norm=route_norm,
         route_scale=route_scale,
-        num_expert_groups=num_expert_groups,
-        num_limited_groups=num_limited_groups,
     )
 
 
@@ -350,7 +374,6 @@ def make_token_dispatcher_config(
       dispatch when EP=1, i.e. ep_mesh is None at runtime)
     - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
     - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
-    - "minimal_async_ep": Uses MinimalAsyncEP for constrained DP>=EP
 
     DeepEP/HybridEP requires installation:
     https://github.com/deepseek-ai/DeepEP
@@ -383,13 +406,6 @@ def make_token_dispatcher_config(
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
         )
-    elif comm_backend == "minimal_async_ep":
-        return MinimalAsyncEPTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            hidden_dim=hidden_dim,
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-        )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
@@ -398,7 +414,7 @@ def make_token_dispatcher_config(
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of 'standard', 'deepep', 'hybridep', 'minimal_async_ep'."
+            "Must be one of 'standard', 'deepep', or 'hybridep'."
         )
 
 

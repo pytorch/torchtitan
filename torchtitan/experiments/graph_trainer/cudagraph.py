@@ -11,6 +11,7 @@ This module provides a cudagraph pass that can be applied to graph modules
 during compilation.
 """
 
+import logging
 import operator
 from typing import Any
 
@@ -18,7 +19,9 @@ import torch
 
 from torchtitan.distributed.cudagraph import CUDAGraphWrapper
 from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _has_dynamic_shape(val: Any) -> bool:
