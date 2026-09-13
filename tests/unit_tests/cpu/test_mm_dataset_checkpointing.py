@@ -88,10 +88,10 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
         it_resumed = iter(dl_resumed)
 
         for _ in range(2):
-            expected_input, expected_labels = next(it)
-            input_dict, labels = next(it_resumed)
+            expected_input = next(it)
+            input_dict = next(it_resumed)
             assert torch.equal(input_dict["input"], expected_input["input"])
-            assert torch.equal(labels, expected_labels)
+            assert torch.equal(input_dict["labels"], expected_input["labels"])
             assert torch.equal(input_dict["positions"], expected_input["positions"])
             for key in ["pixel_values", "grid_thw"]:
                 expected = expected_input[key]

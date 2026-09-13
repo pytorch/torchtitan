@@ -28,7 +28,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, OverrideConfig, ParallelismConfig
@@ -76,9 +76,6 @@ class InferenceParallelismConfig:
     enable_sequence_parallel: bool = False
     """Enable dense sequence parallelism across the tensor-parallel axis."""
 
-    spmd_backend: Literal["partial_dtensor", "spmd_types"] = "spmd_types"
-    """SPMD backend used by TorchTitan model parallelization in the generator."""
-
     @property
     def expert_sequence_parallel_size(self) -> int:
         """TP-axis shard count used internally by expert-parallel MoE."""
@@ -107,7 +104,6 @@ class InferenceParallelismConfig:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
             enable_sequence_parallel=self.enable_sequence_parallel,
-            spmd_backend=self.spmd_backend,
         )
 
 
@@ -166,12 +162,12 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     }
 
     if ffn is not None:
-        # Unused: only v1/metrics/perf.py reads it (off by default). SwiGLU hidden == w1.out_features.
-        hf["intermediate_size"] = ffn.w1.out_features
+        # Unused: only v1/metrics/perf.py reads it (off by default).
+        hf["intermediate_size"] = ffn.w13.out_features // 2
 
     if moe is not None:
         # Presence required: >0 toggles MoE/EP branches.
-        hf["num_experts"] = moe.routed_experts.w13.num_groups
+        hf["num_experts"] = moe.router.num_experts
         # Unused: only per-model loaders (qwen3_moe, deepseek_v2, ...) and v1/metrics/perf.py (off) read these.
         hf["num_experts_per_tok"] = moe.router.top_k
         hf["moe_intermediate_size"] = moe.routed_experts.w2.in_features

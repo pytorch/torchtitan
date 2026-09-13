@@ -7,6 +7,7 @@
 # This file provides the util functions to apply activation checkpointing to the model.
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Annotated, cast
@@ -27,7 +28,9 @@ from torch.utils.checkpoint import (
 
 from torchtitan.config import Configurable
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _get_default_save_ops() -> set:
@@ -47,7 +50,7 @@ def _get_default_save_ops() -> set:
         # For low precision training, always save the absolute maximum used
         # to compute the scaling factor for quantization.
         torch.ops.aten.max.default,
-        # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
+        # FlexInnerAttention (torch.ops.higher_order.flex_attention is the same object)
         torch._higher_order_ops.flex_attention,
         torch.ops.aten.linear.default,
         torch.ops.aten.mm.dtype,

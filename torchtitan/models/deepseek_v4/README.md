@@ -37,12 +37,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 MODULE=deepseek_v4 CONFIG=deepseek_v4_debugm
   --parallelism.expert_parallel_degree 2
 ```
 
-To exercise the `spmd_types` backend, add:
-
-```bash
---parallelism.spmd_backend spmd_types
-```
-
 ## Status
 
 The debug model has been smoke-tested with 4 GPUs using FSDP2, TP2, EP2, and the

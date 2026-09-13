@@ -11,8 +11,8 @@ import torch
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.compile import apply_compile
+from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear, Linear
-from torchtitan.models.common.moe import ExpertActivation
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -107,17 +107,17 @@ class TestApplyCompile(unittest.TestCase):
         hidden_dim = 256
         w13 = (
             GroupedLinear.Config(
-                num_groups=num_experts,
+                group_size=num_experts,
                 in_features=dim,
                 out_features=(2, hidden_dim),
             )
             .build()
             .cuda()
         )
-        activation = ExpertActivation.Config().build().cuda()
+        activation = SwiGLU.Config().build()
         w2 = (
             GroupedLinear.Config(
-                num_groups=num_experts,
+                group_size=num_experts,
                 in_features=hidden_dim,
                 out_features=dim,
             )
@@ -137,7 +137,7 @@ class TestApplyCompile(unittest.TestCase):
 
         offsets = num_tokens_per_expert.cumsum(0, dtype=torch.int32)
         gate, up = w13(x, offsets).unbind(-2)
-        output = w2(activation(gate, up, offsets), offsets)
+        output = w2(activation(gate, up, offsets=offsets), offsets)
 
         self.assertEqual(output.shape, x.shape)
 
