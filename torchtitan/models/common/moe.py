@@ -130,7 +130,7 @@ class GroupedExperts(Module):
             recompute=self.remat_should_recompute("w13"),
         )(
             A=x_RD.bfloat16(),
-            weight_EOI=self.w13_E_2F_D.bfloat16(),
+            weight_EOI=self.w13_E_2F_D,
             offs=offsets_E,
         )
         gate_RF, up_RF = gate_up_R_2F.reshape(-1, F, 2).unbind(-1)
