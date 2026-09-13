@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.components.quantization._fsdp_tensor import _ShardedFSDPTensor
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
 from dist_moe import (
     BlockScaledFormat,

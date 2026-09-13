@@ -29,14 +29,14 @@ from torchtitan.models.deepseek_v3.model import Attention
 
 from torchtitan.models.kimi_k2_7.qk_clip import (
     qk_clip,
-    QKClipFlexAttention,
+    QKClipFlexInnerAttention,
     register_qk_clip_hook,
 )
 
 
 class QKClipTest(unittest.TestCase):
     def test_attention_records_training_maxima_only(self) -> None:
-        attention = QKClipFlexAttention.Config().build()
+        attention = QKClipFlexInnerAttention.Config().build()
         q_THK = torch.randn(2, 2, 4)
         max_scores_1HT = torch.tensor([[[1.0, 3.0], [4.0, 2.0]]])
         block_mask = create_block_mask(
@@ -52,7 +52,7 @@ class QKClipTest(unittest.TestCase):
 
         attention.train()
         with patch(
-            "torchtitan.models.common.attention.FlexAttention.compiled_flex_attn",
+            "torchtitan.models.common.attention.FlexInnerAttention.compiled_flex_attn",
             return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
         ):
             attention(
@@ -71,7 +71,7 @@ class QKClipTest(unittest.TestCase):
         attention.max_attention_logits_H.clear()
         attention.eval()
         with patch(
-            "torchtitan.models.common.attention.FlexAttention.compiled_flex_attn",
+            "torchtitan.models.common.attention.FlexInnerAttention.compiled_flex_attn",
             return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
         ):
             attention(
@@ -170,7 +170,7 @@ class QKClipDistributedTest(DTensorTestBase):
         attention.v_head_dim = v_head_dim
         attention.wq_b = weight_module(num_heads * attention.qk_head_dim)
         attention.wkv_b = weight_module(num_heads * (qk_nope_head_dim + v_head_dim))
-        attention.inner_attention = QKClipFlexAttention.Config().build()
+        attention.inner_attention = QKClipFlexInnerAttention.Config().build()
         rank_maxima = (
             torch.tensor([50.0, 400.0], device=device)
             if self.rank == 0
@@ -269,7 +269,7 @@ class QKClipDistributedTest(DTensorTestBase):
             attention.v_head_dim = v_head_dim
             attention.wq_b = weight_module(num_heads * attention.qk_head_dim)
             attention.wkv_b = weight_module(num_heads * (qk_nope_head_dim + v_head_dim))
-            attention.inner_attention = QKClipFlexAttention.Config().build()
+            attention.inner_attention = QKClipFlexInnerAttention.Config().build()
             attention.inner_attention.max_attention_logits_H.append(
                 torch.full((num_heads,), 400.0, device=device)
             )

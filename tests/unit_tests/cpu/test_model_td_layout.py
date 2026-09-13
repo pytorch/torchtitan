@@ -10,9 +10,9 @@ import torch
 import torch.nn as nn
 
 from torchtitan.experiments.graph_trainer.common_utils import (
-    GraphTrainerScaledDotProductAttention,
+    GraphTrainerScaledDotProductInnerAttention,
 )
-from torchtitan.models.common.attention import ScaledDotProductAttention
+from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.gpt_oss import gptoss_configs
 from torchtitan.models.muse_glimmer import muse_glimmer_configs
@@ -34,7 +34,7 @@ class _AttentionOutput(nn.Module):
 
 class TestModelTDLayout(unittest.TestCase):
     def test_sdpa_preserves_blhv_shape(self):
-        attention = ScaledDotProductAttention.Config().build()
+        attention = ScaledDotProductInnerAttention.Config().build()
         q_BLHK = torch.randn(2, 8, 4, 16)
         k_BLHK = torch.randn(2, 8, 2, 16)
         v_BLHV = torch.randn(2, 8, 2, 16)
@@ -44,7 +44,7 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_BLHV.shape, q_BLHK.shape)
 
     def test_graph_trainer_sdpa_preserves_thv_shape(self):
-        attention = GraphTrainerScaledDotProductAttention.Config().build()
+        attention = GraphTrainerScaledDotProductInnerAttention.Config().build()
         q_THK = torch.randn(8, 4, 16)
         k_THK = torch.randn(8, 2, 16)
         v_THV = torch.randn(8, 2, 16)

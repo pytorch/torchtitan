@@ -160,15 +160,15 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
             skip_rocm_test=True,
         ),
-        # TODO: Disabled with the FlexAttention default (SDPA is no longer a
+        # TODO: Disabled with the FlexInnerAttention default (SDPA is no longer a
         # language-model backend). Zero-bubble / multi schedules split backward
         # and call torch's stage_backward_input, which runs
         # _get_grad_fn_or_grad_acc (t.requires_grad) over every stage input —
-        # including the forwarded FlexAttention BlockMask, which is not a Tensor
+        # including the forwarded FlexInnerAttention BlockMask, which is not a Tensor
         # ("'BlockMask' object has no attribute 'requires_grad'"). Full-backward
         # schedules (1F1B/GPipe/Interleaved1F1B) are unaffected. Re-enable once
         # stage_backward_input skips non-tensor stage inputs upstream.
-        # (VarlenAttention's tensor-based metadata would sidestep this, but
+        # (VarlenInnerAttention's tensor-based metadata would sidestep this, but
         # varlen requires flash_attn_interface/FA3, which the core integration
         # CI does not install; SDPA is no longer a core LM backend. So the
         # upstream stage_backward_input fix is the path here.)
@@ -190,7 +190,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         ),
         # TODO: Disabled for the same reason as the zero-bubble PP tests above:
         # the custom CSV schedule splits backward (separate input-grad step),
-        # so stage_backward_input chokes on the forwarded FlexAttention
+        # so stage_backward_input chokes on the forwarded FlexInnerAttention
         # BlockMask. Re-enable once stage_backward_input skips non-tensor inputs.
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_pp2_custom_csv],
@@ -235,6 +235,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="FSDP+CP",
             test_name="fsdp+cp",
             ngpu=4,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_ulysses_cp2],
+            test_descr="Ulysses CP",
+            test_name="cp_ulysses",
+            ngpu=2,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_ddp2_cp2],
@@ -284,17 +290,17 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fused_swiglu_tp2],
-            test_descr="Override: swap FeedForward with fused SwiGLU (FSDP2 + TP2)",
+            test_descr="Override: use Triton SwiGLU activation (FSDP2 + TP2)",
             test_name="override_fused_swiglu",
             ngpu=4,
         ),
         OverrideDefinitions(
-            configs=[recipes.deepseek_v3_debugmodel_fused_grouped_experts_tp2_ep4],
+            configs=[recipes.deepseek_v3_debugmodel_fused_swiglu_tp2_ep4],
             test_descr=(
-                "Override: fuse grouped experts + FFNs on deepseek_v3 "
+                "Override: use Triton SwiGLU activation on deepseek_v3 "
                 "(FSDP2 + TP2 dense, EP4 sparse)"
             ),
-            test_name="override_fused_grouped_experts",
+            test_name="override_fused_swiglu_moe",
             ngpu=4,
             use_real_pg=True,
         ),
