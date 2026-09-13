@@ -15,7 +15,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
-from torchtitan.config import CompileConfig, ParallelismConfig
+from torchtitan.config import CompileConfig, FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -390,7 +390,7 @@ def apply_fsdp_to_mtp_decoder(
     edp_mesh: DeviceMesh | None = None,
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
-    enable_symm_mem: bool = False,
+    symm_mem_scope: FSDPSymmMemScope = "disabled",
 ) -> None:
     mtp_layer_keys = []
     try:
@@ -413,7 +413,7 @@ def apply_fsdp_to_mtp_decoder(
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
-            enable_symm_mem=enable_symm_mem,
+            symm_mem_scope=symm_mem_scope,
         )
     finally:
         for key in mtp_layer_keys:

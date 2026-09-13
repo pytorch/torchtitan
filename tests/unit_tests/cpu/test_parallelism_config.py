@@ -6,7 +6,7 @@
 
 import pytest
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import FSDPSymmMemScope, ParallelismConfig
 
 
 def test_parallelism_config_default_load_balancer() -> None:
@@ -78,4 +78,30 @@ def test_parallelism_config_rejects_unknown_schedule_when_pp_disabled() -> None:
         ParallelismConfig(
             pipeline_parallel_degree=1,
             pipeline_parallel_schedule="foo",
+        )
+
+
+def test_parallelism_config_disables_fsdp_symm_mem_by_default() -> None:
+    assert ParallelismConfig().fsdp_symm_mem_scope == "disabled"
+
+
+@pytest.mark.parametrize("scope", ["all", "dense"])
+def test_parallelism_config_accepts_fsdp_symm_mem_scopes(
+    scope: FSDPSymmMemScope, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("torch.cuda.get_device_capability", lambda: (9, 0))
+
+    config = ParallelismConfig(fsdp_symm_mem_scope=scope)
+
+    assert config.fsdp_symm_mem_scope == scope
+
+
+def test_parallelism_config_rejects_unknown_fsdp_symm_mem_scope() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"fsdp_symm_mem_scope must be one of: .* \(got 'sparse'\)",
+    ):
+        ParallelismConfig(
+            fsdp_symm_mem_scope="sparse"  # pyrefly: ignore [bad-argument-type]
         )
