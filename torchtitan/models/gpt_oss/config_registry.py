@@ -7,7 +7,6 @@
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.validate import Validator
 from torchtitan.config import ParallelismConfig, TrainingConfig
@@ -17,6 +16,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -40,6 +40,7 @@ def _gpt_oss_debugmodel(
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=128 if attn_backend == "varlen" else None,
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -92,6 +93,7 @@ def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            max_num_documents=64,
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -125,6 +127,7 @@ def gpt_oss_120b(seq_len: int | None = None) -> Trainer.Config:
         model_spec=model_spec,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            max_num_documents=64,
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

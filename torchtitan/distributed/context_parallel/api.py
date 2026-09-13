@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, cast, TYPE_CHECKING
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -20,21 +20,6 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import AttentionMasksType
-
-if TYPE_CHECKING:
-    from torchtitan.config import ParallelismConfig
-
-
-def validate_cp_backend(parallelism: "ParallelismConfig") -> None:
-    """Validate CP backend compatibility for ShardingConfig-based models."""
-    if (
-        parallelism.context_parallel_degree > 1
-        and parallelism.spmd_backend != "spmd_types"
-    ):
-        raise ValueError(
-            "Context Parallel requires parallelism.spmd_backend='spmd_types', "
-            f"got '{parallelism.spmd_backend}'."
-        )
 
 
 def _cp_shard_dims(input_sharding: dict[str, SpmdType]) -> dict[str, int]:
@@ -145,7 +130,7 @@ def cp_shard(
             BlockMask, or dict[str, BlockMask]
         load_balancer_type: Type of load balancer to use. Options:
             - "headtail": Use HeadTailLoadBalancer (for SDPA)
-            - "ptrr": Use PTRRLoadBalancer (for FlexAttention)
+            - "ptrr": Use PTRRLoadBalancer (for FlexInnerAttention)
             - None: Disable load balancing
             Defaults to "headtail".
         input_seq_dims: Sequence dimension(s) for sharding. An int applies the
@@ -186,7 +171,7 @@ def cp_shard(
                     seq_len, cp_world_size, cp_mesh.device_type
                 )
             case "ptrr":
-                # For FlexAttention, we use _PTRRLoadBalancer.
+                # For FlexInnerAttention, we use _PTRRLoadBalancer.
                 # _PTRRLoadBalancer is built from a single BlockMask. When the
                 # attention masks are a dict[str, BlockMask], the caller must
                 # specify which mask to build the balancer from via
@@ -236,8 +221,7 @@ def cp_shard(
         ),
     )
 
-    # BlockMask, has shape, [B, H, Q, KV], and we can only shard
-    # on the Q seq dimension, not KV.
+    # BlockMask has shape [B, H, Q, KV]. Only Q can be sequence-sharded.
     MASK_Q_SEQ_DIM = 2
     if attention_masks is not None:
         assert isinstance(attention_masks, (BlockMask, dict))

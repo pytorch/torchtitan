@@ -4,78 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""SiTU feed-forward and latent MoE modules for Kimi K3."""
+"""Latent MoE modules for Kimi K3."""
 
 from dataclasses import dataclass
 
 import torch
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import ExpertActivation, MoE
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, E = experts,
 # F = expert hidden dimension, R = routed tokens, K = selected experts per token.
-
-
-def _situ_glu(
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    beta: float,
-    linear_beta: float | None,
-) -> torch.Tensor:
-    """Kimi's SiTU-GLU activation, evaluated in FP32."""
-    input_dtype = gate.dtype
-    gate = gate.float()
-    up = up.float()
-    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
-    if linear_beta is not None:
-        up = linear_beta * torch.tanh(up / linear_beta)
-    return (gate * up).to(input_dtype)
-
-
-class KimiFeedForward(FeedForward):
-    """FeedForward with Kimi's SiTU activation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
-        beta: float = 1.0
-        linear_beta: float | None = None
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.beta = config.beta
-        self.linear_beta = config.linear_beta
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(
-            _situ_glu(self.w1(x), self.w3(x), self.beta, self.linear_beta),
-        )
-
-
-class KimiExpertActivation(ExpertActivation):
-    """Kimi's SiTU activation for fused routed-expert projections."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ExpertActivation.Config):
-        beta: float = 1.0
-        linear_beta: float | None = None
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.beta = config.beta
-        self.linear_beta = config.linear_beta
-
-    def forward(
-        self,
-        gate_RF: torch.Tensor,
-        up_RF: torch.Tensor,
-        offsets_E: torch.Tensor,
-    ) -> torch.Tensor:
-        del offsets_E
-        return _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
 
 
 class KimiLatentMoE(MoE):
@@ -94,11 +35,8 @@ class KimiLatentMoE(MoE):
         self.routed_up = config.routed_up.build()
 
     def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
-        weights_TK, expert_ids_TK, scores_TE = self.router(
+        weights_TK, expert_ids_TK, routing_map_TE = self.router(
             x_TD, self.expert_bias_E, **router_kwargs
-        )
-        routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
-            -1, expert_ids_TK, True
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
         if self.training:

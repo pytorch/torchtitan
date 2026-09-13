@@ -251,7 +251,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
 
     GPT-OSS uses alternating attention: even layers apply a sliding window, odd
     layers use full causal attention; the per-layer window is baked into each
-    ``VarlenAttention.window_size``.
+    ``VarlenInnerAttention.window_size``.
     """
     num_samples_per_prompt = 8
     seq_len = 2048
@@ -674,7 +674,6 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     config.generator.override = OverrideConfig(
         imports=[
             "torchtitan.overrides.fused_swiglu.fused_swiglu",
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
             (
                 "torchtitan.overrides.moe_token_dispatcher.deepep_override",
                 {"cudagraphable": True},
@@ -855,7 +854,8 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     Same model/parallelism/data as ``rl_grpo_qwen3_30b_a3b_varlen``, but applies
     opt-in overrides (per-actor) to both the trainer and generator:
 
-    * ``fused_swiglu`` fuses the dense and grouped-experts gate+up projections
+    * ``fused_swiglu`` fuses the dense SwiGLU activation; the sibling grouped
+      experts override also fuses its gate/up projections
       into a single weight (one GEMM; fused SiLU-and-mul Triton kernel).
     * ``helion_rope`` applies cos/sin RoPE with a fused Helion kernel (qwen3 uses
       ``CosSinRoPE``, which the override targets).
@@ -870,7 +870,6 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     # independent (they run in different actors).
     perf_imports = [
         "torchtitan.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
         "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
     ]
     config.trainer = dataclasses.replace(
@@ -1079,6 +1078,9 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
+            ),
         ),
         compile=CompileConfig(enable=False),
         rollouter=AlphabetSortRollouter.Config(),
