@@ -46,13 +46,13 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             "language_model.model.layers.{}.mlp.down_proj.weight": "layers.{}.feed_forward.w2.weight",
             # MoE.
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w1.weight": (
-                "layers.{}.moe.routed_experts.inner_experts.w1_EFD"
+                "layers.{}.moe.routed_experts.w13.gate"
             ),
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w2.weight": (
-                "layers.{}.moe.routed_experts.inner_experts.w2_EDF"
+                "layers.{}.moe.routed_experts.w2.weight"
             ),
             "language_model.model.layers.{}.block_sparse_moe.experts.{}.w3.weight": (
-                "layers.{}.moe.routed_experts.inner_experts.w3_EFD"
+                "layers.{}.moe.routed_experts.w13.up"
             ),
             "language_model.model.layers.{}.block_sparse_moe.gate.weight": "layers.{}.moe.router.gate.weight",
             "language_model.model.layers.{}.block_sparse_moe.gate.e_score_correction_bias": "layers.{}.moe.expert_bias_E",
@@ -135,6 +135,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
+        state_dict = self._to_logical_expert_state(state_dict)
         to_hf_map = {
             tt_key: hf_key
             for mapping in (
@@ -149,7 +150,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         unmapped: list[str] = []
 
         for key, value in state_dict.items():
-            if "moe.routed_experts.inner_experts" in key:
+            if self._is_expert_weight_key(key):
                 abstract_key = re.sub(r"(?<=\.)\d+(?=\.)", "{}", key, count=1)
                 layer_num_match = re.search(r"layers\.(\d+)\.", key)
                 assert layer_num_match is not None
@@ -376,4 +377,4 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 "KimiK3StateDictAdapter received an incomplete set of "
                 f"routed-expert weights: {expert_weights_by_layer.keys()}."
             )
-        return state_dict
+        return self._to_native_expert_state(state_dict)
