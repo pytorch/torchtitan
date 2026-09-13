@@ -84,7 +84,7 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     text_overrides = {
         "vocab_size": tt_config.vocab_size,
         "hidden_size": tt_config.dim,
-        "intermediate_size": dense_ffn.w1.out_features,
+        "intermediate_size": dense_ffn.w13.out_features // 2,
         "num_hidden_layers": len(tt_config.layers),
         "num_attention_heads": mla.n_heads,
         "num_key_value_heads": mla.n_heads,
@@ -99,7 +99,8 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         "num_experts": moe.num_experts,
         "num_experts_per_token": moe.router.top_k,
         "num_shared_experts": (
-            moe.shared_experts.w1.out_features
+            moe.shared_experts.w13.out_features
+            // 2
             // moe.routed_experts.inner_experts.hidden_dim
         ),
         "moe_renormalize": moe.router.route_norm,
