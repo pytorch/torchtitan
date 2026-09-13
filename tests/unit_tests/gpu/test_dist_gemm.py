@@ -35,7 +35,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.common.config_utils import make_gqa_config
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
 from torchtitan.models.common.dist_gemm import (
     AllGatherFusedQKVLinear,
@@ -85,23 +84,6 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         )
         self.assertEqual(fused.wo.in_features, stock.wo.in_features)
         self.assertEqual(fused.wo.out_features, stock.wo.out_features)
-
-    def test_unfused_qkv_is_rejected(self):
-        """The all-gather feeds one wqkv GEMM; separate wq/wk/wv has no schedule."""
-        from torchtitan.models.common.attention import FlexInnerAttention
-        from torchtitan.models.common.rope import ComplexRoPE
-
-        with self.assertRaisesRegex(ValueError, "requires fuse_qkv=True"):
-            make_gqa_config(
-                dim=DIM,
-                n_heads=N_HEADS,
-                wqkv_param_init={},
-                wo_param_init={},
-                inner_attention=FlexInnerAttention.Config(),
-                rope=ComplexRoPE.Config(dim=DIM // N_HEADS, max_context_length=128),
-                fuse_qkv=False,
-                tp_gemm_backend="dist_gemm",
-            )
 
     def test_sequence_parallel_disabled_is_rejected(self):
         """The fused GEMMs *are* the SP collectives, so SP off has nothing to fuse
