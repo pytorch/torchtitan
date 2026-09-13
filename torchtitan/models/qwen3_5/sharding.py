@@ -106,7 +106,7 @@ def _conv_weight_sharding() -> ShardingConfig:
 
 
 _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w13_EF2D": spmd.S(1),
+    "w13_E_2F_D": spmd.S(1),
     "w2_EDF": spmd.S(2),
 }
 
