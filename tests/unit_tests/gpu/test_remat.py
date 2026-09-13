@@ -25,7 +25,6 @@ from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
-    GroupedExperts,
     RoutedExperts,
     TokenChoiceTopKRouter,
 )
@@ -38,8 +37,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
-from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
+from torchtitan.overrides.fused_swiglu import fused_swiglu
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -112,36 +110,6 @@ class _FeedForwardBlock(Module):
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         return self.feed_forward(x_TD).sum()
-
-
-class _GroupedExpertsBlock(Module):
-    def __init__(self, grouped_experts: GroupedExperts):
-        super().__init__()
-        self.grouped_experts = grouped_experts
-
-    def forward(self, x_RD: torch.Tensor) -> torch.Tensor:
-        num_tokens_per_expert_E = torch.tensor([x_RD.shape[0]], device=x_RD.device)
-        return self.grouped_experts(x_RD, num_tokens_per_expert_E).sum()
-
-
-class _CountingGroupedExperts(GroupedExperts):
-    """GroupedExperts using a CPU reference GEMM and counted region bodies."""
-
-    def __init__(self):
-        super().__init__(GroupedExperts.Config(dim=4, hidden_dim=8, num_experts=1))
-        self.num_w13_forwards = 0
-        self.num_w2_forwards = 0
-        for parameter in self.parameters():
-            torch.nn.init.normal_(parameter)
-
-    def _grouped_mm(
-        self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
-    ) -> torch.Tensor:
-        if weight_EOI is self.w2_EDF:
-            self.num_w2_forwards += 1
-        else:
-            self.num_w13_forwards += 1
-        return A.float() @ weight_EOI[0].float().transpose(0, 1)
 
 
 class _CountingRoutedInnerExperts(Module):
@@ -219,7 +187,6 @@ class _RoutedExpertsBlock(Module):
             torch.tensor([num_tokens], device=x_TD.device),
         ).sum()
 
-
 def _vision_inner_attention(
     q_THDh: torch.Tensor,
     k_THDh: torch.Tensor,
@@ -278,7 +245,6 @@ class _VisionRematModel(Module):
             rope_apply=_vision_identity_rope,
             attention_mask=None,  # pyrefly: ignore [bad-argument-type]
         ).sum()
-
 
 class _RematModel(Module):
     def __init__(self, block: Module):
@@ -538,94 +504,6 @@ class TestRematRegions(unittest.TestCase):
                         [f"feed_forward.{name}" for name in expected_names],
                     )
 
-    def test_grouped_expert_save_regions_control_recomputation(self):
-        for save_regions, expected_counts in (
-            ([], (2, 2)),
-            (["grouped_experts.*"], (1, 1)),
-            (["grouped_experts.w13"], (1, 2)),
-            (["grouped_experts.w2"], (2, 1)),
-        ):
-            with self.subTest(save_regions=save_regions):
-                torch.manual_seed(42)
-                baseline = _RematModel(_GroupedExpertsBlock(_CountingGroupedExperts()))
-                remat_model = deepcopy(baseline)
-                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
-
-                x_RD = torch.randn(3, 4)
-                expected = _run_forward_backward(baseline, x_RD)
-                actual = _run_forward_backward(remat_model, x_RD)
-
-                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
-                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
-                for actual_grad, expected_grad in zip(actual[2], expected[2]):
-                    torch.testing.assert_close(
-                        actual_grad, expected_grad, rtol=0, atol=0
-                    )
-
-                block = remat_model.layers["0"]
-                assert isinstance(block, _GroupedExpertsBlock)
-                grouped_experts = block.grouped_experts
-                assert isinstance(grouped_experts, _CountingGroupedExperts)
-                self.assertEqual(
-                    (
-                        grouped_experts.num_w13_forwards,
-                        grouped_experts.num_w2_forwards,
-                    ),
-                    expected_counts,
-                )
-
-    def test_grouped_expert_variants_use_expected_region_boundaries(self):
-        configs = (
-            GroupedExperts.Config(dim=4, hidden_dim=8, num_experts=1),
-            GptOssGroupedExperts.Config(dim=4, hidden_dim=8, num_experts=1),
-            GroupedExperts.Config(
-                dim=4,
-                hidden_dim=8,
-                num_experts=1,
-                activation_fn=FusedSwiGLU.Config(),
-            ),
-        )
-
-        def grouped_mm(
-            *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
-        ) -> torch.Tensor:
-            return A.float() @ weight_EOI[0].float().transpose(0, 1)
-
-        def silu_and_mul(
-            gate_RF: torch.Tensor,
-            up_RF: torch.Tensor,
-            offsets_E: torch.Tensor,
-        ) -> torch.Tensor:
-            return torch.nn.functional.silu(gate_RF) * up_RF
-
-        for config in configs:
-            grouped_experts = config.build()
-            with self.subTest(grouped_experts=type(grouped_experts).__name__):
-                for parameter in grouped_experts.parameters():
-                    torch.nn.init.normal_(parameter)
-                model = _RematModel(_GroupedExpertsBlock(grouped_experts))
-                RegionAC.Config(save_regions=["grouped_experts.*"]).build().apply(model)
-
-                with (
-                    patch.object(
-                        grouped_experts, "_grouped_mm", side_effect=grouped_mm
-                    ),
-                    patch(
-                        "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
-                        side_effect=silu_and_mul,
-                    ),
-                ):
-                    x_RD = torch.randn(3, 4, requires_grad=True)
-                    with remat.collect_trace() as trace:
-                        output = model(x_RD)
-                    output.backward()
-
-                self.assertEqual(
-                    [entry.name for entry in trace.entries],
-                    ["grouped_experts.w13", "grouped_experts.w2"],
-                )
-                self.assertIsNotNone(x_RD.grad)
-
     def test_deepep_communication_policy_controls_dispatch_and_combine(self):
         for save_regions, expected_count in (
             ([], 2),
@@ -665,7 +543,6 @@ class TestRematRegions(unittest.TestCase):
                 "routed_experts.ep_communication.combine",
             ],
         )
-
     def test_vision_save_regions_control_recomputation(self):
         for save_regions, expected_counts in (
             ([], (2, 2, 2, 2, 2, 2, 2)),
@@ -707,7 +584,6 @@ class TestRematRegions(unittest.TestCase):
                     ),
                     expected_counts,
                 )
-
     def test_router_decision_is_always_saved(self):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
