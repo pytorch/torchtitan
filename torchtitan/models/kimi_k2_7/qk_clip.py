@@ -16,7 +16,7 @@ from torch.nn.attention.flex_attention import AuxRequest
 
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.deepseek_v3.model import Attention
 
 # Shape suffixes:
@@ -24,11 +24,11 @@ from torchtitan.models.deepseek_v3.model import Attention
 # I = input features.
 
 
-class QKClipFlexAttention(FlexAttention):
-    """FlexAttention that records the maximum score for each query head."""
+class QKClipFlexInnerAttention(FlexInnerAttention):
+    """FlexInnerAttention that records the maximum score for each query head."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexAttention.Config):
+    class Config(FlexInnerAttention.Config):
         pass
 
     def __init__(self, config: Config) -> None:
@@ -147,7 +147,7 @@ def qk_clip(
         for model_part in model_parts
         for module in model_part.modules()
         if isinstance(module, Attention)
-        and isinstance(module.inner_attention, QKClipFlexAttention)
+        and isinstance(module.inner_attention, QKClipFlexInnerAttention)
     ]
     if not attention_layers:
         return
@@ -199,6 +199,6 @@ def register_qk_clip_hook(
 
 
 __all__ = [
-    "QKClipFlexAttention",
+    "QKClipFlexInnerAttention",
     "register_qk_clip_hook",
 ]

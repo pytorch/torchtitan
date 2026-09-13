@@ -8,13 +8,10 @@ import unittest
 
 import torch
 
-from torchtitan.models.common.moe import ExpertActivation
-from torchtitan.models.deepseek_v3.config_registry import (
-    deepseek_v3_debugmodel_minimal_async_ep,
-)
+from torchtitan.models.common.activation import SwiGLU
 from torchtitan.overrides.fused_swiglu import (
-    fused_grouped_experts,
-    FusedExpertActivation,
+    fused_swiglu,
+    FusedSwiGLU,
     silu_and_mul_backward_kernel,
     silu_and_mul_forward_kernel,
     silu_and_mul_op,
@@ -22,28 +19,20 @@ from torchtitan.overrides.fused_swiglu import (
 
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
-    def test_minimal_async_ep_config_imports_override(self):
-        config = deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048)
+    def test_swiglu_config_is_replaced(self):
+        cfg = SwiGLU.Config()
 
-        self.assertIn(
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-            config.override.imports,
-        )
+        replacement = fused_swiglu(cfg)
 
-    def test_expert_activation_config_is_replaced(self):
-        cfg = ExpertActivation.Config()
-
-        replacement = fused_grouped_experts(cfg)
-
-        self.assertIsInstance(replacement, FusedExpertActivation.Config)
+        self.assertIsInstance(replacement, FusedSwiGLU.Config)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-class TestFusedExpertActivationNumerics(unittest.TestCase):
+class TestFusedSwiGLUNumerics(unittest.TestCase):
     def test_matches_reference_forward_and_backward(self):
         torch.manual_seed(0)
-        reference = ExpertActivation.Config().build().cuda()
-        fused = FusedExpertActivation.Config().build().cuda()
+        reference = SwiGLU.Config().build()
+        fused = FusedSwiGLU.Config().build()
         gate = torch.randn(8, 32, device="cuda")
         up = torch.randn(8, 32, device="cuda")
         offsets = torch.tensor([3, 5, 6, 8], device="cuda", dtype=torch.int32)
@@ -52,8 +41,8 @@ class TestFusedExpertActivationNumerics(unittest.TestCase):
         gate_fused = gate.detach().clone().requires_grad_()
         up_fused = up.detach().clone().requires_grad_()
 
-        out_reference = reference(gate_reference, up_reference, offsets)
-        out_fused = fused(gate_fused, up_fused, offsets)
+        out_reference = reference(gate_reference, up_reference, offsets=offsets)
+        out_fused = fused(gate_fused, up_fused, offsets=offsets)
         torch.testing.assert_close(out_fused, out_reference)
 
         out_reference.sum().backward()

@@ -8,6 +8,7 @@ from dataclasses import fields
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import graph_pipeline_llm
+from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -25,6 +26,12 @@ def _parallelize_fn(model, *, compile_config, **kwargs):
             model, compile_config=compile_config, **kwargs
         )
     return parallelize_deepseekv3(model, compile_config=compile_config, **kwargs)
+
+
+def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
+    """Register MoE load-balancing and aux-loss step pre-hooks."""
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
 
 
 def model_registry(
@@ -59,6 +66,6 @@ def model_registry(
         max_context_length=context_len,
         parallelize_fn=_parallelize_fn,
         pipelining_fn=graph_pipeline_llm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_post_optimizer_build_fn,
         state_dict_adapter=DeepSeekV3StateDictAdapter,
     )
