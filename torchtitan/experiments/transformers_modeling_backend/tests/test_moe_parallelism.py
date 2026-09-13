@@ -27,7 +27,7 @@ from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 
 def _expert_weights(experts):
     """Return logical gate, down, and up expert-weight tensors."""
-    logical_w13 = experts.w13_EF2D
+    logical_w13 = experts.w13_E_2F_D.unflatten(1, (-1, 2))
     return logical_w13[:, :, 0, :], experts.w2_EDF, logical_w13[:, :, 1, :]
 
 
@@ -421,7 +421,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
 
         self.assertIsNotNone(x.grad)
         inner_experts = native_moe.routed_experts.inner_experts
-        self.assertIsNotNone(inner_experts.w13_EF2D.grad)
+        self.assertIsNotNone(inner_experts.w13_E_2F_D.grad)
         self.assertIsNotNone(inner_experts.w2_EDF.grad)
 
 
