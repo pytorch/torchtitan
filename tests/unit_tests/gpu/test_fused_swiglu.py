@@ -19,18 +19,14 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.activation import SiTUGLU
+from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
-from torchtitan.overrides.fused_swiglu import (
-    dist_gemm_fused_swiglu,
-    fused_swiglu,
-    FusedSwiGLU,
-)
+from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 
 _DIM = 16
 _HIDDEN = 32
@@ -43,7 +39,9 @@ class _ConvertedLinear(Linear):
 
 
 def _build_fused() -> FeedForward:
-    fused = fused_swiglu(_feed_forward_config()).build()
+    fused = _feed_forward_config()
+    fused.activation_fn = fused_swiglu(fused.activation_fn)
+    fused = fused.build()
     with torch.no_grad():
         fused.w13.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
         fused.w2.weight.copy_(torch.randn(_DIM, _HIDDEN))
@@ -71,17 +69,9 @@ def _build_native() -> FeedForward:
 
 class TestFusedSwiGLU(unittest.TestCase):
     def test_replaces_only_activation(self):
-        fused = fused_swiglu(_feed_forward_config())
+        fused = fused_swiglu(SwiGLU.Config())
 
-        self.assertIs(type(fused), FeedForward.Config)
-        self.assertIsInstance(fused.activation_fn, FusedSwiGLU.Config)
-
-    def test_rejects_non_swiglu_activation(self):
-        config = _feed_forward_config()
-        config.activation_fn = SiTUGLU.Config()
-
-        with self.assertRaisesRegex(ValueError, "requires the default SwiGLU"):
-            fused_swiglu(config)
+        self.assertIsInstance(fused, FusedSwiGLU.Config)
 
     def test_gate_up_projection_is_linear(self):
         fused = _build_fused()
@@ -98,16 +88,19 @@ class TestFusedSwiGLU(unittest.TestCase):
             w2=Linear.Config(in_features=_HIDDEN, out_features=_DIM),
         )
 
-        fused = fused_swiglu(cfg)
+        cfg.activation_fn = fused_swiglu(cfg.activation_fn)
+        fused = cfg
 
         self.assertIsInstance(fused.w13, _ConvertedLinear.Config)
         self.assertIsInstance(fused.build().w13, _ConvertedLinear)
 
-    def test_saves_physical_layout(self):
+    def test_saves_logical_layout(self):
         fused = _build_fused()
         sd = fused.state_dict()
-        self.assertEqual(set(sd), {"w13.weight", "w2.weight"})
-        self.assertTrue(torch.equal(sd["w13.weight"], fused.w13.weight))
+        self.assertEqual(set(sd), {"w1.weight", "w2.weight", "w3.weight"})
+        logical_w13 = _logical_w13(fused)
+        self.assertTrue(torch.equal(sd["w1.weight"], logical_w13[:, 0]))
+        self.assertTrue(torch.equal(sd["w3.weight"], logical_w13[:, 1]))
 
     @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_triton_checkpoint_loads_into_native(self):
@@ -172,28 +165,24 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
     """
 
     def test_dist_gemm_config_keeps_overlap(self):
-        self.assertIsInstance(
-            fused_swiglu(_dist_gemm_ffn_config()).build(), FeedForward
-        )
-        fused = dist_gemm_fused_swiglu(
-            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
-        ).build()
+        config = _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
+        config.activation_fn = fused_swiglu(config.activation_fn)
+        fused = config.build()
         self.assertIsInstance(fused, DistGEMMFeedForward)
         self.assertIsInstance(fused.activation_fn, FusedSwiGLU)
 
     def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
-        fused = dist_gemm_fused_swiglu(
-            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
-        ).build()
+        config = _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
+        config.activation_fn = fused_swiglu(config.activation_fn)
+        fused = config.build()
         with torch.no_grad():
             fused.w13.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
         state_dict = fused.state_dict()
-        self.assertEqual(set(state_dict), {"w13.weight", "w2.weight"})
-        torch.testing.assert_close(state_dict["w13.weight"], fused.w13.weight)
+        self.assertEqual(set(state_dict), {"w1.weight", "w2.weight", "w3.weight"})
 
-        reloaded = dist_gemm_fused_swiglu(
-            _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
-        ).build()
+        reload_config = _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
+        reload_config.activation_fn = fused_swiglu(reload_config.activation_fn)
+        reloaded = reload_config.build()
         reloaded.load_state_dict(state_dict)
         torch.testing.assert_close(reloaded.w13.weight, fused.w13.weight)
 
@@ -210,7 +199,9 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         # Apply the fused override factory directly, independent of the global
         # override registry (which other tests may clear).
         for layer in config.layers:
-            layer.feed_forward = fused_swiglu(layer.feed_forward)
+            layer.feed_forward.activation_fn = fused_swiglu(
+                layer.feed_forward.activation_fn
+            )
         model = Llama3Model(config)
         model.init_states()
         ffn = model.get_submodule("layers.0.feed_forward")
@@ -218,7 +209,7 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         self.assertIsInstance(ffn.activation_fn, FusedSwiGLU)
 
         sd = model.state_dict()
-        self.assertTrue(any(k.endswith("feed_forward.w13.weight") for k in sd))
+        self.assertTrue(any(k.endswith("feed_forward.w1.weight") for k in sd))
 
         adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
         hf_sd = adapter.to_hf(sd)
@@ -227,7 +218,8 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
 
         orig_w13 = ffn.w13.weight.detach().clone()
         restored = adapter.from_hf(hf_sd)
-        self.assertIn("layers.0.feed_forward.w13.weight", restored)
+        self.assertIn("layers.0.feed_forward.w1.weight", restored)
+        self.assertIn("layers.0.feed_forward.w3.weight", restored)
         model.load_state_dict(restored, strict=False)
         self.assertTrue(torch.equal(ffn.w13.weight, orig_w13))
 

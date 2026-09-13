@@ -4,12 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from collections import defaultdict
 
 import torch
 from torch._logging import trace_structured
 
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
 
 
 def _get_node_target_name(node: torch.fx.Node) -> str:

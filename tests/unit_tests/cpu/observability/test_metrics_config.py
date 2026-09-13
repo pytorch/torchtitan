@@ -6,7 +6,7 @@
 
 import pytest
 
-from torchtitan.components.metrics import MetricsProcessor
+from torchtitan.observability.metrics import MetricsProcessor
 
 
 @pytest.mark.parametrize("log_freq", [0, -1])
