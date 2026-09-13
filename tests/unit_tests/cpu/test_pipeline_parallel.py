@@ -4,14 +4,78 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from types import SimpleNamespace
+
 import pytest
+import torch.nn as nn
 
 from torchtitan.config import ParallelismConfig
+from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.pipeline_parallel import (
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
 )
+
+
+def test_pipeline_with_first_stage_modules_prepends_present_modules(monkeypatch):
+    model = nn.Module()
+    model.vision_encoder = nn.Linear(2, 2)
+    model.vision_adapter = nn.Linear(2, 2)
+    model.vision_projection = None
+    captured = {}
+    expected_result = object()
+
+    def capture_pipeline_llm(model, **kwargs):
+        captured["parallelism"] = kwargs["parallelism"]
+        return expected_result
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
+
+    result = pipeline_parallel.pipeline_with_first_stage_modules(
+        model,
+        first_stage_module_fqns=(
+            "vision_encoder",
+            "vision_adapter",
+            "vision_projection",
+            "missing_module",
+        ),
+        parallel_dims=SimpleNamespace(pp=2),
+        parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+        model_config=SimpleNamespace(layers=[None] * 4),
+    )
+
+    assert result is expected_result
+    assert captured["parallelism"].module_fqns_per_model_part == [
+        ["vision_encoder", "vision_adapter", "tok_embeddings", "layers.0", "layers.1"],
+        ["layers.2", "layers.3", "norm", "lm_head"],
+    ]
+
+
+def test_pipeline_with_first_stage_modules_preserves_explicit_split(monkeypatch):
+    model = nn.Module()
+    configured_fqns = [["input"], ["output"]]
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        module_fqns_per_model_part=configured_fqns,
+    )
+    captured = {}
+
+    def capture_pipeline_llm(model, **kwargs):
+        captured["parallelism"] = kwargs["parallelism"]
+        return object()
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
+
+    pipeline_parallel.pipeline_with_first_stage_modules(
+        model,
+        first_stage_module_fqns=("missing_module",),
+        parallel_dims=SimpleNamespace(pp=2),
+        parallelism=parallelism,
+        model_config=SimpleNamespace(layers=[None] * 4),
+    )
+
+    assert captured["parallelism"] is parallelism
 
 
 def _assert_layer_assignment(module_names_per_stage: list[list[str]], num_layers: int):

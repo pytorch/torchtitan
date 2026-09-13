@@ -13,7 +13,7 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 
-from torchtitan.models.common.attention import ScaledDotProductAttention
+from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm, SiLU
 from torchtitan.protocols.module import Module, Sequential
@@ -150,8 +150,8 @@ class SelfAttention(Module):
         norm: QKNorm.Config
         num_heads: int = 8
         qkv_bias: bool = False
-        inner_attention: ScaledDotProductAttention.Config = field(
-            default_factory=ScaledDotProductAttention.Config
+        inner_attention: ScaledDotProductInnerAttention.Config = field(
+            default_factory=ScaledDotProductInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -218,8 +218,8 @@ class DoubleStreamBlock(Module):
         txt_mlp_out: Linear.Config
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
-        inner_attention: ScaledDotProductAttention.Config = field(
-            default_factory=ScaledDotProductAttention.Config
+        inner_attention: ScaledDotProductInnerAttention.Config = field(
+            default_factory=ScaledDotProductInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -338,8 +338,8 @@ class SingleStreamBlock(Module):
         norm: QKNorm.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
-        inner_attention: ScaledDotProductAttention.Config = field(
-            default_factory=ScaledDotProductAttention.Config
+        inner_attention: ScaledDotProductInnerAttention.Config = field(
+            default_factory=ScaledDotProductInnerAttention.Config
         )
 
     def __init__(self, config: Config):
