@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""Training metrics collection and export."""
+
+import logging
 import os
 import time
 from collections import namedtuple
@@ -13,15 +16,18 @@ from typing import Any
 
 import torch
 from torch.utils.tensorboard import SummaryWriter
+
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import Color, device_module, device_type, NoColor
 
 
 # named tuple for passing device memory stats for logging
+logger = logging.getLogger(__name__)
+
+
 DeviceMemStats = namedtuple(
     "DeviceMemStats",
     [
