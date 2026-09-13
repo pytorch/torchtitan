@@ -512,7 +512,7 @@ def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]
         "w3_EFD": init_fn,
     }
     param_layout = {
-        "w13_EF2D": spmd.S(1),
+        "w13_E_2F_D": spmd.S(1),
         "w2_EDF": spmd.S(2),
     }
     _expert_param_info_cache = (param_init, param_layout)

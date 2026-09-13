@@ -34,13 +34,13 @@ def _build_fused_swiglu_grouped_experts() -> GroupedExperts:
         activation_fn=FusedSwiGLU.Config(),
     ).build()
     with torch.no_grad():
-        fused.w13_EF2D.copy_(torch.randn(_E, _HIDDEN, 2, _DIM))
+        fused.w13_E_2F_D.copy_(torch.randn(_E, 2 * _HIDDEN, _DIM))
         fused.w2_EDF.copy_(torch.randn(_E, _DIM, _HIDDEN))
     return fused
 
 
 def _logical_w13(experts: GroupedExperts) -> torch.Tensor:
-    return experts.w13_EF2D
+    return experts.w13_E_2F_D.unflatten(1, (_HIDDEN, 2))
 
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
@@ -67,23 +67,23 @@ class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
 
         dst = _build_fused_swiglu_grouped_experts()
         dst.load_state_dict(sd)
-        self.assertTrue(torch.equal(dst.w13_EF2D, src.w13_EF2D))
+        self.assertTrue(torch.equal(dst.w13_E_2F_D, src.w13_E_2F_D))
         self.assertTrue(torch.equal(dst.w2_EDF, src.w2_EDF))
 
     def test_built_module_has_only_fused_params(self):
-        """The override keeps the default physical w13_EF2D parameter layout."""
+        """The override keeps the default physical w13_E_2F_D parameter layout."""
         fused = _build_fused_swiglu_grouped_experts()
         names = {name for name, _ in fused.named_parameters(recurse=False)}
-        self.assertEqual(names, {"w13_EF2D", "w2_EDF"})
-        self.assertEqual(tuple(fused.w13_EF2D.shape), (_E, _HIDDEN, 2, _DIM))
+        self.assertEqual(names, {"w13_E_2F_D", "w2_EDF"})
+        self.assertEqual(tuple(fused.w13_E_2F_D.shape), (_E, 2 * _HIDDEN, _DIM))
 
-    def test_param_init_and_native_sharding_use_w13_ef2d(self):
-        """Building uses logical initialization and native w13_EF2D sharding."""
+    def test_param_init_and_native_sharding_use_w13_e_2f_d(self):
+        """Building uses logical initialization and native w13_E_2F_D sharding."""
         colwise = dense_param_placement(tp=spmd.S(1))
         rowwise = dense_param_placement(tp=spmd.S(2))  # w2_EDF
         base_sharding = ShardingConfig(
             state_shardings={
-                "w13_EF2D": colwise,
+                "w13_E_2F_D": colwise,
                 "w2_EDF": rowwise,
             },
             in_src_shardings={"x_RD": colwise},
@@ -106,18 +106,18 @@ class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
         module = cfg.build()
 
         assert module._param_init is not None
-        self.assertEqual(set(module._param_init), {"w13_EF2D", "w2_EDF"})
+        self.assertEqual(set(module._param_init), {"w13_E_2F_D", "w2_EDF"})
         module.init_states()
         logical_w13 = _logical_w13(module)
         self.assertTrue(torch.all(logical_w13[:, :, 0, :] == 1.0))
         self.assertTrue(torch.all(logical_w13[:, :, 1, :] == 2.0))
         self.assertTrue(torch.all(module.w2_EDF == 0.0))
 
-        # The native w13_EF2D/w2 shardings and the rest of the config are preserved.
+        # The native w13_E_2F_D/w2 shardings and the rest of the config are preserved.
         sc = module._sharding_config
         assert sc is not None
-        self.assertEqual(set(sc.state_shardings), {"w13_EF2D", "w2_EDF"})
-        self.assertIs(sc.state_shardings["w13_EF2D"], colwise)
+        self.assertEqual(set(sc.state_shardings), {"w13_E_2F_D", "w2_EDF"})
+        self.assertIs(sc.state_shardings["w13_E_2F_D"], colwise)
         self.assertIs(sc.state_shardings["w2_EDF"], rowwise)
         self.assertIs(sc.in_src_shardings, base_sharding.in_src_shardings)
         self.assertEqual(sc.local_spmd, base_sharding.local_spmd)
@@ -177,7 +177,7 @@ class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
 
         assert actual_input_RD.grad is not None
         assert expected_input_RD.grad is not None
-        assert experts.w13_EF2D.grad is not None
+        assert experts.w13_E_2F_D.grad is not None
         assert experts.w2_EDF.grad is not None
         assert w1_EFD.grad is not None
         assert w2_EDF.grad is not None
@@ -185,7 +185,7 @@ class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
         torch.testing.assert_close(
             actual_input_RD.grad, expected_input_RD.grad, atol=2e-2, rtol=2e-2
         )
-        logical_w13_grad = experts.w13_EF2D.grad
+        logical_w13_grad = experts.w13_E_2F_D.grad.unflatten(1, (_HIDDEN, 2))
         torch.testing.assert_close(
             logical_w13_grad[:, :, 0, :], w1_EFD.grad, atol=2e-2, rtol=2e-2
         )
