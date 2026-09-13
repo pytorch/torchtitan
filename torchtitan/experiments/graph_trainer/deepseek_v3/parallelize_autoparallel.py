@@ -18,6 +18,7 @@ because the solver doesn't support torchtitan's token_dispatcher ops
 layout via duck typing.
 """
 
+import logging
 import time
 
 import torch
@@ -34,8 +35,10 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     validate_autoparallel_config,
 )
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
+
+
+logger = logging.getLogger(__name__)
 
 
 def _load_autoparallel_dsv3_dependency():

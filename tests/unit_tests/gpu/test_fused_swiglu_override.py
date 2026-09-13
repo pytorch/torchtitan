@@ -12,17 +12,14 @@ import torch
 from torchtitan.models.common.config_utils import fused_grouped_experts_param_init
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.models.deepseek_v3.config_registry import (
-    deepseek_v3_debugmodel_minimal_async_ep,
-)
 from torchtitan.overrides.fused_swiglu import (
-    fused_grouped_experts,
+    fused_swiglu,
     FusedSwiGLU,
     silu_and_mul_backward_kernel,
     silu_and_mul_forward_kernel,
     silu_and_mul_op,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 _DIM = 16
 _HIDDEN = 32
@@ -37,69 +34,60 @@ def _build_fused_swiglu_grouped_experts() -> GroupedExperts:
         activation_fn=FusedSwiGLU.Config(),
     ).build()
     with torch.no_grad():
-        fused.w13.copy_(torch.randn(_E, _HIDDEN, 2, _DIM))
+        fused.w13_EF2D.copy_(torch.randn(_E, _HIDDEN, 2, _DIM))
         fused.w2_EDF.copy_(torch.randn(_E, _DIM, _HIDDEN))
     return fused
 
 
 def _logical_w13(experts: GroupedExperts) -> torch.Tensor:
-    return experts.w13
+    return experts.w13_EF2D
 
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
-    def test_minimal_async_ep_config_imports_override(self):
-        config = deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048)
-
-        self.assertIn(
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-            config.override.imports,
-        )
-
-    def test_grouped_experts_config_is_replaced(self):
+    def test_grouped_experts_activation_is_replaced(self):
         cfg = GroupedExperts.Config(
             dim=16,
             hidden_dim=32,
             num_experts=4,
         )
 
-        replacement = fused_grouped_experts(cfg)
+        replacement = fused_swiglu(cfg.activation_fn)
 
-        self.assertIsInstance(replacement, GroupedExperts.Config)
-        self.assertIsInstance(replacement.activation_fn, FusedSwiGLU.Config)
+        self.assertIsInstance(replacement, FusedSwiGLU.Config)
 
 
 class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
     """Checkpoint interop and configuration for the fused activation override."""
 
-    def test_saves_and_loads_physical_layout(self):
+    def test_saves_and_loads_logical_layout(self):
         src = _build_fused_swiglu_grouped_experts()
         sd = src.state_dict()
 
-        self.assertEqual(set(sd), {"w13", "w2_EDF"})
+        self.assertEqual(set(sd), {"w1_EFD", "w2_EDF", "w3_EFD"})
 
         dst = _build_fused_swiglu_grouped_experts()
         dst.load_state_dict(sd)
-        self.assertTrue(torch.equal(dst.w13, src.w13))
+        self.assertTrue(torch.equal(dst.w13_EF2D, src.w13_EF2D))
         self.assertTrue(torch.equal(dst.w2_EDF, src.w2_EDF))
 
     def test_built_module_has_only_fused_params(self):
-        """The override keeps the default physical w13 parameter layout."""
+        """The override keeps the default physical w13_EF2D parameter layout."""
         fused = _build_fused_swiglu_grouped_experts()
         names = {name for name, _ in fused.named_parameters(recurse=False)}
-        self.assertEqual(names, {"w13", "w2_EDF"})
-        self.assertEqual(tuple(fused.w13.shape), (_E, _HIDDEN, 2, _DIM))
+        self.assertEqual(names, {"w13_EF2D", "w2_EDF"})
+        self.assertEqual(tuple(fused.w13_EF2D.shape), (_E, _HIDDEN, 2, _DIM))
 
-    def test_param_init_and_native_sharding_use_w13(self):
-        """Building uses logical initialization and native w13 sharding."""
+    def test_param_init_and_native_sharding_use_w13_ef2d(self):
+        """Building uses logical initialization and native w13_EF2D sharding."""
         colwise = dense_param_placement(tp=spmd.S(1))
         rowwise = dense_param_placement(tp=spmd.S(2))  # w2_EDF
         base_sharding = ShardingConfig(
             state_shardings={
-                "w13": colwise,
+                "w13_EF2D": colwise,
                 "w2_EDF": rowwise,
             },
             in_src_shardings={"x_RD": colwise},
-            local_map=LocalMapConfig(in_grad_placements=None),
+            local_spmd=True,
         )
         cfg = GroupedExperts.Config(
             dim=_DIM,
@@ -115,25 +103,24 @@ class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
             sharding_config=base_sharding,
         )
 
-        replacement = fused_grouped_experts(cfg)
-        module = replacement.build()
+        module = cfg.build()
 
         assert module._param_init is not None
-        self.assertEqual(set(module._param_init), {"w13", "w2_EDF"})
+        self.assertEqual(set(module._param_init), {"w13_EF2D", "w2_EDF"})
         module.init_states()
         logical_w13 = _logical_w13(module)
         self.assertTrue(torch.all(logical_w13[:, :, 0, :] == 1.0))
         self.assertTrue(torch.all(logical_w13[:, :, 1, :] == 2.0))
         self.assertTrue(torch.all(module.w2_EDF == 0.0))
 
-        # The native w13/w2 shardings and the rest of the config are preserved.
+        # The native w13_EF2D/w2 shardings and the rest of the config are preserved.
         sc = module._sharding_config
         assert sc is not None
-        self.assertEqual(set(sc.state_shardings), {"w13", "w2_EDF"})
-        self.assertIs(sc.state_shardings["w13"], colwise)
+        self.assertEqual(set(sc.state_shardings), {"w13_EF2D", "w2_EDF"})
+        self.assertIs(sc.state_shardings["w13_EF2D"], colwise)
         self.assertIs(sc.state_shardings["w2_EDF"], rowwise)
         self.assertIs(sc.in_src_shardings, base_sharding.in_src_shardings)
-        self.assertIs(sc.local_map, base_sharding.local_map)
+        self.assertEqual(sc.local_spmd, base_sharding.local_spmd)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -190,7 +177,7 @@ class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
 
         assert actual_input_RD.grad is not None
         assert expected_input_RD.grad is not None
-        assert experts.w13.grad is not None
+        assert experts.w13_EF2D.grad is not None
         assert experts.w2_EDF.grad is not None
         assert w1_EFD.grad is not None
         assert w2_EDF.grad is not None
@@ -198,7 +185,7 @@ class TestFusedSwiGLUGroupedExpertsNumerics(unittest.TestCase):
         torch.testing.assert_close(
             actual_input_RD.grad, expected_input_RD.grad, atol=2e-2, rtol=2e-2
         )
-        logical_w13_grad = experts.w13.grad
+        logical_w13_grad = experts.w13_EF2D.grad
         torch.testing.assert_close(
             logical_w13_grad[:, :, 0, :], w1_EFD.grad, atol=2e-2, rtol=2e-2
         )

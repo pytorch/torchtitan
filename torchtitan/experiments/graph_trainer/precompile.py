@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import logging
 import os
 import pickle
 from dataclasses import dataclass
@@ -29,7 +30,10 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.storage import StorageAdapter
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
+
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
 

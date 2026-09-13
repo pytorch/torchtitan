@@ -20,8 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
-from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend for the router gate:
@@ -116,39 +116,35 @@ class RouterGateLinear(Linear):
         return output_TE
 
 
-class ScaledBiasRowwiseLinear(Linear):
-    """
-    Rowwise linear whose local bias contribution is scaled by TP degree.
-    TODO(pianpwk): this should work in decomposition in spmd_types, or as Partial
-    init in DTensor. Today the local SPMD typecheck errors on the TP-axis
-    input:V, weight:V, bias:P case; decomposing to input @ weight -> P, then P + P should pass.
-    For DTensor, this errors because FSDP does not want to redistribute the incoming gradient
-    from Replicate -> storage-time Partial.
-    """
+class PartialBiasRowwiseLinear(Linear):
+    """Rowwise linear whose invariant bias becomes TP-partial in forward."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         pass
 
     def __init__(self, config: Config):
+        if not config.bias:
+            raise ValueError("PartialBiasRowwiseLinear requires bias=True")
         super().__init__(config)
-        self.tp_degree = 1
-
-    def parallelize(self, parallel_dims) -> None:
-        self.tp_degree = parallel_dims.tp
-        super().parallelize(parallel_dims)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight = (
-            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        )
-        bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
-        bias = bias / self.tp_degree
-        return F.linear(input, weight, bias)
+        bias = self.bias
+        assert bias is not None
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            bias = spmd.convert(
+                bias,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.P,
+                expert_mode=True,
+            )
+        return F.linear(input, self.weight, bias)
 
 
 __all__ = [
     "Linear",
+    "PartialBiasRowwiseLinear",
     "RouterGateLinear",
-    "ScaledBiasRowwiseLinear",
 ]
