@@ -15,8 +15,6 @@ packed-bank row for every placeholder token.
 import spmd_types as spmd
 import torch
 
-from torchtitan.distributed.utils import get_spmd_backend
-
 
 def get_vision_positions(
     tokens: torch.Tensor,
@@ -107,7 +105,7 @@ def gather_vision_embeds(
     # token layout at the fusion boundary.
     with spmd.local():
         fused_TD = torch.where(is_vision_T1, gathered_TD, inputs_TD)
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         spmd.assert_type_like(fused_TD, inputs_TD)
     return fused_TD
 

@@ -13,6 +13,8 @@ fails loudly if those upstream forward signatures drift.
 
 from __future__ import annotations
 
+import logging
+
 from collections.abc import Callable
 from typing import Any
 
@@ -29,7 +31,9 @@ from torchtitan.experiments.graph_trainer.configs import (
     validate_ep_overlap_config,
 )
 from torchtitan.models.common.decoder import TransformerBlock
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _chunk_dim_index(mode: EpOverlapChunkDim) -> int:

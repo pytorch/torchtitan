@@ -19,7 +19,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
-    set_gqa_inner_attention_local_map,
+    set_gqa_inner_attention_local_spmd,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
@@ -77,7 +77,7 @@ def _set_qwen3_layer_sharding(
     layer_cfg.ffn_norm.sharding_config = norm
 
     set_gqa_attention_sharding(attention, enable_sp=enable_sp)
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # QK norms: shard on head dim (dim=1), independent of SP.
     if attention.qk_norm is not None:

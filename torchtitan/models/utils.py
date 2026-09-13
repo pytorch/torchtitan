@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from collections.abc import Iterable
 from fractions import Fraction
 
@@ -21,7 +22,9 @@ from torch.distributed.tensor.placement_types import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe import MoE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def validate_converter_order(converters: list) -> None:
@@ -30,8 +33,7 @@ def validate_converter_order(converters: list) -> None:
     Raises ``ValueError`` if a quantization converter appears after a LoRA
     converter in the list.
     """
-    from torchtitan.components.lora import LoRAConverter
-    from torchtitan.components.quantization import QuantizationConverter
+    from torchtitan.config.transform import LoRAConverter, QuantizationConverter
 
     _BEFORE_LORA = (QuantizationConverter.Config,)
 
