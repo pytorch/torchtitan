@@ -39,9 +39,16 @@ class DataloaderExhaustedError(Exception):
 class BaseDataLoader(Stateful, ABC, Configurable):
     """Enforces the `Stateful`, `state_dict()`, and `load_state_dict()` contract."""
 
+    max_num_documents: int | None = None
+
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        max_num_documents: Annotated[int | None, tyro.conf.Suppress] = None
+        """Maximum non-padding document segments in one local token batch."""
+
+        def __post_init__(self) -> None:
+            if self.max_num_documents is not None and self.max_num_documents <= 0:
+                raise ValueError("max_num_documents must be positive")
 
     @abstractmethod
     def __iter__(self) -> Iterator[TrainerBatch]:
@@ -97,6 +104,7 @@ class GrainDataLoader(BaseDataLoader):
             )
         self._dp_world_size = dp_world_size
         self._rank_id = f"dp_rank_{dp_rank}"
+        self.max_num_documents = config.max_num_documents
 
         # Build the dataset graph and collator.
         read_options = config.read_options
@@ -105,6 +113,7 @@ class GrainDataLoader(BaseDataLoader):
             max_context_length=max_context_length,
             num_tokens_per_batch=num_tokens_per_batch,
             read_options=read_options,
+            max_num_documents=config.max_num_documents,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
             seed=config.seed,

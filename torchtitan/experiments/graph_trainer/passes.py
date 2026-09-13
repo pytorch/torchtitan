@@ -29,6 +29,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 from __future__ import annotations
 
 import functools
+import logging
 import time
 import warnings
 from collections.abc import Callable
@@ -92,7 +93,9 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 c10d = torch.ops._c10d_functional
 
@@ -142,6 +145,11 @@ def _tensor_parallel_degree(config, parallel_dims=None) -> int:
     return int(getattr(config.parallelism, "tensor_parallel_degree", 1))
 
 
+def construct_mandatory_graph_passes() -> list[Callable]:
+    """Return correctness passes that run even when optional passes are disabled."""
+    return [remove_parameter_gradient_markers_pass]
+
+
 def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -151,7 +159,7 @@ def compile_time_passes(
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
 ) -> list[Callable]:
-    """Cleanup, FlexAttention annotation, and regional_inductor passes.
+    """Cleanup, FlexInnerAttention annotation, and regional_inductor passes.
 
     If precompile is enabled, these are applied before serialization so
     that compiled Triton kernels are baked into the artifact. Otherwise
@@ -203,7 +211,7 @@ def compile_time_passes(
         split_moe_expert_buckets=efsdp_degree > 1,
     )
 
-    passes: list[Callable] = [remove_parameter_gradient_markers_pass]
+    passes = construct_mandatory_graph_passes()
     if include_mandatory_normalization:
         passes.extend(
             [
@@ -368,7 +376,7 @@ def final_inductor_compile_passes(
     only depends on compile config; model- and parallelism-aware rewrites stay
     in ``compile_time_passes``.
     """
-    from torchtitan.models.common.attention import FlexAttention
+    from torchtitan.models.common.attention import FlexInnerAttention
 
     passes: list[Callable] = []
     inductor_compilation = compile_config.inductor_compilation
@@ -382,12 +390,12 @@ def final_inductor_compile_passes(
             )
         )
     elif inductor_compilation == "regional":
-        # FlexAttention HOPs must be compiled (via regional_inductor) to
+        # FlexInnerAttention HOPs must be compiled (via regional_inductor) to
         # produce bitwise identical results to the eager Trainer path.
         passes.append(
             functools.partial(
                 annotate_flex_attention_for_regional_inductor_pass,
-                flex_compile_config=FlexAttention.inductor_configs,
+                flex_compile_config=FlexInnerAttention.inductor_configs,
             )
         )
         if compile_config.numerics_changing_optim:
@@ -421,7 +429,7 @@ def construct_default_graph_passes(
     """Build the pass list for the aot_fx_trace path.
 
     When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
-    FlexAttention annotation, regional_inductor, and cudagraph.
+    FlexInnerAttention annotation, regional_inductor, and cudagraph.
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
     transformed during precompile phase, so only cudagraph is returned.

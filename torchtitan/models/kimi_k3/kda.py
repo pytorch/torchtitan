@@ -140,6 +140,7 @@ class InnerKDA(Module):
         conv_v_weight_C1W: torch.Tensor,
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
+        *,
         cu_seqlens: torch.Tensor | None,
     ) -> torch.Tensor:
         raw_gate_1THK = raw_gate_THK.unsqueeze(0)
@@ -271,7 +272,7 @@ class KDA(Module):
             self.v_conv.weight,
             self.A_log,
             self.dt_bias,
-            cu_seqlens,
+            cu_seqlens=cu_seqlens,
         )
 
         output_gate_THV = self.output_gate(x_TD).view_as(out_THV)
