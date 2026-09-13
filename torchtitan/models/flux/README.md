@@ -62,7 +62,7 @@ MODULE=flux CONFIG=flux_debugmodel ./run_train.sh --compile.enable --compile.com
 
 ## MXFP8 Quantization
 
-The Flux model supports MXFP8 (Microscaling FP8) quantization for accelerating training on SM100+ hardware (B200, B100). This uses the existing `MXFP8Converter` from torchtitan, which dynamically quantizes linear layers to MXFP8 precision.
+The Flux model supports MXFP8 (Microscaling FP8) quantization for accelerating training on SM100+ hardware (B200, B100). This uses the existing `MXFP8LinearConverter` from torchtitan, which dynamically quantizes linear layers to MXFP8 precision.
 
 **Requirements:**
 - SM100+ GPU (e.g., NVIDIA B200, B100)
@@ -85,12 +85,15 @@ MODULE=flux CONFIG=flux_dev_mxfp8 ./run_train.sh
 To create a custom MXFP8 config, define a new function in `config_registry.py`:
 
 ```python
+from torchtitan.config.transform import MXFP8LinearConverter
+
+
 def my_custom_mxfp8() -> FluxTrainer.Config:
     config = flux_schnell()  # or flux_dev()
     config.compile = CompileConfig(enable=True)
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
-            MXFP8Converter.Config(
+            MXFP8LinearConverter.Config(
                 fqns=[
                     "double_blocks",
                     "single_blocks",

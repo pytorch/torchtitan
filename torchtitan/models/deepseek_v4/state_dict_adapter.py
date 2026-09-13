@@ -9,11 +9,6 @@ from typing import Any
 
 import torch
 
-from torchtitan.models.common.feed_forward import (
-    fuse_gate_up_state_dict,
-    split_fused_gate_up_state_dict,
-)
-
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
 from .model import DeepSeekV4Model
@@ -172,7 +167,6 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         return False
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        state_dict = split_fused_gate_up_state_dict(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
         delegated_state_dict = {}
@@ -235,4 +229,4 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
         if delegated_hf_state_dict:
             state_dict.update(super().from_hf(delegated_hf_state_dict))
-        return fuse_gate_up_state_dict(state_dict)
+        return state_dict

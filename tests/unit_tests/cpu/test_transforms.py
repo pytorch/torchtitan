@@ -26,7 +26,6 @@ def _llama3_cp_ready():
 
     config = llama3_debugmodel()
     config.model_spec = model_registry("debugmodel", attn_backend="flex")
-    config.parallelism.spmd_backend = "spmd_types"
     config.parallelism.context_parallel_degree = 2
     config.training.max_context_length = 512
     return config

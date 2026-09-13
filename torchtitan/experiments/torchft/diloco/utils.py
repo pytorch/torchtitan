@@ -4,12 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
+
 import torch.nn as nn
 
 from torchtitan.distributed.pipeline_parallel import _generate_llm_fqn_per_model_part
 from torchtitan.experiments.torchft.config import FaultTolerance as TorchFTConfig
 from torchtitan.protocols.module import ModuleList
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def module_split(
