@@ -1341,6 +1341,31 @@ def test_single_dataset_post_filter_removes_none():
     assert [sequence.labels.tolist() for sequence in sequences] == [[10, 2]]
 
 
+def _chat_processor(*, tokenizer=None, max_context_length=65):
+    context = replace(
+        CONTEXT,
+        tokenizer=tokenizer or FakeTokenizer(),
+        max_context_length=max_context_length,
+    )
+    return ChatProcessor.Config(
+        messages_fn=lambda sample: sample["messages"],
+    ).build(context=context)
+
+
+def _legacy_single_turn_labels(tokenizer, messages):
+    full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+    full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+    if full_tokens[-1] != tokenizer.eos_id:
+        full_tokens.append(tokenizer.eos_id)
+    prompt_text = tokenizer.apply_chat_template(
+        messages[:1], add_generation_prompt=True
+    )
+    prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+    labels = np.asarray(full_tokens[1:], dtype=np.int64)
+    labels[: max(len(prompt_tokens) - 1, 0)] = IGNORE_INDEX
+    return np.asarray(full_tokens[:-1], dtype=np.int64), labels
+
+
 def test_chat_processor_masks_prompt_and_trains_assistant():
     def question_answer_to_messages(sample):
         return [
@@ -1364,6 +1389,41 @@ def test_chat_processor_masks_prompt_and_trains_assistant():
     assert (token_sequence.labels[: prompt_length - 1] == IGNORE_INDEX).all()
     assert (token_sequence.labels[prompt_length - 1 :] != IGNORE_INDEX).all()
     assert token_sequence.labels[-1] == FakeTokenizer.eos_id
+
+
+def test_chat_processor_single_turn_labels_match_legacy_formula():
+    messages = [
+        {"role": "user", "content": "2+2?"},
+        {"role": "assistant", "content": "4"},
+    ]
+    sequence = _chat_processor()({"messages": messages}, np.random.default_rng(0))
+    expected_input_ids, expected_labels = _legacy_single_turn_labels(
+        FakeTokenizer(), messages
+    )
+
+    np.testing.assert_array_equal(sequence.input_ids, expected_input_ids)
+    np.testing.assert_array_equal(sequence.labels, expected_labels)
+
+
+def test_chat_processor_prefix_mismatch_raises():
+    class PrefixMismatchTokenizer(FakeTokenizer):
+        def encode(self, text, add_bos=False, add_eos=False):
+            tokens = super().encode(text, add_bos=add_bos, add_eos=add_eos)
+            if text.endswith(" assistant:"):
+                return [99, *tokens]
+            return tokens
+
+    processor = _chat_processor(tokenizer=PrefixMismatchTokenizer())
+    with pytest.raises(ValueError, match="exact prefix"):
+        processor(
+            {
+                "messages": [
+                    {"role": "user", "content": "2+2?"},
+                    {"role": "assistant", "content": "4"},
+                ]
+            },
+            np.random.default_rng(0),
+        )
 
 
 def test_chat_processor_rejects_non_single_turn_messages():
