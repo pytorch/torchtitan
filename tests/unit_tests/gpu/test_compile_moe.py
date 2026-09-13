@@ -128,7 +128,12 @@ class TestApplyCompile(unittest.TestCase):
             [10, 8, 12, 9, 11, 7, 10, 13], dtype=torch.int32, device="cuda"
         )
         total_tokens = num_tokens_per_expert.sum().item()
-        x = torch.randn(total_tokens, dim, device="cuda")
+        x = torch.randn(
+            total_tokens,
+            dim,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
 
         offsets = num_tokens_per_expert.cumsum(0, dtype=torch.int32)
         gate, up = w13(x, offsets).unbind(-2)
