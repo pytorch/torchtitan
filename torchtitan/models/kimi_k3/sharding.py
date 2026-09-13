@@ -92,9 +92,8 @@ def set_kimi_k3_sharding_config(
                 # without sequence parallel.
                 enable_sp=enable_sp,
                 expert_param_layout={
-                    "w1_EFD": spmd.S(1),
+                    "w13_E2FD": spmd.S(2),
                     "w2_EDF": spmd.S(2),
-                    "w3_EFD": spmd.S(1),
                 },
             )
 
