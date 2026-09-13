@@ -35,10 +35,10 @@ from torchtitan.models.common.vision_encoder_sharding import (
     set_vision_transformer_block_sharding_config,
     vision_colwise_config,
     vision_invariant_linear_config,
-    vision_scaled_bias_rowwise_config,
+    vision_partial_bias_rowwise_config,
 )
 from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
 TP = MeshAxisName.TP
@@ -82,7 +82,7 @@ def _shard_decoder_after_embedding_scatter(config: "KimiK25Model.Config") -> Non
         in_dst_shardings={"input": token_id_placement()},
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=_REPLICATE_ACT,
-        local_map=LocalMapConfig(in_grad_placements=None),
+        local_spmd=True,
     )
 
     layer0 = config.layers[0]
@@ -128,4 +128,4 @@ def _set_vision_encoder_sharding(ve_cfg) -> None:
     proj = ve_cfg.projector
     proj.pre_norm.sharding_config = invariant_norm_config()
     proj.linear_1.sharding_config = vision_colwise_config()
-    proj.linear_2.sharding_config = vision_scaled_bias_rowwise_config()
+    proj.linear_2.sharding_config = vision_partial_bias_rowwise_config()

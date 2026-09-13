@@ -4,28 +4,28 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from .activation import ActivationFn, SiTUGLU, SwiGLU
 from .attention import (
-    BaseQKVLinear,
     create_attention_mask,
     create_varlen_metadata_for_document,
-    FlexAttention,
-    FusedQKVLinear,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_fixed_block_mask_mod,
     get_sliding_window_mask_mod,
     GQAttention,
+    InnerAttention,
     QKVLinear,
-    ScaledDotProductAttention,
-    VarlenAttention,
+    ScaledDotProductInnerAttention,
+    VarlenInnerAttention,
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
-from .linear import Linear, RouterGateLinear, ScaledBiasRowwiseLinear
-from .moe import MoE
+from .linear import Linear, PartialBiasRowwiseLinear, RouterGateLinear
+from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .nn_modules import (
     Conv1d,
     Conv2d,
@@ -49,9 +49,8 @@ __all__ = [
     "Embedding",
     "FeedForward",
     "SigmoidGatedFeedForward",
-    "FlexAttention",
-    "BaseQKVLinear",
-    "FusedQKVLinear",
+    "FlexInnerAttention",
+    "QKVLinear",
     "GELU",
     "get_causal_mask_mod",
     "get_document_mask_mod",
@@ -61,18 +60,22 @@ __all__ = [
     "GQAttention",
     "GroupNorm",
     "Identity",
+    "InnerAttention",
     "LayerNorm",
     "Linear",
     "MoE",
-    "QKVLinear",
+    "MicrobatchWiseLoadBalanceLoss",
+    "PartialBiasRowwiseLinear",
     "RMSNorm",
     "RoPE",
     "RouterGateLinear",
-    "ScaledBiasRowwiseLinear",
-    "ScaledDotProductAttention",
+    "ScaledDotProductInnerAttention",
     "SiLU",
+    "ActivationFn",
+    "SiTUGLU",
+    "SwiGLU",
     "TransformerBlock",
-    "VarlenAttention",
+    "VarlenInnerAttention",
     "VarlenMetadata",
     "compute_ffn_hidden_dim",
 ]

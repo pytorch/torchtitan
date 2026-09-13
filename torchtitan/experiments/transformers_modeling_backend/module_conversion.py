@@ -15,13 +15,16 @@ forward behavior, or state_dict keys. After conversion,
 ``model.parallelize()`` distributes parameters and wraps forwards.
 """
 
+import logging
 from typing import cast
 
 import torch.nn as nn
 
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 _module_class_cache: dict[type, type] = {}
 

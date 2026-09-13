@@ -22,25 +22,12 @@ from torchtitan.components.optimizer import (
     register_moe_load_balancing_hook,
 )
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 
 
 def _expert_weights(experts):
-    """Return (w1, w2, w3) expert params by their dynamically-discovered names.
-
-    GroupedExperts param names carry dimension suffixes (e.g. ``w1_EFD``), so
-    resolve the canonical (gate, down, up) roles via the same helper the
-    production state-dict adapter uses instead of hardcoding ``w1``/``w2``/``w3``.
-    """
-    from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
-        _expert_names,
-    )
-
-    gate_name, down_name, up_name = _expert_names()
-    return (
-        getattr(experts, gate_name),
-        getattr(experts, down_name),
-        getattr(experts, up_name),
-    )
+    """Return logical gate, down, and up expert-weight tensors."""
+    return experts.w13_E2FD[:, 0], experts.w2_EDF, experts.w13_E2FD[:, 1]
 
 
 def _moe_buffer(moe, prefix):
@@ -172,7 +159,6 @@ def _prepare_layers(model):
 class _FakeParallelDims:
     """Minimal ParallelDims stub for tests that don't use full distributed setup."""
 
-    spmd_backend = "spmd_types"
     tp_enabled = False
     ep_enabled = False
     tp = 1
@@ -242,6 +228,7 @@ class TestPrepareNativeMoeConfigs(unittest.TestCase):
         _prepare_layers(model)
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
+            _build_moe_config,
             _probe_hf_moe_block,
         )
 
@@ -254,6 +241,9 @@ class TestPrepareNativeMoeConfigs(unittest.TestCase):
         self.assertEqual(params["num_limited_groups"], 1)
         self.assertIsNotNone(params["shared_expert_info"])
         self.assertFalse(params["shared_expert_info"]["has_sigmoid_gate"])
+
+        moe_config = _build_moe_config(params, config)
+        self.assertIsInstance(moe_config.router, DeepSeekV3Router.Config)
 
     def test_moe_config_build(self):
         """MoE.Config is built correctly from probed params."""
@@ -429,10 +419,9 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         output.sum().backward()
 
         self.assertIsNotNone(x.grad)
-        w1, w2, w3 = _expert_weights(native_moe.routed_experts.inner_experts)
-        self.assertIsNotNone(w1.grad)
-        self.assertIsNotNone(w2.grad)
-        self.assertIsNotNone(w3.grad)
+        inner_experts = native_moe.routed_experts.inner_experts
+        self.assertIsNotNone(inner_experts.w13_E2FD.grad)
+        self.assertIsNotNone(inner_experts.w2_EDF.grad)
 
 
 # ---------------------------------------------------------------------------

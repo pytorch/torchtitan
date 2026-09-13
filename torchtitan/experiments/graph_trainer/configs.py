@@ -86,6 +86,19 @@ class GraphTrainerCompileConfig(CompileConfig):
     partitioning contracts depend on canonical graph structure.
     """
 
+    enable_inplace_graph_gradient_accumulation: bool = False
+    """Accumulate SPMD AOT gradients in-place into trainer-owned buffers.
+
+    This makes gradient accumulation CUDA-graph safe by avoiding clones of
+    replay-owned gradient outputs.
+
+    TODO: Add support for:
+        GraphPP
+        precompile
+        parameter aliases
+        custom pass pipelines.
+    """
+
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.
@@ -126,7 +139,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
     Inductor compilation strategy. Mutually exclusive options:
-        regional: compile tagged regions (e.g. FlexAttention HOPs) with
+        regional: compile tagged regions (e.g. FlexInnerAttention HOPs) with
             regional_inductor while leaving the rest interpreted.
         full: compile the entire graph with inductor into optimized
             Triton kernels. Provides better performance but may change
@@ -252,10 +265,6 @@ def to_graph_trainer_config(
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
-    d["parallelism"] = replace(
-        base_config.parallelism,
-        spmd_backend="spmd_types",
-    )
     graph_spec = model_registry(base_config.model_spec.flavor)
     # Wrap the base model config in the graph_trainer's model config class
     # (e.g. GraphTrainerQwen3Model.Config) while preserving all field values

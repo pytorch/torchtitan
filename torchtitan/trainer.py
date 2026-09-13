@@ -6,6 +6,7 @@
 
 import dataclasses
 import json
+import logging
 import os
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -23,15 +24,12 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
     PipelineScheduleMulti,
 )
-from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
-from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -43,6 +41,7 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.config.override import apply_overrides, OverrideConfig
+from torchtitan.config.validation import validate_context_parallel
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
@@ -50,19 +49,23 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
-    MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
+from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
-from torchtitan.tools.profiler import Profiler
+
+
+logger = logging.getLogger(__name__)
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -72,9 +75,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         Default container for training configuration.
         """
 
-        # NOTE: model_spec is suppressed from tyro CLI parsing and is always
-        # set programmatically by the model registry before Trainer construction.
-        model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
+        # model_spec is always set by the registry. The unused string constructor
+        # keeps Tyro from traversing the model config before applying Suppress.
+        model_spec: Annotated[
+            ModelSpec,
+            tyro.conf.Suppress,
+            tyro.conf.arg(constructor=str),
+        ]
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """
@@ -136,8 +143,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self._validate_cuda_graphs()
 
             if (
-                self.parallelism.spmd_backend == "spmd_types"
-                and self.debug.spmd_typechecking
+                self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
                 # TODO(sanketpurandare): Enable SPMD typechecking under PP.
@@ -148,16 +154,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
             if (
-                self.parallelism.spmd_backend == "spmd_types"
-                and self.debug.spmd_typechecking
+                self.debug.spmd_typechecking
                 and isinstance(self.activation_checkpoint, SelectiveAC.Config)
-                and self.model_spec is not None
-                and any(self.model_spec.model.traverse(FlexAttention.Config))
+                and any(self.model_spec.model.traverse(FlexInnerAttention.Config))
             ):
-                # TODO(pianpwk): Enable SAC with FlexAttention under SPMD typechecking.
+                # TODO(pianpwk): Enable SAC with FlexInnerAttention under SPMD typechecking.
                 raise ValueError(
                     "Selective activation checkpointing (SAC) is not supported "
-                    "with FlexAttention while SPMD typechecking is enabled. "
+                    "with FlexInnerAttention while SPMD typechecking is enabled. "
                     "Use full activation checkpointing, disable activation "
                     "checkpointing, or switch to a non-Flex attention backend."
                 )
@@ -170,6 +174,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "compiled: set --compile.enable and include 'model' in "
                     "--compile.components."
                 )
+
+            if self.model_spec is not None:
+                validate_context_parallel(self.model_spec.model, self.parallelism)
 
         def _validate_cuda_graphs(self) -> None:
             if self.training.disable_cuda_graphs:
@@ -195,15 +202,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         "Use a single-stage pipeline schedule or disable CUDA graphs."
                     )
 
-            if self.parallelism.expert_parallel_degree == 1 or self.model_spec is None:
+            if self.dataloader.max_num_documents is None:
+                for fqn, _, _, _ in self.model_spec.model.traverse(
+                    VarlenInnerAttention.Config
+                ):
+                    raise ValueError(
+                        "CUDA graphs require fixed-shape varlen document "
+                        f"metadata for {fqn}, but "
+                        "dataloader.max_num_documents is unset. Set it to "
+                        "an upper bound on documents per local token batch, "
+                        "or set --training.disable_cuda_graphs."
+                    )
+
+            if self.parallelism.expert_parallel_degree == 1:
                 return
 
             for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
                 LocalTokenDispatcher.Config
             ):
-                if isinstance(
-                    dispatcher_config, MinimalAsyncEPTokenDispatcher.Config
-                ) or (
+                if (
                     isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
                     and dispatcher_config.non_blocking_capacity_factor is not None
                 ):
@@ -212,8 +229,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "CUDA graphs support only expert parallel token dispatcher "
                     "configurations without CPU synchronization. "
-                    "Set HybridEP non_blocking_capacity_factor, or use "
-                    "MinimalAsyncEP, or set --training.disable_cuda_graphs. "
+                    "Set HybridEP non_blocking_capacity_factor, or set "
+                    "--training.disable_cuda_graphs. "
                     "Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
@@ -244,7 +261,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             d = {}
             for f in dataclasses.fields(self):
                 if f.name == "model_spec":
-                    assert self.model_spec is not None
                     # ModelSpec contains callables that can't be serialized
                     d["model_spec"] = {
                         "name": self.model_spec.name,
@@ -322,9 +338,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         torch._C._log_api_usage_once("torchtitan.train")
 
         self.config = config
-        assert (
-            config.model_spec is not None
-        ), "model_spec must be set before creating Trainer"
         model_spec = config.model_spec
 
         device_module, device_type = utils.device_module, utils.device_type
@@ -350,10 +363,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 f"divisible by {seq_len_divisor} for the configured "
                 "sequence/context parallelism."
             )
-
-        # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
-        # backends share one runtime mesh/type mechanism.
-        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
@@ -436,7 +445,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
         )
 
-        # move sharded model to CPU/GPU and initialize weights via DTensor
+        # Move the sharded model to CPU/GPU and initialize its states.
         buffer_device: torch.device | None
         if config.checkpoint.create_seed_checkpoint:
             init_device = "cpu"
@@ -645,10 +654,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
-            spmd_typechecking=(
-                config.parallelism.spmd_backend == "spmd_types"
-                and config.debug.spmd_typechecking
-            ),
+            spmd_typechecking=config.debug.spmd_typechecking,
         )
         if parallel_dims.pp_enabled:
             self.fwd_bwd_fn = self._pp_forward_backward_body
@@ -717,8 +723,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         return ParallelDims.from_config(config.parallelism, world_size)
 
     def batch_generator(
-        self, data_iterable: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
-    ) -> Iterator[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+        self, data_iterable: Iterable[TrainerBatch]
+    ) -> Iterator[TrainerBatch]:
         """Returns an iterator that processes batches from the data iterator.
 
         Note: Tensors are yielded on CPU. The caller is responsible for moving
@@ -730,27 +736,25 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         while True:
             data_load_start = time.perf_counter()
             try:
-                batch = next(data_iterator)
+                input_dict = next(data_iterator)
             except StopIteration as ex:
                 # If data runs out during gradient accumulation, that
                 # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
-            input_dict, labels = batch
-            ntokens_batch = labels.numel()
+            ntokens_batch = input_dict["labels"].numel()
             self.metrics_processor.ntokens_since_last_log += ntokens_batch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )
 
             # Tensors stay on CPU; moved to GPU per-microbatch during training
-            yield input_dict, labels
+            yield input_dict
 
     @sl.log_trace_span("fwd_bwd")
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
-        labels: torch.Tensor | list[torch.Tensor],
+        input_dict: dict[str, Any] | list[dict[str, Any]],
         global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
         model_parts = self.model_parts
@@ -758,27 +762,30 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if parallel_dims.pp_enabled:
             assert isinstance(input_dict, list)
-            assert isinstance(labels, list)
             arg_mbs: list[tuple[torch.Tensor, ...]] = []
             kwarg_mbs: list[dict[str, Any]] = []
             target_mbs: list[torch.Tensor] | None = (
                 [] if self.pp_has_last_stage else None
             )
-            for input_dict_mb, labels_mb in zip(input_dict, labels, strict=True):
+            for input_dict_mb in input_dict:
                 with sl.log_trace_span("preprocess_inputs"):
                     inputs_mb, labels_mb, extra_kwargs_mb = cast(
                         BaseModel, model_parts[0]
                     ).preprocess_inputs(
-                        {**input_dict_mb, "labels": labels_mb},
+                        input_dict_mb,
                         parallel_dims=parallel_dims,
                         parallelism=self.config.parallelism,
+                        max_num_documents=self.dataloader.max_num_documents,
+                        max_context_length=self.config.training.max_context_length,
                     )
-                    self.ntokens_seen += labels_mb.numel()
+                    self.ntokens_seen += (
+                        labels_mb.numel()  # pyrefly: ignore[missing-attribute]
+                    )
                 if self.pp_has_first_stage:
-                    arg_mbs.append((inputs_mb,))
+                    arg_mbs.append((inputs_mb,))  # pyrefly: ignore[bad-argument-type]
                 kwarg_mbs.append(extra_kwargs_mb)
                 if target_mbs is not None:
-                    target_mbs.append(labels_mb)
+                    target_mbs.append(labels_mb)  # pyrefly: ignore[bad-argument-type]
 
             return self.fwd_bwd_fn(
                 arg_mbs if self.pp_has_first_stage else None,
@@ -788,24 +795,29 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             )
 
         assert isinstance(input_dict, dict)
-        assert isinstance(labels, torch.Tensor)
         with sl.log_trace_span("preprocess_inputs"):
             inputs, labels, extra_kwargs = cast(
                 BaseModel, self.model_parts[0]
             ).preprocess_inputs(
-                {**input_dict, "labels": labels},
+                input_dict,
                 parallel_dims=self.parallel_dims,
                 parallelism=self.config.parallelism,
+                max_num_documents=self.dataloader.max_num_documents,
+                max_context_length=self.config.training.max_context_length,
             )
-            self.ntokens_seen += labels.numel()
+            # MTP returns one labels tensor per prediction; index 0 contains
+            # the complete main-model labels used for token accounting.
+            self.ntokens_seen += (
+                labels[0].numel() if isinstance(labels, tuple) else labels.numel()
+            )
 
         assert len(model_parts) == 1
         return self.fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs)
 
     def _forward_backward_body(
         self,
-        inputs: torch.Tensor,
-        labels: torch.Tensor,
+        inputs: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
         global_valid_tokens: torch.Tensor,
         extra_kwargs: dict[str, Any],
     ) -> torch.Tensor:
@@ -816,7 +828,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 loss_kwargs["positions"] = extra_kwargs["positions"]
             loss, _ = self.loss_fn(
                 pred,
-                labels,
+                labels,  # pyrefly: ignore[bad-argument-type]
                 global_valid_tokens,
                 **loss_kwargs,
             )
@@ -857,7 +869,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             return torch.sum(torch.stack(detached_losses)).to(self.device)
         return self._pp_loss_sentinel_on_non_last_stage
 
-    def train_step(self, data_iterator: Iterator[TrainerBatch]):
+    def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
         # Save per-optimizer-group learning rates for logging
         lr_metrics = self.lr_schedulers.get_metrics()
@@ -867,16 +879,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
         # All groups form one optimizer step; each group feeds one fwd-bwd call.
-        microbatch_groups: list[list[TrainerBatch]] = []
+        microbatch_groups: list[list[dict[str, Any]]] = []
         local_valid_tokens = 0
         for _ in range(self.gradient_accumulation_steps):
             microbatches = []
             for _ in range(self.num_pp_microbatches):
                 with sl.log_trace_span("fetching_batch"):
-                    input_dict, labels = next(data_iterator)
+                    input_dict = next(data_iterator)
                 # Popped so the batch reaching the model holds only its kwargs.
                 local_valid_tokens += input_dict.pop("num_valid_tokens")
-                microbatches.append((input_dict, labels))
+                microbatches.append(input_dict)
             microbatch_groups.append(microbatches)
         sl.log_trace_scalar({"local_valid_tokens": local_valid_tokens})
 
@@ -895,32 +907,31 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         else:
             global_valid_tokens = local_valid_tokens_tensor
 
+        # Auxiliary losses normalize by the same per-step token count as the
+        # main loss, so their scale is independent of parallelism degrees.
+        AuxLoss.set_step_denominator(global_valid_tokens)
+
         # Process each gradient accumulation step, then free its inputs.
         accumulated_loss: torch.Tensor | None = None
         # int32 is supported by NCCL reductions, unlike bool.
         loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
         for fwd_bwd_index, microbatches in enumerate(microbatch_groups):
             input_dict_mbs = []
-            label_mbs = []
-            for input_dict, labels in microbatches:
+            for input_dict in microbatches:
                 for key, value in input_dict.items():
                     if isinstance(value, torch.Tensor):
                         input_dict[key] = value.to(self.device, non_blocking=True)
                 input_dict_mbs.append(input_dict)
-                label_mbs.append(labels.to(self.device, non_blocking=True))
 
             if parallel_dims.pp_enabled:
                 fwd_bwd_input_dict = input_dict_mbs
-                fwd_bwd_labels = label_mbs
             else:
-                assert len(input_dict_mbs) == len(label_mbs) == 1
+                assert len(input_dict_mbs) == 1
                 fwd_bwd_input_dict = input_dict_mbs[0]
-                fwd_bwd_labels = label_mbs[0]
 
             def fwd_bwd() -> torch.Tensor:
                 return self.forward_backward_step(
                     input_dict=fwd_bwd_input_dict,
-                    labels=fwd_bwd_labels,
                     global_valid_tokens=global_valid_tokens,
                 )
 
@@ -947,12 +958,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 loss = fwd_bwd()
             detached_loss = loss.detach()
-            local_loss = (
-                detached_loss.to_local()
-                if isinstance(detached_loss, DTensor)
-                else detached_loss
-            )
-            loss_is_finite.logical_and_(torch.isfinite(local_loss).all())
+            loss_is_finite.logical_and_(torch.isfinite(detached_loss).all())
             if should_log:
                 if accumulated_loss is None:
                     # Take ownership before the next replay overwrites the
@@ -1043,6 +1049,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
+            **collect_aux_loss_metrics(parallel_dims),
         }
         self.metrics_processor.log(
             self.step,

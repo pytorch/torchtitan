@@ -89,6 +89,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
 )
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    GraphStateSpec,
     minimal_fx_tracer,
     run_traced,
 )
@@ -150,7 +151,10 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 parallelism=SimpleNamespace(),
             )
 
-        traced_result = SimpleNamespace(state_fqns=[])
+        traced_result = SimpleNamespace(
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
         with patch(
             "torchtitan.experiments.graph_trainer.common_utils."
             "get_default_transformer_block_buckets",
@@ -267,19 +271,26 @@ class TestReassignCollectivePgsPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
     def _make_fsdp_model(self, dim=16, n_layers=3):
         """Create a toy model and apply simple_fsdp data_parallel."""
         model = ToyModel(dim, n_layers).cuda()
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         model = data_parallel(model, device_mesh=fsdp_mesh, mode="fully_shard")
         return model
 
     def _get_fsdp_pg_name(self):
         """Get the FSDP process group name from the mesh."""
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         return fsdp_mesh.get_group().group_name
 
     def _export_and_get_bw_graph(self, model, inputs):
@@ -1230,11 +1241,14 @@ class TestOverlapPgIsolationPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
     def _get_fsdp_pg_name(self):
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         return fsdp_mesh.get_group().group_name
 
     def _count_all_ag_nodes(self, gm):
@@ -2115,7 +2129,6 @@ class TestBucketingPrefetchOrder(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
-            spmd_backend="partial_dtensor",
         )
 
         model_spec = llama3_model_registry("debugmodel")
@@ -2126,7 +2139,11 @@ class TestBucketingPrefetchOrder(FSDPTest):
             model = model_config.build()
 
         annotate_llama(model)
-        fsdp_mesh = parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
@@ -2146,13 +2163,14 @@ class TestBucketingPrefetchOrder(FSDPTest):
             GraphTrainer,
             tokenizer=HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer"),
             fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+            parallel_dims=parallel_dims,
         )
 
         num_tokens = self.BATCH_SIZE * self.SEQ_LEN
         inputs = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
         labels = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
         # The dataloader supplies per-document positions, which the trainer
-        # requires to build the block-causal FlexAttention mask.
+        # requires to build the block-causal FlexInnerAttention mask.
         positions = torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32).repeat(
             self.BATCH_SIZE
         )
@@ -2161,8 +2179,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
         # One forward_backward_step triggers _make_fx_forward_backward_step
         # which traces the model and applies all graph passes.
         trainer.forward_backward_step(
-            input_dict={"input": inputs, "positions": positions},
-            labels=labels,
+            input_dict={"input": inputs, "positions": positions, "labels": labels},
             global_valid_tokens=global_valid_tokens,
         )
 
@@ -3648,7 +3665,11 @@ class TestChunkPasses(TestCase):
     def _compile_config_for_ep_overlap_test(self):
         from types import SimpleNamespace
 
-        traced_result = SimpleNamespace(num_static_inputs=2, state_fqns=[])
+        traced_result = SimpleNamespace(
+            num_static_inputs=2,
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
         config = SimpleNamespace(
             model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
             parallelism=SimpleNamespace(
@@ -5186,6 +5207,65 @@ class TestChunkPasses(TestCase):
         self.assertEqual(tuple(fake_inputs[0].shape), (4, 8))
         self.assertFalse(free_symbols(x.meta["val"].shape[1]))
         self.assertNotIn(batch_symbol, free_symbols(x.meta["val"].shape[0]))
+
+    def test_concretize_ep_chunk_symbolic_shapes_preserves_dynamic_gather_length(
+        self,
+    ):
+        from torch.fx.experimental.symbolic_shapes import free_symbols, ShapeEnv
+
+        shape_env = ShapeEnv()
+        fake_mode = torch._subclasses.FakeTensorMode(
+            allow_non_fake_inputs=True, shape_env=shape_env
+        )
+        with fake_mode:
+            seq = shape_env.create_unbacked_symint()
+            gathered_tokens = shape_env.create_unbacked_symint()
+            torch._dynamo.override_optimization_hint(seq, 8)
+            torch._dynamo.override_optimization_hint(gathered_tokens, 5)
+            x_meta = torch.empty(seq, 4)
+            indices_meta = torch.empty(gathered_tokens, dtype=torch.int64)
+            gathered_meta = x_meta[indices_meta]
+            expanded_meta = gathered_meta.reshape(1, -1, 4)
+
+        # DSV4 gathers complete compression blocks using independent metadata,
+        # then flattens [1, gathered_tokens, hidden_dim]. Only seq is chunked.
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        indices = graph.placeholder("gather_indices")
+        gathered = graph.call_function(torch.ops.aten.index.Tensor, args=(x, [indices]))
+        expanded = graph.call_function(
+            torch.ops.aten.reshape.default, args=(gathered, [1, -1, 4])
+        )
+        size = graph.call_function(torch.ops.aten.sym_size.int, args=(expanded, 1))
+        flattened = graph.call_function(
+            torch.ops.aten.reshape.default, args=(expanded, [size, 4])
+        )
+        graph.output(flattened)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        x.meta["val"] = x_meta
+        x.meta[CHUNK_SYMBOL_HINTS_META] = {next(iter(free_symbols(seq))): 8}
+        indices.meta["val"] = indices_meta
+        gathered.meta["val"] = gathered_meta
+        expanded.meta["val"] = expanded_meta
+        size.meta["val"] = gathered_tokens
+        flattened.meta["val"] = gathered_meta
+
+        real_x = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        # Establish that the graph works before the pass, with lengths that
+        # differ from the optimization hint. No CUDA execution is needed.
+        for count in (3, 6):
+            real_indices = torch.arange(count)
+            self.assertEqual(gm(real_x, real_indices), real_x[real_indices])
+
+        concretize_ep_chunk_symbolic_shapes_pass(gm, [x_meta, indices_meta])
+
+        # Execute the same transformed graph with both runtime lengths.
+        # The unfixed pass replaces size with 5, so the first call raises:
+        # RuntimeError: shape '[5, 4]' is invalid for input of size 12.
+        for count in (3, 6):
+            with self.subTest(gathered_tokens=count):
+                real_indices = torch.arange(count)
+                self.assertEqual(gm(real_x, real_indices), real_x[real_indices])
 
     def test_chunk_copied_meta_rewrites_chunk_symbol_inside_product(self):
         from torch.fx.experimental.symbolic_shapes import ShapeEnv

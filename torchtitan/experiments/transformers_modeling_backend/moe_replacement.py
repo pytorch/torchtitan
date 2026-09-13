@@ -16,6 +16,7 @@ Two-phase replacement:
       happens later via ``model.parallelize(parallel_dims)``.
 """
 
+import logging
 from dataclasses import replace
 from functools import partial
 
@@ -41,10 +42,13 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts, MoE
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
 from torchtitan.protocols.sharding import ShardingConfig
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class _HFBatchedMoE(MoE):
@@ -146,7 +150,7 @@ def build_and_swap_native_moe(
             out_dst_shardings=hf_sp_layout,
         )
 
-        # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but
+        # set_moe_sharding_config shards the shared FFN (w13/w2) but
         # leaves the SigmoidGatedFeedForward gate to model-specific code.
         shared = moe_config.shared_experts
         if isinstance(shared, SigmoidGatedFeedForward.Config):
@@ -496,46 +500,39 @@ _expert_param_info_cache: tuple[dict, dict] | None = None
 
 
 def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]:
-    """Discover GroupedExperts parameter names and their TP shard placements.
-
-    Builds a tiny throwaway instance on meta device to introspect actual
-    parameter names (which may carry dimension suffixes like ``_EFD``).
-    Returns ``(param_init, param_layout)`` where ``param_init`` maps each
-    name to ``trunc_normal_`` and ``param_layout`` maps each name to the
-    correct ``Shard`` placement for TP.
-    """
+    """Return logical expert initialization and TP sharding configuration."""
     global _expert_param_info_cache
     if _expert_param_info_cache is not None:
         return _expert_param_info_cache
 
-    with torch.device("meta"):
-        temp = GroupedExperts.Config(
-            dim=2,
-            hidden_dim=4,
-            num_experts=2,
-        ).build()
-
     init_fn = partial(nn.init.trunc_normal_, std=0.02)
-    param_init: dict = {}
-    param_layout: dict[str, spmd.PerMeshAxisSpmdType] = {}
-
-    for name, param in temp.named_parameters(recurse=False):
-        param_init[name] = init_fn
-        # (E, hidden_dim, dim) → colwise S(1)  [w1/w3 pattern]
-        # (E, dim, hidden_dim) → rowwise S(2)  [w2 pattern]
-        if param.shape[1] >= param.shape[2]:
-            param_layout[name] = spmd.S(1)
-        else:
-            param_layout[name] = spmd.S(2)
-
+    param_init = {
+        "w1_EFD": init_fn,
+        "w2_EDF": init_fn,
+        "w3_EFD": init_fn,
+    }
+    param_layout = {
+        "w13_E2FD": spmd.S(2),
+        "w2_EDF": spmd.S(2),
+    }
     _expert_param_info_cache = (param_init, param_layout)
-    del temp
     return _expert_param_info_cache
 
 
 def _build_moe_config(params: dict, config) -> MoE.Config:
     """Build a fully-specified MoE.Config from probed parameters."""
-    router = make_router_config(
+    router_config_factory = (
+        make_deepseek_v3_router_config
+        if params["num_expert_groups"] is not None
+        else make_router_config
+    )
+    router_kwargs = {}
+    if params["num_expert_groups"] is not None:
+        router_kwargs = {
+            "num_expert_groups": params["num_expert_groups"],
+            "num_limited_groups": params["num_limited_groups"],
+        }
+    router = router_config_factory(
         dim=params["dim"],
         num_experts=params["num_experts"],
         gate_param_init=_LINEAR_INIT,
@@ -543,8 +540,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         score_func=params["score_func"],
         route_norm=params["route_norm"],
         route_scale=params["route_scale"],
-        num_expert_groups=params["num_expert_groups"],
-        num_limited_groups=params["num_limited_groups"],
+        **router_kwargs,
     )
 
     expert_init, _ = _get_expert_param_info()
@@ -567,13 +563,9 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
-            # SigmoidGatedFeedForward is a FeedForward subclass, so w1/w2/w3 stay flat
-            # (no nested ``ffn.`` level) and are directly shardable by
-            # set_moe_sharding_config.
             shared_experts = SigmoidGatedFeedForward.Config(
-                w1=ffn_config.w1,
+                w13=ffn_config.w13,
                 w2=ffn_config.w2,
-                w3=ffn_config.w3,
                 gate=Linear.Config(
                     in_features=shared_info["dim"],
                     out_features=1,
