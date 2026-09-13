@@ -7,7 +7,6 @@
 from dataclasses import dataclass, field
 
 import torch
-from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
 
@@ -68,32 +67,19 @@ class MRoPE(CosSinRoPE):
 
         Args:
             position_ids: ``(num_tokens, 3)`` temporal/height/width positions.
-                Plain, or a DTensor under TP matching the rope ``cache``
-                buffer's Replicate placement.
 
         Returns:
             ``(num_tokens, 1, dim * 2)`` cache, broadcastable to the
             ``(num_tokens, n_heads, rotary_dim)`` query/key in
             ``apply_rotary_emb``.
 
-        The scatter runs on plain local tensors. Under TP the ``cache`` buffer is a
-        Replicate DTensor, so it is unwrapped to local here and the result is
-        re-distributed with the buffer's placements, yielding a DTensor that
-        composes with the sharded query/key without any manual wrapping in the
-        attention forward.
+        The scatter runs on plain local tensors carrying SPMD annotations.
         """
         cfg = self.config
         assert isinstance(cfg, MRoPE.Config)
 
         rope_cache = self.cache
-        cache_dtensor = rope_cache if isinstance(rope_cache, DTensor) else None
-        if cache_dtensor is not None:
-            rope_cache = cache_dtensor.to_local()
-        pos = (
-            position_ids.to_local()
-            if isinstance(position_ids, DTensor)
-            else position_ids
-        )
+        pos = position_ids
 
         _maybe_check_max_pos(pos, max_valid_pos=rope_cache.shape[0] - 1)
         head_dim = rope_cache.shape[-1] // 2
@@ -117,11 +103,4 @@ class MRoPE(CosSinRoPE):
             mrope_cos[..., col_indices] = cos_cache[:, col_indices][dim_pos]
             mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
 
-        mrope_cache = torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(1)
-        if cache_dtensor is not None:
-            return distribute_tensor(
-                mrope_cache,
-                cache_dtensor.device_mesh,
-                list(cache_dtensor.placements),
-            )
-        return mrope_cache
+        return torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(1)

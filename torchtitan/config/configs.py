@@ -8,10 +8,10 @@
 Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
-  - Profiler.Config                 (in tools/profiler.py)
+  - Profiler.Config                 (in observability/profiler.py)
   - OptimizersContainer.Config      (in components/optimizer/optimizer.py)
   - LRSchedulersContainer.Config    (in components/optimizer/lr_scheduler.py)
-  - MetricsProcessor.Config         (in components/metrics.py)
+  - MetricsProcessor.Config         (in observability/metrics.py)
   - CheckpointManager.Config        (in components/checkpointer/dcp.py)
 
 Configs without a clear single owner (or with circular-import constraints)
@@ -79,8 +79,8 @@ class TrainingConfig:
     Disable CUDA graph capture and replay for the forward+backward step. CUDA
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
-    when ``non_blocking_capacity_factor`` is set, or with MinimalAsyncEP. Other
-    EP backends synchronize with the host during dispatch. Pipeline parallelism
+    when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
+    with the host during dispatch. Pipeline parallelism
     is supported with single-stage schedules such as GPipe and 1F1B. CUDA graphs
     are independent of ``torch.compile(mode="reduce-overhead")``, which performs
     its own CUDA graph capture.
@@ -101,7 +101,7 @@ class TrainingConfig:
     and no other parallelism is enabled, i.e. under DDP or single-device training.
     """
 
-    mixed_precision_reduce: Literal["float32"] = "float32"
+    mixed_precision_reduce: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype to use for reductions when applying mixed precision via FSDP.
     This feature only takes effect when data_parallel_shard_degree > 1
@@ -171,14 +171,6 @@ class ParallelismConfig:
     enable_sequence_parallel: bool = True
     """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
 
-    spmd_backend: Literal["partial_dtensor", "spmd_types"] = "spmd_types"
-    """
-    SPMD backend selector.
-
-    - "partial_dtensor": use DTensor for model-parallel axes only.
-    - "spmd_types": use the spmd_types path.
-    """
-
     pipeline_parallel_degree: int = 1
     """
     Pipeline Parallelism degree, or number of ranks. 1 means disabled.
@@ -245,7 +237,7 @@ class ParallelismConfig:
     """
     Load balancer type for context parallelism. Options:
     - "headtail": Use HeadTailLoadBalancer for SDPA
-    - "ptrr": Use PTRRLoadBalancer for FlexAttention
+    - "ptrr": Use PTRRLoadBalancer for FlexInnerAttention
     - None: Disable load balancing
     """
 
@@ -259,11 +251,6 @@ class ParallelismConfig:
     """
 
     def __post_init__(self):
-        if self.spmd_backend not in {"partial_dtensor", "spmd_types"}:
-            raise ValueError(
-                "parallelism.spmd_backend must be either 'partial_dtensor' "
-                "or 'spmd_types'."
-            )
         if self.context_parallel_load_balancer == "":
             raise ValueError(
                 "context_parallel_load_balancer cannot be an empty string. "
@@ -287,6 +274,16 @@ class ParallelismConfig:
                 "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
                 "for compute capability 9.0 or newer."
             )
+        # Import lazily so loading configs.py does not pull in pipelining.
+        from torch.distributed.pipelining.schedules import get_schedule_class
+
+        try:
+            get_schedule_class(self.pipeline_parallel_schedule)
+        except ValueError as e:
+            raise ValueError(
+                "Invalid parallelism.pipeline_parallel_schedule "
+                f"{self.pipeline_parallel_schedule!r}: {e}"
+            ) from e
 
     expert_parallel_degree: int = 1
     """
@@ -365,7 +362,7 @@ class DebugConfig:
     """Choose the base RNG seed used for training"""
 
     spmd_typechecking: bool = False
-    """Enable global SPMD type checking; only effective under spmd_backend="spmd_types"."""
+    """Enable global SPMD type checking."""
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
