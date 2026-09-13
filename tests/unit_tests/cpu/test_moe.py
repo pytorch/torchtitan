@@ -63,41 +63,6 @@ class TestMoE(unittest.TestCase):
         actual_RF = experts.activation_fn(gate_RF, up_RF)
         torch.testing.assert_close(actual_RF, expected_RF)
 
-    def test_grouped_experts_use_fused_gate_up_parameter(self):
-        experts = GroupedExperts.Config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-        ).build()
-
-        self.assertEqual(
-            {name for name, _ in experts.named_parameters(recurse=False)},
-            {"w13_E_2F_D", "w2_EDF"},
-        )
-        self.assertEqual(tuple(experts.w13_E_2F_D.shape), (2, 16, 4))
-
-    def test_grouped_experts_checkpoint_uses_logical_projection_keys(self):
-        source = GroupedExperts.Config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-        ).build()
-        with torch.no_grad():
-            source.w13_E_2F_D.copy_(torch.randn_like(source.w13_E_2F_D))
-            source.w2_EDF.copy_(torch.randn_like(source.w2_EDF))
-
-        state_dict = source.state_dict()
-        self.assertEqual(set(state_dict), {"w1_EFD", "w2_EDF", "w3_EFD"})
-
-        target = GroupedExperts.Config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-        ).build()
-        target.load_state_dict(state_dict)
-        torch.testing.assert_close(target.w13_E_2F_D, source.w13_E_2F_D)
-        torch.testing.assert_close(target.w2_EDF, source.w2_EDF)
-
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
         dim = 4
