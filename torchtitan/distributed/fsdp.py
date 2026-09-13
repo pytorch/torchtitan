@@ -276,7 +276,7 @@ def apply_fsdp_to_decoder(
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
         # - When EP = 1: all params use the same FSDP mesh, but experts may
-        #   use Shard(1) when FSDP degree > num_experts to avoid padding
+        #   shard their output features when FSDP degree > num_experts
         # Dense blocks (no ``moe_enabled``) fall through to a plain fully_shard.
         if getattr(transformer_block, "moe_enabled", False):
             assert hasattr(transformer_block, "moe")
