@@ -57,9 +57,9 @@ _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=0.02)}
 _EMBEDDING_SKIP_INIT = {"weight": skip_param_init}
 _EXPERTS_INIT: dict[str, Callable] = {
-    "w1_EFD": _LINEAR_INIT["weight"],
-    "w2_EDF": _LINEAR_INIT["weight"],
-    "w3_EFD": _LINEAR_INIT["weight"],
+    "gate": _LINEAR_INIT["weight"],
+    "down": _LINEAR_INIT["weight"],
+    "up": _LINEAR_INIT["weight"],
 }
 
 _EPS = 1e-6
@@ -80,7 +80,7 @@ def _residual_output_init(n_layers: int) -> dict[str, Callable]:
 def _moe_experts_init(n_layers: int) -> dict[str, Callable]:
     return {
         **_EXPERTS_INIT,
-        "w2_EDF": _residual_output_weight_init(n_layers),
+        "down": _residual_output_weight_init(n_layers),
     }
 
 

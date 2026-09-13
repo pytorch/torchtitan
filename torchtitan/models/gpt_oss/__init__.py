@@ -15,6 +15,7 @@ from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     CosSinRoPE,
     Embedding,
+    GroupedLinear,
     Linear,
     RMSNorm,
     RoPE,
@@ -37,7 +38,7 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, GptOssModel, GptOssTransformerBlock
-from .moe import GptOssGroupedExperts, GptOssMoE
+from .moe import GptOssDownGroupedLinear, GptOssExpertActivation, GptOssMoE
 from .parallelize import parallelize_gptoss
 from .state_dict_adapter import GptOssStateDictAdapter
 
@@ -160,18 +161,25 @@ def _make_gptoss_experts_config(
     """Build a fully-specified RoutedExperts.Config for a single GPT-OSS layer."""
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
-        "mlp1_weight_EGD": partial(nn.init.trunc_normal_, std=std),
-        "mlp1_bias_EG": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_weight_EDF": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_bias_ED": partial(nn.init.trunc_normal_, std=std),
+        "weight": partial(nn.init.trunc_normal_, std=std),
+        "bias": partial(nn.init.trunc_normal_, std=std),
     }
     return RoutedExperts.Config(
-        inner_experts=GptOssGroupedExperts.Config(
-            dim=dim,
-            hidden_dim=hidden_dim,
-            num_experts=num_experts,
+        w13=GroupedLinear.Config(
+            num_groups=num_experts,
+            in_features=dim,
+            out_features=(2, hidden_dim),
+            bias=True,
             param_init=experts_init,
         ),
+        w2=GptOssDownGroupedLinear.Config(
+            num_groups=num_experts,
+            in_features=hidden_dim,
+            out_features=dim,
+            bias=True,
+            param_init=experts_init,
+        ),
+        activation=GptOssExpertActivation.Config(),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,

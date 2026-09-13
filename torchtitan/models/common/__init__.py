@@ -24,7 +24,7 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
-from .linear import Linear, RouterGateLinear, ScaledBiasRowwiseLinear
+from .linear import GroupedLinear, Linear, RouterGateLinear, ScaledBiasRowwiseLinear
 from .moe import MoE
 from .nn_modules import (
     Conv1d,
@@ -60,6 +60,7 @@ __all__ = [
     "get_sliding_window_mask_mod",
     "GQAttention",
     "GroupNorm",
+    "GroupedLinear",
     "Identity",
     "LayerNorm",
     "Linear",
