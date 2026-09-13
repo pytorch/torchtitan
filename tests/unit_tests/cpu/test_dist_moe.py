@@ -10,8 +10,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
-from dist_moe import DistMoeInputScaledRMSNorm
 
+import torchtitan.config.transform.quantization as quantization_transform
+from dist_moe import DistMoeInputScaledRMSNorm
 from torchtitan.components.dist_moe import (
     DistMoeBackendConfig,
     DistMoeConverter,
@@ -19,22 +20,22 @@ from torchtitan.components.dist_moe import (
 )
 from torchtitan.components.dist_moe.backend import _DistMoeRuntime
 from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
-from torchtitan.components.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     config_registry as graph_configs,
 )
-from torchtitan.models.common.attention import VarlenAttention
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.deepseek_v3 import config_registry as eager_configs
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
 
 def _parameter_initializers() -> dict[str, Any]:
     """Return the logical routed-expert initializers required by the builder."""
     return {
-        "gate": torch.nn.init.zeros_,
-        "up": torch.nn.init.zeros_,
-        "down": torch.nn.init.zeros_,
+        "w1_EFD": torch.nn.init.zeros_,
+        "w2_EDF": torch.nn.init.zeros_,
+        "w3_EFD": torch.nn.init.zeros_,
     }
 
 
@@ -94,7 +95,7 @@ def test_dist_moe_converter_rejects_specialized_routed_experts():
     specialized = SpecializedConfig(
         w13=stock.w13,
         w2=stock.w2,
-        activation=stock.activation,
+        activation_fn=stock.activation_fn,
         token_dispatcher=stock.token_dispatcher,
     )
 
@@ -360,13 +361,10 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
         for entry in experts
     )
     assert all(
-        isinstance(layer.attention.inner_attention, VarlenAttention.Config)
+        isinstance(layer.attention.inner_attention, VarlenInnerAttention.Config)
         for layer in model_config.layers
     )
-    assert all(
-        layer.attention.inner_attention.max_num_documents == 512
-        for layer in model_config.layers
-    )
+    assert config.dataloader.max_num_documents == 512
 
 
 def test_dist_moe_recipe_supports_cuda_graphs_with_expert_parallelism():
@@ -392,13 +390,14 @@ def test_dist_moe_recipe_supports_cuda_graphs_with_expert_parallelism():
     ],
 )
 def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
-    factory, num_experts_modules
+    factory, num_experts_modules, monkeypatch
 ):
     pytest.importorskip("torchao")
-    from torchtitan.components.quantization import MXFP8Linear
+    from torchtitan.quantization import MXFP8Linear
 
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     config = factory()
     model_config = config.model_spec.model
     experts = list(model_config.traverse(DistMoeRoutedExperts.Config))

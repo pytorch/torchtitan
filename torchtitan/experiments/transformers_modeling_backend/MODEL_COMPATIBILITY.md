@@ -44,7 +44,7 @@ With all three fixes applied, all PASS/WARN models produce max_diff=0.00.
 
 ### Activation function (Gemma4)
 
-Titan's default `ExpertActivation` uses SwiGLU, while Gemma4 uses
+Titan's default routed-expert `SwiGLU` uses SwiGLU, while Gemma4 uses
 `F.gelu(approximate="tanh")` (GeGLU). Supplying the model-specific activation
 produces an exact expert-output match under identical routing.
 
@@ -102,8 +102,8 @@ diff.
 - **Shared experts:** additive — supported
 - **Attention:** MLA + Dynamic Sparse Attention (DSA) indexer — MLA supported via
   ShardingConfig; the DSA indexer is **not supported under TP** (its no_grad forward
-  uses scatter_/index ops needing local tensors; supporting it requires local_map
-  execution of the indexer). Runs under FSDP/EP without TP.
+  uses scatter_/index ops that do not yet have explicit local SPMD coverage).
+  Runs under FSDP/EP without TP.
 - **Differences from Titan:** dispatcher precision only
 
 ### Gemma-4-26B (gemma4_text)
@@ -130,7 +130,7 @@ diff.
 ## Core Changes Needed for Full Support
 
 ### Model-specific expert activation (for Gemma4)
-Configure the routed experts with a GeGLU `ExpertActivation` implementation
+Configure the routed experts with a GeGLU `ActivationFn` implementation
 (`gelu_pytorch_tanh`) instead of the default SwiGLU implementation.
 
 ### Extended router features (for Gemma4)

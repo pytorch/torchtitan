@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import logging
 import os
 import pickle
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
 import torch
 import torch.utils._pytree as pytree
 from torch.distributed.device_mesh import DeviceMesh
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _unwrap_subclasses,
@@ -28,7 +30,10 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.storage import StorageAdapter
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
+
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
 
@@ -207,11 +212,14 @@ class PrecompiledFxTraceArtifact:
     output_spec: pytree.TreeSpec
     tensor_input_indices: list[int]
     # user_inputs_spec is intentionally omitted: it can contain
-    # FlexAttention _MaskModWrapper objects that are not picklable,
+    # FlexInnerAttention _MaskModWrapper objects that are not picklable,
     # and the mask_mod is already compiled into standalone Inductor
     # HOPs (AOTCompiledArtifact) baked into serialized_gm. The spec
     # is only used for optional runtime validation in run_traced().
     config_fingerprint: ConfigFingerprint = ConfigFingerprint("")
+    # Retained separately because user_inputs_spec is not serialized.
+    num_optimizer_state_inputs: int = 0
+    num_runtime_mesh_inputs: int = 0
 
     @classmethod
     def from_traced_result(
@@ -227,6 +235,12 @@ class PrecompiledFxTraceArtifact:
         (e.g. the embedding vocab offset from
         _runtime_compute_coordinate_on_dim).
         """
+        if traced_result.graph_state.mappings:
+            raise ValueError(
+                "Precompiled FX artifacts do not yet support trainer-owned "
+                "gradient state"
+            )
+
         from torch.fx._graph_pickler import GraphPickler, Options
 
         from torchtitan.experiments.graph_trainer.inductor_passes import (
@@ -251,6 +265,8 @@ class PrecompiledFxTraceArtifact:
             output_spec=traced_result.output_spec,
             tensor_input_indices=traced_result.tensor_input_indices,
             config_fingerprint=config_fingerprint or ConfigFingerprint(""),
+            num_optimizer_state_inputs=traced_result.num_optimizer_state_inputs,
+            num_runtime_mesh_inputs=traced_result.num_runtime_mesh_inputs,
         )
 
     def to_traced_result(self, example_inputs: tuple[Any, ...]) -> TracedResult:
@@ -268,7 +284,7 @@ class PrecompiledFxTraceArtifact:
 
         fake_mode = FakeTensorMode(
             allow_non_fake_inputs=True,
-            shape_env=torch.fx.experimental.symbolic_shapes.ShapeEnv(),
+            shape_env=ShapeEnv(),
         )
         gm = GraphPickler.loads(self.serialized_gm, fake_mode)
         gm.recompile()
@@ -288,6 +304,8 @@ class PrecompiledFxTraceArtifact:
             output_subclass_layouts=self.output_subclass_layouts,
             output_spec=self.output_spec,
             state_fqns=self.state_fqns,
+            num_optimizer_state_inputs=self.num_optimizer_state_inputs,
+            num_runtime_mesh_inputs=self.num_runtime_mesh_inputs,
         )
 
 

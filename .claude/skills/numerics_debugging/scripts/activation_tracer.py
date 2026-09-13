@@ -47,6 +47,7 @@ Filtering / customization:
     to drop additional infrastructure ops you never want to see.
 """
 
+import logging
 import os
 import re
 from contextvars import ContextVar
@@ -55,6 +56,9 @@ from dataclasses import dataclass, field
 import torch
 import torch.utils._pytree as pytree
 from torch import nn
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -872,8 +876,6 @@ class ActivationCaptureProfiler:
 
     def _setup(self) -> None:
         """Enter DebugModeTracer so the next training step is captured."""
-        from torchtitan.tools.logging import logger
-
         logger.info(f"Numerics capture: arming for step {self._capture_step}")
         set_numerics_capture_active(True)
         self._tracer = DebugModeTracer(self._model)
@@ -881,8 +883,6 @@ class ActivationCaptureProfiler:
 
     def _dump(self) -> None:
         """Dump captures after the capture step completes."""
-        from torchtitan.tools.logging import logger
-
         # _teardown() exits the tracer.  DebugModeTracer populates
         # skipped_excluded_ops inside __exit__ (when operators are
         # walked), so we snapshot it *after* teardown.

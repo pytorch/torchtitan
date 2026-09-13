@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
@@ -15,6 +16,18 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.linear import GroupedLinear
+
+
+class _RecordingGroupedLinear(GroupedLinear):
+    recorded_weight: torch.Tensor
+
+    def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
+        self.recorded_weight = weight_EOI
+        return super()._grouped_mm(
+            input_RI=input_RI,
+            weight_EOI=weight_EOI,
+            offsets_E=offsets_E,
+        )
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -40,8 +53,13 @@ class _FixedRouter(nn.Module):
         topk_expert_ids_TK = torch.zeros(
             num_tokens, self.top_k, dtype=torch.int64, device=x_TD.device
         )
-        scores_TE = x_TD.new_zeros(num_tokens, self.num_experts)
-        return topk_scores_TK, topk_expert_ids_TK, scores_TE
+        routing_map_TE = torch.zeros(
+            num_tokens,
+            self.num_experts,
+            dtype=torch.bool,
+            device=x_TD.device,
+        ).scatter_(-1, topk_expert_ids_TK, True)
+        return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
 
 
 class _IdentityDispatcher(nn.Module):
@@ -73,8 +91,8 @@ class _AddOneW13(nn.Module):
 
 
 class _SelectGate(nn.Module):
-    def forward(self, gate_RD, up_RD, offsets_E):
-        del up_RD, offsets_E
+    def forward(self, gate_RD, up_RD, *, offsets):
+        del up_RD, offsets
         return gate_RD
 
 
@@ -86,11 +104,13 @@ class _IdentityW2(nn.Module):
 
 class TestMoE(unittest.TestCase):
     def test_grouped_linear_structured_output(self):
-        grouped = GroupedLinear.Config(
-            num_groups=2,
-            in_features=8,
-            out_features=(2, 8),
-        ).build()
+        grouped = _RecordingGroupedLinear(
+            GroupedLinear.Config(
+                group_size=2,
+                in_features=8,
+                out_features=(2, 8),
+            )
+        )
         with torch.no_grad():
             identity = torch.eye(8)
             grouped.weight[0].copy_(torch.stack((identity, identity)))
@@ -103,6 +123,11 @@ class TestMoE(unittest.TestCase):
         )
 
         self.assertEqual(output.shape, (3, 2, 8))
+        self.assertEqual(grouped.recorded_weight.shape, (2, 16, 8))
+        self.assertEqual(
+            grouped.recorded_weight.untyped_storage().data_ptr(),
+            grouped.weight.untyped_storage().data_ptr(),
+        )
         torch.testing.assert_close(
             output,
             torch.stack((input, input), dim=1)
@@ -112,7 +137,7 @@ class TestMoE(unittest.TestCase):
     def test_grouped_linear_uses_local_weight_shape(self):
         """Local expert and feature shards determine the runtime output shape."""
         grouped = GroupedLinear.Config(
-            num_groups=2,
+            group_size=2,
             in_features=8,
             out_features=(2, 8),
         ).build()
@@ -133,24 +158,39 @@ class TestMoE(unittest.TestCase):
             torch.stack((input_RI[:, :4], 2 * input_RI[:, :4]), dim=1),
         )
 
-    def test_routed_experts_postprocesses_routes_before_combine(self):
-        """The optional callback transforms expert rows before combine."""
+    def test_routed_experts_own_structured_linears(self):
         init = {
-            "gate": nn.init.zeros_,
-            "up": nn.init.ones_,
-            "down": nn.init.zeros_,
+            "w1_EFD": nn.init.zeros_,
+            "w2_EDF": nn.init.zeros_,
+            "w3_EFD": nn.init.ones_,
         }
         config = make_routed_experts_config(
             dim=4,
-            hidden_dim=4,
+            hidden_dim=8,
             num_experts=2,
             top_k=1,
             param_init=init,
             comm_backend="standard",
         )
         routed_experts = config.build()
+
+        self.assertEqual(routed_experts.w13.weight.shape, (2, 2, 8, 4))
+        self.assertEqual(routed_experts.w2.weight.shape, (2, 4, 8))
+        self.assertEqual(set(routed_experts.state_dict()), {"w13.weight", "w2.weight"})
+
+    def test_routed_experts_postprocesses_routes_before_combine(self):
+        """The optional callback transforms expert rows before combine."""
+        config = make_routed_experts_config(
+            dim=4,
+            hidden_dim=4,
+            num_experts=2,
+            top_k=1,
+            param_init={},
+            comm_backend="standard",
+        )
+        routed_experts = config.build()
         routed_experts.w13 = _AddOneW13()
-        routed_experts.activation = _SelectGate()
+        routed_experts.activation_fn = _SelectGate()
         routed_experts.w2 = _IdentityW2()
         routed_experts.token_dispatcher = _IdentityDispatcher()
         scale = nn.Parameter(torch.tensor(3.0))
@@ -169,24 +209,30 @@ class TestMoE(unittest.TestCase):
         torch.testing.assert_close(x.grad, torch.full_like(x, 3.0))
         torch.testing.assert_close(scale.grad, (x.detach() + 1).sum())
 
-    def test_routed_experts_own_structured_linears(self):
+    def test_routed_expert_config_validates_projection_contract(self):
         config = make_routed_experts_config(
             dim=4,
             hidden_dim=8,
             num_experts=2,
             top_k=1,
             param_init={
-                "gate": nn.init.zeros_,
-                "up": nn.init.ones_,
-                "down": nn.init.zeros_,
+                "w1_EFD": nn.init.zeros_,
+                "w2_EDF": nn.init.zeros_,
+                "w3_EFD": nn.init.ones_,
             },
             comm_backend="standard",
         )
-        routed_experts = config.build()
 
-        self.assertEqual(routed_experts.w13.weight.shape, (2, 2, 8, 4))
-        self.assertEqual(routed_experts.w2.weight.shape, (2, 4, 8))
-        self.assertEqual(set(routed_experts.state_dict()), {"w13.weight", "w2.weight"})
+        with self.assertRaisesRegex(ValueError, "same number of experts"):
+            replace(
+                config,
+                w2=replace(config.w2, group_size=3),
+            )
+        with self.assertRaisesRegex(ValueError, "gate and up projections"):
+            replace(
+                config,
+                w13=replace(config.w13, out_features=8),
+            )
 
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
@@ -206,9 +252,9 @@ class TestMoE(unittest.TestCase):
                 num_experts=num_experts,
                 top_k=top_k,
                 param_init={
-                    "gate": nn.init.zeros_,
-                    "up": nn.init.ones_,
-                    "down": nn.init.zeros_,
+                    "w1_EFD": nn.init.zeros_,
+                    "w2_EDF": nn.init.zeros_,
+                    "w3_EFD": nn.init.ones_,
                 },
                 comm_backend="standard",
             ),

@@ -19,6 +19,7 @@ Configuration (via HybridEPTokenDispatcher.Config):
         See _num_permuted_tokens_for_non_blocking().
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,7 +27,8 @@ import torch
 import torch.distributed as dist
 from torch._library.opaque_object import CustomClassBase, register_opaque_type
 
-from torchtitan.tools.logging import logger
+logger = logging.getLogger(__name__)
+
 
 _buffer: Any = None  # Global buffer instance
 
