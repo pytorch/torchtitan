@@ -30,10 +30,10 @@ for all four parallelism configurations (EP on/off × SP on/off).
   `desired_input_layouts`. Output is `Partial`, reduced to `sp_layout`
   at the boundary.
 - **Router gate**: weights `Replicate`, output stays DTensor.
-- **Shared experts** (w13/w2): dense-family TP plan. Colwise for w13,
-  rowwise for w2. Output stays `Partial` — reduction happens once at
+- **Shared experts** (`w13`/`w2`): dense-family TP plan. Colwise for `w13`,
+  rowwise for `w2`. Output stays `Partial` — reduction happens once at
   the MoE boundary.
-- **Routed experts** (`RoutedExperts`): the local SPMD region runs
-  dispatch/compute/combine on local tensors while checking its input and
-  output layout contracts. The expert-weight `state_shardings` live on its
-  `GroupedExperts` child.
+- **Routed experts** (`RoutedExperts`): the local-SPMD boundary converts
+  distributed inputs to local tensors for dispatch, grouped computation, and
+  combine, then restores the declared distributed output. Expert-weight
+  `state_shardings` live on its `w13` and `w2` grouped linears.

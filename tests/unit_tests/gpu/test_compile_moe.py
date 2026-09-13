@@ -11,7 +11,8 @@ import torch
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -101,25 +102,42 @@ class TestApplyCompile(unittest.TestCase):
             parallel_dims=MagicMock(tp_enabled=False),
         )
 
-        from torchtitan.models.common.moe import GroupedExperts
-
         num_experts = 8
         dim = 128
         hidden_dim = 256
-        experts = GroupedExperts(
-            GroupedExperts.Config(
-                dim=dim,
-                hidden_dim=hidden_dim,
-                num_experts=num_experts,
+        w13 = (
+            GroupedLinear.Config(
+                group_size=num_experts,
+                in_features=dim,
+                out_features=(2, hidden_dim),
             )
-        ).cuda()
+            .build()
+            .cuda()
+        )
+        activation = SwiGLU.Config().build()
+        w2 = (
+            GroupedLinear.Config(
+                group_size=num_experts,
+                in_features=hidden_dim,
+                out_features=dim,
+            )
+            .build()
+            .cuda()
+        )
         num_tokens_per_expert = torch.tensor(
             [10, 8, 12, 9, 11, 7, 10, 13], dtype=torch.int32, device="cuda"
         )
         total_tokens = num_tokens_per_expert.sum().item()
-        x = torch.randn(total_tokens, dim, device="cuda")
+        x = torch.randn(
+            total_tokens,
+            dim,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
 
-        output = experts(x, num_tokens_per_expert)
+        offsets = num_tokens_per_expert.cumsum(0, dtype=torch.int32)
+        gate, up = w13(x, offsets).unbind(-2)
+        output = w2(activation(gate, up, offsets=offsets), offsets)
 
         self.assertEqual(output.shape, x.shape)
 
