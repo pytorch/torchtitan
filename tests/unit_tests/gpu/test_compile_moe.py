@@ -130,7 +130,7 @@ class TestApplyCompile(unittest.TestCase):
         total_tokens = num_tokens_per_expert.sum().item()
         x = torch.randn(total_tokens, dim, device="cuda")
 
-        offsets = num_tokens_per_expert.cumsum(0)
+        offsets = num_tokens_per_expert.cumsum(0, dtype=torch.int32)
         gate, up = w13(x, offsets).unbind(-2)
         output = w2(activation(gate, up, offsets), offsets)
 
