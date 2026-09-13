@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import queue
 import re
 import threading
@@ -27,8 +29,10 @@ from torchtitan.config import Configurable, Function
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
+
+logger = logging.getLogger(__name__)
+
 
 MODEL = "model"
 OPTIMIZER = "optimizer"

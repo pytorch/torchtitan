@@ -21,6 +21,7 @@ Usage (aot_fx_trace mode):
 """
 
 import contextlib
+import logging
 from typing import Any, cast
 
 import torch
@@ -44,8 +45,11 @@ from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.observability.logging import init_logger
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _common_setup(config):
@@ -58,7 +62,6 @@ def _common_setup(config):
         )
 
     parallelism = config.parallelism
-    dist_utils.set_spmd_backend(parallelism.spmd_backend)
     dp_replicate = parallelism.data_parallel_replicate_degree
     dp_shard = parallelism.data_parallel_shard_degree
     cp = parallelism.context_parallel_degree
@@ -112,7 +115,6 @@ def _common_setup(config):
         pp=pp,
         ep=parallelism.expert_parallel_degree,
         world_size=world_size,
-        spmd_backend=parallelism.spmd_backend,
     )
     parallel_dims.build_mesh()
 
@@ -317,11 +319,7 @@ def _precompile_aot_fx_trace(
         traced_result = minimal_fx_tracer(
             fwd_bwd_fn,
             module=model,
-            precompile_meshes=(
-                get_spmd_precompile_meshes(parallel_dims)
-                if config.parallelism.spmd_backend == "spmd_types"
-                else None
-            ),
+            precompile_meshes=get_spmd_precompile_meshes(parallel_dims),
             prepare_inputs=prepare_trace_inputs,
             prepare_call_inputs=prepare_trace_call_inputs,
         )(dummy_inputs, dummy_labels, dummy_global_valid_tokens, extra_kwargs)
@@ -366,6 +364,7 @@ def _precompile_aot_fx_trace(
 
 
 def main():
+    init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
 

@@ -2,7 +2,7 @@
 
 This enables HF transformers models to be trained with `4D parallelism + torch.compile`
 
-This backend requires `--parallelism.spmd_backend spmd_types`.
+This backend uses the TorchTitan SPMD type system.
 
 ## Quick start
 

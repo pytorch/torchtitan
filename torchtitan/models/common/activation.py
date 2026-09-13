@@ -6,6 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -26,8 +27,7 @@ class ActivationFn(Function[torch.Tensor], ABC):
         self,
         gate: torch.Tensor,
         up: torch.Tensor,
-        *,
-        offsets: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
         pass
 
@@ -46,10 +46,9 @@ class SwiGLU(ActivationFn):
         self,
         gate: torch.Tensor,
         up: torch.Tensor,
-        *,
-        offsets: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
-        del offsets
+        del kwargs
         return F.silu(gate) * up
 
 
@@ -69,10 +68,9 @@ class SiTUGLU(ActivationFn):
         self,
         gate: torch.Tensor,
         up: torch.Tensor,
-        *,
-        offsets: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> torch.Tensor:
-        del offsets
+        del kwargs
         input_dtype = gate.dtype
         gate = gate.float()
         up = up.float()

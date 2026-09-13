@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""NVFP4 quantization converter.
+"""NVFP4 quantized linear building block.
 
 Swaps dense ``Linear.Config`` nodes for :class:`NVFP4Linear`, which keeps a bf16
 weight and quantizes activations, weights, and gradients to NVFP4 on the fly via
@@ -17,21 +17,18 @@ reduce-scatter); NVFP4 does not move fp4 codes over the wire.
 """
 
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import cast
 
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
-from torchtitan.components.quantization import QuantizationConverter
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import LocalMapConfig
-from torchtitan.tools.logging import logger
-from torchtitan.tools.utils import has_cuda_capability
+
 
 TP = MeshAxisName.TP
 
@@ -76,9 +73,9 @@ try:
     )
 
     # The NVFP4 GEMM is a raw autograd Function that runs on local shards inside
-    # the spmd.local_map region. Mark it local-safe so SPMD type checking
-    # propagates through it; the local_map boundary declares the real
-    # colwise/rowwise output and input-gradient types.
+    # the local SPMD region. Mark it local-safe so SPMD type checking
+    # propagates through it; the region boundary declares the real
+    # colwise/rowwise output type.
     spmd.register_local_autograd_function(nvfp4_mm_triton)
 
     class NVFP4Linear(TorchAONVFP4Linear, Module):
@@ -114,7 +111,7 @@ try:
                 # sharding_config (the stock colwise/rowwise weight placement) is
                 # attached by update_from_config after this Config is built, so it
                 # is available here but not in __post_init__. Fold it into the
-                # local_map region for the opaque nvfp4_linear op now, so base
+                # local SPMD region for the opaque nvfp4_linear op now, so base
                 # Module.parallelize consumes it directly.
                 # slots=True breaks zero-arg super(), so call the parent explicitly.
                 instance = Linear.Config.build(self, **kwargs)
@@ -126,12 +123,8 @@ try:
                         in_layout = dense_activation_placement(
                             tp=spmd.S(-1), cp=spmd.S(0)
                         )
-                        in_grad = dense_activation_placement(
-                            tp=spmd.S(-1), cp=spmd.S(0)
-                        )
                     else:
                         in_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-                        in_grad = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
                     instance._sharding_config = replace(
                         sc,
                         state_shardings={
@@ -152,7 +145,7 @@ try:
                             **(sc.in_dst_shardings or {}),
                             "x": in_layout,
                         },
-                        local_map=LocalMapConfig(in_grad_placements=(in_grad,)),
+                        local_spmd=True,
                     )
                 return instance
 
@@ -262,62 +255,3 @@ def nvfp4_bf16_tail_fqns(num_layers: int, bf16_tail_fraction: float) -> list[str
             "layers in bf16; nothing to convert to NVFP4."
         )
     return [f"layers.{i}." for i in range(convert_upto)]
-
-
-class NVFP4LinearConverter(QuantizationConverter):
-    """Replace matching Linear.Config with NVFP4Linear.Config."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(QuantizationConverter.Config):
-        fqns: list[str] = field(default_factory=list)
-        """
-        List of fully qualified names of modules to apply NVFP4 quantization to.
-        Only Linear.Config entries whose FQN contains a match are converted.
-        If empty, all Linear modules are converted -- pass explicit fqns to keep
-        the LM head in bf16, which the mixed recipe leaves unquantized for stability.
-        """
-
-    def __init__(self, config: Config):
-        self.config = config
-
-        if NVFP4Linear is None:
-            raise ImportError(
-                "torchao is not installed or does not provide the NVFP4 training "
-                "prototype. Install a torchao build with "
-                "torchao.prototype.moe_training.nvfp4_training."
-            )
-
-        if not has_cuda_capability(10, 0):
-            raise ValueError("NVFP4 is only supported on SM100 or later architectures")
-
-        if not self.config.model_compile_enabled:
-            logger.warning(
-                "torch.compile enablement is required for highest performance "
-                "of NVFP4 dynamic quantization."
-            )
-
-    def convert(self, model_config):
-        assert NVFP4Linear is not None
-        fqns = self.config.fqns
-        for fqn, config, parent, attr in model_config.traverse(Linear.Config):
-            if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                if isinstance(config, RouterGateLinear.Config):
-                    raise ValueError(
-                        f"NVFP4 quantization does not support router gate {fqn!r}; "
-                        "exclude it with fqns."
-                    )
-                new_config = NVFP4Linear.Config(
-                    in_features=config.in_features,
-                    out_features=config.out_features,
-                    bias=config.bias,
-                    param_init=config.param_init,
-                )
-                if parent is None:
-                    model_config = new_config
-                elif isinstance(parent, list):
-                    parent[attr] = new_config
-                else:
-                    setattr(parent, attr, new_config)
-
-        logger.info("Converted Linear layers to NVFP4Linear")
-        return model_config
