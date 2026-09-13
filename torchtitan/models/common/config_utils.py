@@ -208,16 +208,17 @@ def fused_gate_up_param_init(
 def fused_grouped_experts_param_init(
     param_init: dict[str, Callable],
 ) -> dict[str, Callable]:
-    """Pack logical grouped-expert initializers for the physical w13_EF2D weight."""
+    """Pack logical grouped-expert initializers for the physical w13_E_2F_D weight."""
     if not param_init:
         return param_init
 
-    def init_w13(w13_EF2D: torch.Tensor) -> None:
-        param_init["w1_EFD"](w13_EF2D[:, :, 0, :])
-        param_init["w3_EFD"](w13_EF2D[:, :, 1, :])
+    def init_w13(w13_E_2F_D: torch.Tensor) -> None:
+        gate_up_EF2D = w13_E_2F_D.unflatten(1, (-1, 2))
+        param_init["w1_EFD"](gate_up_EF2D[:, :, 0, :])
+        param_init["w3_EFD"](gate_up_EF2D[:, :, 1, :])
 
     return {
-        "w13_EF2D": init_w13,
+        "w13_E_2F_D": init_w13,
         "w2_EDF": param_init["w2_EDF"],
     }
 
