@@ -60,6 +60,40 @@ class _Model(Module):
         return self.layers["0"](x_TD)
 
 
+class _QKVProjection(Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = Linear.Config(in_features=4, out_features=4).build()
+
+    def forward(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q_THK = self.linear(x_TD).unflatten(-1, (2, 2))
+        return q_THK, q_THK, q_THK
+
+
+class _CPAttentionBlock(Module):
+    def __init__(self, inner_attention: Module):
+        super().__init__()
+        attention = GQAttention.__new__(GQAttention)
+        Module.__init__(attention)
+        attention.n_heads = 2
+        attention.n_kv_heads = 2
+        attention.head_dim = 2
+        attention.enable_gqa = False
+        attention.rope = None
+        attention.qkv_linear = _QKVProjection()
+        attention.wo = Linear.Config(in_features=4, out_features=4).build()
+        attention.inner_attention = inner_attention
+        attention.q_norm = None
+        attention.k_norm = None
+        attention.scaling = None
+        self.attention = attention
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.attention(x_TD, attention_masks=None).sum()
+
+
 class _LocalExpert(Module):
     def __init__(self):
         super().__init__()
@@ -105,40 +139,6 @@ class _AllToAllBlock(Module):
             expert_ids_TK,
             num_tokens_per_expert_E,
         ).sum()
-
-
-class _QKVProjection(Module):
-    def __init__(self):
-        super().__init__()
-        self.linear = Linear.Config(in_features=4, out_features=4).build()
-
-    def forward(
-        self, x_TD: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        q_THK = self.linear(x_TD).unflatten(-1, (2, 2))
-        return q_THK, q_THK, q_THK
-
-
-class _CPAttentionBlock(Module):
-    def __init__(self, inner_attention: Module):
-        super().__init__()
-        attention = GQAttention.__new__(GQAttention)
-        Module.__init__(attention)
-        attention.n_heads = 2
-        attention.n_kv_heads = 2
-        attention.head_dim = 2
-        attention.enable_gqa = False
-        attention.rope = None
-        attention.qkv_linear = _QKVProjection()
-        attention.wo = Linear.Config(in_features=4, out_features=4).build()
-        attention.inner_attention = inner_attention
-        attention.q_norm = None
-        attention.k_norm = None
-        attention.scaling = None
-        self.attention = attention
-
-    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        return self.attention(x_TD, attention_masks=None).sum()
 
 
 class _FeedForwardBlock(Module):
@@ -310,45 +310,6 @@ class TestDistributedRematRegions(DTensorTestBase):
         )
 
     @with_comms
-    def test_standard_all_to_all_collective_replay(self):
-        mesh = init_device_mesh(
-            self.device_type, (self.world_size,), mesh_dim_names=("ep",)
-        )
-        for save_regions, expected_extra_collectives in (
-            ([], 3),
-            (["routed_experts.ep_communication"], 0),
-        ):
-            with self.subTest(save_regions=save_regions), _use_spmd_types(mesh):
-                torch.manual_seed(42)
-                baseline = _Model(_AllToAllBlock(mesh)).to(self.device_type)
-                remat_model = _Model(_AllToAllBlock(mesh)).to(self.device_type)
-                remat_model.load_state_dict(baseline.state_dict())
-                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
-
-                num_collectives = 0
-                original_all_to_all = spmd.all_to_all
-
-                def counted_all_to_all(*args, **kwargs):
-                    nonlocal num_collectives
-                    num_collectives += 1
-                    return original_all_to_all(*args, **kwargs)
-
-                x_TD = torch.randn(4, 4, device=self.device_type)
-                with patch.object(spmd, "all_to_all", side_effect=counted_all_to_all):
-                    expected = _run_forward_backward(baseline, x_TD)
-                    baseline_collectives = num_collectives
-                    num_collectives = 0
-                    actual = _run_forward_backward(remat_model, x_TD)
-
-                self._assert_results_equal(expected, actual)
-
-                self.assertEqual(baseline_collectives, 3)
-                self.assertEqual(
-                    num_collectives,
-                    baseline_collectives + expected_extra_collectives,
-                )
-
-    @with_comms
     def test_cp_collective_replay(self):
         mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("cp",)
@@ -417,6 +378,45 @@ class TestDistributedRematRegions(DTensorTestBase):
                         num_collectives,
                         baseline_collectives + expected_extra_collectives,
                     )
+
+    @with_comms
+    def test_standard_all_to_all_collective_replay(self):
+        mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("ep",)
+        )
+        for save_regions, expected_extra_collectives in (
+            ([], 3),
+            (["routed_experts.ep_communication"], 0),
+        ):
+            with self.subTest(save_regions=save_regions), _use_spmd_types(mesh):
+                torch.manual_seed(42)
+                baseline = _Model(_AllToAllBlock(mesh)).to(self.device_type)
+                remat_model = _Model(_AllToAllBlock(mesh)).to(self.device_type)
+                remat_model.load_state_dict(baseline.state_dict())
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+
+                num_collectives = 0
+                original_all_to_all = spmd.all_to_all
+
+                def counted_all_to_all(*args, **kwargs):
+                    nonlocal num_collectives
+                    num_collectives += 1
+                    return original_all_to_all(*args, **kwargs)
+
+                x_TD = torch.randn(4, 4, device=self.device_type)
+                with patch.object(spmd, "all_to_all", side_effect=counted_all_to_all):
+                    expected = _run_forward_backward(baseline, x_TD)
+                    baseline_collectives = num_collectives
+                    num_collectives = 0
+                    actual = _run_forward_backward(remat_model, x_TD)
+
+                self._assert_results_equal(expected, actual)
+
+                self.assertEqual(baseline_collectives, 3)
+                self.assertEqual(
+                    num_collectives,
+                    baseline_collectives + expected_extra_collectives,
+                )
 
 
 if __name__ == "__main__":
