@@ -12,8 +12,7 @@ from typing import Literal
 import torch
 import torch._inductor.config
 from torchtitan.components.quantization import QuantizationConverter
-from torchtitan.models.common.linear import Linear, RouterGateLinear
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import GroupedLinear, Linear, RouterGateLinear
 from torchtitan.protocols.module import Module
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
@@ -178,21 +177,21 @@ class Float8LinearConverter(QuantizationConverter):
         return model_config
 
 
-_float8_experts_cache: dict[type, type] = {}
+_float8_grouped_linear_cache: dict[type, type] = {}
 
 
-def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
+def _get_float8_grouped_linear_cls(parent_cls: type) -> type:
     """Get or create a Float8-quantized subclass of *parent_cls*.
 
-    Works for any ``GroupedExperts`` subclass (e.g. gpt-oss variants).
+    Works for any ``GroupedLinear`` subclass (e.g. GPT-OSS down projections).
     The returned class has a proper ``_owner`` set by ``__init_subclass__``.
     """
-    if parent_cls in _float8_experts_cache:
-        return _float8_experts_cache[parent_cls]
+    if parent_cls in _float8_grouped_linear_cache:
+        return _float8_grouped_linear_cache[parent_cls]
 
     parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
 
-    class Float8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+    class Float8GroupedLinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             pass
@@ -203,25 +202,25 @@ def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
 
             self._float8_op_config = Float8TrainingOpConfig()
 
-        def _grouped_mm(self, *, A, weight_EOI, offs):
+        def _grouped_mm(self, *, input, weight, offsets):
             from torchao.prototype.moe_training.utils import (
                 _quantize_then_scaled_grouped_mm,
             )
 
             return _quantize_then_scaled_grouped_mm(
-                A,
-                weight_EOI.bfloat16().transpose(-2, -1),
+                input,
+                weight.bfloat16().transpose(-2, -1),
                 config=self._float8_op_config,
-                offs=offs,
+                offs=offsets,
             )
 
-    Float8GroupedExperts.__name__ = f"Float8{parent_cls.__name__}"
-    Float8GroupedExperts.__qualname__ = f"Float8{parent_cls.__name__}"
-    _float8_experts_cache[parent_cls] = Float8GroupedExperts
-    return Float8GroupedExperts
+    Float8GroupedLinear.__name__ = f"Float8{parent_cls.__name__}"
+    Float8GroupedLinear.__qualname__ = f"Float8{parent_cls.__name__}"
+    _float8_grouped_linear_cache[parent_cls] = Float8GroupedLinear
+    return Float8GroupedLinear
 
 
-class Float8GroupedExpertsConverter(QuantizationConverter):
+class Float8GroupedLinearConverter(QuantizationConverter):
     """Apply FP8 quantization to MoE expert grouped GEMMs."""
 
     # FP8: 16 byte alignment / 1 byte per elem = 16 elements.
@@ -252,23 +251,24 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             )
 
     def convert(self, model_config):
-        for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            swap_token_dispatcher(parent, self.PAD_MULTIPLE)
+        routed_configs: dict[int, object] = {}
+        for _fqn, config, parent, attr in model_config.traverse(GroupedLinear.Config):
+            if parent is None or isinstance(parent, list):
+                raise ValueError("GroupedLinear must be owned by RoutedExperts")
+            routed_configs[id(parent)] = parent
             base_module_cls = type(config)._owner
-            quantized_cls = _get_float8_grouped_experts_cls(base_module_cls)
+            quantized_cls = _get_float8_grouped_linear_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
             )
-            if parent is None:
-                model_config = new_config
-            elif isinstance(parent, list):
-                parent[attr] = new_config
-            else:
-                setattr(parent, attr, new_config)
+            setattr(parent, attr, new_config)
+
+        for routed_config in routed_configs.values():
+            swap_token_dispatcher(routed_config, self.PAD_MULTIPLE)
 
         logger.info(
-            "Converted GroupedExperts to use dynamic float8 rowwise quantization "
+            "Converted GroupedLinear modules to use dynamic float8 rowwise quantization "
             "with scaled grouped GEMMs"
         )
         return model_config
