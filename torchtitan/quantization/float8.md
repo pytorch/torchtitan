@@ -13,7 +13,7 @@ Quantization is applied at config time in your `model_registry()` function via t
 
 For float8 with rowwise scaling, configure it in your config_registry function:
 ```python
-from torchtitan.components.quantization import Float8LinearConverter
+from torchtitan.config.transform import Float8LinearConverter
 
 # In your model_registry call:
 model_spec = model_registry(
@@ -34,7 +34,10 @@ model_spec = model_registry(
 
 For float8 MoE expert quantization (grouped GEMMs), use `Float8GroupedExpertsConverter`:
 ```python
-from torchtitan.components.quantization import Float8LinearConverter, Float8GroupedExpertsConverter
+from torchtitan.config.transform import (
+    Float8GroupedExpertsConverter,
+    Float8LinearConverter,
+)
 
 model_spec = model_registry(
     "671B",
