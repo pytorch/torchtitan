@@ -33,22 +33,22 @@ class QuantizationConverter(ModelConfigConverter):
 
 # Re-export all public symbols so callers can import from the package directly.
 from .float8 import (  # noqa: F401, E402
-    Float8GroupedExpertsConverter,
+    Float8GroupedLinearConverter,
     Float8Linear,
     Float8LinearConverter,
 )
 from .mxfp8 import (  # noqa: F401, E402
-    MXFP8GroupedExpertsConverter,
+    MXFP8GroupedLinearConverter,
     MXFP8Linear,
     MXFP8LinearConverter,
 )
 from .nvfp4 import NVFP4Linear, NVFP4LinearConverter  # noqa: F401, E402
 
 __all__ = [
-    "Float8GroupedExpertsConverter",
+    "Float8GroupedLinearConverter",
     "Float8Linear",
     "Float8LinearConverter",
-    "MXFP8GroupedExpertsConverter",
+    "MXFP8GroupedLinearConverter",
     "MXFP8Linear",
     "MXFP8LinearConverter",
     "NVFP4Linear",
