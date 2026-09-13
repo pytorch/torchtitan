@@ -17,7 +17,7 @@ import unittest
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.deepseek_v4.attention import DSV4FlexAttention
+from torchtitan.models.deepseek_v4.attention import DSV4FlexInnerAttention
 from torchtitan.models.deepseek_v4.compressor import Indexer
 
 
@@ -81,14 +81,14 @@ def new_attended(block_mask, seqlen, n_cmp):
 
 
 def build_dsa(ratio, window_size, block_size=128):
-    cfg = DSV4FlexAttention.Config(
+    cfg = DSV4FlexInnerAttention.Config(
         block_size=block_size,
         window_size=window_size,
         compress_ratio=ratio,
         softmax_scale=0.1,
         index_topk=16,
     )
-    return DSV4FlexAttention(cfg)
+    return DSV4FlexInnerAttention(cfg)
 
 
 class TestDSABlockMask(unittest.TestCase):

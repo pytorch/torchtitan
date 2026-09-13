@@ -48,3 +48,34 @@ def test_parallelism_config_rejects_unknown_load_balancer_when_cp_disabled() -> 
             context_parallel_degree=1,
             context_parallel_load_balancer="foo",
         )
+
+
+def test_parallelism_config_default_schedule() -> None:
+    assert ParallelismConfig().pipeline_parallel_schedule == "1F1B"
+
+
+def test_parallelism_config_accepts_interleaved_1f1b() -> None:
+    config = ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B")
+    assert config.pipeline_parallel_schedule == "Interleaved1F1B"
+
+
+def test_parallelism_config_accepts_pipeline_schedule_multi() -> None:
+    config = ParallelismConfig(pipeline_parallel_schedule="PipelineScheduleMulti")
+    assert config.pipeline_parallel_schedule == "PipelineScheduleMulti"
+
+
+@pytest.mark.parametrize("schedule", ["foo", "Interleved1F1B", ""])
+def test_parallelism_config_rejects_invalid_schedule(schedule: str) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"pipeline_parallel_schedule {schedule!r}",
+    ):
+        ParallelismConfig(pipeline_parallel_schedule=schedule)
+
+
+def test_parallelism_config_rejects_unknown_schedule_when_pp_disabled() -> None:
+    with pytest.raises(ValueError, match=r"pipeline_parallel_schedule 'foo'"):
+        ParallelismConfig(
+            pipeline_parallel_degree=1,
+            pipeline_parallel_schedule="foo",
+        )

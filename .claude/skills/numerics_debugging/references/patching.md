@@ -35,7 +35,7 @@ equivalent but is not -- with an editable install, `import torchtitan` can
 resolve to a *different* checkout depending on the working directory, and the
 bootstrap would then load another tree's tracer or fail outright.
 
-## 1. `torchtitan/tools/profiler.py`
+## 1. `torchtitan/observability/profiler.py`
 
 Add the import, config field, constructor arg, lifecycle hooks, and builder.
 

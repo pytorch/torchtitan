@@ -16,7 +16,6 @@ import tyro
 from torchtitan.config import ConfigManager, ParallelismConfig, TrainingConfig
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
-    deepseek_v3_debugmodel_minimal_async_ep,
 )
 from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
@@ -108,6 +107,7 @@ class TestConfigManager(unittest.TestCase):
 
         assert "alphabet_sort" in _supported_experiments
         assert "search_r1" in _supported_experiments
+        assert "verifiers.dapo_math" in _supported_experiments
 
     def test_cli_overrides(self):
         """CLI args override config defaults."""
@@ -371,7 +371,6 @@ class TestConfigManager(unittest.TestCase):
             "symm_mem_async_tp": config,
             "distributed_gemm": llama3_debugmodel_dist_gemm(seq_len=2048),
             "hybrid_ep": deepseek_v3_debugmodel_hybridep(seq_len=2048),
-            "minimal_async_ep": deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048),
             "deep_ep": qwen3_moe_deepep(seq_len=512),
         }
 
@@ -464,7 +463,7 @@ class TestConfigManager(unittest.TestCase):
         assert config.checkpoint.async_mode == "async"
 
     def test_trainer_config_quantization_default(self):
-        from torchtitan.components.quantization.utils import has_quantization
+        from torchtitan.quantization.utils import has_quantization
 
         config_manager = ConfigManager()
         config = config_manager.parse_args(
@@ -493,7 +492,12 @@ class TestConfigManager(unittest.TestCase):
         )
 
         # Verify the merged type has both base and custom fields
-        merged = MergedTrainerConfig()
+        model_spec = (
+            ConfigManager()
+            .parse_args(["--module", "llama3", "--config", "llama3_debugmodel"])
+            .model_spec
+        )
+        merged = MergedTrainerConfig(model_spec=model_spec)
         assert hasattr(merged, "checkpoint")
         assert hasattr(merged.checkpoint, "convert_path")
         assert merged.checkpoint.convert_path == "/custom/path"
@@ -521,6 +525,18 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.model_spec.name == "deepseek_v3"
         assert config.model_spec.flavor == "debugmodel"
+
+    def test_suppressed_model_spec_is_opaque_to_tyro(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "torchtitan_recipes.tests.transformers_modeling_backend",
+                "--config",
+                "transformers_backend_dense_cp_pp",
+            ]
+        )
+
+        assert config.model_spec.name == "transformers_modeling_backend"
 
     def test_fqn_module_with_config_registry(self):
         """--module torchtitan.models.llama3.config_registry works."""
