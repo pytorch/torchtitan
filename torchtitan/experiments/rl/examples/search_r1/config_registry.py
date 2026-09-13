@@ -23,6 +23,7 @@ from renderers import Qwen3RendererConfig
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.renderer import RenderersLibraryConfig
 from torchtitan.config import (
     CompileConfig,
     OverrideConfig,
@@ -51,7 +52,6 @@ from torchtitan.experiments.rl.models.muse_glimmer.renderer import (
 )
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
-from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.models.muse_glimmer import model_registry as muse_glimmer_model_registry
 from torchtitan.models.muse_glimmer.state_dict_adapter import (

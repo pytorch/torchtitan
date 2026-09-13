@@ -15,14 +15,14 @@ from renderers import (
     Qwen3RendererConfig,
     Tokenizer,
 )
-
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import Configurable
-from torchtitan.experiments.rl.renderer import (
+from torchtitan.components.renderer import (
     RendererConfig,
     RenderersLibraryConfig,
     RendererTokenizerWrapper,
 )
+
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.config import Configurable
 
 _TOKENIZER_PATH = "tests/assets/tokenizer"
 

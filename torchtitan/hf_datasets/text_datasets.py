@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 import numpy as np
 import tyro
+from renderers import build_training_sample, Message
 
 from torchtitan.components.data.dataset import (
     SampleProcessor,
@@ -23,6 +24,8 @@ from torchtitan.components.data.sources import (
 )
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.renderer import RendererConfig
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
 logger = logging.getLogger(__name__)
@@ -91,13 +94,15 @@ def _require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> N
 
 
 class ChatProcessor(SampleProcessor):
-    """Tokenizes one single-turn chat sample and masks prompt labels."""
+    """Tokenizes chat samples and masks labels outside assistant responses."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
         messages_fn: Annotated[
-            Callable[[dict[str, Any]], list[dict[str, str]]], tyro.conf.Suppress
+            Callable[[dict[str, Any]], list[Message]], tyro.conf.Suppress
         ]
+        renderer: RendererConfig | None = None
+        """Model renderer; None uses the tokenizer's single-turn chat template."""
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         if context.tokenizer.eos_id is None:
@@ -110,13 +115,15 @@ class ChatProcessor(SampleProcessor):
         self._max_context_length = context.max_context_length
         self._messages_fn = config.messages_fn
         self._logged_first_sample = False
+        self._renderer = None
+        if config.renderer is not None:
+            if not isinstance(context.tokenizer, HuggingFaceTokenizer):
+                raise ValueError("Chat renderers require a HuggingFaceTokenizer.")
+            self._renderer = config.renderer.build(tokenizer=context.tokenizer)
 
     @staticmethod
-    def _validate_messages(messages: list[dict[str, str]]) -> None:
+    def _validate_messages(messages: list[Message]) -> None:
         """Validate that messages are a single-turn [user, assistant] pair."""
-        # TODO(data-sft-multiturn): Multi-turn needs per-turn spans that survive
-        # templates which rewrite earlier turns, so prefix re-rendering is not
-        # enough. See the RFC in #3304 and the implementation in #2769.
         if len(messages) != 2:
             raise ValueError(
                 f"Expected single-turn [user, assistant], got {len(messages)} messages"
@@ -131,25 +138,43 @@ class ChatProcessor(SampleProcessor):
             )
 
     def _tokenize_sample(self, sample: dict[str, Any]) -> TextSequence | None:
-        """Tokenize a single-turn sample and mask prompt labels.
+        """Tokenize a chat sample and mask prompt labels.
 
         Returns None if the sample exceeds `seq_len`, avoiding
         training on truncated responses.
 
-        Uses incremental prefix re-tokenization to find the prompt/response
-        token boundary, avoiding BPE merge errors.
+        Uses the renderer's loss mask when configured; otherwise uses prefix
+        re-tokenization to find the single-turn prompt/response boundary.
         """
         messages = self._messages_fn(sample)
-        self._validate_messages(messages)
+        loss_mask = None
+        full_text = None
+        if self._renderer is None:
+            self._validate_messages(messages)
 
-        full_text = self._tokenizer.apply_chat_template(messages)
-        # Strip extra newline and ensure the sequence ends with EOS without duplicates
-        full_text = full_text.rstrip("\n")
-        full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
-        if full_tokens[-1] != self._eos_id:
-            full_tokens.append(self._eos_id)
+            full_text = self._tokenizer.apply_chat_template(messages)
+            # Strip extra newline and ensure the sequence ends with EOS without duplicates
+            full_text = full_text.rstrip("\n")
+            full_tokens = self._tokenizer.encode(full_text, add_bos=True, add_eos=False)
+            if full_tokens[-1] != self._eos_id:
+                full_tokens.append(self._eos_id)
+        else:
+            if not messages or messages[-1]["role"] != "assistant":
+                raise ValueError("Chat samples must end with an assistant message.")
+            # TODO(data-sft-supervision): Support per-turn loss weighting.
+            rendered = build_training_sample(
+                self._renderer, messages, ensure_final_stop=True
+            )
+            if rendered.multi_modal_data is not None:
+                raise ValueError("ChatProcessor supports text-only samples.")
+            full_tokens = rendered.token_ids
+            loss_mask = rendered.loss_mask
 
         if not self._logged_first_sample:
+            if full_text is None:
+                full_text = self._tokenizer.decode(
+                    full_tokens, skip_special_tokens=False
+                )
             logger.info(f"[ChatProcessor] First sample full:\n{full_text}")
             self._logged_first_sample = True
 
@@ -163,19 +188,24 @@ class ChatProcessor(SampleProcessor):
             )
             return None
 
-        # Find prompt/response boundary by tokenizing just the user message
-        # with add_generation_prompt=True.
-        prompt_text = self._tokenizer.apply_chat_template(
-            messages[:1], add_generation_prompt=True
-        )
-        prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-        _require_token_prefix(full_tokens, prompt_tokens)
-        prompt_len = len(prompt_tokens)
-
         tokens = np.asarray(full_tokens, dtype=np.int64)
         input_ids = tokens[:-1]
         labels = tokens[1:].copy()
-        labels[: max(prompt_len - 1, 0)] = IGNORE_INDEX
+        if loss_mask is None:
+            # Find prompt/response boundary by tokenizing just the user message
+            # with add_generation_prompt=True.
+            prompt_text = self._tokenizer.apply_chat_template(
+                messages[:1], add_generation_prompt=True
+            )
+            prompt_tokens = self._tokenizer.encode(
+                prompt_text, add_bos=True, add_eos=False
+            )
+            _require_token_prefix(full_tokens, prompt_tokens)
+            prompt_len = len(prompt_tokens)
+            labels[: max(prompt_len - 1, 0)] = IGNORE_INDEX
+        else:
+            # Shift the mask with the labels: label j predicts token j + 1.
+            labels[~np.asarray(loss_mask[1:], dtype=bool)] = IGNORE_INDEX
         return TextSequence(
             input_ids=input_ids,
             labels=labels,

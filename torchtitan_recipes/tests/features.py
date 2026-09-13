@@ -10,14 +10,22 @@ import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
+from renderers import Message, Qwen3RendererConfig
 from torch.distributed.tensor import DTensor
+from torchtitan.components.data import (
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    SingleDatasetConfig,
+)
+from torchtitan.components.renderer import RenderersLibraryConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
@@ -542,6 +550,26 @@ def llama3_debugmodel_float8_emulate_lora_tp2_pp2() -> Trainer.Config:
 def llama3_debugmodel_sft() -> Trainer.Config:
     config = sft_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
+    return config
+
+
+def llama3_debugmodel_sft_multiturn() -> Trainer.Config:
+    config = llama3_debugmodel_sft()
+
+    def messages(sample) -> list[Message]:
+        return [
+            {"role": "user", "content": sample["question"]},
+            {"role": "assistant", "content": sample["answer"]},
+            {"role": "user", "content": "Repeat your answer."},
+            {"role": "assistant", "content": sample["answer"]},
+        ]
+
+    dataloader = cast(GrainDataLoader.Config, config.dataloader)
+    packing = cast(FirstFitPackingConfig, dataloader.dataset)
+    dataset = cast(SingleDatasetConfig, packing.dataset)
+    processor = cast(ChatProcessor.Config, dataset.processor)
+    processor.messages_fn = messages
+    processor.renderer = RenderersLibraryConfig(renderers_config=Qwen3RendererConfig())
     return config
 
 

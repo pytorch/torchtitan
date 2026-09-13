@@ -18,6 +18,8 @@ pytest.importorskip("verifiers")
 import verifiers.v1 as vf
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
+from torchtitan.components.renderer import RenderersLibraryConfig
+
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.examples.dapo_math import DapoMathSample
 from torchtitan.experiments.rl.examples.verifiers.components import VerifiersTaskDataset
@@ -25,7 +27,6 @@ from torchtitan.experiments.rl.examples.verifiers.dapo_math import data
 from torchtitan.experiments.rl.examples.verifiers.dapo_math.rollouter import (
     VerifiersMathRollouter,
 )
-from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 
 
 def test_verifiers_task_scores_math_response() -> None:

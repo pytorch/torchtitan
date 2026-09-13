@@ -6,6 +6,8 @@
 
 from typing import cast
 
+from renderers import Message
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
@@ -485,7 +487,7 @@ def qwen3_moe_deepep(
 def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
     """Qwen3-8B SFT on GSM8K math dataset."""
 
-    def process_sample(sample):
+    def process_sample(sample) -> list[Message]:
         answer = sample["answer"]
         reasoning, final_answer = answer.rsplit("####", 1)
         return [
