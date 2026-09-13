@@ -14,7 +14,6 @@
 """
 
 from dataclasses import dataclass
-from math import prod
 
 import spmd_types as spmd
 import torch
@@ -101,15 +100,9 @@ class GroupedLinear(Module):
         if isinstance(bias, DTensor):
             bias = bias.to_local()
 
-        flat_out_features = prod(self.output_shape)
-        flat_weight = weight.reshape(
-            self.num_groups, flat_out_features, self.in_features
-        )
-        flat_bias = (
-            bias.reshape(self.num_groups, flat_out_features)
-            if bias is not None
-            else None
-        )
+        local_output_shape = weight.shape[1:-1]
+        flat_weight = weight.flatten(1, -2)
+        flat_bias = bias.flatten(1) if bias is not None else None
         output = self._grouped_mm(
             input=input,
             weight=flat_weight,
@@ -117,7 +110,7 @@ class GroupedLinear(Module):
         )
         if flat_bias is not None:
             output = self._add_grouped_bias(output, flat_bias, offsets)
-        return output.reshape(*output.shape[:-1], *self.output_shape)
+        return output.reshape(*output.shape[:-1], *local_output_shape)
 
     def _grouped_mm(
         self,
