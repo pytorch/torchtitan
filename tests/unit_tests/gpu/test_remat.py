@@ -513,7 +513,7 @@ class TestRematRegions(unittest.TestCase):
             return torch.nn.functional.silu(gate) * up
 
         with patch(
-            "torchtitan.overrides.fused_swiglu._fused_silu_and_mul",
+            "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
             side_effect=silu_and_mul,
         ):
             async_config = deepcopy(feed_forward_config)
