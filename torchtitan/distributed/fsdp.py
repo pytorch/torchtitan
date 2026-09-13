@@ -280,10 +280,9 @@ def apply_fsdp_to_decoder(
         # Dense blocks (no ``moe_enabled``) fall through to a plain fully_shard.
         if getattr(transformer_block, "moe_enabled", False):
             assert hasattr(transformer_block, "moe")
-            # Expert weights live on the grouped-GEMM child (inner_experts).
             # pyrefly: ignore [missing-attribute]
-            experts = transformer_block.moe.routed_experts.inner_experts
-            num_experts = experts.num_experts
+            routed_experts = transformer_block.moe.routed_experts
+            num_experts = routed_experts.w13.group_size
 
             if ep_degree > 1:
                 assert edp_mesh is not None
@@ -293,8 +292,14 @@ def apply_fsdp_to_decoder(
 
             shard_expert_features = efsdp_ep_size > num_experts
             expert_param_placements = {
-                experts.w13_E2FD: Shard(2 if shard_expert_features else 0),
-                experts.w2_EDF: Shard(1 if shard_expert_features else 0),
+                **{
+                    param: Shard(2 if shard_expert_features else 0)
+                    for param in routed_experts.w13.parameters()
+                },
+                **{
+                    param: Shard(1 if shard_expert_features else 0)
+                    for param in routed_experts.w2.parameters()
+                },
             }
 
             # Without feature sharding, the default expert-axis placement is
