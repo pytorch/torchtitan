@@ -16,6 +16,7 @@ Two-phase replacement:
       happens later via ``model.parallelize(parallel_dims)``.
 """
 
+import logging
 from dataclasses import replace
 from functools import partial
 
@@ -43,8 +44,11 @@ from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
 from torchtitan.protocols.sharding import ShardingConfig
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class _HFBatchedMoE(MoE):
@@ -508,7 +512,7 @@ def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]
         "w3_EFD": init_fn,
     }
     param_layout = {
-        "w13": spmd.S(1),
+        "w13_EF2D": spmd.S(1),
         "w2_EDF": spmd.S(2),
     }
     _expert_param_info_cache = (param_init, param_layout)
@@ -517,7 +521,18 @@ def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]
 
 def _build_moe_config(params: dict, config) -> MoE.Config:
     """Build a fully-specified MoE.Config from probed parameters."""
-    router = make_router_config(
+    router_config_factory = (
+        make_deepseek_v3_router_config
+        if params["num_expert_groups"] is not None
+        else make_router_config
+    )
+    router_kwargs = {}
+    if params["num_expert_groups"] is not None:
+        router_kwargs = {
+            "num_expert_groups": params["num_expert_groups"],
+            "num_limited_groups": params["num_limited_groups"],
+        }
+    router = router_config_factory(
         dim=params["dim"],
         num_experts=params["num_experts"],
         gate_param_init=_LINEAR_INIT,
@@ -525,8 +540,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         score_func=params["score_func"],
         route_norm=params["route_norm"],
         route_scale=params["route_scale"],
-        num_expert_groups=params["num_expert_groups"],
-        num_limited_groups=params["num_limited_groups"],
+        **router_kwargs,
     )
 
     expert_init, _ = _get_expert_param_info()

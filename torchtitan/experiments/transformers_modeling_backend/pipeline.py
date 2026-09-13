@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
+import logging
 import math
 from collections.abc import Callable
 
@@ -31,9 +32,11 @@ from torchtitan.models.common.nn_modules import Identity
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
-from torchtitan.tools.logging import logger
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
+
+
+logger = logging.getLogger(__name__)
 
 
 def generate_llm_fqn_per_model_part(

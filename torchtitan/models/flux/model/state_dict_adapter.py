@@ -16,7 +16,7 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .model import FluxModel
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 
 class FluxStateDictAdapter(StateDictAdapter):

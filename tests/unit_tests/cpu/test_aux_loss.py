@@ -42,12 +42,6 @@ _COEFF = 0.1
 _METRIC_KEY = ("batch", "microbatch_wise_load_balance_loss")
 
 
-def _set_spmd_types_backend():
-    from torchtitan.distributed.utils import set_spmd_backend
-
-    set_spmd_backend("spmd_types")
-
-
 def _clear_aux_loss_registry():
     """Reset the class-level metric registry for the current process."""
     AuxLoss._group_counts.clear()
@@ -110,10 +104,9 @@ def _make_loss(
 
 
 class _AuxLossTestCase(unittest.TestCase):
-    """spmd_types backend and a clean metric registry for every test."""
+    """Use a clean auxiliary-loss metric registry for every test."""
 
     def setUp(self):
-        _set_spmd_types_backend()
         _clear_aux_loss_registry()
 
     def tearDown(self):
@@ -247,7 +240,6 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
         """ParallelDims on CPU; ``overrides`` replace the default dp2/cp2/tp2."""
         from torchtitan.distributed.parallel_dims import ParallelDims
 
-        _set_spmd_types_backend()
         kwargs = dict(
             dp_replicate=1,
             dp_shard=2,
@@ -256,7 +248,6 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=8,
-            spmd_backend="spmd_types",
         )
         with patch("torchtitan.distributed.parallel_dims.device_type", "cpu"):
             parallel_dims = ParallelDims(**{**kwargs, **overrides})
