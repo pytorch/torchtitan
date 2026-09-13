@@ -137,15 +137,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
-            if (
-                self.parallelism.module_fqns_per_model_part is not None
-                and self.parallelism.pipeline_parallel_layers_per_stage is not None
-            ):
-                raise ValueError(
-                    "parallelism.module_fqns_per_model_part and "
-                    "parallelism.pipeline_parallel_layers_per_stage both describe the "
-                    "pipeline split; give at most one of them."
-                )
 
             self._validate_cuda_graphs()
 

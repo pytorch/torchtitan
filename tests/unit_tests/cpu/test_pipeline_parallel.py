@@ -78,6 +78,40 @@ def test_pipeline_with_first_stage_modules_preserves_explicit_split(monkeypatch)
     assert captured["parallelism"] is parallelism
 
 
+def test_pipeline_with_first_stage_modules_clears_the_consumed_split_knob(monkeypatch):
+    """A layers-per-stage count derives the generated split and is consumed by it.
+
+    The entry puts the split on the config with ``dataclasses.replace``, which
+    re-runs ``ParallelismConfig.__post_init__``; the knob that derived the split
+    has to be cleared in the same call, or the exclusivity check refuses a legal
+    configuration for every model routed through this entry.
+    """
+    model = nn.Module()
+    model.vision_encoder = nn.Linear(2, 2)
+    captured = {}
+
+    def capture_pipeline_llm(model, **kwargs):
+        captured["parallelism"] = kwargs["parallelism"]
+        return object()
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
+
+    pipeline_parallel.pipeline_with_first_stage_modules(
+        model,
+        first_stage_module_fqns=("vision_encoder",),
+        parallel_dims=SimpleNamespace(pp=2),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_degree=2, pipeline_parallel_layers_per_stage=3
+        ),
+        model_config=SimpleNamespace(layers=[None] * 4),
+    )
+
+    spelled_out = captured["parallelism"]
+    assert spelled_out.module_fqns_per_model_part[0][0] == "vision_encoder"
+    assert len(spelled_out.module_fqns_per_model_part) == 2
+    assert spelled_out.pipeline_parallel_layers_per_stage is None
+
+
 def _assert_layer_assignment(module_names_per_stage: list[list[str]], num_layers: int):
     """Layers are assigned in order with no gaps or duplicates."""
     assigned = [

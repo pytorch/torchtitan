@@ -160,7 +160,7 @@ class TestSplit(unittest.TestCase):
             fqns[-1], ["norm", "lm_head", "output_res_proj", "output_res_norm"]
         )
 
-    def test_the_entry_spells_the_split_out(self):
+    def test_the_entry_spells_the_split_out_and_drops_the_knob(self):
         from torchtitan.config import ParallelismConfig
         from torchtitan.models.kimi_k3.parallelize import _kimi_k3_pipeline_split
 
@@ -178,6 +178,7 @@ class TestSplit(unittest.TestCase):
             model_config=SimpleNamespace(layers=[None] * 10),
         )
         self.assertEqual(spelled_out.module_fqns_per_model_part, fqns)
+        self.assertIsNone(spelled_out.pipeline_parallel_layers_per_stage)
         self.assertEqual(len(fqns), 4)
         self.assertEqual(sum(_layers_per_stage(fqns)), 10)
         self.assertEqual(fqns[0][:2], ["vision_encoder", "tok_embeddings"])
@@ -188,6 +189,7 @@ class TestSplit(unittest.TestCase):
         parallelism = kimi_k3_debugmodel_pp8_vp4().parallelism
         fqns = parallelism.module_fqns_per_model_part
         assert fqns is not None
+        self.assertIsNone(parallelism.pipeline_parallel_layers_per_stage)
         self.assertEqual(len(fqns), 32)
         self.assertEqual(sum(_layers_per_stage(fqns)), 33)
 

@@ -179,7 +179,9 @@ def pipeline_with_first_stage_modules(
         ]
         fqn_per_part[0][:0] = present_module_fqns
         parallelism = dataclasses.replace(
-            parallelism, module_fqns_per_model_part=fqn_per_part
+            parallelism,
+            module_fqns_per_model_part=fqn_per_part,
+            pipeline_parallel_layers_per_stage=None,
         )
 
     return pipeline_llm(
