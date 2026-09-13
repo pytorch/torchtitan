@@ -206,7 +206,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 RoutedExperts.Config
             ):
                 assert isinstance(experts_config, RoutedExperts.Config)
-                if experts_config.supports_cuda_graphs:
+                if getattr(experts_config, "supports_cuda_graphs", False):
                     continue
                 dispatcher_config = experts_config.token_dispatcher
                 if isinstance(
