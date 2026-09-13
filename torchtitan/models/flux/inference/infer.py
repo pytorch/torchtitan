@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import os
 
 import torch
@@ -11,7 +12,10 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.config import ConfigManager
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
 from torchtitan.models.flux.trainer import FluxTrainer
-from torchtitan.tools.logging import init_logger, logger
+from torchtitan.observability.logging import init_logger
+
+
+logger = logging.getLogger(__name__)
 
 
 @torch.no_grad()

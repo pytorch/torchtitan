@@ -86,7 +86,7 @@ are reported at step 760.
 
 In this run nvfp4 remained faster and used less memory than both the MXFP8 and bf16 baselines, and its final loss is on par with them.
 
-![Llama 3 8B NVFP4, MXFP8, and BF16 training loss curves](../../../assets/images/nvfp4_vs_mxfp8_vs_bf16_eager_compile_200m_tokens.png)
+![Llama 3 8B NVFP4, MXFP8, and BF16 training loss curves](../../assets/images/nvfp4_vs_mxfp8_vs_bf16_eager_compile_200m_tokens.png)
 
 *Llama 3 8B training loss through 200M tokens at global batch size 128. All runs use eager execution with model compilation.*
 
@@ -111,7 +111,7 @@ GiB (30%) less peak reserved memory. It was 3% slower than MXFP8 while using
 34.00 GiB (30%) less memory. Its final logged loss was 0.01547 above bf16 and
 0.01441 above MXFP8.
 
-![Qwen3 8B random-initialization NVFP4, MXFP8, and BF16 training loss curves](../../../assets/images/qwen3_8b_random_init_nvfp4_vs_mxfp8_vs_bf16_eager_compile_200m_tokens.png)
+![Qwen3 8B random-initialization NVFP4, MXFP8, and BF16 training loss curves](../../assets/images/qwen3_8b_random_init_nvfp4_vs_mxfp8_vs_bf16_eager_compile_200m_tokens.png)
 
 *Qwen3 8B random-initialization training loss through 200M tokens at global batch size 64.*
 

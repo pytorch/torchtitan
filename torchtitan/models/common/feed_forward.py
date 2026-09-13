@@ -4,13 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.models.common.activation import ActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
@@ -19,78 +19,6 @@ from torchtitan.protocols.module import Module
 #   T = token dimensions, D = model dimension, F = feed-forward hidden dimension
 
 __all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
-
-
-def _make_fused_gate_up_init(
-    gate_init: Callable,
-    up_init: Callable,
-    *,
-    gate_up_axis: int,
-) -> Callable:
-    """Build an initializer for a fused gate/up weight from per-half initializers.
-
-    The fused weight has a size-2 ``gate_up_axis`` (index 0 = gate / stock w1,
-    index 1 = up / stock w3). Each half is initialized with its own initializer
-    because the gate and up projections differ (e.g. up shares w2's depth-scaled
-    init), so initializing the whole tensor at once would mis-init the up half.
-    Used by the grouped FusedGroupedExperts ``(E, F, 2, D)`` override and by
-    the logical 3D view of the dense fused linear weight.
-    """
-
-    def _init(t: torch.Tensor) -> None:
-        gate_idx: list[int | slice] = [slice(None)] * t.ndim
-        up_idx: list[int | slice] = [slice(None)] * t.ndim
-        gate_idx[gate_up_axis] = 0
-        up_idx[gate_up_axis] = 1
-        gate_init(t[tuple(gate_idx)])  # gate (stock w1)
-        up_init(t[tuple(up_idx)])  # up (stock w3)
-
-    return _init
-
-
-def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
-    """Build an initializer for an interleaved 2D gate/up linear weight."""
-    init_logical_weight = _make_fused_gate_up_init(gate_init, up_init, gate_up_axis=1)
-
-    def _init(t: torch.Tensor) -> None:
-        init_logical_weight(t.unflatten(0, (-1, 2)))
-
-    return _init
-
-
-def split_fused_gate_up_state_dict(
-    state_dict: dict[str, Any],
-) -> dict[str, Any]:
-    """Return a state dict with dense ``w13`` parameters split into w1/w3."""
-    result = dict(state_dict)
-    for param_name in ("weight", "bias"):
-        suffix = f"w13.{param_name}"
-        for key in tuple(result):
-            if not key.endswith(suffix):
-                continue
-            prefix = key[: -len(suffix)]
-            gate_up = result.pop(key).unflatten(0, (-1, 2))
-            result[f"{prefix}w1.{param_name}"] = gate_up[:, 0].contiguous()
-            result[f"{prefix}w3.{param_name}"] = gate_up[:, 1].contiguous()
-    return result
-
-
-def fuse_gate_up_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
-    """Return a state dict with dense w1/w3 parameters packed into ``w13``."""
-    result = dict(state_dict)
-    for param_name in ("weight", "bias"):
-        suffix = f"w1.{param_name}"
-        for gate_key in tuple(result):
-            if not gate_key.endswith(suffix):
-                continue
-            prefix = gate_key[: -len(suffix)]
-            up_key = f"{prefix}w3.{param_name}"
-            if up_key not in result:
-                continue
-            result[f"{prefix}w13.{param_name}"] = torch.stack(
-                [result.pop(gate_key), result.pop(up_key)], dim=1
-            ).flatten(0, 1)
-    return result
 
 
 def compute_ffn_hidden_dim(
@@ -128,6 +56,51 @@ class FeedForward(Module):
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
+        self.register_state_dict_post_hook(self._split_w13_on_save)
+        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
+
+    @staticmethod
+    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
+        """Expose fused parameters under the logical w1/w3 checkpoint keys."""
+        for param_name in ("weight", "bias"):
+            fused_key = f"{prefix}w13.{param_name}"
+            if fused_key not in state_dict:
+                continue
+            gate_up = state_dict.pop(fused_key).unflatten(0, (-1, 2))
+            state_dict[f"{prefix}w1.{param_name}"] = gate_up[:, 0].contiguous()
+            state_dict[f"{prefix}w3.{param_name}"] = gate_up[:, 1].contiguous()
+
+    @staticmethod
+    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
+        """Pack logical w1/w3 checkpoint entries into the fused parameter."""
+        for param_name in ("weight", "bias"):
+            gate_key = f"{prefix}w1.{param_name}"
+            up_key = f"{prefix}w3.{param_name}"
+            if gate_key not in state_dict or up_key not in state_dict:
+                continue
+            state_dict[f"{prefix}w13.{param_name}"] = torch.stack(
+                [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=1
+            ).flatten(0, 1)
+
+    def parallelize(self, parallel_dims: ParallelDims) -> None:
+        w13_sharding_config = self.w13._sharding_config
+        if parallel_dims.tp_enabled and w13_sharding_config is not None:
+            weight_layout = w13_sharding_config.state_shardings.get("weight")
+            if weight_layout is not None:
+                tp_type = weight_layout.local_type.get(MeshAxisName.TP)
+                if (
+                    isinstance(tp_type, spmd.Shard)
+                    and tp_type.dim in (0, -self.w13.weight.ndim)
+                    and self.w2.in_features % parallel_dims.tp
+                ):
+                    raise ValueError(
+                        "FeedForward hidden dimension "
+                        f"({self.w2.in_features}) must be divisible by TP degree "
+                        f"({parallel_dims.tp}) when w13 is sharded colwise. "
+                        "Checking only the fused w13 output dimension would allow "
+                        "TP to split an interleaved gate/up pair."
+                    )
+        super().parallelize(parallel_dims)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up_TF = remat.region(
