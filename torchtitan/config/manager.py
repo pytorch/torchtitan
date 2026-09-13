@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import importlib
+
+import logging
 import os
 import sys
 import warnings
@@ -13,7 +15,10 @@ from typing import Any
 
 import tyro
 
-from torchtitan.tools.logging import logger
+from torchtitan.observability.logging import init_logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigManager:
@@ -297,6 +302,8 @@ if __name__ == "__main__":
     #     > python -m torchtitan.config.manager --module llama3 --config llama3_debugmodel --help
     #
     # -----------------------------------------------------------------------------
+
+    init_logger()
 
     try:
 

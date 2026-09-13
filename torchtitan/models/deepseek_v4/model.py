@@ -17,12 +17,12 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from torchtitan.protocols.module import ModuleList
 
 from .mhc import HcHead, HcPost, HcPre
 
 if TYPE_CHECKING:
     from .attention import Attention
-    from .moe import DeepSeekV4MoE
     from .mtp import MTPBlock
 
 
@@ -31,10 +31,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        # Redeclared with the DeepSeek V4 specific types so sharding and MTP
-        # build helpers can access V4-only fields (e.g. router.layer_id).
         attention: "Attention.Config"  # pyrefly: ignore [bad-override]
-        moe: "DeepSeekV4MoE.Config | None" = None  # pyrefly: ignore [bad-override]
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
@@ -209,13 +206,21 @@ class DeepSeekV4Model(Decoder):
         self.n_main_layers = cfg.n_layers
 
         self.hc_head = cfg.hc_head.build()
-        self.mtp_layers = torch.nn.ModuleList()
+        self.mtp_layers = ModuleList()
         if cfg.mtp_layers is not None:
-            self.mtp_layers = torch.nn.ModuleList(
+            self.mtp_layers = ModuleList(
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
-    def get_attention_masks(self, positions):
+    def get_attention_masks(
+        self,
+        positions,
+        *,
+        padding_mask=None,
+        max_num_documents=None,
+        max_context_length=None,
+    ):
+        del positions, padding_mask, max_num_documents, max_context_length
         return None
 
     def forward(

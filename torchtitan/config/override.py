@@ -33,11 +33,14 @@ from __future__ import annotations
 
 import importlib
 import json
+
+import logging
 from dataclasses import dataclass, field, fields, is_dataclass
 from fnmatch import fnmatch
 from typing import Any, cast, TYPE_CHECKING, TypeVar
 
-from torchtitan.tools.logging import logger
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable

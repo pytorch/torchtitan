@@ -69,28 +69,35 @@ If the consumer is not inside such a region, call
 `remat.recompute_needs_tensor(...)` immediately before the output is consumed:
 
 ```python
-q, k, v = remat.region(
-    self.qkv_linear,
-    self.remat_region_name("qkv"),
-    recompute=self.remat_should_recompute("qkv"),
+gate_up = remat.region(
+    self.w13,
+    self.remat_region_name("w13"),
+    recompute=self.remat_should_recompute("w13"),
 )(x)
-remat.recompute_needs_tensor(q, k, v)
-q, k = self.rope(q, k, positions)
+gate, up = gate_up.unflatten(-1, (-1, 2)).unbind(-1)
+remat.recompute_needs_tensor(gate, up)
+hidden = F.silu(gate) * up
 ```
 
 Without this marker, a tensor required by ordinary recomputed operations may
-not be retained. For the initial TorchTitan integration, model code
-conservatively calls `recompute_needs_tensor` immediately after each
-configurable region because region outputs are usually consumed by bare
-operations soon afterward. This prioritizes correct replay, but a saved region
-may retain an output that recomputation does not actually need.
+not be retained. Place the marker on the consumer side, immediately before the
+bare operation that reads the tensor, rather than immediately after the region
+that produced it. This ensures the output is retained only when that consumer
+actually runs. Views may be passed because `torch_remat` resolves them to their
+producing region by storage.
+
+When one bare operation consumes multiple region outputs, pass all of them to
+one call, as in the example above. Keep separate calls for separate consumers.
+Do not add a marker when the output is consumed only by another `remat.region`;
+that dependency is inferred automatically.
 
 The marker can be omitted when a region's output is returned directly from the
 checkpointed transformer block and no operation inside the block reads its
 data. Being the last region in a submodule is not sufficient: for example, an
 attention output may still be consumed by a residual addition in the enclosing
-transformer block. We plan to audit these call sites and place markers at the
-actual consumers in a later change.
+transformer block. If the consumer lives outside the helper that owns the
+region, place the marker as close to that call-site consumer as the module
+boundary permits.
 
 ## Random state
 

@@ -60,14 +60,21 @@ class BaseModel(Module):
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> tuple[
+        torch.Tensor | tuple[torch.Tensor, ...],
+        torch.Tensor | tuple[torch.Tensor, ...],
+        dict[str, Any],
+    ]:
         """Prepare the forward inputs from a dataloader batch.
 
         Models driven by the standard trainer/validator forward path implement
         this to build any attention masks, apply context-parallel sharding and
         SPMD annotation as needed, and split ``input``/``labels`` out of the
         batch. ``input_dict`` is the batch with ``labels`` folded in; return
-        ``(inputs, labels, extra_kwargs)``.
+        ``(inputs, labels, extra_kwargs)``. Models with aligned multi-output
+        objectives may return tuples of input and label tensors.
 
         The trainer calls this via ``cast(BaseModel, model).preprocess_inputs``,
         so the declaration lives here for typing. There is no meaningful default:
