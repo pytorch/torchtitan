@@ -17,14 +17,13 @@ selecting any single configuration stays cheap.
 from torchtitan.trainer import Trainer
 
 
-def _use_spmd_types(config: Trainer.Config, *, typechecking: bool) -> None:
-    """Select the SPMD-typed backend for a test configuration.
+def _set_spmd_typechecking(config: Trainer.Config, *, typechecking: bool) -> None:
+    """Configure SPMD typechecking for a test configuration.
 
     Type checking forces activation checkpointing off: it rejects selective AC
-    with FlexAttention, which the debug models use. It is also unsupported
+    with FlexInnerAttention, which the debug models use. It is also unsupported
     under compile and under pipeline parallelism.
     """
-    config.parallelism.spmd_backend = "spmd_types"
     config.debug.spmd_typechecking = typechecking
     if typechecking:
         config.activation_checkpoint = None

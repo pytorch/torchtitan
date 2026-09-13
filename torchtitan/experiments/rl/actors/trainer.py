@@ -35,11 +35,11 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.logging import init_logger
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
-from torchtitan.tools.logging import init_logger
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ class PolicyTrainer(Actor, Configurable):
     Args:
         config: PolicyTrainer.Config with all model/optimizer/parallelism settings.
         model_spec: TorchTitan model specification.
+        max_num_documents: Fixed varlen metadata capacity configured by the batcher.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
             Shared with the generator (both load from the same HF checkpoint).
         generator_dtype: Generator dtype (e.g. "bfloat16"). Needed to cast weights to generator dtype
@@ -93,6 +94,7 @@ class PolicyTrainer(Actor, Configurable):
         *,
         model_spec: ModelSpec,
         compile_config: CompileConfig,
+        max_num_documents: int | None,
         hf_assets_path: str = "",
         generator_dtype: str = "",
         output_dir: str,
@@ -112,6 +114,7 @@ class PolicyTrainer(Actor, Configurable):
 
         self.config = config
         self.compile_config = compile_config
+        self.max_num_documents = max_num_documents
         self.loss_fn = config.loss.build()
         # TODO: add support to compile the loss.
 
@@ -136,7 +139,6 @@ class PolicyTrainer(Actor, Configurable):
             )
 
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
-        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=self.parallel_dims,
             spmd_typechecking=False,
@@ -259,12 +261,12 @@ class PolicyTrainer(Actor, Configurable):
             Model with random-initialized weights.
         """
 
-        from torchtitan.models.common.attention import VarlenAttention
+        from torchtitan.models.common.attention import VarlenInnerAttention
 
         attention_backend = model_spec.model.first_full_attention_backend
         assert isinstance(
             attention_backend,
-            (VarlenAttention.Config, FlexAttention.Config),
+            (VarlenInnerAttention.Config, FlexInnerAttention.Config),
         ), "Only varlen and flex attention backends are allowed."
 
         # Fill sharding configs on the config BEFORE build via the
@@ -374,11 +376,17 @@ class PolicyTrainer(Actor, Configurable):
         token_ids = local_batch.token_ids.to(device)
         labels = local_batch.labels.to(device)
         positions = local_batch.positions.to(device)
+        padding_mask = local_batch.padding_mask.to(device)
         loss_mask = local_batch.loss_mask.to(device)
         generator_logprobs = local_batch.generator_logprobs.to(device)
         advantages = local_batch.advantages.to(device)
 
-        attention_masks = model.get_attention_masks(positions)
+        attention_masks = model.get_attention_masks(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=self.max_num_documents,
+            max_context_length=self.config.training.max_context_length,
+        )
 
         with self.train_context():
             with sl.log_trace_span("model_forward"):
