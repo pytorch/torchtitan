@@ -74,7 +74,6 @@ def _build_llama3_layers(
     hidden_dim: int,
     rope: RoPE.Config,
     n_kv_heads: int | None = None,
-    fuse_qkv: bool = True,
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
 ) -> list[TransformerBlock.Config]:
@@ -95,7 +94,6 @@ def _build_llama3_layers(
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
-                    fuse_qkv=fuse_qkv,
                     rope=rope,
                     tp_gemm_backend=tp_gemm_backend,
                 ),
@@ -131,7 +129,6 @@ def _debugmodel(
             in_features=dim, out_features=2048, param_init=_output_linear_init(dim)
         ),
         layers=_build_llama3_layers(
-            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -175,7 +172,6 @@ def _1b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
-            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -222,7 +218,6 @@ def _3b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
-            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -266,7 +261,6 @@ def _8b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
-            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -310,7 +304,6 @@ def _70b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
-            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
@@ -354,7 +347,6 @@ def _405b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_llama3_layers(
-            fuse_qkv=True,
             n_layers=n_layers,
             dim=dim,
             n_heads=n_heads,
