@@ -13,8 +13,6 @@ Module protocol. Nothing here touches a mesh or a device.
 
 from typing import TYPE_CHECKING
 
-import spmd_types as spmd
-
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 
 if TYPE_CHECKING:
@@ -39,9 +37,4 @@ def set_kimi_k3_sharding_config(
                 # tensor-parallel PR lands; with EP alone the internals run
                 # without sequence parallel.
                 enable_sp=enable_sp,
-                expert_param_layout={
-                    "w1_EFD": spmd.S(1),
-                    "w2_EDF": spmd.S(2),
-                    "w3_EFD": spmd.S(1),
-                },
             )

@@ -32,9 +32,9 @@ from torchtitan.models.common.dist_gemm import (
     RowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import GroupedLinear, Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
-    GroupedExperts,
+    ExpertActivation,
     MoE,
     RoutedExperts,
     TokenChoiceTopKRouter,
@@ -69,6 +69,16 @@ def decoder_vocab_size(model_spec: ModelSpec) -> int:
 # Megatron exposes as --tp-comm-overlap. Further implementations (CuTeDSL, Triton)
 # would be additional values here.
 TpGemmBackend = Literal["default", "dist_gemm"]
+
+
+def fused_gate_up_init(gate_init: Callable, up_init: Callable) -> Callable:
+    """Initialize the gate and up slices of a structured W13 parameter."""
+
+    def init(weight_E2FD: torch.Tensor) -> None:
+        gate_init(weight_E2FD[:, 0])
+        up_init(weight_E2FD[:, 1])
+
+    return init
 
 
 def get_attention_config(
@@ -442,14 +452,33 @@ def make_routed_experts_config(
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
 ) -> RoutedExperts.Config:
-    """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
+    """Build routed experts with fused gate/up and down projections.
+
+    ``param_init`` contains the logical ``gate``, ``up``, and ``down``
+    projection initializers. Gate and up initialize distinct views of the
+    structured W13 parameter so model-specific initialization is preserved.
+    """
+
+    missing = {"gate", "up", "down"} - param_init.keys()
+    if missing:
+        raise ValueError(f"Missing routed-expert initializers: {sorted(missing)}")
+
     return RoutedExperts.Config(
-        inner_experts=GroupedExperts.Config(
-            dim=dim,
-            hidden_dim=hidden_dim,
-            num_experts=num_experts,
-            param_init=param_init,
+        w13=GroupedLinear.Config(
+            num_groups=num_experts,
+            in_features=dim,
+            out_features=(2, hidden_dim),
+            param_init={
+                "weight": fused_gate_up_init(param_init["gate"], param_init["up"])
+            },
         ),
+        w2=GroupedLinear.Config(
+            num_groups=num_experts,
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init={"weight": param_init["down"]},
+        ),
+        activation=ExpertActivation.Config(),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,

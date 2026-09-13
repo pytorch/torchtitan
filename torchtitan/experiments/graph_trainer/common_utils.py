@@ -416,7 +416,10 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.moe.router",
                         f"layers.{layer_id}.moe.shared_experts",
                     ],
-                    f"layers.{layer_id}.moe.routed_experts.inner_experts",
+                    [
+                        f"layers.{layer_id}.moe.routed_experts.w13",
+                        f"layers.{layer_id}.moe.routed_experts.w2",
+                    ],
                 ]
             )
         else:
@@ -472,9 +475,8 @@ def apply_simple_fsdp(
 ) -> nn.Module:
     """Wrap the model (and any MoE experts) with graph_trainer's simple_fsdp.
 
-    For MoE-enabled models, the ``moe.routed_experts.inner_experts`` submodules
-    (the routed-expert weights) are separately wrapped on the EDP mesh when expert
-    parallelism is enabled.
+    For MoE-enabled models, the routed W13 and W2 projections are separately
+    sharded on the EDP mesh when expert parallelism is enabled.
     """
     use_spmd_types = get_spmd_backend() == "spmd_types"
     fsdp_mesh: DeviceMesh | None = None
@@ -524,25 +526,50 @@ def apply_simple_fsdp(
             if moe is None:
                 continue
             routed_experts = moe.routed_experts
-            inner_experts = routed_experts.expert_parameters_module()
             experts_shard_dim = 0
-            if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
+            if edp_mesh["efsdp"].size() * parallel_dims.ep > routed_experts.num_experts:
                 experts_shard_dim = 1
 
-            moe.routed_experts = routed_experts.replace_expert_parameters_module(
+            if experts_shard_dim == 0:
                 data_parallel(
-                    inner_experts,
+                    routed_experts,
                     edp_mesh,
                     dp_mode,
                     mp_policy=mp_policy,
-                    shard_dim=experts_shard_dim,
+                    shard_dim=0,
                     non_dp_mesh=(
                         parallel_dims.get_optional_mesh("ep")
                         if use_spmd_types
                         else None
                     ),
                 )
-            )
+            else:
+                # W13 keeps gate/up paired on its structured F dimension;
+                # W2 may use any storage shard dimension for EFSdp.
+                data_parallel(
+                    routed_experts.w13,
+                    edp_mesh,
+                    dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=2,
+                    non_dp_mesh=(
+                        parallel_dims.get_optional_mesh("ep")
+                        if use_spmd_types
+                        else None
+                    ),
+                )
+                data_parallel(
+                    routed_experts.w2,
+                    edp_mesh,
+                    dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=1,
+                    non_dp_mesh=(
+                        parallel_dims.get_optional_mesh("ep")
+                        if use_spmd_types
+                        else None
+                    ),
+                )
 
     model = data_parallel(
         model,
