@@ -674,7 +674,6 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     config.generator.override = OverrideConfig(
         imports=[
             "torchtitan.overrides.fused_swiglu.fused_swiglu",
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
             (
                 "torchtitan.overrides.moe_token_dispatcher.deepep_override",
                 {"cudagraphable": True},
@@ -871,7 +870,6 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     # independent (they run in different actors).
     perf_imports = [
         "torchtitan.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
         "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
     ]
     config.trainer = dataclasses.replace(

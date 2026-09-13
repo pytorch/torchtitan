@@ -6,6 +6,7 @@
 
 import dataclasses
 import json
+import logging
 import os
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -23,15 +24,12 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
     PipelineScheduleMulti,
 )
-from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
-from torchtitan.components.quantization.utils import has_quantization
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -56,15 +54,18 @@ from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
-    MinimalAsyncEPTokenDispatcher,
 )
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
+from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
-from torchtitan.tools.logging import logger
-from torchtitan.tools.profiler import Profiler
+
+
+logger = logging.getLogger(__name__)
 
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
@@ -142,8 +143,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self._validate_cuda_graphs()
 
             if (
-                self.parallelism.spmd_backend == "spmd_types"
-                and self.debug.spmd_typechecking
+                self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
                 # TODO(sanketpurandare): Enable SPMD typechecking under PP.
@@ -154,8 +154,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
             if (
-                self.parallelism.spmd_backend == "spmd_types"
-                and self.debug.spmd_typechecking
+                self.debug.spmd_typechecking
                 and isinstance(self.activation_checkpoint, SelectiveAC.Config)
                 and any(self.model_spec.model.traverse(FlexInnerAttention.Config))
             ):
@@ -221,9 +220,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
                 LocalTokenDispatcher.Config
             ):
-                if isinstance(
-                    dispatcher_config, MinimalAsyncEPTokenDispatcher.Config
-                ) or (
+                if (
                     isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
                     and dispatcher_config.non_blocking_capacity_factor is not None
                 ):
@@ -232,8 +229,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 raise ValueError(
                     "CUDA graphs support only expert parallel token dispatcher "
                     "configurations without CPU synchronization. "
-                    "Set HybridEP non_blocking_capacity_factor, or use "
-                    "MinimalAsyncEP, or set --training.disable_cuda_graphs. "
+                    "Set HybridEP non_blocking_capacity_factor, or set "
+                    "--training.disable_cuda_graphs. "
                     "Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
@@ -367,10 +364,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 "sequence/context parallelism."
             )
 
-        # TODO(pianpwk): Transitional until the local-SPMD and full-DTensor
-        # backends share one runtime mesh/type mechanism.
-        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
-
         # Logging needs to happen after distributed initialized
         config.maybe_log()
 
@@ -452,7 +445,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"{color.red}size: {model_param_count:,} total parameters{color.reset}"
         )
 
-        # move sharded model to CPU/GPU and initialize weights via DTensor
+        # Move the sharded model to CPU/GPU and initialize its states.
         buffer_device: torch.device | None
         if config.checkpoint.create_seed_checkpoint:
             init_device = "cpu"
@@ -661,10 +654,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
-            spmd_typechecking=(
-                config.parallelism.spmd_backend == "spmd_types"
-                and config.debug.spmd_typechecking
-            ),
+            spmd_typechecking=config.debug.spmd_typechecking,
         )
         if parallel_dims.pp_enabled:
             self.fwd_bwd_fn = self._pp_forward_backward_body
@@ -968,12 +958,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             else:
                 loss = fwd_bwd()
             detached_loss = loss.detach()
-            local_loss = (
-                detached_loss.to_local()
-                if isinstance(detached_loss, DTensor)
-                else detached_loss
-            )
-            loss_is_finite.logical_and_(torch.isfinite(local_loss).all())
+            loss_is_finite.logical_and_(torch.isfinite(detached_loss).all())
             if should_log:
                 if accumulated_loss is None:
                     # Take ownership before the next replay overwrites the
