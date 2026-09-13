@@ -16,6 +16,7 @@ Two-phase replacement:
       happens later via ``model.parallelize(parallel_dims)``.
 """
 
+from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 
@@ -41,7 +42,7 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts, MoE
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
@@ -114,12 +115,10 @@ def build_and_swap_native_moe(
         if moe_config is None:
             continue
 
-        _, expert_layout = _get_expert_param_info()
         set_moe_sharding_config(
             moe_config,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=expert_layout,
         )
         root_sharding = moe_config.sharding_config
         assert root_sharding is not None
@@ -492,45 +491,11 @@ _LINEAR_INIT = {
     "bias": nn.init.zeros_,
 }
 
-_expert_param_info_cache: tuple[dict, dict] | None = None
 
-
-def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]:
-    """Discover GroupedExperts parameter names and their TP shard placements.
-
-    Builds a tiny throwaway instance on meta device to introspect actual
-    parameter names (which may carry dimension suffixes like ``_EFD``).
-    Returns ``(param_init, param_layout)`` where ``param_init`` maps each
-    name to ``trunc_normal_`` and ``param_layout`` maps each name to the
-    correct ``Shard`` placement for TP.
-    """
-    global _expert_param_info_cache
-    if _expert_param_info_cache is not None:
-        return _expert_param_info_cache
-
-    with torch.device("meta"):
-        temp = GroupedExperts.Config(
-            dim=2,
-            hidden_dim=4,
-            num_experts=2,
-        ).build()
-
+def _get_expert_param_init() -> dict[str, Callable]:
+    """Return initializers for the three logical expert projections."""
     init_fn = partial(nn.init.trunc_normal_, std=0.02)
-    param_init: dict = {}
-    param_layout: dict[str, spmd.PerMeshAxisSpmdType] = {}
-
-    for name, param in temp.named_parameters(recurse=False):
-        param_init[name] = init_fn
-        # (E, hidden_dim, dim) → colwise S(1)  [w1/w3 pattern]
-        # (E, dim, hidden_dim) → rowwise S(2)  [w2 pattern]
-        if param.shape[1] >= param.shape[2]:
-            param_layout[name] = spmd.S(1)
-        else:
-            param_layout[name] = spmd.S(2)
-
-    _expert_param_info_cache = (param_init, param_layout)
-    del temp
-    return _expert_param_info_cache
+    return {"gate": init_fn, "up": init_fn, "down": init_fn}
 
 
 def _build_moe_config(params: dict, config) -> MoE.Config:
@@ -547,13 +512,12 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_limited_groups=params["num_limited_groups"],
     )
 
-    expert_init, _ = _get_expert_param_info()
     routed_experts = make_routed_experts_config(
         dim=params["dim"],
         hidden_dim=params["moe_intermediate_size"],
         num_experts=params["num_experts"],
         top_k=params["top_k"],
-        param_init=expert_init,
+        param_init=_get_expert_param_init(),
         comm_backend=params["comm_backend"],
     )
 

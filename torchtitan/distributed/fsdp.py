@@ -284,9 +284,12 @@ def apply_fsdp_to_decoder(
         if getattr(transformer_block, "moe_enabled", False):
             assert hasattr(transformer_block, "moe")
             # pyrefly: ignore [missing-attribute]
-            experts = transformer_block.moe.routed_experts.expert_parameters_module()
-            expert_params = set(experts.parameters())
-            num_experts = experts.num_experts
+            routed_experts = transformer_block.moe.routed_experts
+            expert_params = {
+                *routed_experts.w13.parameters(),
+                *routed_experts.w2.parameters(),
+            }
+            num_experts = routed_experts.num_experts
 
             if ep_degree > 1:
                 assert edp_mesh is not None
