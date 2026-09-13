@@ -16,7 +16,7 @@ from torchtitan.models.common import (  # noqa: F401
     Conv1d,
     Embedding,
     Linear,
-    ScaledBiasRowwiseLinear,
+    PartialBiasRowwiseLinear,
     SigmoidGatedFeedForward,
 )
 from torchtitan.models.common.config_utils import (
@@ -112,10 +112,10 @@ def _linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _scaled_bias_rowwise_linear(
+def _partial_bias_rowwise_linear(
     in_features: int, out_features: int
-) -> ScaledBiasRowwiseLinear.Config:
-    return ScaledBiasRowwiseLinear.Config(
+) -> PartialBiasRowwiseLinear.Config:
+    return PartialBiasRowwiseLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -184,11 +184,11 @@ def _qwen35_vision_encoder_config(
                 wq=_linear(dim, dim),
                 wk=_linear(dim, dim),
                 wv=_linear(dim, dim),
-                proj=_scaled_bias_rowwise_linear(dim, dim),
+                proj=_partial_bias_rowwise_linear(dim, dim),
             ),
             mlp=VisionMLP.Config(
                 fc1=_linear(dim, ffn_dim),
-                fc2=_scaled_bias_rowwise_linear(ffn_dim, dim),
+                fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
             ),
         ),
         rotary_pos_emb=VisionRotaryEmbedding.Config(
@@ -199,7 +199,7 @@ def _qwen35_vision_encoder_config(
             merged_hidden_size=merged_hidden_size,
             norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
             fc1=_linear(merged_hidden_size, merged_hidden_size),
-            fc2=_scaled_bias_rowwise_linear(merged_hidden_size, out_hidden_size),
+            fc2=_partial_bias_rowwise_linear(merged_hidden_size, out_hidden_size),
         ),
         param_init=_POS_EMBED_INIT,
     )

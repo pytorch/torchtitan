@@ -11,9 +11,9 @@ import pytest
 import torch
 
 import torchtitan.experiments.torchft.trainer as ft
-from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import override
+from torchtitan.config.transform import LoRAConverter
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import model_registry
@@ -22,7 +22,6 @@ from torchtitan.models.llama3 import model_registry
 def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     # Restore shared registration and distributed state after this test.
     monkeypatch.setattr(import_module("torchtitan.config.override"), "_REGISTRY", {})
-    monkeypatch.setattr(ft.dist_utils, "_spmd_backend", "spmd_types")
 
     @override(target=FeedForward.Config)
     def ffn_lora(config):

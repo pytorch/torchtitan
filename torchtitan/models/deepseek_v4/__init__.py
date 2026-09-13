@@ -18,6 +18,7 @@ from torchtitan.models.common import (
     Embedding,
     FeedForward,
     Linear,
+    MoE,
     RMSNorm,
     RoPE,
     RouterGateLinear,
@@ -43,7 +44,7 @@ from .attention import (
 from .compressor import Compressor, Indexer
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
-from .moe import DeepSeekV4MoE, DeepSeekV4Router
+from .moe import DeepSeekV4Router
 from .mtp import MTPBlock
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
@@ -329,7 +330,7 @@ def _make_v4_moe_config(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
 ):
-    return DeepSeekV4MoE.Config(
+    return MoE.Config(
         num_experts=num_experts,
         router=DeepSeekV4Router.Config(
             num_experts=num_experts,
@@ -548,8 +549,10 @@ def _build_mtp_layers(
         layer_id = n_main_layers + depth
         block_cfg = _make_mtp_inner_block(inner_cfg, rope)
         if block_cfg.moe is not None:
-            block_cfg.moe.router.gate.param_init = _depth_init(layer_id)
-            block_cfg.moe.router.layer_id = layer_id
+            router_cfg = block_cfg.moe.router
+            assert isinstance(router_cfg, DeepSeekV4Router.Config)
+            router_cfg.gate.param_init = _depth_init(layer_id)
+            router_cfg.layer_id = layer_id
             block_cfg.moe.routed_experts.inner_experts.param_init = _depth_experts_init(
                 layer_id
             )

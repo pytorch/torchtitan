@@ -8,11 +8,13 @@ import logging
 import re
 from typing import Any
 
-logger = logging.getLogger()
-
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+
 from .model import Llama3Model
+
+
+logger = logging.getLogger(__name__)
 
 
 class Llama3StateDictAdapter(StateDictAdapter):

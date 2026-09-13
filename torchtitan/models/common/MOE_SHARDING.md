@@ -33,7 +33,7 @@ for all four parallelism configurations (EP on/off × SP on/off).
 - **Shared experts** (w1/w2/w3): dense-family TP plan. Colwise for w1/w3,
   rowwise for w2. Output stays `Partial` — reduction happens once at
   the MoE boundary.
-- **Routed experts** (`RoutedExperts`): `LocalMapConfig` converts DTensor
-  inputs to local tensors at the module boundary; dispatch/compute/combine
-  run on local tensors, then the output is wrapped back as `DTensor(Partial)`.
-  The expert-weight `state_shardings` live on its `GroupedExperts` child.
+- **Routed experts** (`RoutedExperts`): the local SPMD region runs
+  dispatch/compute/combine on local tensors while checking its input and
+  output layout contracts. The expert-weight `state_shardings` live on its
+  `GroupedExperts` child.

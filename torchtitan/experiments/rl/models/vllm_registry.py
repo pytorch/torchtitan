@@ -28,7 +28,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, OverrideConfig, ParallelismConfig
@@ -76,9 +76,6 @@ class InferenceParallelismConfig:
     enable_sequence_parallel: bool = False
     """Enable dense sequence parallelism across the tensor-parallel axis."""
 
-    spmd_backend: Literal["partial_dtensor", "spmd_types"] = "spmd_types"
-    """SPMD backend used by TorchTitan model parallelization in the generator."""
-
     @property
     def expert_sequence_parallel_size(self) -> int:
         """TP-axis shard count used internally by expert-parallel MoE."""
@@ -107,7 +104,6 @@ class InferenceParallelismConfig:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
             enable_sequence_parallel=self.enable_sequence_parallel,
-            spmd_backend=self.spmd_backend,
         )
 
 

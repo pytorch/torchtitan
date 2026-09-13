@@ -11,9 +11,6 @@ import torch
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.models.deepseek_v3.config_registry import (
-    deepseek_v3_debugmodel_minimal_async_ep,
-)
 from torchtitan.overrides.fused_swiglu import (
     fused_grouped_experts,
     FusedGroupedExperts,
@@ -21,7 +18,7 @@ from torchtitan.overrides.fused_swiglu import (
     silu_and_mul_forward_kernel,
     silu_and_mul_op,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 _DIM = 16
 _HIDDEN = 32
@@ -41,14 +38,6 @@ def _build_fused_grouped_experts() -> FusedGroupedExperts:
 
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
-    def test_minimal_async_ep_config_imports_override(self):
-        config = deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048)
-
-        self.assertIn(
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-            config.override.imports,
-        )
-
     def test_grouped_experts_config_is_replaced(self):
         cfg = GroupedExperts.Config(
             dim=16,
@@ -89,7 +78,7 @@ class TestFusedGroupedExperts(unittest.TestCase):
     def test_param_init_and_sharding_remapped_to_w13(self):
         """The override remaps both per-param init and state shardings from the
         separate w1_EFD/w3_EFD onto w13, keeps w2_EDF, and preserves the rest of
-        the sharding config (in/out shardings, local_map)."""
+        the sharding config (in/out shardings, local_spmd)."""
         colwise = dense_param_placement(tp=spmd.S(1))  # w1_EFD/w3_EFD: shard hidden
         rowwise = dense_param_placement(tp=spmd.S(2))  # w2_EDF
         base_sharding = ShardingConfig(
@@ -99,7 +88,7 @@ class TestFusedGroupedExperts(unittest.TestCase):
                 "w3_EFD": colwise,
             },
             in_src_shardings={"x_RD": colwise},
-            local_map=LocalMapConfig(in_grad_placements=None),
+            local_spmd=True,
         )
         cfg = GroupedExperts.Config(
             dim=_DIM,
@@ -132,7 +121,7 @@ class TestFusedGroupedExperts(unittest.TestCase):
         self.assertIs(sc.state_shardings["w13"], colwise)
         self.assertIs(sc.state_shardings["w2_EDF"], rowwise)
         self.assertIs(sc.in_src_shardings, base_sharding.in_src_shardings)
-        self.assertIs(sc.local_map, base_sharding.local_map)
+        self.assertIs(sc.local_spmd, base_sharding.local_spmd)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
