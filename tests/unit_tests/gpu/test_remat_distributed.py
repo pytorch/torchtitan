@@ -20,6 +20,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
+from torchtitan.models.common.attention import FlexInnerAttention, GQAttention
+from torchtitan.models.common.cp_attention import (
+    KVAllGatherCPFlexInnerAttention,
+    UlyssesCPFlexInnerAttention,
+)
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.module import Module, ModuleDict
@@ -43,6 +49,40 @@ class _Model(Module):
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         return self.layers["0"](x_TD)
+
+
+class _QKVProjection(Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = Linear.Config(in_features=4, out_features=4).build()
+
+    def forward(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q_THK = self.linear(x_TD).unflatten(-1, (2, 2))
+        return q_THK, q_THK, q_THK
+
+
+class _CPAttentionBlock(Module):
+    def __init__(self, inner_attention: Module):
+        super().__init__()
+        attention = GQAttention.__new__(GQAttention)
+        Module.__init__(attention)
+        attention.n_heads = 2
+        attention.n_kv_heads = 2
+        attention.head_dim = 2
+        attention.enable_gqa = False
+        attention.rope = None
+        attention.qkv_linear = _QKVProjection()
+        attention.wo = Linear.Config(in_features=4, out_features=4).build()
+        attention.inner_attention = inner_attention
+        attention.q_norm = None
+        attention.k_norm = None
+        attention.scaling = None
+        self.attention = attention
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.attention(x_TD, attention_masks=None).sum()
 
 
 class _LocalExpert(Module):
@@ -117,6 +157,76 @@ class TestDistributedRematRegions(DTensorTestBase):
         torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
         for actual_grad, expected_grad in zip(actual[2], expected[2]):
             torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
+
+    @with_comms
+    def test_cp_collective_replay(self):
+        mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("cp",)
+        )
+        for inner_attention, num_collectives_per_forward in (
+            (KVAllGatherCPFlexInnerAttention.Config().build(), 2),
+            (UlyssesCPFlexInnerAttention.Config().build(), 4),
+        ):
+            for save_regions, expected_extra_collectives in (
+                ([], num_collectives_per_forward),
+                (["attention.inner_attention"], 0),
+            ):
+                with (
+                    self.subTest(
+                        inner_attention=type(inner_attention).__name__,
+                        save_regions=save_regions,
+                    ),
+                    _use_spmd_types(mesh),
+                ):
+                    torch.manual_seed(42)
+                    baseline = _Model(
+                        _CPAttentionBlock(type(inner_attention).Config().build())
+                    ).to(self.device_type)
+                    remat_model = _Model(
+                        _CPAttentionBlock(type(inner_attention).Config().build())
+                    ).to(self.device_type)
+                    remat_model.load_state_dict(baseline.state_dict())
+                    RegionAC.Config(save_regions=save_regions).build().apply(
+                        remat_model
+                    )
+
+                    num_collectives = 0
+                    original_redistribute = spmd.redistribute
+
+                    def counted_redistribute(*args, **kwargs):
+                        nonlocal num_collectives
+                        num_collectives += 1
+                        return original_redistribute(*args, **kwargs)
+
+                    def inner_attention_forward(self, q, k, v, **kwargs):
+                        return (
+                            q
+                            + k.mean(dim=0, keepdim=True)
+                            + v.mean(dim=0, keepdim=True)
+                        )
+
+                    x_TD = torch.randn(4, 4, device=self.device_type)
+                    with (
+                        patch.object(
+                            spmd, "redistribute", side_effect=counted_redistribute
+                        ),
+                        patch.object(
+                            FlexInnerAttention,
+                            "forward",
+                            new=inner_attention_forward,
+                        ),
+                    ):
+                        expected = _run_forward_backward(baseline, x_TD)
+                        baseline_collectives = num_collectives
+                        num_collectives = 0
+                        actual = _run_forward_backward(remat_model, x_TD)
+
+                    self._assert_results_equal(expected, actual)
+                    self.assertEqual(baseline_collectives, num_collectives_per_forward)
+                    self.assertEqual(
+                        num_collectives,
+                        baseline_collectives + expected_extra_collectives,
+                    )
 
     @with_comms
     def test_standard_all_to_all_collective_replay(self):
