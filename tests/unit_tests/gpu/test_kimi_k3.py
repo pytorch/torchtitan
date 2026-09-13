@@ -200,7 +200,7 @@ class TestKimiK3(unittest.TestCase):
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         hf_state_dict = adapter.to_hf(state_dict)
         self.assertIn(
-            "layers.1.moe.routed_experts.inner_experts.w1_EFD",
+            "layers.1.moe.routed_experts.w13.weight",
             state_dict,
         )
         self.assertIn(

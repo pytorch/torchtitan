@@ -23,6 +23,7 @@ from torchtitan.models.common import (
     RouterGateLinear,
 )
 from torchtitan.models.common.config_utils import (
+    fused_gate_up_init,
     make_ffn_config,
     make_routed_experts_config,
 )
@@ -84,9 +85,9 @@ def _depth_init(layer_id: int) -> dict[str, Callable]:
 
 def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
-        "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
-        "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "gate": partial(nn.init.trunc_normal_, std=0.02),
+        "down": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "up": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
     }
 
 
@@ -550,9 +551,11 @@ def _build_mtp_layers(
         if block_cfg.moe is not None:
             block_cfg.moe.router.gate.param_init = _depth_init(layer_id)
             block_cfg.moe.router.layer_id = layer_id
-            block_cfg.moe.routed_experts.inner_experts.param_init = _depth_experts_init(
-                layer_id
-            )
+            expert_init = _depth_experts_init(layer_id)
+            block_cfg.moe.routed_experts.w13.param_init = {
+                "weight": fused_gate_up_init(expert_init["gate"], expert_init["up"])
+            }
+            block_cfg.moe.routed_experts.w2.param_init = {"weight": expert_init["down"]}
             if block_cfg.moe.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
                 block_cfg.moe.shared_experts.w2.param_init = depth_init
