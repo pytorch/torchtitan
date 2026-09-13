@@ -13,6 +13,8 @@ from torchtitan.overrides.fused_swiglu import (
     silu_and_mul_forward_kernel,
     silu_and_mul_op,
 )
+
+
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
     def test_silu_and_mul_custom_op_matches_reference_with_offsets(self):
