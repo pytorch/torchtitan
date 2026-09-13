@@ -53,9 +53,7 @@ from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import (
-    HybridEPTokenDispatcher,
-)
+from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.observability.profiler import Profiler
