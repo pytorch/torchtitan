@@ -55,6 +55,7 @@ from torchtitan.experiments.graph_trainer.qwen3 import (
 from torchtitan.experiments.graph_trainer.qwen3.parallelize import annotate_qwen3
 from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
     build_minimal_trainer,
+    single_device_parallel_dims,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -115,6 +116,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
     attn_backend: str = "sdpa"
 
     def setUp(self):
+        self.parallel_dims = self.enterContext(single_device_parallel_dims())
+
         # Disable max_autotune for FlexInnerAttention to ensure bitwise-identical
         # results between eager (torch.compile) and traced (regional_inductor)
         # paths. max_autotune causes kernel config divergence between the two.
@@ -224,6 +227,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             compile_disable_passes=compile_disable_passes,
             compile_numerics_changing_optim=numerics_changing_optim,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
+            parallel_dims=self.parallel_dims,
         )
         global_valid_tokens = torch.tensor(NUM_TOKENS, dtype=torch.float, device="cuda")
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)

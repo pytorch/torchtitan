@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import math
 import os
 from collections import defaultdict
@@ -15,16 +17,20 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from torchtitan.components.metrics import (
+from torchtitan.config import Configurable
+from torchtitan.observability.logging import warn_once
+
+from torchtitan.observability.metrics import (
     BaseLogger as MetricBackend,
     TensorBoardLogger,
     WandBLogger,
 )
-from torchtitan.config import Configurable
-from torchtitan.tools.logging import logger, warn_once
 
 from .console import log_to_console
 from .types import Metric, MetricValue
+
+
+logger = logging.getLogger(__name__)
 
 
 __all__ = [
@@ -36,7 +42,7 @@ __all__ = [
 class MetricsProcessor(Configurable):
     """Aggregates Metric records and dispatches to backends and console.
 
-    TODO: unify with torchtitan/components/metrics.py:MetricsProcessor.
+    TODO: unify with torchtitan/observability/metrics.py:MetricsProcessor.
 
     Args:
         config: MetricsProcessor.Config with backend toggles and the

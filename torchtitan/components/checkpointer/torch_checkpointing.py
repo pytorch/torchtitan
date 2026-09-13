@@ -48,7 +48,6 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
 from .base import (
@@ -60,6 +59,9 @@ from .base import (
     OPTIMIZER,
     purge_thread,
 )
+
+logger = logging.getLogger(__name__)
+
 
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
