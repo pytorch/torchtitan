@@ -9,13 +9,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, TYPE_CHECKING
 
-import spmd_types as spmd
 import torch
 import torch.distributed as dist
-from spmd_types import SpmdType
 from torch.distributed.pipelining.schedules import (
     _analyze_pipeline_resource_liveness,
     PipelineScheduleMulti,
@@ -24,11 +22,11 @@ from torch.distributed.tensor import DTensor
 from torch.utils.hooks import RemovableHandle
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh
 
-from torchtitan.models.common.moe import GroupedExperts, RoutedExperts
+from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.moe import ExpertActivation, RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.logging import logger
 
 from dist_moe import (
@@ -133,68 +131,6 @@ class DistMoeBackendConfig:
             raise ValueError("bf16_kernel_config requires dtype='bf16'")
 
 
-def _fused_param_init(param_init: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Translate stock W1/W3 initialization to the fused W13 parameter."""
-    if param_init is None:
-        return None
-    w1_init = param_init.get("w1_EFD")
-    w3_init = param_init.get("w3_EFD")
-    fused = {
-        name: initializer
-        for name, initializer in param_init.items()
-        if name not in ("w1_EFD", "w3_EFD")
-    }
-    if w1_init is not None and w3_init is not None:
-        if not callable(w1_init) or not callable(w3_init):
-            raise TypeError("W1 and W3 initializers must be callable")
-        init_w1: Callable[..., object] = w1_init
-        init_w3: Callable[..., object] = w3_init
-
-        def init_w13(weight_EGFD: torch.Tensor) -> None:
-            init_w1(weight_EGFD[:, 0])
-            init_w3(weight_EGFD[:, 1])
-
-        fused["w13_EGFD"] = init_w13
-    return fused or None
-
-
-def _insert_gate_axis(layout: SpmdType) -> SpmdType:
-    """Shift stock weight shard dimensions after inserting W13's gate axis."""
-    local_type = {
-        axis: spmd.S(axis_type.dim + 1)
-        if isinstance(axis_type, spmd.Shard) and axis_type.dim >= 1
-        else axis_type
-        for axis, axis_type in layout.local_type.items()
-    }
-    partition_spec = layout.partition_spec
-    if partition_spec is not None:
-        partition_spec = spmd.PartitionSpec(
-            *partition_spec[:1], None, *partition_spec[1:]
-        )
-    return SpmdType(local_type, partition_spec)
-
-
-def _merge_sharding_configs(
-    routed: ShardingConfig,
-    experts: ShardingConfig,
-) -> ShardingConfig:
-    """Move stock expert state placements onto the fused routed module."""
-    state = dict(experts.state_shardings)
-    w1 = state.pop("w1_EFD")
-    w3 = state.pop("w3_EFD")
-    if w1 != w3:
-        raise ValueError("Dist-MoE requires identical W1 and W3 sharding")
-    state["w13_EGFD"] = _insert_gate_axis(w1)
-    return replace(routed, state_shardings=state)
-
-
-def _state_values_equal(left: Any, right: Any) -> bool:
-    """Return whether duplicated optimizer metadata can be fused."""
-    if isinstance(left, torch.Tensor) and isinstance(right, torch.Tensor):
-        return bool(torch.equal(left, right))
-    return left == right
-
-
 class DistMoeConverter(ModelConfigConverter):
     """Replace stock routed experts with the fused Dist-MoE backend."""
 
@@ -217,9 +153,14 @@ class DistMoeConverter(ModelConfigConverter):
                     "express model-specific behavior through the common routed-"
                     "expert contract"
                 )
-            if type(config.inner_experts) is not GroupedExperts.Config:
+            if (
+                type(config.w13) is not GroupedLinear.Config
+                or type(config.w2) is not GroupedLinear.Config
+                or type(config.activation) is not ExpertActivation.Config
+            ):
                 raise TypeError(
-                    "Dist-MoE requires the stock GroupedExperts parameter layout"
+                    "Dist-MoE requires the stock grouped-linear projections and "
+                    "expert activation"
                 )
             if not isinstance(config.token_dispatcher, AllToAllTokenDispatcher.Config):
                 raise ValueError(
@@ -227,10 +168,11 @@ class DistMoeConverter(ModelConfigConverter):
                     "with a non-standard token dispatcher"
                 )
             replacement = DistMoeRoutedExperts.Config(
-                inner_experts=config.inner_experts,
+                w13=config.w13,
+                w2=config.w2,
+                activation=config.activation,
                 token_dispatcher=config.token_dispatcher,
                 backend=self.config.backend,
-                param_init=_fused_param_init(config.inner_experts.param_init),
                 sharding_config=config.sharding_config,
             )
             if parent is None:
@@ -329,61 +271,31 @@ class DistMoeRoutedExperts(RoutedExperts):
         supports_cuda_graphs: ClassVar[bool] = True
         backend: DistMoeBackendConfig = field(default_factory=DistMoeBackendConfig)
 
-        def set_sharding_configs(
-            self,
-            routed: ShardingConfig,
-            experts: ShardingConfig,
-        ) -> None:
-            """Attach activation and direct expert-parameter sharding."""
-            self.sharding_config = _merge_sharding_configs(routed, experts)
-
     def __init__(self, config: Config):
-        Module.__init__(self)
-        experts = config.inner_experts
-        self.num_experts = experts.num_experts
-        self.hidden_dim = experts.dim
-        self.intermediate_dim = experts.hidden_dim
+        super().__init__(config)
+        self.hidden_dim = config.w13.in_features
+        self.intermediate_dim = config.w2.in_features
         self.top_k = config.token_dispatcher.top_k
-        self.w13_EGFD = torch.nn.Parameter(
-            torch.empty(
-                experts.num_experts,
-                2,
-                experts.hidden_dim,
-                experts.dim,
-            )
-        )
-        self.w2_EDF = torch.nn.Parameter(
-            torch.empty(experts.num_experts, experts.dim, experts.hidden_dim)
-        )
+        if self.w13.bias is not None or self.w2.bias is not None:
+            raise ValueError("Dist-MoE does not support expert projection biases")
         if config.backend.dtype == "mxfp8":
-            self.w13_EGFD = torch.nn.Parameter(
-                _DistMoeW13ShardedTensor(self.w13_EGFD.data),
-                requires_grad=self.w13_EGFD.requires_grad,
+            self.w13.weight = torch.nn.Parameter(
+                _DistMoeW13ShardedTensor(self.w13.weight.data),
+                requires_grad=self.w13.weight.requires_grad,
             )
-            self.w2_EDF = torch.nn.Parameter(
-                _DistMoeW2ShardedTensor(self.w2_EDF.data),
-                requires_grad=self.w2_EDF.requires_grad,
+            self.w2.weight = torch.nn.Parameter(
+                _DistMoeW2ShardedTensor(self.w2.weight.data),
+                requires_grad=self.w2.weight.requires_grad,
             )
         self._backend_config = config.backend
         self._runtime: _DistMoeRuntime | None = None
         self._ep_group: dist.ProcessGroup | None = None
         self._sp_size = 1
-        self.register_state_dict_post_hook(type(self)._split_state_on_save)
-        self.register_load_state_dict_pre_hook(type(self)._merge_state_on_load)
-
-    def expert_parameters_module(self) -> torch.nn.Module:
-        """Return the module that directly owns routed-expert parameters."""
-        return self
-
-    def replace_expert_parameters_module(
-        self, module: torch.nn.Module
-    ) -> torch.nn.Module:
-        """Return the wrapper because this backend owns parameters directly."""
-        return module
 
     def parallelize(self, parallel_dims: ParallelDims) -> None:
         """Apply declared sharding and retain the expert-parallel group."""
-        # Dist-MoE owns dispatch and has no stock token-dispatcher child.
+        # Dist-MoE bypasses the stock dispatcher at runtime but keeps the common
+        # module hierarchy and applies each child's declared parameter sharding.
         Module.parallelize(self, parallel_dims)
         ep_mesh = parallel_dims.get_optional_mesh("ep", include_singleton_axes=True)
         self._ep_group = ep_mesh.get_group() if ep_mesh is not None else None
@@ -396,10 +308,10 @@ class DistMoeRoutedExperts(RoutedExperts):
         buffer_device: torch.device | None = None,
     ) -> None:
         if self._runtime is None:
-            if self.w13_EGFD.device.type == "cpu" and buffer_device is None:
+            if self.w13.weight.device.type == "cpu" and buffer_device is None:
                 return
             raise RuntimeError("Dist-MoE runtime was not configured")
-        self._runtime.initialize(buffer_device or self.w13_EGFD.device)
+        self._runtime.initialize(buffer_device or self.w13.weight.device)
 
     def forward(
         self,
@@ -429,11 +341,15 @@ class DistMoeRoutedExperts(RoutedExperts):
             raise RuntimeError("Dist-MoE context is not initialized")
 
         w13 = (
-            self.w13_EGFD.to_local()
-            if isinstance(self.w13_EGFD, DTensor)
-            else self.w13_EGFD
+            self.w13.weight.to_local()
+            if isinstance(self.w13.weight, DTensor)
+            else self.w13.weight
         )
-        w2 = self.w2_EDF.to_local() if isinstance(self.w2_EDF, DTensor) else self.w2_EDF
+        w2 = (
+            self.w2.weight.to_local()
+            if isinstance(self.w2.weight, DTensor)
+            else self.w2.weight
+        )
         if self._backend_config.dtype == "mxfp8":
             from torchtitan.components.quantization._fsdp_tensor import (
                 _UnshardedFSDPTensor,
@@ -477,7 +393,7 @@ class DistMoeRoutedExperts(RoutedExperts):
 
         options = DistMoeExecutionOptions(
             inplace_wgrad_accum=self._backend_config.inplace_wgrad_accum,
-            wgrad_parameter_owners=(self.w13_EGFD, self.w2_EDF)
+            wgrad_parameter_owners=(self.w13.weight, self.w2.weight)
             if self._backend_config.inplace_wgrad_accum
             else None,
             experts_output_postprocess=postprocess,
@@ -491,116 +407,6 @@ class DistMoeRoutedExperts(RoutedExperts):
             self._runtime.context,
             options=options,
         )
-
-    @staticmethod
-    def _split_state_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Expose fused parameters under the stock grouped-expert keys."""
-        del module, local_metadata
-        w13 = state_dict.pop(f"{prefix}w13_EGFD")
-        w2 = state_dict.pop(f"{prefix}w2_EDF")
-        if isinstance(w2, _DistMoeW2ShardedTensor):
-            w2 = w2._tensor
-        stock = f"{prefix}inner_experts."
-        state_dict[f"{stock}w1_EFD"] = w13[:, 0].contiguous()
-        state_dict[f"{stock}w2_EDF"] = w2
-        state_dict[f"{stock}w3_EFD"] = w13[:, 1].contiguous()
-
-    @staticmethod
-    def _merge_state_on_load(module, state_dict, prefix, *args) -> None:
-        """Merge stock grouped-expert keys into the fused parameters."""
-        del module, args
-        stock = f"{prefix}inner_experts."
-        w1_key = f"{stock}w1_EFD"
-        w3_key = f"{stock}w3_EFD"
-        w2_key = f"{stock}w2_EDF"
-        if w1_key in state_dict and w3_key in state_dict:
-            state_dict[f"{prefix}w13_EGFD"] = torch.stack(
-                [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=1
-            )
-        if w2_key in state_dict:
-            state_dict[f"{prefix}w2_EDF"] = state_dict.pop(w2_key)
-
-    def _optimizer_state_dict_post_hook(
-        self,
-        state_dict: dict[str, Any],
-        prefix: str,
-    ) -> None:
-        """Expose fused optimizer state under stock grouped-expert keys."""
-        self._split_flat_optimizer_keys(state_dict, prefix)
-
-    def _optimizer_load_state_dict_pre_hook(
-        self,
-        state_dict: dict[str, Any],
-        prefix: str,
-    ) -> None:
-        """Merge stock grouped-expert optimizer state for the fused weights."""
-        self._merge_flat_optimizer_keys(state_dict, prefix)
-
-    def _split_flat_optimizer_keys(
-        self,
-        state_dict: dict[str, Any],
-        prefix: str,
-    ) -> None:
-        """Rewrite fused flat optimizer entries in place."""
-        for section in ("state", "param_groups"):
-            fused_prefix = f"{section}.{prefix}w13_EGFD."
-            stock_prefix = f"{section}.{prefix}inner_experts."
-            for key in [key for key in state_dict if key.startswith(fused_prefix)]:
-                suffix = key[len(fused_prefix) :]
-                value = state_dict.pop(key)
-                if (
-                    isinstance(value, torch.Tensor)
-                    and value.shape == self.w13_EGFD.shape
-                ):
-                    w1_value = value[:, 0].contiguous()
-                    w3_value = value[:, 1].contiguous()
-                else:
-                    w1_value = w3_value = value
-                state_dict[f"{stock_prefix}w1_EFD.{suffix}"] = w1_value
-                state_dict[f"{stock_prefix}w3_EFD.{suffix}"] = w3_value
-
-            w2_prefix = f"{section}.{prefix}w2_EDF."
-            for key in [key for key in state_dict if key.startswith(w2_prefix)]:
-                suffix = key[len(w2_prefix) :]
-                state_dict[f"{stock_prefix}w2_EDF.{suffix}"] = state_dict.pop(key)
-
-    def _merge_flat_optimizer_keys(
-        self,
-        state_dict: dict[str, Any],
-        prefix: str,
-    ) -> None:
-        """Rewrite stock flat optimizer entries in place."""
-        stock_shape = (self.w13_EGFD.shape[0], *self.w13_EGFD.shape[2:])
-        for section in ("state", "param_groups"):
-            stock_prefix = f"{section}.{prefix}inner_experts."
-            w1_prefix = f"{stock_prefix}w1_EFD."
-            for w1_key in [key for key in state_dict if key.startswith(w1_prefix)]:
-                suffix = w1_key[len(w1_prefix) :]
-                w3_key = f"{stock_prefix}w3_EFD.{suffix}"
-                if w3_key not in state_dict:
-                    raise KeyError(f"Missing matching optimizer key {w3_key!r}")
-                w1_value = state_dict.pop(w1_key)
-                w3_value = state_dict.pop(w3_key)
-                if (
-                    isinstance(w1_value, torch.Tensor)
-                    and isinstance(w3_value, torch.Tensor)
-                    and w1_value.shape == stock_shape
-                    and w3_value.shape == stock_shape
-                ):
-                    fused_value = torch.stack([w1_value, w3_value], dim=1)
-                else:
-                    if not _state_values_equal(w1_value, w3_value):
-                        raise ValueError(
-                            "Optimizer metadata differs between "
-                            f"{w1_key!r} and {w3_key!r}"
-                        )
-                    fused_value = w1_value
-                state_dict[f"{section}.{prefix}w13_EGFD.{suffix}"] = fused_value
-
-            w2_prefix = f"{stock_prefix}w2_EDF."
-            for key in [key for key in state_dict if key.startswith(w2_prefix)]:
-                suffix = key[len(w2_prefix) :]
-                state_dict[f"{section}.{prefix}w2_EDF.{suffix}"] = state_dict.pop(key)
 
 
 def _annex_config(

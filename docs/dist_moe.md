@@ -57,19 +57,20 @@ ordered autograd operation.
 
 ## Model and checkpoint contract
 
-`DistMoeConverter` accepts the stock `RoutedExperts.Config` backed by
-`GroupedExperts` and `AllToAllTokenDispatcher`. It replaces the runtime module
-with `DistMoeRoutedExperts`, which directly owns:
+`DistMoeConverter` accepts the stock `RoutedExperts.Config` backed by the
+standard `GroupedLinear` projections, SwiGLU activation, and
+`AllToAllTokenDispatcher`. It replaces only the routed-expert implementation;
+the common module hierarchy remains:
 
-- `w13_EGFD`: fused gate and up-projection weights.
-- `w2_EDF`: down-projection weights.
+- `w13.weight`: structured `[E, 2, F, D]` gate/up weights.
+- `w2.weight`: `[E, D, F]` down-projection weights.
+- `activation`: the expert activation module.
+- `token_dispatcher`: the common dispatcher configuration and module.
 
-There is deliberately no runtime `inner_experts` child. Generic TorchTitan
-code finds the true parameter owner through `expert_parameters_module()`.
-State-dict and optimizer-state hooks translate the fused representation back
-to the stock `inner_experts.w{1,2,3}_EFD` keys. A stock checkpoint therefore
-loads into Dist-MoE, and a Dist-MoE checkpoint remains consumable by the stock
-grouped-experts backend.
+The stock and Dist-MoE implementations therefore have identical native model
+and optimizer keys. No ownership API, runtime packing, or state-dict rewrite is
+needed. External checkpoint adapters convert separate or packed gate/up weights
+to the structured W13 layout at the checkpoint boundary.
 
 ## FSDP and MXFP8 weights
 
