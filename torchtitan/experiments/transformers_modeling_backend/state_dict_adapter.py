@@ -26,9 +26,6 @@ from typing import Any
 
 import torch
 
-from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
-    _get_expert_param_info,
-)
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 from .model import HFTransformerModel
