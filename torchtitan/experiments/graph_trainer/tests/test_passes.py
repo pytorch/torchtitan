@@ -515,7 +515,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.moe.router",
                     "layers.1.moe.shared_experts",
                 ],
-                "layers.1.moe.routed_experts.inner_experts",
+                [
+                    "layers.1.moe.routed_experts.w13",
+                    "layers.1.moe.routed_experts.w2",
+                ],
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -1152,12 +1155,12 @@ class TestFsdpDenseSchedulerPass(TestCase):
                 c10d.all_to_all_single.default,
                 args=(ffn_norm, [], [], "ep_pg"),
             ),
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts",
             backward=True,
         )
         moe_dispatch_wait = self._tag_fsdp_schedule_node(
             graph.call_function(c10d.wait_tensor.default, args=(moe_dispatch,)),
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts",
             backward=True,
         )
         dense1_attention = self._tag_fsdp_schedule_node(
@@ -3830,7 +3833,13 @@ class TestChunkPasses(TestCase):
             ],
             buckets,
         )
-        self.assertIn("layers.1.moe.routed_experts.inner_experts", buckets)
+        self.assertIn(
+            [
+                "layers.1.moe.routed_experts.w13",
+                "layers.1.moe.routed_experts.w2",
+            ],
+            buckets,
+        )
         self.assertNotIn("layers.1", buckets)
 
     def test_prepare_ep_overlap_trace_inputs_marks_batch_dims(self):

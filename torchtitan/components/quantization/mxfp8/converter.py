@@ -11,8 +11,7 @@ from typing import Literal
 import torch
 
 from torchtitan.components.quantization import QuantizationConverter
-from torchtitan.models.common.linear import Linear, RouterGateLinear
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import GroupedLinear, Linear, RouterGateLinear
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -182,25 +181,25 @@ class MXFP8LinearConverter(QuantizationConverter):
         return model_config
 
 
-_mxfp8_experts_cache: dict[type, type] = {}
+_mxfp8_grouped_linear_cache: dict[type, type] = {}
 
 
-def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
+def _get_mxfp8_grouped_linear_cls(parent_cls: type) -> type:
     """Get or create an MXFP8-quantized subclass of *parent_cls*.
 
-    Works for any experts module exposing the ``_grouped_mm`` seam (the common
-    ``GroupedExperts`` and ``GptOssGroupedExperts``). The returned class has a
-    proper ``_owner`` set by ``__init_subclass__``.
+    Works for any ``GroupedLinear`` subclass while preserving model-specific
+    bias behavior. The returned class has a proper ``_owner`` set by
+    ``__init_subclass__``.
 
     The subclass overrides ``_grouped_mm`` to call torchao's
     ``_quantize_then_scaled_grouped_mm``.
     """
-    if parent_cls in _mxfp8_experts_cache:
-        return _mxfp8_experts_cache[parent_cls]
+    if parent_cls in _mxfp8_grouped_linear_cache:
+        return _mxfp8_grouped_linear_cache[parent_cls]
 
     parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
 
-    class MXFP8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+    class MXFP8GroupedLinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             recipe_name: str = "mxfp8_rceil"
@@ -215,25 +214,25 @@ def _get_mxfp8_grouped_experts_cls(parent_cls: type) -> type:
             recipe = MXFP8TrainingRecipe(config.recipe_name)
             self._mxfp8_op_config = MXFP8TrainingOpConfig.from_recipe(recipe)
 
-        def _grouped_mm(self, *, A, weight_EOI, offs):
+        def _grouped_mm(self, *, input, weight, offsets):
             from torchao.prototype.moe_training.utils import (
                 _quantize_then_scaled_grouped_mm,
             )
 
             return _quantize_then_scaled_grouped_mm(
-                A,
-                weight_EOI.bfloat16().transpose(-2, -1),
+                input,
+                weight.bfloat16().transpose(-2, -1),
                 config=self._mxfp8_op_config,
-                offs=offs,
+                offs=offsets,
             )
 
-    MXFP8GroupedExperts.__name__ = f"MXFP8{parent_cls.__name__}"
-    MXFP8GroupedExperts.__qualname__ = f"MXFP8{parent_cls.__name__}"
-    _mxfp8_experts_cache[parent_cls] = MXFP8GroupedExperts
-    return MXFP8GroupedExperts
+    MXFP8GroupedLinear.__name__ = f"MXFP8{parent_cls.__name__}"
+    MXFP8GroupedLinear.__qualname__ = f"MXFP8{parent_cls.__name__}"
+    _mxfp8_grouped_linear_cache[parent_cls] = MXFP8GroupedLinear
+    return MXFP8GroupedLinear
 
 
-class MXFP8GroupedExpertsConverter(QuantizationConverter):
+class MXFP8GroupedLinearConverter(QuantizationConverter):
     """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
 
     @dataclass(kw_only=True, slots=True)
@@ -269,25 +268,25 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
             )
 
     def convert(self, model_config):
-        for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            # ``parent`` is the RoutedExperts.Config owning inner_experts + dispatcher.
-            swap_token_dispatcher(parent, self.config.pad_multiple)
+        routed_configs: dict[int, object] = {}
+        for _fqn, config, parent, attr in model_config.traverse(GroupedLinear.Config):
+            if parent is None or isinstance(parent, list):
+                raise ValueError("GroupedLinear must be owned by RoutedExperts")
+            routed_configs[id(parent)] = parent
             base_module_cls = type(config)._owner
-            quantized_cls = _get_mxfp8_grouped_experts_cls(base_module_cls)
+            quantized_cls = _get_mxfp8_grouped_linear_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
                 recipe_name=self.config.recipe_name,
             )
-            if parent is None:
-                model_config = new_config
-            elif isinstance(parent, list):
-                parent[attr] = new_config
-            else:
-                setattr(parent, attr, new_config)
+            setattr(parent, attr, new_config)
+
+        for routed_config in routed_configs.values():
+            swap_token_dispatcher(routed_config, self.config.pad_multiple)
 
         logger.info(
-            f"Converted GroupedExperts to use dynamic {self.config.recipe_name} "
-            "quantization for grouped_mm ops"
+            f"Converted GroupedLinear modules to use dynamic {self.config.recipe_name} "
+            "quantization for grouped_mm"
         )
         return model_config
