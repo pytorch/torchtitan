@@ -47,9 +47,9 @@ from .token_dispatcher import LocalTokenDispatcher
 class GroupedExperts(Module):
     """SwiGLU experts with one physical interleaved gate-up parameter.
 
-    ``w13_EF2D`` has shape ``(E, F, 2, D)``, with gate and up stored on the size-2
-    axis. Forward flattens the middle dimensions to ``(E, 2F, D)`` for one
-    grouped GEMM.
+    ``w13_E_2F_D`` has shape ``(E, 2F, D)`` with interleaved gate and up rows,
+    matching the dense FeedForward ``w13`` layout. It is consumed directly by
+    one grouped GEMM.
     State-dict hooks expose the logical ``w1_EFD`` and ``w3_EFD`` checkpoint
     keys while retaining the fused parameter internally.
     """
@@ -64,11 +64,10 @@ class GroupedExperts(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.num_experts = config.num_experts
-        self.w13_EF2D = nn.Parameter(
+        self.w13_E_2F_D = nn.Parameter(
             torch.empty(
                 config.num_experts,
-                config.hidden_dim,
-                2,
+                2 * config.hidden_dim,
                 config.dim,
             )
         )
@@ -82,9 +81,10 @@ class GroupedExperts(Module):
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
         """Expose fused experts under the logical w1/w3 checkpoint keys."""
-        w13_EF2D = state_dict.pop(f"{prefix}w13_EF2D")
-        state_dict[f"{prefix}w1_EFD"] = w13_EF2D[:, :, 0, :].contiguous()
-        state_dict[f"{prefix}w3_EFD"] = w13_EF2D[:, :, 1, :].contiguous()
+        w13_E_2F_D = state_dict.pop(f"{prefix}w13_E_2F_D")
+        gate_up_EF2D = w13_E_2F_D.unflatten(1, (-1, 2))
+        state_dict[f"{prefix}w1_EFD"] = gate_up_EF2D[:, :, 0, :].contiguous()
+        state_dict[f"{prefix}w3_EFD"] = gate_up_EF2D[:, :, 1, :].contiguous()
 
     @staticmethod
     def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
@@ -93,9 +93,9 @@ class GroupedExperts(Module):
         up_key = f"{prefix}w3_EFD"
         if gate_key not in state_dict or up_key not in state_dict:
             return
-        state_dict[f"{prefix}w13_EF2D"] = torch.stack(
+        state_dict[f"{prefix}w13_E_2F_D"] = torch.stack(
             [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=2
-        )
+        ).flatten(1, 2)
 
     def forward(
         self,
@@ -119,11 +119,10 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        E, F, _, D = self.w13_EF2D.shape
-        w13_E_2F_D = self.w13_EF2D.reshape(E, F * 2, D)
+        F = self.w13_E_2F_D.shape[1] // 2
         gate_up_R_2F = self._grouped_mm(
             A=x_RD.bfloat16(),
-            weight_EOI=w13_E_2F_D.bfloat16(),
+            weight_EOI=self.w13_E_2F_D.bfloat16(),
             offs=offsets_E,
         )
         gate_RF, up_RF = gate_up_R_2F.reshape(-1, F, 2).unbind(-1)
