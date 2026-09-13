@@ -36,10 +36,10 @@ checkpoint=CheckpointManager.Config(
 In some cases, you may want to partially load from a previous-trained checkpoint and modify certain settings, such as the number of GPUs or the current step. To achieve this, you can use the `exclude_from_loading` parameter to specify which keys should be excluded from loading.
 ```python
 checkpoint=CheckpointManager.Config(
-    exclude_from_loading=["data_loader", "lr_scheduler"],
+    exclude_from_loading=["dataloader", "lr_scheduler"],
 ),
 ```
-When used in command line: `--checkpoint.exclude_from_loading data_loader,lr_scheduler`.
+When used in command line: `--checkpoint.exclude_from_loading dataloader,lr_scheduler`.
 
 5. EXAMPLE CHECKPOINT CONFIGURATION
 ```python
