@@ -84,7 +84,10 @@ from torchtitan.experiments.graph_trainer.passes import (
     final_inductor_compile_passes,
 )
 from torchtitan.protocols.model import BaseModel
-from torchtitan.tools.logging import logger
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

@@ -11,10 +11,12 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+from torch import nn
 
 from torchtitan.distributed.spmd_types import spmd_mesh_size
+from torchtitan.models.common.activation import ActivationFn
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.moe import ExpertActivation, MoE
+from torchtitan.models.common.moe import MoE
 
 
 class ScaleBiasForward(torch.autograd.Function):
@@ -79,32 +81,73 @@ def _swiglu_components(
     return torch.addcmul(out_glu, out_glu, up)
 
 
-class GptOssExpertActivation(ExpertActivation):
+class GptOssSwiGLU(ActivationFn):
     """GPT-OSS clamped SwiGLU activation."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ExpertActivation.Config):
+    class Config(ActivationFn.Config):
         swiglu_limit: float = 7.0
 
     def __init__(self, config: Config):
-        super().__init__(config)
         self.swiglu_limit = config.swiglu_limit
 
-    def forward(
+    def __call__(
         self,
         gate_RF: torch.Tensor,
         up_RF: torch.Tensor,
-        offsets_E: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
-        del offsets_E
+        del kwargs
         return _swiglu_components(gate_RF, up_RF, limit=self.swiglu_limit)
 
 
-class GptOssDownGroupedLinear(GroupedLinear):
-    """Grouped down projection with GPT-OSS TP bias semantics."""
+class GptOssGroupedLinear(GroupedLinear):
+    """Grouped linear with GPT-OSS per-expert bias."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedLinear.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.bias = nn.Parameter(torch.empty(config.group_size, *self.output_shape))
+
+    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
+        output_RO = super().forward(input_RI, offsets_E)
+        bias_RO = self._expand_grouped_bias(
+            self.bias.flatten(1), offsets_E, output_RO.shape[0]
+        ).reshape_as(output_RO)
+        return self._add_grouped_bias(output_RO, bias_RO)
+
+    @staticmethod
+    def _expand_grouped_bias(
+        bias_EO: torch.Tensor,
+        offsets_E: torch.Tensor,
+        output_rows: int,
+    ) -> torch.Tensor:
+        """Expand expert bias across routed rows and zero-valued tail padding."""
+        counts_E = torch.diff(torch.cat((offsets_E.new_zeros(1), offsets_E)))
+        tail_count = (output_rows - offsets_E[-1]).unsqueeze(0).to(counts_E.dtype)
+        padded_bias = torch.cat((bias_EO, bias_EO.new_zeros(1, bias_EO.shape[-1])))
+        return padded_bias.repeat_interleave(
+            torch.cat((counts_E, tail_count)).long(),
+            dim=0,
+            output_size=output_rows,
+        )
+
+    def _add_grouped_bias(
+        self,
+        output_RO: torch.Tensor,
+        bias_RO: torch.Tensor,
+    ) -> torch.Tensor:
+        return output_RO + bias_RO.to(output_RO.dtype)
+
+
+class GptOssDownGroupedLinear(GptOssGroupedLinear):
+    """GPT-OSS grouped down projection with TP-aware forward bias."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(GptOssGroupedLinear.Config):
         pass
 
     def __init__(self, config: Config):
@@ -118,13 +161,11 @@ class GptOssDownGroupedLinear(GroupedLinear):
 
     def _add_grouped_bias(
         self,
-        output: torch.Tensor,
-        bias: torch.Tensor,
-        offsets: torch.Tensor,
+        output_RO: torch.Tensor,
+        bias_RO: torch.Tensor,
     ) -> torch.Tensor:
-        row_bias = self._expand_grouped_bias(bias, offsets, output.shape[0])
-        row_bias = ScaleBiasForward.apply(row_bias, self.tp_degree, output.dtype)
-        return output + row_bias
+        bias_RO = ScaleBiasForward.apply(bias_RO, self.tp_degree, output_RO.dtype)
+        return output_RO + bias_RO
 
 
 class GptOssMoE(MoE):

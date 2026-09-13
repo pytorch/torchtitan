@@ -56,8 +56,9 @@ class TestInvalidLoss(unittest.TestCase):
             # A fresh dict per batch: the trainer pops num_valid_tokens.
             yield {
                 "input": torch.tensor([1, 2, 3]),
+                "labels": labels,
                 "num_valid_tokens": 2,
-            }, labels
+            }
 
     def _run_step(self, loss_value: float, should_log: bool) -> None:
         trainer = self._make_trainer(loss_value, should_log)

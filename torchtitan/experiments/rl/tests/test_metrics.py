@@ -15,8 +15,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from torchtitan.components.metrics import BaseLogger, TensorBoardLogger, WandBLogger
 from torchtitan.experiments.rl.observability import metrics as m
+
+from torchtitan.observability.metrics import BaseLogger, TensorBoardLogger, WandBLogger
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +299,7 @@ class TestAggregatorWarnOnce:
     ) -> None:
         # warn_once dedups by message string in a module-level set; clear ours
         # for hermeticity.
-        from torchtitan.tools.logging import _logged
+        from torchtitan.observability.logging import _logged
 
         msg = "Dropping NaN metric k/max from Max reduction."
         _logged.discard(msg)
