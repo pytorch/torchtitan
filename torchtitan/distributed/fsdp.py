@@ -292,10 +292,17 @@ def apply_fsdp_to_decoder(
                 efsdp_ep_size = fsdp_config["mesh"].size()
 
             shard_expert_features = efsdp_ep_size > num_experts
-            expert_param_placements = {
-                experts.w13_E2FD: Shard(2 if shard_expert_features else 0),
-                experts.w2_EDF: Shard(1 if shard_expert_features else 0),
-            }
+            if shard_expert_features:
+                # Only the common fused W13 gained an explicit projection axis;
+                # model-specific expert parameters retain their prior layouts.
+                expert_param_placements = {
+                    param: Shard(2 if name == "w13_E2FD" else 1)
+                    for name, param in experts.named_parameters()
+                }
+            else:
+                expert_param_placements = {
+                    param: Shard(0) for param in experts.parameters()
+                }
 
             # Without feature sharding, the default expert-axis placement is
             # already correct for the single-mesh case.

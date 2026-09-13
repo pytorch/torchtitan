@@ -55,6 +55,35 @@ from vllm.utils import torch_utils as _torch_utils
 logger = init_logger(__name__)
 
 
+def _layout_after_select(
+    layout: SpmdType,
+    *,
+    dim: int,
+    ndim: int,
+) -> SpmdType:
+    """Update an SPMD layout after selecting and removing one tensor dimension."""
+    dim %= ndim
+    local_type = {}
+    for axis, axis_type in layout.local_type.items():
+        if isinstance(axis_type, spmd.Shard):
+            shard_dim = axis_type.dim % ndim
+            if shard_dim == dim:
+                raise ValueError(f"Cannot select sharded tensor dimension {dim}")
+            if shard_dim > dim:
+                shard_dim -= 1
+            axis_type = spmd.S(shard_dim)
+        local_type[axis] = axis_type
+
+    partition_spec = layout.partition_spec
+    if partition_spec is not None and dim < len(partition_spec):
+        if partition_spec[dim] is not None:
+            raise ValueError(f"Cannot select sharded tensor dimension {dim}")
+        partition_spec = spmd.PartitionSpec(
+            *(partition_spec[:dim] + partition_spec[dim + 1 :])
+        )
+    return SpmdType(local_type, partition_spec)
+
+
 def _replace_vllm_layer_configs(model_config):
     """Replace inner-computation configs with vLLM generation variants."""
     # These modules inspect the breakable-cudagraph environment at import time.
@@ -566,8 +595,13 @@ class VLLMModelWrapper(Module):
                 # while the layout is declared on the fused w13 parameter.
                 w13_layout = sharding_config.state_shardings.get("w13_E2FD")
                 if w13_layout is not None:
+                    split_w13_layout = _layout_after_select(
+                        w13_layout,
+                        dim=1,
+                        ndim=4,
+                    )
                     for state_name in ("w1_EFD", "w3_EFD"):
-                        layouts[f"{module_prefix}{state_name}"] = w13_layout
+                        layouts[f"{module_prefix}{state_name}"] = split_w13_layout
 
             if isinstance(module, FeedForward):
                 # FeedForward exposes w1/w3 state-dict keys, but their layout

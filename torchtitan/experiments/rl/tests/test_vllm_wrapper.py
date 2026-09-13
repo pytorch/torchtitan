@@ -46,7 +46,8 @@ def test_state_dict_layouts_include_split_feed_forward_weights():
 
 def test_state_dict_layouts_include_split_expert_weights():
     """Verify fused grouped-expert layouts use the exported split state-dict keys."""
-    colwise = dense_param_placement(tp=spmd.S(2))
+    physical_colwise = dense_param_placement(tp=spmd.S(2))
+    exported_colwise = dense_param_placement(tp=spmd.S(1))
     rowwise = dense_param_placement(tp=spmd.S(2))
     config = GroupedExperts.Config(
         dim=16,
@@ -54,7 +55,7 @@ def test_state_dict_layouts_include_split_expert_weights():
         num_experts=4,
         sharding_config=ShardingConfig(
             state_shardings={
-                "w13_E2FD": colwise,
+                "w13_E2FD": physical_colwise,
                 "w2_EDF": rowwise,
             }
         ),
@@ -67,6 +68,6 @@ def test_state_dict_layouts_include_split_expert_weights():
 
     layouts = wrapper.get_state_dict_layouts()
 
-    assert layouts["experts.w1_EFD"] is colwise
-    assert layouts["experts.w3_EFD"] is colwise
+    assert layouts["experts.w1_EFD"] == exported_colwise
+    assert layouts["experts.w3_EFD"] == exported_colwise
     assert layouts["experts.w2_EDF"] is rowwise
