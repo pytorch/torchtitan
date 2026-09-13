@@ -16,6 +16,16 @@ from torchtitan.protocols.module import Module
 from torchtitan.trainer import Trainer
 
 
+def muse_glimmer_30b_bf16_optimizer_states() -> Trainer.Config:
+    """Use BF16 optimizer states with FP32 parameters and reduction."""
+    config = muse_glimmer_30b()
+    config.training.dtype = "float32"
+    config.training.mixed_precision_param = "bfloat16"
+    config.training.mixed_precision_reduce = "float32"
+    config.optimizer.implementation = "fused_opt_states_bf16"
+    return config
+
+
 def _muse_glimmer_30b_cp(
     *,
     inner_attention: type[Module],
