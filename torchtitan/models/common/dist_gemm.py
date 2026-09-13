@@ -30,11 +30,12 @@ from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
+import torch_remat as remat
 
 from torchtitan.distributed.linear import AllGatherLinear, LinearReduceScatter
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
@@ -101,11 +102,11 @@ def validate_dist_gemm_preconditions(*, enable_sp: bool) -> None:
         )
 
 
-class AllGatherFusedQKVLinear(FusedQKVLinear):
+class AllGatherFusedQKVLinear(QKVLinear):
     """Fused QKV projection whose forward all-gathers the TP sequence shard."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FusedQKVLinear.Config):
+    class Config(QKVLinear.Config):
         """Same fields as the stock fused QKV. The subclass exists because it is
         what binds ``Config.build()`` to this module rather than the stock one, so
         it cannot be deleted as empty."""
@@ -187,7 +188,11 @@ class DistGEMMFeedForward(FeedForward):
             _warn_once_no_tp_overlap()
             return super().forward(x)
 
-        gate_up_TF = AllGatherLinear.apply(
+        gate_up_TF = remat.region(
+            AllGatherLinear.apply,
+            self.remat_region_name("w13"),
+            recompute=self.remat_should_recompute("w13"),
+        )(
             x,
             self.w13.weight,
             self.w13.bias,
@@ -196,14 +201,21 @@ class DistGEMMFeedForward(FeedForward):
         )
         gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
         # Elementwise on feature-sharded activations: no collective.
+        remat.recompute_needs_tensor(gate_TF, up_TF)
         h_TF = self.activation_fn(gate_TF, up_TF)
-        return LinearReduceScatter.apply(
+        out_TD = remat.region(
+            LinearReduceScatter.apply,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(
             h_TF,
             self.w2.weight,
             self.w2.bias,
             tp_group,
             tp_group.group_name,
         )
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 __all__ = [
