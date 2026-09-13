@@ -12,6 +12,7 @@ from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.overrides.fused_swiglu import fused_grouped_experts
 from torchtitan.protocols.sharding import ShardingConfig
 
 
@@ -54,13 +55,14 @@ def test_state_dict_layouts_include_split_expert_weights():
         num_experts=4,
         sharding_config=ShardingConfig(
             state_shardings={
-                "w13_E_2F_D": colwise,
+                "w1_EFD": colwise,
                 "w2_EDF": rowwise,
+                "w3_EFD": colwise,
             }
         ),
     )
     model = torch.nn.Module()
-    model.experts = config.build()
+    model.experts = fused_grouped_experts(config).build()
     wrapper = VLLMModelWrapper.__new__(VLLMModelWrapper)
     torch.nn.Module.__init__(wrapper)
     wrapper.model = model
