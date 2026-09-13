@@ -54,6 +54,8 @@ Pseudo-code
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,7 +77,9 @@ from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     is_c10d_functional_node,
     ordered_nodes,
 )
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 _GRAPH_BOUNDARY_OPS = {"placeholder", "get_attr"}

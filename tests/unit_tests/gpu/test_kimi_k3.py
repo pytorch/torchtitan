@@ -111,7 +111,24 @@ class TestKimiK3(unittest.TestCase):
         model = config.build()
         positions = torch.arange(4, dtype=torch.int32)
         attention_masks = model.get_attention_masks(positions)
-        self.assertIsInstance(attention_masks, BlockMask)
+        # MLA layers read the BlockMask; KDA layers read document offsets.
+        self.assertIsInstance(attention_masks["quadratic_attention"], BlockMask)
+        torch.testing.assert_close(
+            attention_masks["kda"].cu_seq_q, torch.tensor([0, 4], dtype=torch.int32)
+        )
+
+    def test_padded_tail_is_one_kda_segment(self):
+        config = _small_model_config()
+        model = config.build()
+        # Two documents (3 and 4 tokens), then padding numbered the way the
+        # multimodal packer and collator emit it.
+        positions = torch.cat([torch.arange(3), torch.arange(4), torch.arange(5)])
+        padding_mask = torch.zeros(12, dtype=torch.bool)
+        padding_mask[7:] = True
+        masks = model.get_attention_masks(positions, padding_mask=padding_mask)
+        torch.testing.assert_close(
+            masks["kda"].cu_seq_q, torch.tensor([0, 3, 7, 12], dtype=torch.int32)
+        )
 
     @unittest.skipIf(
         not torch.cuda.is_available()
