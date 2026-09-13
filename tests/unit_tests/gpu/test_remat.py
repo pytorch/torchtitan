@@ -22,11 +22,7 @@ from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedF
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
-from torchtitan.overrides.fused_swiglu import (
-    dist_gemm_fused_swiglu,
-    fused_swiglu,
-    FusedSwiGLU,
-)
+from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -167,9 +163,8 @@ def _linear_config(in_features: int, out_features: int) -> Linear.Config:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w1=_linear_config(4, 8),
+        w13=_linear_config(4, 16),
         w2=_linear_config(8, 4),
-        w3=_linear_config(4, 8),
     )
 
 
@@ -283,9 +278,8 @@ class TestRematRegions(unittest.TestCase):
     def test_feed_forward_variants_use_expected_region_boundaries(self):
         feed_forward_config = _feed_forward_config()
         sigmoid_config = SigmoidGatedFeedForward.Config(
-            w1=feed_forward_config.w1,
+            w13=feed_forward_config.w13,
             w2=feed_forward_config.w2,
-            w3=feed_forward_config.w3,
             gate=_linear_config(4, 4),
         )
 
@@ -293,22 +287,24 @@ class TestRematRegions(unittest.TestCase):
             return torch.nn.functional.silu(gate) * up
 
         with patch(
-            "torchtitan.overrides.fused_swiglu._fused_silu_and_mul",
+            "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
             side_effect=silu_and_mul,
         ):
             dist_gemm_config = DistGEMMFeedForward.Config(
-                w1=feed_forward_config.w1,
+                w13=feed_forward_config.w13,
                 w2=feed_forward_config.w2,
-                w3=feed_forward_config.w3,
+            )
+            fused_config = deepcopy(feed_forward_config)
+            fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)
+            fused_dist_gemm_config = deepcopy(dist_gemm_config)
+            fused_dist_gemm_config.activation_fn = fused_swiglu(
+                fused_dist_gemm_config.activation_fn
             )
             variants = (
                 (sigmoid_config.build(), ["w13", "w2", "gate"]),
                 (dist_gemm_config.build(), ["w13", "w2"]),
-                (fused_swiglu(feed_forward_config).build(), ["w13", "w2"]),
-                (
-                    dist_gemm_fused_swiglu(dist_gemm_config).build(),
-                    ["w13", "w2"],
-                ),
+                (fused_config.build(), ["w13", "w2"]),
+                (fused_dist_gemm_config.build(), ["w13", "w2"]),
             )
             for feed_forward, expected_names in variants:
                 with self.subTest(feed_forward=type(feed_forward).__name__):

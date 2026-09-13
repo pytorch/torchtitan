@@ -564,7 +564,7 @@ class VLLMModelWrapper(Module):
 
                 # Fused grouped experts expose split gate/up state-dict keys
                 # while the layout is declared on the fused w13 parameter.
-                w13_layout = sharding_config.state_shardings.get("w13")
+                w13_layout = sharding_config.state_shardings.get("w13_E_2F_D")
                 if w13_layout is not None:
                     for state_name in ("w1_EFD", "w3_EFD"):
                         layouts[f"{module_prefix}{state_name}"] = w13_layout
