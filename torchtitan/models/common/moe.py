@@ -45,6 +45,15 @@ from .token_dispatcher import LocalTokenDispatcher
 
 
 class GroupedExperts(Module):
+    """SwiGLU experts with one physical gate-up parameter.
+
+    ``w13_E2FD`` has shape ``(E, 2, F, D)``. The projection axis stores gate
+    before up, matching DistMoE's native layout, and the two middle dimensions
+    form a zero-copy ``(E, 2F, D)`` grouped-GEMM operand.
+    State-dict hooks expose the logical ``w1_EFD`` and ``w3_EFD`` checkpoint
+    keys while retaining the fused parameter internally.
+    """
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         dim: int
@@ -55,16 +64,38 @@ class GroupedExperts(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.num_experts = config.num_experts
-        self.w1_EFD = nn.Parameter(
-            torch.empty(config.num_experts, config.hidden_dim, config.dim)
+        self.w13_E2FD = nn.Parameter(
+            torch.empty(
+                config.num_experts,
+                2,
+                config.hidden_dim,
+                config.dim,
+            )
         )
         self.w2_EDF = nn.Parameter(
             torch.empty(config.num_experts, config.dim, config.hidden_dim)
         )
-        self.w3_EFD = nn.Parameter(
-            torch.empty(config.num_experts, config.hidden_dim, config.dim)
-        )
         self.activation_fn = config.activation_fn.build()
+        self.register_state_dict_post_hook(self._split_w13_on_save)
+        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
+
+    @staticmethod
+    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
+        """Expose fused experts under the logical w1/w3 checkpoint keys."""
+        w13_E2FD = state_dict.pop(f"{prefix}w13_E2FD")
+        state_dict[f"{prefix}w1_EFD"] = w13_E2FD[:, 0].contiguous()
+        state_dict[f"{prefix}w3_EFD"] = w13_E2FD[:, 1].contiguous()
+
+    @staticmethod
+    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
+        """Pack logical w1/w3 checkpoint entries into the fused parameter."""
+        gate_key = f"{prefix}w1_EFD"
+        up_key = f"{prefix}w3_EFD"
+        if gate_key not in state_dict or up_key not in state_dict:
+            return
+        state_dict[f"{prefix}w13_E2FD"] = torch.stack(
+            [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=1
+        )
 
     def forward(
         self,
@@ -88,13 +119,15 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        gate_RF = self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=self.w1_EFD, offs=offsets_E
-        )
-        up_RF = self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=self.w3_EFD, offs=offsets_E
-        )
-        h_RF = self.activation_fn(gate_RF, up_RF)
+        F = self.w13_E2FD.shape[2]
+        weight_EOI = self.w13_E2FD.flatten(1, 2)
+        gate_up_R2F = self._grouped_mm(
+            A=x_RD.bfloat16(),
+            weight_EOI=weight_EOI,
+            offs=offsets_E,
+        ).unflatten(-1, (2, F))
+        gate_RF, up_RF = gate_up_R2F.unbind(-2)
+        h_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
         return self._grouped_mm(A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E).type_as(
             x_RD
         )

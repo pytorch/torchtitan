@@ -64,16 +64,22 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
     return Qwen3Model(config)
 
 
-def _get_expert_shard_dim(model: Qwen3Model) -> int | None:
-    """Return the shard dim used for expert params, or None if not sharded."""
+def _get_expert_shard_dims(model: Qwen3Model) -> tuple[int | None, int | None]:
+    """Return the W13 and W2 shard dimensions."""
     for layer in model.layers.values():
         if layer.moe_enabled:
-            for param in layer.moe.routed_experts.inner_experts.parameters():
+            # pyrefly: ignore [missing-attribute]
+            experts = layer.moe.routed_experts.inner_experts
+
+            def shard_dim(param):
                 if hasattr(param, "placements"):
-                    for p in param.placements:
-                        if isinstance(p, Shard):
-                            return p.dim
-    return None
+                    for placement in param.placements:
+                        if isinstance(placement, Shard):
+                            return placement.dim
+                return None
+
+            return shard_dim(experts.w13_E2FD), shard_dim(experts.w2_EDF)
+    return None, None
 
 
 class TestApplyFsdpMoESharding(DTensorTestBase):
@@ -81,13 +87,13 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
     @property
     def world_size(self):
-        return 8
+        return 4
 
     @with_comms
-    def test_no_ep_fsdp_gt_num_experts_shards_dim1(self):
-        """ep_degree=1, fsdp_size(8) > num_experts(4) → Shard(1)."""
+    def test_no_ep_fsdp_gt_num_experts_shards_feature_dimensions(self):
+        """When FSDP cannot shard E, it shards each projection's feature dim."""
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
-        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=2).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
@@ -98,13 +104,13 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             ep_degree=1,
         )
 
-        self.assertEqual(_get_expert_shard_dim(model), 1)
+        self.assertEqual(_get_expert_shard_dims(model), (2, 1))
 
     @with_comms
     def test_no_ep_fsdp_le_num_experts_shards_dim0(self):
-        """ep_degree=1, fsdp_size(8) <= num_experts(8) → Shard(0)."""
+        """FSDP shards the expert axis when it does not require padding."""
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
-        model = _build_qwen3_moe_model(num_experts=8).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
@@ -115,17 +121,17 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             ep_degree=1,
         )
 
-        self.assertEqual(_get_expert_shard_dim(model), 0)
+        self.assertEqual(_get_expert_shard_dims(model), (0, 0))
 
     @with_comms
-    def test_with_ep_fsdp_gt_num_experts_shards_dim1(self):
-        """ep_degree=2, efsdp*ep(8) > num_experts(4) → Shard(1)."""
-        # edp_mesh: 2D mesh [efsdp=4, ep=2], dp_mesh: 1D mesh [8]
+    def test_with_ep_fsdp_gt_num_experts_shards_feature_dimensions(self):
+        """Sparse FSDP also falls back to each projection's feature dim."""
+        # edp_mesh: 2D mesh [efsdp=2, ep=2], dp_mesh: 1D mesh [4]
         edp_mesh = init_device_mesh(
-            self.device_type, (4, 2), mesh_dim_names=("efsdp", "ep")
+            self.device_type, (2, 2), mesh_dim_names=("efsdp", "ep")
         )
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
-        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+        model = _build_qwen3_moe_model(num_experts=2).to(self.device_type)
 
         apply_fsdp_to_decoder(
             model,
@@ -137,7 +143,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             edp_mesh=edp_mesh,
         )
 
-        self.assertEqual(_get_expert_shard_dim(model), 1)
+        self.assertEqual(_get_expert_shard_dims(model), (2, 1))
 
 
 if __name__ == "__main__":
