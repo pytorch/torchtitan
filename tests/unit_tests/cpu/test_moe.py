@@ -69,6 +69,30 @@ class TestMoE(unittest.TestCase):
             * input.new_tensor([1, 1, 2]).reshape(-1, 1, 1),
         )
 
+    def test_grouped_linear_uses_local_weight_shape(self):
+        """Local expert and feature shards determine the runtime output shape."""
+        grouped = GroupedLinear.Config(
+            num_groups=2,
+            in_features=8,
+            out_features=(2, 8),
+        ).build()
+        identity_OI = torch.eye(8, dtype=torch.bfloat16)[:4]
+        grouped.weight = nn.Parameter(
+            torch.stack((identity_OI, 2 * identity_OI)).unsqueeze(0)
+        )
+
+        input_RI = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)
+        output_R2O = grouped(
+            input_RI,
+            torch.tensor([3], dtype=torch.int32),
+        )
+
+        self.assertEqual(output_R2O.shape, (3, 2, 4))
+        torch.testing.assert_close(
+            output_R2O,
+            torch.stack((input_RI[:, :4], 2 * input_RI[:, :4]), dim=1),
+        )
+
     def test_routed_experts_own_structured_linears(self):
         init = {
             "gate": nn.init.zeros_,
