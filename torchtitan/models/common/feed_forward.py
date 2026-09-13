@@ -95,23 +95,6 @@ class FeedForward(Module):
             ).flatten(0, 1)
 
     def parallelize(self, parallel_dims: ParallelDims) -> None:
-        w13_sharding_config = self.w13._sharding_config
-        if parallel_dims.tp_enabled and w13_sharding_config is not None:
-            weight_layout = w13_sharding_config.state_shardings.get("weight")
-            if weight_layout is not None:
-                tp_type = spmd_type_for_axis(weight_layout, MeshAxisName.TP)
-                if (
-                    isinstance(tp_type, spmd.Shard)
-                    and tp_type.dim in (0, -self.w13.weight.ndim)
-                    and self.w2.in_features % parallel_dims.tp
-                ):
-                    raise ValueError(
-                        "FeedForward hidden dimension "
-                        f"({self.w2.in_features}) must be divisible by TP degree "
-                        f"({parallel_dims.tp}) when w13 is sharded colwise. "
-                        "Checking only the fused w13 output dimension would allow "
-                        "TP to split an interleaved gate/up pair."
-                    )
         sharding_config = self._sharding_config
         if (
             type(self) is FeedForward

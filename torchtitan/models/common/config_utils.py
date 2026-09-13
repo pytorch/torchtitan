@@ -49,35 +49,13 @@ from torchtitan.protocols.module import Module
 DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
 
 
-def _make_fused_gate_up_init(
-    gate_init: Callable,
-    up_init: Callable,
-    *,
-    gate_up_axis: int,
-) -> Callable:
-    """Build an initializer for a fused gate/up weight."""
-
-    def _init(t: torch.Tensor) -> None:
-        gate_idx: list[int | slice] = [slice(None)] * t.ndim
-        up_idx: list[int | slice] = [slice(None)] * t.ndim
-        gate_idx[gate_up_axis] = 0
-        up_idx[gate_up_axis] = 1
-        gate_init(t[tuple(gate_idx)])
-        up_init(t[tuple(up_idx)])
-
-    return _init
-
-
 def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
     """Build an initializer for an interleaved 2D gate/up linear weight."""
-    init_logical_weight = _make_fused_gate_up_init(
-        gate_init,
-        up_init,
-        gate_up_axis=1,
-    )
 
     def _init(t: torch.Tensor) -> None:
-        init_logical_weight(t.unflatten(0, (-1, 2)))
+        gate_up = t.unflatten(0, (-1, 2))
+        gate_init(gate_up[:, 0])
+        up_init(gate_up[:, 1])
 
     return _init
 
@@ -219,12 +197,13 @@ def fused_grouped_experts_param_init(
     """Pack logical grouped-expert initializers for the physical w13_EF2D weight."""
     if not param_init:
         return param_init
+
+    def init_w13(w13_EF2D: torch.Tensor) -> None:
+        param_init["w1_EFD"](w13_EF2D[:, :, 0, :])
+        param_init["w3_EFD"](w13_EF2D[:, :, 1, :])
+
     return {
-        "w13_EF2D": _make_fused_gate_up_init(
-            param_init["w1_EFD"],
-            param_init["w3_EFD"],
-            gate_up_axis=2,
-        ),
+        "w13_EF2D": init_w13,
         "w2_EDF": param_init["w2_EDF"],
     }
 
