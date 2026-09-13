@@ -6,7 +6,7 @@
 
 from dataclasses import replace
 
-from torchtitan.components.quantization import MXFP8GroupedExpertsConverter
+from torchtitan.components.quantization import MXFP8GroupedLinearConverter
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
@@ -42,7 +42,7 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
             deepseek_v3_mxfp8_linear_converter_config(
                 model_compile_enabled=True,
             ),
-            MXFP8GroupedExpertsConverter.Config(
+            MXFP8GroupedLinearConverter.Config(
                 model_compile_enabled=True,
                 pad_multiple=128,
             ),

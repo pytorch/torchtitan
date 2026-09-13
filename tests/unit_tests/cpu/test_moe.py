@@ -14,6 +14,7 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.linear import GroupedLinear
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -44,23 +45,49 @@ class _FixedRouter(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
-    def test_routed_experts_expose_parameter_owner(self):
+    def test_grouped_linear_structured_output(self):
+        grouped = GroupedLinear.Config(
+            num_groups=2,
+            in_features=8,
+            out_features=(2, 8),
+        ).build()
+        with torch.no_grad():
+            identity = torch.eye(8)
+            grouped.weight[0].copy_(torch.stack((identity, identity)))
+            grouped.weight[1].copy_(torch.stack((2 * identity, 2 * identity)))
+
+        input = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)
+        output = grouped(
+            input,
+            torch.tensor([2, 3], dtype=torch.int32),
+        )
+
+        self.assertEqual(output.shape, (3, 2, 8))
+        torch.testing.assert_close(
+            output,
+            torch.stack((input, input), dim=1)
+            * input.new_tensor([1, 1, 2]).reshape(-1, 1, 1),
+        )
+
+    def test_routed_experts_own_structured_linears(self):
+        init = {
+            "gate": nn.init.zeros_,
+            "up": nn.init.ones_,
+            "down": nn.init.zeros_,
+        }
         config = make_routed_experts_config(
             dim=4,
             hidden_dim=8,
             num_experts=2,
             top_k=1,
-            param_init={},
+            param_init=init,
             comm_backend="standard",
         )
         routed_experts = config.build()
-        original_owner = routed_experts.expert_parameters_module()
-        wrapped_owner = nn.Sequential(original_owner)
 
-        result = routed_experts.replace_expert_parameters_module(wrapped_owner)
-
-        self.assertIs(result, routed_experts)
-        self.assertIs(routed_experts.expert_parameters_module(), wrapped_owner)
+        self.assertEqual(routed_experts.w13.weight.shape, (2, 2, 8, 4))
+        self.assertEqual(routed_experts.w2.weight.shape, (2, 4, 8))
+        self.assertEqual(set(routed_experts.state_dict()), {"w13.weight", "w2.weight"})
 
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
@@ -79,7 +106,11 @@ class TestMoE(unittest.TestCase):
                 hidden_dim=8,
                 num_experts=num_experts,
                 top_k=top_k,
-                param_init={},
+                param_init={
+                    "gate": nn.init.zeros_,
+                    "up": nn.init.ones_,
+                    "down": nn.init.zeros_,
+                },
                 comm_backend="standard",
             ),
         ).build()

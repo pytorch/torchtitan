@@ -25,16 +25,6 @@ if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
 
 
-# Routed-expert layout for ``GptOssGroupedExperts`` (mlp1/mlp2 fused
-# weights + biases): mlp1 colwise, mlp2 rowwise, mlp2_bias replicated.
-_GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "mlp1_weight_EGD": spmd.S(1),
-    "mlp1_bias_EG": spmd.S(1),
-    "mlp2_weight_EDF": spmd.S(2),
-    "mlp2_bias_ED": spmd.R,
-}
-
-
 def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
     input_layout = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     out_dst = (
@@ -123,5 +113,4 @@ def _set_gpt_oss_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
         )
