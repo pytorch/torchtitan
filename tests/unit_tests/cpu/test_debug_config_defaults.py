@@ -33,7 +33,6 @@ from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
-    deepseek_v3_debugmodel_minimal_async_ep,
     deepseek_v3_debugmodel_mtp,
     deepseek_v3_debugmodel_mxfp8,
 )
@@ -67,7 +66,6 @@ from torchtitan.models.qwen3.config_registry import (
     qwen3_debugmodel_first_85_pct_layers_nvfp4,
     qwen3_debugmodel_flex_flash,
     qwen3_debugmodel_moe_param_groups,
-    qwen3_debugmodel_non_fused_qkv,
     qwen3_debugmodel_nvfp4,
     qwen3_moe_debug,
     qwen3_moe_deepep,
@@ -76,6 +74,11 @@ from torchtitan.models.qwen3_5.config_registry import (
     qwen35_debugmodel,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_varlen_attn,
+)
+from torchtitan.models.qwen3_6.config_registry import (
+    qwen36_debugmodel,
+    qwen36_debugmodel_moe,
+    qwen36_debugmodel_varlen_attn,
 )
 from torchtitan.models.qwen3_8.config_registry import (
     qwen38_debugmodel,
@@ -90,7 +93,6 @@ DebugConfigFactory = Callable[..., Trainer.Config]
 _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
-    deepseek_v3_debugmodel_minimal_async_ep,
     deepseek_v3_debugmodel_mtp,
     deepseek_v3_debugmodel_mxfp8,
     deepseek_v4_debugmodel,
@@ -114,13 +116,15 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     qwen3_debugmodel_first_85_pct_layers_nvfp4,
     qwen3_debugmodel_flex_flash,
     qwen3_debugmodel_moe_param_groups,
-    qwen3_debugmodel_non_fused_qkv,
     qwen3_debugmodel_nvfp4,
     qwen3_moe_debug,
     qwen3_moe_deepep,
     qwen35_debugmodel,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_varlen_attn,
+    qwen36_debugmodel,
+    qwen36_debugmodel_moe,
+    qwen36_debugmodel_varlen_attn,
     qwen38_debugmodel,
     qwen38_debugmodel_moe,
     qwen38_debugmodel_varlen_attn,

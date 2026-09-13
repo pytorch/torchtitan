@@ -9,11 +9,13 @@
 Gated behind ``--compile.numerics_changing_optim`` (opt-in, default off).
 """
 
+import logging
 import operator
 
 import torch
 
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
 
 
 def annotate_rmsnorm_for_regional_inductor_pass(
