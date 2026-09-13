@@ -120,16 +120,25 @@ class GroupedExperts(Module):
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         F = self.w13_E_2F_D.shape[1] // 2
-        gate_up_R_2F = self._grouped_mm(
+        gate_up_R_2F = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w13"),
+            recompute=self.remat_should_recompute("w13"),
+        )(
             A=x_RD.bfloat16(),
             weight_EOI=self.w13_E_2F_D,
             offs=offsets_E,
         )
         gate_RF, up_RF = gate_up_R_2F.reshape(-1, F, 2).unbind(-1)
+        remat.recompute_needs_tensor(gate_RF, up_RF)
         h_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
-        return self._grouped_mm(A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E).type_as(
-            x_RD
-        )
+        out_RD = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E)
+        remat.recompute_needs_tensor(out_RD)
+        return out_RD.type_as(x_RD)
 
     def _grouped_mm(
         self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
