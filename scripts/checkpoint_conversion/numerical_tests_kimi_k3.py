@@ -99,11 +99,10 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         "num_experts": moe.num_experts,
         "num_experts_per_token": moe.router.top_k,
         "num_shared_experts": (
-            moe.shared_experts.w1.out_features
-            // moe.routed_experts.inner_experts.hidden_dim
+            moe.shared_experts.w1.out_features // moe.routed_experts.w2.in_features
         ),
         "moe_renormalize": moe.router.route_norm,
-        "moe_intermediate_size": moe.routed_experts.inner_experts.hidden_dim,
+        "moe_intermediate_size": moe.routed_experts.w2.in_features,
         "routed_expert_hidden_size": moe.routed_down.out_features,
         "routed_scaling_factor": moe.router.route_scale,
         "first_k_dense_replace": next(

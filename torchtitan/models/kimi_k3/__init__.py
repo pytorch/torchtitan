@@ -11,7 +11,13 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.models.common import Conv1d, Embedding, Linear, RouterGateLinear
+from torchtitan.models.common import (
+    Conv1d,
+    Embedding,
+    GroupedLinear,
+    Linear,
+    RouterGateLinear,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
@@ -30,7 +36,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
-from .moe import KimiFeedForward, KimiGroupedExperts, KimiLatentMoE
+from .moe import KimiExpertActivation, KimiFeedForward, KimiLatentMoE
 from .parallelize import parallelize_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
@@ -243,17 +249,25 @@ def _latent_moe_config(
         ),
         routed_down=_linear(dim, latent_dim),
         routed_experts=RoutedExperts.Config(
-            inner_experts=KimiGroupedExperts.Config(
-                dim=latent_dim,
-                hidden_dim=expert_hidden_dim,
-                num_experts=num_experts,
+            w13=GroupedLinear.Config(
+                num_groups=num_experts,
+                in_features=latent_dim,
+                out_features=(2, expert_hidden_dim),
+                param_init={
+                    "weight": partial(nn.init.trunc_normal_, std=0.02),
+                },
+            ),
+            w2=GroupedLinear.Config(
+                num_groups=num_experts,
+                in_features=expert_hidden_dim,
+                out_features=latent_dim,
+                param_init={
+                    "weight": partial(nn.init.trunc_normal_, std=0.02),
+                },
+            ),
+            activation=KimiExpertActivation.Config(
                 beta=4.0,
                 linear_beta=25.0,
-                param_init={
-                    "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
-                    "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
-                    "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
-                },
             ),
             # core's dispatcher factory: standard / deepep / hybridep /
             # minimal_async_ep per spec, as deepseek_v3; falls back to local

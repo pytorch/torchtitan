@@ -36,4 +36,4 @@ for all four parallelism configurations (EP on/off × SP on/off).
 - **Routed experts** (`RoutedExperts`): `LocalMapConfig` converts DTensor
   inputs to local tensors at the module boundary; dispatch/compute/combine
   run on local tensors, then the output is wrapped back as `DTensor(Partial)`.
-  The expert-weight `state_shardings` live on its `GroupedExperts` child.
+  Expert-weight `state_shardings` live on its `w13` and `w2` grouped linears.

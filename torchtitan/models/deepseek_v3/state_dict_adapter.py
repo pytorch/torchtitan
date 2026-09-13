@@ -45,9 +45,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE Module
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w1_EFD",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w3_EFD",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
+            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "layers.{}.moe.routed_experts.w13.gate",
+            "model.layers.{}.mlp.experts.{}.up_proj.weight": "layers.{}.moe.routed_experts.w13.up",
+            "model.layers.{}.mlp.experts.{}.down_proj.weight": "layers.{}.moe.routed_experts.w2.weight",
             "model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.shared_experts.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
             "model.layers.{}.mlp.shared_experts.up_proj.weight": "layers.{}.moe.shared_experts.w3.weight",
@@ -152,19 +152,20 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
-        2. Split the GroupedExperts' weight into separate expert's weight.
+        2. Split grouped weights into individual expert weights.
         """
 
+        state_dict = self._to_logical_expert_state(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         hf_state_dict = {}
 
         for key, value in state_dict.items():
-            if "moe.routed_experts.inner_experts" in key:
+            if self._is_expert_weight_key(key):
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=1)
                 new_abstract_key, layer_num = self._map_to_hf_layer_key(key, to_hf_map)
 
-                # Store the GroupedExperts Weight metadata for from_hf()
+                # Store grouped-weight metadata for from_hf().
                 if isinstance(value, DTensor):
                     self.grouped_expert_weight_placements[
                         abstract_key
@@ -172,7 +173,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
                     self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
 
-                    # Split GroupedExperts weight to local individual expert weights
+                    # Split the grouped weight into local expert weights.
                     local_expert_fqn = self._get_local_experts_weights(
                         new_abstract_key,
                         abstract_key,
@@ -212,7 +213,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         """
         1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.
-        3. Concat separate expert's weight into GroupedExperts' weight.
+        3. Concatenate individual expert weights into grouped weights.
         """
         self._validate_hf_rope_config(ComplexRoPE.Config)
 
@@ -278,4 +279,4 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = self.from_hf_map[key]
                 state_dict[new_key] = value
 
-        return state_dict
+        return self._to_native_expert_state(state_dict)
