@@ -98,6 +98,21 @@ def _build_rows(max_context_length):
     )
 
 
+def _legacy_single_turn_labels(tokenizer, messages):
+    """Reproduce the original single-turn mask: labels[:max(prompt_len-1, 0)]."""
+    full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+    full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+    if full_tokens[-1] != tokenizer.eos_id:
+        full_tokens.append(tokenizer.eos_id)
+    prompt_text = tokenizer.apply_chat_template(
+        messages[:1], add_generation_prompt=True
+    )
+    prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+    labels = np.asarray(full_tokens[1:], dtype=np.int64)
+    labels[: max(len(prompt_tokens) - 1, 0)] = IGNORE_INDEX
+    return np.asarray(full_tokens[:-1], dtype=np.int64), labels
+
+
 def _build_dataloader(max_context_length=128, world_size=1, rank=0):
     config = GrainDataLoader.Config(
         dataset=FirstFitPackingConfig(
@@ -264,6 +279,40 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
                     messages_fn=lambda _sample, value=messages: value
                 )
                 processor({}, np.random.default_rng(0))
+
+
+class TestChatDatasetPrefixValidation(unittest.TestCase):
+    """Prompt tokens must be an exact prefix of the full conversation tokens."""
+
+    def test_single_turn_labels_match_legacy_formula(self):
+        sample = _load_dataset()[0]
+        messages = _process_sample(sample)
+        sequence = _build_processor()(sample, np.random.default_rng(0))
+        expected_input_ids, expected_labels = _legacy_single_turn_labels(
+            _load_tokenizer(), messages
+        )
+
+        np.testing.assert_array_equal(sequence.input_ids, expected_input_ids)
+        np.testing.assert_array_equal(sequence.labels, expected_labels)
+
+    def test_prefix_mismatch_raises(self):
+        processor = _build_processor()
+        original_encode = processor._tokenizer.encode
+        call_count = 0
+
+        # _tokenize_sample encodes twice: call 1 is the full conversation,
+        # call 2 is the prompt. Perturbing call 2 breaks the prefix.
+        def mismatched_encode(*args, **kwargs):
+            nonlocal call_count
+            tokens = original_encode(*args, **kwargs)
+            call_count += 1
+            if call_count == 2:
+                return tokens + [0]
+            return tokens
+
+        processor._tokenizer.encode = mismatched_encode
+        with self.assertRaisesRegex(ValueError, "exact prefix"):
+            processor(_load_dataset()[0], np.random.default_rng(0))
 
 
 class TestChatDatasetCheckpointing(unittest.TestCase):
