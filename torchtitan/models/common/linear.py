@@ -20,8 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
-from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend for the router gate:
@@ -56,10 +56,9 @@ class GroupedLinear(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        num_groups: int
+        group_size: int
         in_features: int
         out_features: int | tuple[int, ...]
-        bias: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -71,88 +70,45 @@ class GroupedLinear(Module):
         if not output_shape or any(size <= 0 for size in output_shape):
             raise ValueError(f"out_features must be positive, got {output_shape}")
 
-        self.num_groups = config.num_groups
+        self.group_size = config.group_size
         self.in_features = config.in_features
         self.out_features = config.out_features
         self.output_shape = output_shape
         self.weight = nn.Parameter(
-            torch.empty(config.num_groups, *output_shape, config.in_features)
+            torch.empty(config.group_size, *output_shape, config.in_features)
         )
-        if config.bias:
-            self.bias = nn.Parameter(torch.empty(config.num_groups, *output_shape))
-        else:
-            self.register_parameter("bias", None)
 
-    def forward(self, input: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
         """Apply each grouped linear to rows selected by ``offsets``.
 
         Args:
-            input: Input rows with shape ``[R, in_features]``.
-            offsets: Inclusive cumulative row counts for each group.
+            input_RI: Input rows with shape ``[R, I]``.
+            offsets_E: Inclusive cumulative row counts for each expert.
 
         Returns:
-            Output rows with shape ``[R, *output_shape]``.
+            Output rows with shape ``[R, *O]``.
         """
-        weight = (
-            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
+        output_shape = self.weight.shape[1:-1]
+        weight_EOI = self.weight.flatten(1, -2)
+        output_RO = self._grouped_mm(
+            input_RI=input_RI,
+            weight_EOI=weight_EOI,
+            offsets_E=offsets_E,
         )
-        bias = self.bias
-        if isinstance(bias, DTensor):
-            bias = bias.to_local()
-
-        local_output_shape = weight.shape[1:-1]
-        flat_weight = weight.flatten(1, -2)
-        flat_bias = bias.flatten(1) if bias is not None else None
-        output = self._grouped_mm(
-            input=input,
-            weight=flat_weight,
-            offsets=offsets,
-        )
-        if flat_bias is not None:
-            output = self._add_grouped_bias(output, flat_bias, offsets)
-        return output.reshape(*output.shape[:-1], *local_output_shape)
+        return output_RO.reshape(*output_RO.shape[:-1], *output_shape)
 
     def _grouped_mm(
         self,
         *,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        offsets: torch.Tensor,
+        input_RI: torch.Tensor,
+        weight_EOI: torch.Tensor,
+        offsets_E: torch.Tensor,
     ) -> torch.Tensor:
-        """Execute ``input @ weight.transpose(-2, -1)`` by group."""
+        """Execute ``input_RI @ weight_EOI.transpose(-2, -1)`` by expert."""
         return torch._grouped_mm(
-            input,
-            weight.bfloat16().transpose(-2, -1),
-            offs=offsets,
-        )
-
-    def _add_grouped_bias(
-        self,
-        output: torch.Tensor,
-        bias: torch.Tensor,
-        offsets: torch.Tensor,
-    ) -> torch.Tensor:
-        """Add each group bias while keeping capacity-padding rows unbiased."""
-        return output + self._expand_grouped_bias(bias, offsets, output.shape[0]).to(
-            output.dtype
-        )
-
-    def _expand_grouped_bias(
-        self,
-        bias: torch.Tensor,
-        offsets: torch.Tensor,
-        output_rows: int,
-    ) -> torch.Tensor:
-        """Expand per-group bias to routed rows plus zero-valued tail padding."""
-        counts = torch.diff(
-            torch.cat((offsets.new_zeros(1), offsets)),
-        )
-        tail = (output_rows - offsets[-1]).unsqueeze(0).to(counts.dtype)
-        padded_bias = torch.cat((bias, bias.new_zeros(1, bias.shape[-1])))
-        return padded_bias.repeat_interleave(
-            torch.cat((counts, tail)).long(),
-            dim=0,
-            output_size=output_rows,
+            input_RI,
+            weight_EOI.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
         )
 
 
@@ -227,40 +183,36 @@ class RouterGateLinear(Linear):
         return output_TE
 
 
-class ScaledBiasRowwiseLinear(Linear):
-    """
-    Rowwise linear whose local bias contribution is scaled by TP degree.
-    TODO(pianpwk): this should work in decomposition in spmd_types, or as Partial
-    init in DTensor. Today the local SPMD typecheck errors on the TP-axis
-    input:V, weight:V, bias:P case; decomposing to input @ weight -> P, then P + P should pass.
-    For DTensor, this errors because FSDP does not want to redistribute the incoming gradient
-    from Replicate -> storage-time Partial.
-    """
+class PartialBiasRowwiseLinear(Linear):
+    """Rowwise linear whose invariant bias becomes TP-partial in forward."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         pass
 
     def __init__(self, config: Config):
+        if not config.bias:
+            raise ValueError("PartialBiasRowwiseLinear requires bias=True")
         super().__init__(config)
-        self.tp_degree = 1
-
-    def parallelize(self, parallel_dims) -> None:
-        self.tp_degree = parallel_dims.tp
-        super().parallelize(parallel_dims)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight = (
-            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        )
-        bias = self.bias.to_local() if isinstance(self.bias, DTensor) else self.bias
-        bias = bias / self.tp_degree
-        return F.linear(input, weight, bias)
+        bias = self.bias
+        assert bias is not None
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            bias = spmd.convert(
+                bias,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.P,
+                expert_mode=True,
+            )
+        return F.linear(input, self.weight, bias)
 
 
 __all__ = [
     "GroupedLinear",
     "Linear",
+    "PartialBiasRowwiseLinear",
     "RouterGateLinear",
-    "ScaledBiasRowwiseLinear",
 ]

@@ -10,23 +10,22 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.dist_moe import DistMoeBackendConfig, DistMoeConverter
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.components.quantization import (
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.transform import (
     Float8GroupedLinearConverter,
     Float8LinearConverter,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
 )
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
-from torchtitan.models.common.attention import VarlenAttention
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
+from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.trainer import Trainer
 
@@ -95,21 +94,8 @@ def _enable_dist_moe(
         attn_backend="varlen",
         converters=converters,
     )
-    for _, attention, _, _ in config.model_spec.model.traverse(VarlenAttention.Config):
-        assert isinstance(attention, VarlenAttention.Config)
-        attention.max_num_documents = 512
+    config.dataloader.max_num_documents = 512
     return config
-
-
-def enable_fused_swiglu(config: Trainer.Config) -> None:
-    # Activate the stock dense-FFN and MoE grouped-expert overrides. The separate
-    # dist-GEMM FFN override is not needed by these configs.
-    for override in (
-        "torchtitan.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
-    ):
-        assert override not in config.override.imports
-        config.override.imports.append(override)
 
 
 def deepseek_v3_debugmodel(
@@ -156,8 +142,10 @@ def deepseek_v3_debugmodel_mtp(
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry("debugmodel", seq_len=seq_len, num_mtp_layers=1)
-    config.loss = MTPLoss.Config(
-        global_vocab_size=decoder_vocab_size(config.model_spec),
+    config.loss = ChunkedLossWrapper.Config(
+        loss_fn=MTPLoss.Config(
+            global_vocab_size=decoder_vocab_size(config.model_spec),
+        ),
     )
     return config
 
@@ -228,28 +216,6 @@ def deepseek_v3_debugmodel_hybridep(
     return config
 
 
-def deepseek_v3_debugmodel_minimal_async_ep(
-    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> Trainer.Config:
-    config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry(
-        "debugmodel",
-        seq_len=seq_len,
-        moe_comm_backend="minimal_async_ep",
-    )
-    enable_fused_swiglu(config)
-    config.parallelism = ParallelismConfig(
-        data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=1,
-        tensor_parallel_degree=1,
-        context_parallel_degree=1,
-        pipeline_parallel_degree=1,
-        expert_parallel_degree=1,
-        enable_sequence_parallel=False,
-    )
-    return config
-
-
 def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry("16B", seq_len=seq_len, attn_backend="flex")
     return Trainer.Config(
@@ -293,28 +259,6 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
         attn_backend="flex",
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
-    )
-    config.training.disable_cuda_graphs = False
-    return config
-
-
-def deepseek_v3_16b_minimal_async_ep(seq_len: int | None = None) -> Trainer.Config:
-    config = deepseek_v3_16b(seq_len=seq_len)
-    config.model_spec = model_registry(
-        "16B",
-        seq_len=seq_len,
-        attn_backend="flex",
-        moe_comm_backend="minimal_async_ep",
-    )
-    enable_fused_swiglu(config)
-    config.parallelism = ParallelismConfig(
-        data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=1,
-        tensor_parallel_degree=1,
-        context_parallel_degree=1,
-        pipeline_parallel_degree=1,
-        expert_parallel_degree=1,
-        enable_sequence_parallel=False,
     )
     config.training.disable_cuda_graphs = False
     return config

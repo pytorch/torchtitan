@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, TYPE_CHECKING
@@ -22,12 +23,12 @@ from torch.distributed.tensor import DTensor
 from torch.utils.hooks import RemovableHandle
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh
 
+from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.moe import ExpertActivation, RoutedExperts
+from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
-from torchtitan.tools.logging import logger
 
 from dist_moe import (
     BlockScaledFormat,
@@ -51,6 +52,9 @@ from .tensor import (
     _DistMoeW2ShardedTensor,
     _dynamic_prepared_weight,
 )
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
@@ -156,11 +160,11 @@ class DistMoeConverter(ModelConfigConverter):
             if (
                 type(config.w13) is not GroupedLinear.Config
                 or type(config.w2) is not GroupedLinear.Config
-                or type(config.activation) is not ExpertActivation.Config
+                or type(config.activation_fn) is not SwiGLU.Config
             ):
                 raise TypeError(
                     "Dist-MoE requires the stock grouped-linear projections and "
-                    "expert activation"
+                    "SwiGLU activation"
                 )
             if not isinstance(config.token_dispatcher, AllToAllTokenDispatcher.Config):
                 raise ValueError(
@@ -170,7 +174,7 @@ class DistMoeConverter(ModelConfigConverter):
             replacement = DistMoeRoutedExperts.Config(
                 w13=config.w13,
                 w2=config.w2,
-                activation=config.activation,
+                activation_fn=config.activation_fn,
                 token_dispatcher=config.token_dispatcher,
                 backend=self.config.backend,
                 sharding_config=config.sharding_config,
@@ -276,8 +280,6 @@ class DistMoeRoutedExperts(RoutedExperts):
         self.hidden_dim = config.w13.in_features
         self.intermediate_dim = config.w2.in_features
         self.top_k = config.token_dispatcher.top_k
-        if self.w13.bias is not None or self.w2.bias is not None:
-            raise ValueError("Dist-MoE does not support expert projection biases")
         if config.backend.dtype == "mxfp8":
             self.w13.weight = torch.nn.Parameter(
                 _DistMoeW13ShardedTensor(self.w13.weight.data),
@@ -351,9 +353,7 @@ class DistMoeRoutedExperts(RoutedExperts):
             else self.w2.weight
         )
         if self._backend_config.dtype == "mxfp8":
-            from torchtitan.components.quantization._fsdp_tensor import (
-                _UnshardedFSDPTensor,
-            )
+            from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor
 
             if isinstance(w13, _UnshardedFSDPTensor):
                 w13_arg = w13.operands.prepared(w13.flatten(1, 2))

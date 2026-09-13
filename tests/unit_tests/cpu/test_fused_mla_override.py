@@ -17,7 +17,7 @@ from torch.testing._internal.common_utils import (
 )
 
 from torchtitan.config import apply_overrides, OverrideConfig
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.deepseek_v3.model import Attention, DeepSeekV3Model
@@ -66,9 +66,9 @@ class TestFusedMLANumerics(unittest.TestCase):
 
     def setUp(self):
         torch.manual_seed(42)
-        self._inductor_config_backup = dict(FlexAttention.inductor_configs)
-        FlexAttention.inductor_configs["max_autotune"] = False
-        FlexAttention.inductor_configs["coordinate_descent_tuning"] = False
+        self._inductor_config_backup = dict(FlexInnerAttention.inductor_configs)
+        FlexInnerAttention.inductor_configs["max_autotune"] = False
+        FlexInnerAttention.inductor_configs["coordinate_descent_tuning"] = False
         cuda = torch.device("cuda")
         self.rope = ComplexRoPE.Config(
             dim=self.rope_dim,
@@ -83,8 +83,8 @@ class TestFusedMLANumerics(unittest.TestCase):
         self.positions = torch.arange(self.num_tokens, device=cuda)
 
     def tearDown(self):
-        FlexAttention.inductor_configs.clear()
-        FlexAttention.inductor_configs.update(self._inductor_config_backup)
+        FlexInnerAttention.inductor_configs.clear()
+        FlexInnerAttention.inductor_configs.update(self._inductor_config_backup)
         torch._dynamo.reset()
 
     def assert_dtype_close(
