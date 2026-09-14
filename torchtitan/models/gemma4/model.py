@@ -231,10 +231,10 @@ class Gemma4Attention(GQAttention):
             xk_THK, xv_THV = shared_kv_states[self.layer_type]
             xq_THK = self.rope(xq_THK, None, positions)
         else:
+            if xv_THV is None and xk_THK is not None:
+                xv_THV = xk_THK.clone()
             if self.k_norm is not None and xk_THK is not None:
                 xk_THK = self.k_norm(xk_THK)
-            if xv_THV is None and xk_THK is not None:
-                xv_THV = xk_THK
             xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
             if self.v_norm is not None and xv_THV is not None:
                 xv_THV = self.v_norm(xv_THV)

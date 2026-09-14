@@ -467,15 +467,18 @@ _FLAVOR_SPECS: dict[str, dict[str, Any]] = {
     "12b": dict(
         dim=3840, n_heads=16, n_kv_heads=8, n_layers=48, hidden_dim=15360,
         global_kv_heads=1, attention_k_eq_v=True, sliding_window_size=1024, global_attn_interval=6,
+        final_logit_softcapping=30.0,
     ),
     "26b_a4b": dict(
         dim=2816, n_heads=16, n_kv_heads=8, n_layers=30, hidden_dim=704,
         num_experts=128, top_k=8, shared_experts_dim=2112,
         global_kv_heads=2, attention_k_eq_v=True, sliding_window_size=1024, global_attn_interval=6,
+        final_logit_softcapping=30.0,
     ),
     "31b": dict(
         dim=5376, n_heads=32, n_kv_heads=16, n_layers=60, hidden_dim=21504,
         global_kv_heads=4, attention_k_eq_v=True, sliding_window_size=1024, global_attn_interval=6,
+        final_logit_softcapping=30.0,
     ),
 }
 
