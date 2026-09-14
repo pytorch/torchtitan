@@ -13,6 +13,7 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     register_moe_load_balancing_hook,
 )
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
@@ -31,8 +32,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.deepseek_v3 import build_mla_moe_layers
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import KimiK25Model

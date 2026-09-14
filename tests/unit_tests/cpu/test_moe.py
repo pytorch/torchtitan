@@ -9,11 +9,13 @@ import unittest
 import torch
 import torch.nn as nn
 
+from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.moe import GroupedExperts
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -46,6 +48,21 @@ class _FixedRouter(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_grouped_experts_use_configured_activation(self):
+        activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
+        experts = GroupedExperts.Config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=2,
+            activation_fn=activation_fn,
+        ).build()
+        gate_RF = torch.randn(3, 8)
+        up_RF = torch.randn(3, 8)
+
+        expected_RF = activation_fn.build()(gate_RF, up_RF)
+        actual_RF = experts.activation_fn(gate_RF, up_RF)
+        torch.testing.assert_close(actual_RF, expected_RF)
+
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
         dim = 4

@@ -14,6 +14,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.transform import LMHeadCastConverter
 from torchtitan.experiments.rl.actors.generator import (
     SamplingConfig,
     VLLMCudagraphConfig,
@@ -32,7 +33,6 @@ from torchtitan.experiments.rl.examples.dapo_math.rollouter import (
     DapoMathWorker,
 )
 from torchtitan.experiments.rl.losses import DAPOLoss
-from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
