@@ -12,7 +12,7 @@ from .batch_invariance import BatchInvariantFlexConverter
 from .cast_linear import LMHeadCastConverter
 from .context_parallel import ContextParallelTransform
 from .converter import ModelConfigConverter, validate_converter_order
-from .lora import LoRAConverter
+from .lora import LoRATransform
 from .quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
@@ -31,7 +31,7 @@ __all__ = [
     "ContextParallelTransform",
     "BatchInvariantFlexConverter",
     "LMHeadCastConverter",
-    "LoRAConverter",
+    "LoRATransform",
     "Float8GroupedExpertsConverter",
     "Float8LinearConverter",
     "MXFP8GroupedExpertsConverter",
