@@ -27,22 +27,31 @@ from typing import Any, cast
 
 import torch
 import torch.fx as fx
+import torch.nn as nn
 import torch.utils._pytree as pytree
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining.schedules import (
     _PipelineContext,
     _PipelineScheduleRuntime,
+    FULL_BACKWARD,
     OVERLAP_F_B,
 )
 
 from torchtitan.config import ParallelismConfig
+from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     BOXED_CODEGEN_META,
     compute_annotated_loss,
+    compute_parameter_gradients,
     ensure_boxed_graph_module,
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
+    trace_input_preparer_keys,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+    remove_fsdp_reduction_tail,
     split_backward_fsdp_collectives,
     split_forward_fsdp_collectives,
 )
@@ -53,14 +62,20 @@ from torchtitan.experiments.graph_trainer.graph_pp.partition import (
     GraphMeta as PartitionGraphMeta,
     partition_joint_graph,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.runner import (
+    BACKWARD,
+    BACKWARD_WITH_REDUCE_GRAD,
+    FULL_FORWARD_BACKWARD,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.split_di_dw import (
     GraphPPDiDwSplit,
     split_di_dw_graph,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
-    GraphPPOverlapGraphs,
-    GraphPPStageGraphs,
     GraphPipelineStage,
+    JointStageGraphs,
+    OverlapStageGraphs,
+    SplitStageGraphs,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     example_inputs_from_placeholders,
@@ -73,21 +88,68 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     extract_module_state,
     minimal_fx_tracer,
+    run_traced,
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     canonicalize_graph_pass,
     compile_time_passes,
+    construct_default_graph_passes,
+    construct_mandatory_graph_passes,
     deduplicate_fsdp_unshard_chains_pass,
     eliminate_dead_code_pass,
     final_inductor_compile_passes,
 )
+from torchtitan.experiments.graph_trainer.precompile import (
+    _FX_TRACE_ARTIFACT_KEY,
+    compute_config_fingerprint,
+    flatten_runtime_inputs,
+    get_spmd_precompile_meshes,
+    precompile_fx_trace_load,
+)
+from torchtitan.experiments.graph_trainer.registry import (
+    PASS_PIPELINE_REGISTRY,
+    TRACE_CALL_INPUT_PREPARERS,
+    TRACE_INPUT_PREPARERS,
+)
+from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.protocols.model import BaseModel
 import logging
 
 
 logger = logging.getLogger(__name__)
+
+
+def make_fwd_bwd_step(model, loss_fn):
+    """Return a function that computes loss and explicit parameter gradients.
+
+    ``model`` and ``loss_fn`` are captured in the closure so neither shows up
+    as a graph input. Pass ``model`` through ``minimal_fx_tracer(fn, module=model)``
+    to thread its parameters/buffers as static graph inputs.
+    """
+
+    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
+        pred = model(inputs, **extra_kwargs)
+        # The loss function is not a submodule of the model, so
+        # annotate_module_fqns won't tag it. Annotate it here so that
+        # downstream passes (bucketing, SAC, kernel annotations) can
+        # attribute loss nodes in the traced graph.
+        loss = compute_annotated_loss(
+            loss_fn,
+            pred,
+            labels,
+            {"global_valid_tokens": global_valid_tokens},
+        )
+        named_params = [
+            (name, parameter)
+            for name, parameter in model.named_parameters(remove_duplicate=False)
+            if parameter.requires_grad
+        ]
+        grads = compute_parameter_gradients(loss, named_params)
+        return [loss, *grads]
+
+    return fwd_bwd_step
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -183,12 +245,12 @@ def _execute_graph_module(
 
 
 @dataclasses.dataclass(slots=True)
-class GraphTrainerStageGraphs(GraphPPStageGraphs):
+class GraphTrainerStageGraphs(SplitStageGraphs):
     """GraphTrainer-backed bound graph executor for one GraphPP stage.
 
     The object owns the GraphTrainer-specific FX modules and metadata needed to
-    pack flat graph inputs and unwrap graph outputs. ``GraphPipelineRuntime``
-    calls this object through the generic ``GraphPPStageGraphs`` protocol and
+    pack flat graph inputs and unwrap graph outputs. ``GraphRuntime`` calls
+    this object through the generic ``SplitStageGraphs`` protocol and
     never inspects the private metadata directly.
 
     Args:
@@ -217,10 +279,6 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
     @property
     def supports_backward_input_weight_split(self) -> bool:
         return self.modules.bw_di is not None and self.modules.bw_dw is not None
-
-    @property
-    def num_unsharded_param_grad_values(self) -> int:
-        return self.meta.num_param_grad_values
 
     def unshard_params(
         self,
@@ -581,15 +639,68 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
 
     def param_grads_for_accumulation(
         self,
-        sharded_param_grads: list[Any],
+        param_grads: list[Any],
     ) -> list[Any]:
         """Return parameter gradients in optimizer accumulation structure."""
 
-        return self.meta.param_grad_values.wrap_flat_values(sharded_param_grads)
+        return self.meta.param_grad_values.wrap_flat_values(param_grads)
 
 
 @dataclasses.dataclass(slots=True)
-class GraphTrainerOverlapGraphs(GraphPPOverlapGraphs):
+class GraphTrainerJointStageGraphs(JointStageGraphs):
+    """Execute one monolithic forward/loss/backward graph for PP=1."""
+
+    traced: TracedResult
+    module: nn.Module
+    num_param_grads: int
+    runtime_meshes: list[DeviceMesh] | None = None
+    _run: Callable[..., Any] = dataclasses.field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._run = run_traced(
+            self.traced,
+            module=self.module,
+            precompile_meshes=self.runtime_meshes,
+        )
+
+    def _model_input(self, args: tuple[Any, ...]) -> Any:
+        if len(args) != 1:
+            raise ValueError(
+                "PP=1 joint forward/backward expects one model input, got "
+                f"{len(args)}"
+            )
+        return args[0]
+
+    def forward_backward(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        target: Any,
+        loss_kwargs: dict[str, Any],
+    ) -> tuple[Any, list[Any]]:
+        global_valid_tokens = loss_kwargs["global_valid_tokens"]
+        outputs = self._run(
+            self._model_input(args),
+            target,
+            global_valid_tokens,
+            kwargs,
+        )
+        if len(outputs) != self.num_param_grads + 1:
+            raise ValueError(
+                "PP=1 joint forward/backward output count mismatch: "
+                f"expected {self.num_param_grads + 1}, got {len(outputs)}"
+            )
+        return outputs[0], list(outputs[1:])
+
+    def param_grads_for_accumulation(
+        self,
+        param_grads: list[Any],
+    ) -> list[Any]:
+        return param_grads
+
+
+@dataclasses.dataclass(slots=True)
+class GraphTrainerOverlapGraphs(OverlapStageGraphs):
     """GraphTrainer-backed executor for one multiplexed ``OVERLAP_F_B`` pair."""
 
     fw_graphs: GraphTrainerStageGraphs
@@ -914,6 +1025,144 @@ def _validate_stage_step_output_spec(
         )
 
 
+def construct_joint_train_step_passes(
+    traced: TracedResult,
+    config: Any,
+    *,
+    parallel_dims: ParallelDims,
+    use_graph_trainer_cuda_graph: bool,
+) -> list[Callable]:
+    """Construct passes for the joint PP=1 train graph."""
+    if config.compile.precompile_artifact_dir:
+        if config.compile.enable_passes and use_graph_trainer_cuda_graph:
+            return construct_default_graph_passes(
+                traced,
+                config,
+                parallel_dims=parallel_dims,
+            )
+        return []
+    if not config.compile.enable_passes:
+        return construct_mandatory_graph_passes()
+
+    pipeline_fn = PASS_PIPELINE_REGISTRY.get(config.compile.pass_pipeline)
+    if pipeline_fn is not None:
+        return pipeline_fn(traced, config, parallel_dims=parallel_dims)
+
+    if use_graph_trainer_cuda_graph:
+        return construct_default_graph_passes(
+            traced,
+            config,
+            parallel_dims=parallel_dims,
+        )
+
+    return compile_time_passes(
+        traced,
+        config,
+        parallel_dims=parallel_dims,
+    )
+
+
+def _build_joint_stage_graph(
+    stage: GraphPipelineStage,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    target: Any,
+    loss_kwargs: dict[str, Any],
+    *,
+    loss_fn: Callable,
+    compile_config: GraphTrainerCompileConfig,
+    pass_config: Any,
+    parallel_dims: ParallelDims,
+) -> None:
+    """Build the normal monolithic train graph for a trivial PP=1 schedule."""
+    if not stage.is_first or not stage.is_last or len(args) != 1:
+        raise ValueError(
+            "Joint forward/backward requires one PP=1 stage and one model input"
+        )
+
+    runtime_args = (
+        args[0],
+        target,
+        loss_kwargs["global_valid_tokens"],
+        kwargs,
+    )
+    runtime_meshes = None
+    if compile_config.precompile_artifact_dir:
+        storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
+        if not storage.exists(_FX_TRACE_ARTIFACT_KEY):
+            raise ValueError(
+                "Precompiled fx_trace artifact not found at "
+                f"'{compile_config.precompile_artifact_dir}/"
+                f"{_FX_TRACE_ARTIFACT_KEY}.bin'. Run precompile_main with "
+                "--compile.mode aot_fx_trace first."
+            )
+        runtime_meshes = get_spmd_precompile_meshes(parallel_dims)
+        traced = precompile_fx_trace_load(
+            storage,
+            expected_fingerprint=compute_config_fingerprint(
+                stage.submod,
+                compile_config,
+                parallel_dims,
+            ),
+            example_inputs=flatten_runtime_inputs(
+                stage.submod,
+                runtime_args,
+                {},
+                precompile_meshes=runtime_meshes,
+            ),
+        )
+    else:
+        full_forward_backward_step = make_fwd_bwd_step(stage.submod, loss_fn)
+
+        def prepare_trace_inputs(
+            trace_args: tuple[Any, ...], trace_kwargs: dict[str, Any]
+        ) -> None:
+            for pass_name in trace_input_preparer_keys(compile_config):
+                prepare = TRACE_INPUT_PREPARERS.get(pass_name)
+                if prepare is not None:
+                    prepare(compile_config, trace_args, trace_kwargs)
+
+        def prepare_trace_call_inputs(
+            trace_args: tuple[Any, ...], trace_kwargs: dict[str, Any]
+        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+            for pass_name in trace_input_preparer_keys(compile_config):
+                prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
+                if prepare is not None:
+                    prepared = prepare(compile_config, trace_args, trace_kwargs)
+                    if prepared is not None:
+                        trace_args, trace_kwargs = prepared
+            return trace_args, trace_kwargs
+
+        traced = minimal_fx_tracer(
+            full_forward_backward_step,
+            module=stage.submod,
+            prepare_inputs=prepare_trace_inputs,
+            prepare_call_inputs=prepare_trace_call_inputs,
+        )(*runtime_args)
+    passes = construct_joint_train_step_passes(
+        traced,
+        pass_config,
+        parallel_dims=parallel_dims,
+        use_graph_trainer_cuda_graph=pass_config.training.disable_cuda_graphs,
+    )
+    traced.gm = apply_graph_passes(
+        traced.gm,
+        traced.example_inputs,
+        passes,
+        compile_config=compile_config,
+        respect_disable_passes=compile_config.enable_passes,
+    )
+    stage.graphs = GraphTrainerJointStageGraphs(
+        traced=traced,
+        module=stage.submod,
+        num_param_grads=sum(
+            parameter.requires_grad
+            for _, parameter in stage.submod.named_parameters(remove_duplicate=False)
+        ),
+        runtime_meshes=runtime_meshes,
+    )
+
+
 def _build_stage_graphs(
     stage: GraphPipelineStage,
     args: tuple[Any, ...],
@@ -926,9 +1175,19 @@ def _build_stage_graphs(
     model_config: BaseModel.Config | None = None,
     parallelism: ParallelismConfig | None = None,
     compile_graphs: bool = True,
+    extract_fsdp_param_unshard: bool = True,
+    extract_fsdp_grad_reduction: bool = True,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     maybe_register_blockmask_pytree_node()
+    if (
+        extract_fsdp_grad_reduction
+        and compile_config.enable_fsdp_dense_region_overlap
+    ):
+        raise ValueError(
+            "FSDP dense-region overlap requires gradient reduction to remain "
+            "inside FULL_BACKWARD"
+        )
 
     # 1. Prepare representative trace inputs. ``minimal_fx_tracer`` fakeifies
     # these tensors before running the stage function, so this must not execute
@@ -1092,6 +1351,7 @@ def _build_stage_graphs(
         fwd_input_names=partition_meta.fwd_input_names,
         fwd_flat_input_indices=partition_meta.fwd_flat_input_indices,
         fwd_side_effect_output_names=partition_meta.fwd_side_effect_output_names,
+        extract_fsdp_param_unshard=extract_fsdp_param_unshard,
     )
     partition_meta = dataclasses.replace(
         partition_meta,
@@ -1104,6 +1364,11 @@ def _build_stage_graphs(
     fsdp_bw = split_backward_fsdp_collectives(
         bw_module,
         num_param_grads=num_param_grad_values,
+        extract_grad_reduction=extract_fsdp_grad_reduction,
+    )
+    remove_fsdp_reduction_tail(
+        fsdp_fw.fw_no_fsdp_module,
+        reduction_node_names=fsdp_bw.reduction_node_names,
     )
     didw_split: GraphPPDiDwSplit | None = split_di_dw_graph(
         fsdp_bw.bw_no_fsdp_module,
@@ -1178,7 +1443,13 @@ def _required_multiplex_pairs(
     for action in pipeline_order.get(schedule.rank, []):
         if action.computation_type != OVERLAP_F_B:
             continue
-        fw_action, bw_action = overlap_fw_bw_sub_actions(action)
+        fw_action, bw_action = overlap_fw_bw_sub_actions(
+            action,
+            backward_computation_types=(
+                BACKWARD,
+                BACKWARD_WITH_REDUCE_GRAD,
+            ),
+        )
         required_pairs.add((fw_action.stage_index, bw_action.stage_index))
     return required_pairs
 
@@ -1187,13 +1458,13 @@ def _build_graph_pp_overlap_graphs(
     schedule: _PipelineScheduleRuntime,
     *,
     compile_config: GraphTrainerCompileConfig,
-) -> dict[tuple[int, int], GraphPPOverlapGraphs]:
+) -> dict[tuple[int, int], OverlapStageGraphs]:
     """Build multiplexed graphs required by ``OVERLAP_F_B`` schedule actions."""
 
     stage_index_to_stage = {
         stage.stage_index: cast(GraphPipelineStage, stage) for stage in schedule._stages
     }
-    overlap_graphs: dict[tuple[int, int], GraphPPOverlapGraphs] = {}
+    overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
     for fw_stage_idx, bw_stage_idx in _required_multiplex_pairs(schedule):
         pair = (fw_stage_idx, bw_stage_idx)
         fw_stage = stage_index_to_stage[fw_stage_idx]
@@ -1286,14 +1557,22 @@ class GraphTrainerStageGraphProvider:
             ``None`` when compile passes are disabled in tests.
         parallelism: Parallelism config consumed by GraphTrainer compile passes,
             or ``None`` when compile passes are disabled in tests.
+        extract_fsdp_param_unshard: Whether to extract FSDP parameter all-gathers
+            from forward into a separately scheduled graph.
+        extract_fsdp_grad_reduction: Whether to extract FSDP gradient reduction
+            from backward into a separately scheduled graph.
     """
 
     loss_fn: Callable
     compile_config: GraphTrainerCompileConfig
     model_config: BaseModel.Config | None
     parallelism: ParallelismConfig | None
+    extract_fsdp_param_unshard: bool = True
+    extract_fsdp_grad_reduction: bool = True
+    pass_config: Any = None
+    parallel_dims: ParallelDims | None = None
     _warned_cuda_graph: bool = False
-    _overlap_graphs: dict[tuple[int, int], GraphPPOverlapGraphs] | None = None
+    _overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] | None = None
 
     def _warn_if_cuda_graph_pass_requested(self) -> None:
         if self._warned_cuda_graph:
@@ -1317,7 +1596,7 @@ class GraphTrainerStageGraphProvider:
         ctx: _PipelineContext,
         *,
         loss_kwargs: dict[str, Any],
-    ) -> dict[tuple[int, int], GraphPPOverlapGraphs]:
+    ) -> dict[tuple[int, int], OverlapStageGraphs]:
         """Build, multiplex, and compile all local GraphPP graphs for one step."""
         graph_stages = [
             cast(GraphPipelineStage, stage) for stage in schedule._stages
@@ -1364,6 +1643,32 @@ class GraphTrainerStageGraphProvider:
                 ctx.target_mbs,
                 ctx.losses,
             )
+        local_actions = schedule.pipeline_order_with_comms[schedule.rank]
+        if (
+            len(graph_stages) == 1
+            and len(local_actions) == 1
+            and local_actions[0] is not None
+            and local_actions[0].computation_type == FULL_FORWARD_BACKWARD
+        ):
+            if self.pass_config is None or self.parallel_dims is None:
+                raise ValueError(
+                    "Joint forward/backward requires Trainer config and parallel dims"
+                )
+            stage = graph_stages[0]
+            if stage.graphs is None:
+                _build_joint_stage_graph(
+                    stage,
+                    _trace_args_for_stage(stage, trace_ctx),
+                    _trace_kwargs_from_context(trace_ctx),
+                    _trace_target_from_context(stage, trace_ctx),
+                    loss_kwargs,
+                    loss_fn=self.loss_fn,
+                    compile_config=self.compile_config,
+                    pass_config=self.pass_config,
+                    parallel_dims=self.parallel_dims,
+                )
+            return {}
+
         for stage in graph_stages:
             if stage.graphs is not None:
                 continue
@@ -1378,13 +1683,14 @@ class GraphTrainerStageGraphProvider:
                 model_config=self.model_config,
                 parallelism=self.parallelism,
                 compile_graphs=False,
+                extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
+                extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
             )
 
-        self._warn_if_cuda_graph_pass_requested()
         required_overlap_pairs = _required_multiplex_pairs(schedule)
         if not required_overlap_pairs:
             self._overlap_graphs = {}
-            overlap_graphs: dict[tuple[int, int], GraphPPOverlapGraphs] = {}
+            overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
         elif self._overlap_graphs is None:
             self._overlap_graphs = _build_graph_pp_overlap_graphs(
                 schedule,
