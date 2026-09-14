@@ -27,7 +27,7 @@ from torchtitan.models.kimi_k3.moon_ep_dispatcher import (
 )
 from torchtitan.models.kimi_k3.moon_ep_experts import MoonEPGroupedExperts
 
-from tests.unit_tests.cpu.kimi_k3_moonep_fake import FakeMoonEPWorld
+from tests.unit_tests.cpu.kimi_k3_moonep_fake import FakeMoonEPWorld, grouped_mm_loop
 
 
 def _find_dispatcher(model):
@@ -142,7 +142,11 @@ def _run_rank(rank, world, params, inputs, results):
     )
 
 
-def test_moonep_unit_matches_dense_reference_with_duplicated_experts():
+def test_moonep_unit_matches_dense_reference_with_duplicated_experts(monkeypatch):
+    # The expert GEMMs run on CPU here; torch._grouped_mm is CUDA only.
+    monkeypatch.setattr(
+        "torchtitan.models.kimi_k3.moon_ep_experts._grouped_mm", grouped_mm_loop
+    )
     torch.manual_seed(1)
     params = {
         "w1": torch.randn(E, F, D) * 0.2,

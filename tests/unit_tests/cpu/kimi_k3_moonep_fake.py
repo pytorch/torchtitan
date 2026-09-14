@@ -256,38 +256,6 @@ class FakeBuffer:
         assert hidden_nvsh.dtype == torch.bfloat16
         return self.world.combine(self.rank, plan, hidden_nvsh, route_weights_nvs)
 
-    def prefetch_weight(
-        self, *, plan, full_gate_weight, full_up_weight, full_down_weight
-    ):
-        for name, t in (
-            ("gate", full_gate_weight),
-            ("up", full_up_weight),
-            ("down", full_down_weight),
-        ):
-            assert (
-                t is self.world._tables[(self.rank, name)]
-            ), "prefetch must see the allocated table"
-        return self.world.prefetch(self.rank, plan)
-
-    def reduce_grad(
-        self,
-        *,
-        plan,
-        full_gate_grad,
-        full_up_grad,
-        full_down_grad,
-        gate_reduce_buffer,
-        up_reduce_buffer,
-        down_reduce_buffer,
-    ):
-        for name, t in (
-            ("gate", full_gate_grad),
-            ("up", full_up_grad),
-            ("down", full_down_grad),
-        ):
-            assert t is self.world._grads[(self.rank, name)]
-        return self.world.reduce_grad(self.rank, plan)
-
     def destroy(self) -> None:
         pass
 
@@ -295,6 +263,9 @@ class FakeBuffer:
 class FakeTableBackend:
     def __init__(self, world: FakeMoonEPWorld, rank: int):
         self.world, self.rank = world, rank
+
+    def configure(self, *, num_experts: int, num_slots: int) -> None:
+        assert (num_experts, num_slots) == (self.world.E, self.world.B)
 
     def alloc_weight_table(self, name, rows, in_dim, out_dim):
         t = torch.zeros(rows, in_dim, out_dim, dtype=torch.bfloat16)
@@ -304,6 +275,31 @@ class FakeTableBackend:
     def alloc_grad_table(self, name, rows, in_dim, out_dim):
         full = torch.zeros(rows, in_dim, out_dim, dtype=torch.float32)
         self.world._grads[(self.rank, name)] = full
-        # The slot rows ARE this rank's reduce buffer, as on hardware.
+        # The slot rows ARE this rank's reduce buffer.
         self.world._reduce[(self.rank, name)] = full[self.world.E :]
         return full, full[self.world.E :]
+
+    def prefetch(self, plan, tables):
+        for name, t in tables.items():
+            assert (
+                t is self.world._tables[(self.rank, name)]
+            ), "prefetch must see the allocated table"
+        return self.world.prefetch(self.rank, plan)
+
+    def reduce_grad(self, plan, grads):
+        for name, (full, _) in grads.items():
+            assert full is self.world._grads[(self.rank, name)]
+        return self.world.reduce_grad(self.rank, plan)
+
+
+def grouped_mm_loop(
+    A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
+) -> torch.Tensor:
+    """CPU stand-in for ``torch._grouped_mm``: one matmul per row of ``B_t``."""
+    out = A.new_zeros(A.shape[0], B_t.shape[-1])
+    start = 0
+    for g, end in enumerate(offs.tolist()):
+        if end > start:
+            out[start:end] = A[start:end] @ B_t[g]
+        start = end
+    return out
