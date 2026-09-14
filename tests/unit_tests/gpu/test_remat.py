@@ -164,6 +164,7 @@ class _VisionRematModel(Module):
             attention_mask=None,  # pyrefly: ignore [bad-argument-type]
         ).sum()
 
+
 class _RematModel(Module):
     def __init__(self, block: Module):
         super().__init__()
@@ -463,6 +464,7 @@ class TestRematRegions(unittest.TestCase):
                     ),
                     expected_counts,
                 )
+
     def test_router_decision_is_always_saved(self):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,

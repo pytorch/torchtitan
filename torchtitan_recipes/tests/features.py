@@ -17,7 +17,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
-from torchtitan.distributed.activation_checkpoint import FullAC, RegionAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
@@ -402,15 +402,6 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     )
 
 
-def llama3_debugmodel_ulysses_cp2_region_ac() -> Trainer.Config:
-    config = llama3_debugmodel_ulysses_cp2()
-    config.debug.spmd_typechecking = False
-    config.activation_checkpoint = RegionAC.Config(
-        save_regions=["attention.inner_attention"]
-    )
-    return config
-
-
 def llama3_debugmodel_hsdp2x2_tp2() -> Trainer.Config:
     config = llama3_debugmodel_hsdp2x2()
     config.parallelism.tensor_parallel_degree = 2
@@ -426,14 +417,6 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
         config,
         [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
     )
-
-
-def llama3_debugmodel_fsdp2_cp2_region_ac() -> Trainer.Config:
-    config = llama3_debugmodel_fsdp2_cp2()
-    config.activation_checkpoint = RegionAC.Config(
-        save_regions=["attention.inner_attention"]
-    )
-    return config
 
 
 def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
