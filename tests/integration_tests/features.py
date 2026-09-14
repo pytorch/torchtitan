@@ -128,6 +128,22 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_pp2_optimizer_cuda_graph],
+            test_descr="FSDP+PP forward-backward and optimizer CUDA graphs",
+            test_name="fsdp_pp_optimizer_cuda_graph",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_optimizer_cuda_graph],
+            test_descr="FSDP forward-backward and optimizer CUDA graphs",
+            test_name="fsdp_optimizer_cuda_graph",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_tp2_pp2_gpipe],
             test_descr="PP+TP GPipe 2D test",
             test_name="pp_tp_gpipe",

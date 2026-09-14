@@ -87,6 +87,12 @@ class TrainingConfig:
     its own CUDA graph capture.
     """
 
+    enable_optimizer_cuda_graph: bool = False
+    """Capture clipping and fused Adam or AdamW updates in a second CUDA graph.
+
+    Requires forward-backward CUDA graphs and a fused Adam or AdamW optimizer.
+    """
+
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
     torch dtype for training. In contrast to mixed precision training, setting training_dtype=bfloat16 will

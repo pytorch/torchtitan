@@ -29,7 +29,7 @@ def test_train_step_replay_checks_whole_accumulation():
     trainer.dataloader = SimpleNamespace(max_num_documents=None)
     trainer.optimizers = MagicMock()
     trainer.lr_schedulers = SimpleNamespace(
-        schedulers=[SimpleNamespace(get_last_lr=lambda: [0.1])],
+        get_host_lrs_per_scheduler=lambda: [[0.1]],
         step=MagicMock(),
     )
     trainer.parallel_dims = SimpleNamespace(

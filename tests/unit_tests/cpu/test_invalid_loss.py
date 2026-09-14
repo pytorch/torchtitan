@@ -36,6 +36,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config = MagicMock()
         trainer.config.training.max_norm = 1.0
         trainer.config.training.max_context_length = 2048
+        trainer.config.training.enable_optimizer_cuda_graph = False
         trainer.config.parallelism.fsdp_defer_gradient_reduction = False
         trainer.dataloader = MagicMock(max_num_documents=None)
         trainer.sdc_replayer = None
