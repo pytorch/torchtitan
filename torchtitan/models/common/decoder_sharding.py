@@ -10,12 +10,12 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
-    AsyncAllGatherLinear,
     AsyncAllGatherQKVLinear,
     AsyncLinearReduceScatter,
+    DistGEMMFeedForward,
     validate_async_tp_preconditions,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
 from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
@@ -310,31 +310,25 @@ def set_dense_ffn_sharding(
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    common_feed_forward = feed_forward_cfg._owner is FeedForward
-    if isinstance(feed_forward_cfg.w13, AsyncAllGatherLinear.Config) or isinstance(
-        feed_forward_cfg.w2, AsyncLinearReduceScatter.Config
-    ):
+    tensor_parallel = isinstance(feed_forward_cfg, TensorParallelFeedForward.Config)
+    dist_gemm = isinstance(feed_forward_cfg, DistGEMMFeedForward.Config)
+    if dist_gemm:
         validate_async_tp_preconditions(enable_sp=enable_sp)
-    if common_feed_forward:
-        # The projection leaves own the TP redistributions. The feed-forward
-        # wrapper only validates its external input and output layouts.
+    if tensor_parallel:
+        # TP-aware implementations own the collectives inside their w13 and w2
+        # remat regions. This wrapper only validates the external FFN contract.
+        feed_forward_cfg.enable_sequence_parallel = enable_sp
         feed_forward_cfg.sharding_config = ShardingConfig(
             in_src_shardings={"x": attn_x_layout},
             out_src_shardings=attn_x_layout,
         )
-    else:
-        feed_forward_cfg.sharding_config = ShardingConfig(
-            in_src_shardings={"x": attn_x_layout},
-            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
-        )
+        return
 
-    w13_config = colwise_config()
-    if common_feed_forward:
-        w13_config.in_src_shardings = {"input": attn_x_layout}
-        w13_config.in_dst_shardings = {
-            "input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        }
-    feed_forward_cfg.w13.sharding_config = w13_config
+    feed_forward_cfg.sharding_config = ShardingConfig(
+        in_src_shardings={"x": attn_x_layout},
+        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+    )
+    feed_forward_cfg.w13.sharding_config = colwise_config()
     feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
 
 

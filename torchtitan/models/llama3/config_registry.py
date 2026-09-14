@@ -124,7 +124,7 @@ def llama3_debugmodel_varlen_attn(
 def llama3_debugmodel_dist_gemm(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    """Async-TP: the attention TP collectives are folded into their GEMMs.
+    """Async-TP: attention and FFN collectives are folded into their GEMMs.
 
     Needs tensor_parallel_degree > 1 and CUDA. With TP off the fused modules
     fall back to the stock projections, so this stays runnable on one rank.

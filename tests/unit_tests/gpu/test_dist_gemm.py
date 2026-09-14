@@ -33,7 +33,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
+    convert_config_type,
     LoRAConverter,
+    TensorParallelFeedForwardTransform,
     transform_model_config_,
 )
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -44,11 +46,11 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_attention_sharding,
 )
 from torchtitan.models.common.dist_gemm import (
-    AsyncAllGatherLinear,
     AsyncAllGatherQKVLinear,
     AsyncLinearReduceScatter,
+    DistGEMMFeedForward,
 )
-from torchtitan.models.common.linear import AllGatherLinear, LinearReduceScatter
+from torchtitan.models.common.linear import Linear, LinearReduceScatter
 
 DIM = 256
 N_HEADS = 8
@@ -63,12 +65,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
         return model_registry("debugmodel").model
 
-    def test_default_uses_synchronous_tp_linears(self):
+    def test_default_keeps_plain_feed_forward_linears(self):
         for layer in self._model_config().layers:
             self.assertIs(type(layer.attention.qkv_linear), AllGatherQKVLinear.Config)
             self.assertIs(type(layer.attention.wo), LinearReduceScatter.Config)
-            self.assertIs(type(layer.feed_forward.w13), AllGatherLinear.Config)
-            self.assertIs(type(layer.feed_forward.w2), LinearReduceScatter.Config)
+            self.assertIs(type(layer.feed_forward.w13), Linear.Config)
+            self.assertIs(type(layer.feed_forward.w2), Linear.Config)
 
     def test_transform_selects_async_linears(self):
         model = transform_model_config_(
@@ -80,10 +82,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
                 layer.attention.qkv_linear, AsyncAllGatherQKVLinear.Config
             )
             self.assertIsInstance(layer.attention.wo, AsyncLinearReduceScatter.Config)
-            self.assertIsInstance(layer.feed_forward.w13, AsyncAllGatherLinear.Config)
-            self.assertIsInstance(
-                layer.feed_forward.w2, AsyncLinearReduceScatter.Config
-            )
+            self.assertIsInstance(layer.feed_forward, DistGEMMFeedForward.Config)
 
     def test_stock_parameter_shapes_survive(self):
         """Fused modules keep the stock layouts, or checkpoints stop loading."""
@@ -114,32 +113,53 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             set_gqa_attention_sharding(attn, enable_sp=False)
 
     def test_sharding_setup_declares_common_communication_contracts(self):
-        """Synchronous and async linears receive the same redistribution specs."""
-        stock = self._model_config().layers[0].attention
+        """Async attention and FFN implementations own their collectives."""
+        stock_layer = self._model_config().layers[0]
         async_model = transform_model_config_(
             self._model_config(),
             [AsyncTensorParallelTransform()],
         )
-        fused = async_model.layers[0].attention
-        set_gqa_attention_sharding(stock, enable_sp=True)
-        set_gqa_attention_sharding(fused, enable_sp=True)
+        async_layer = async_model.layers[0]
+        set_gqa_attention_sharding(stock_layer.attention, enable_sp=True)
+        set_gqa_attention_sharding(async_layer.attention, enable_sp=True)
+        set_dense_ffn_sharding(
+            async_layer.feed_forward,
+            attn_x_layout=dense_sequence_parallel_placement(),
+            enable_sp=True,
+        )
 
-        self.assertIsNone(stock.sharding_config.in_dst_shardings)
-        self.assertIsNone(stock.sharding_config.out_dst_shardings)
-        self.assertIsNone(fused.sharding_config.in_dst_shardings)
-        self.assertIsNone(fused.sharding_config.out_dst_shardings)
+        self.assertIsNone(stock_layer.attention.sharding_config.in_dst_shardings)
+        self.assertIsNone(stock_layer.attention.sharding_config.out_dst_shardings)
+        self.assertIsNone(async_layer.attention.sharding_config.in_dst_shardings)
+        self.assertIsNone(async_layer.attention.sharding_config.out_dst_shardings)
 
-        self.assertIsNotNone(stock.qkv_linear.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(fused.qkv_linear.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(stock.wo.sharding_config.out_src_shardings)
-        self.assertIsNotNone(stock.wo.sharding_config.out_dst_shardings)
-        self.assertIsNotNone(fused.wo.sharding_config.out_src_shardings)
-        self.assertIsNotNone(fused.wo.sharding_config.out_dst_shardings)
-        self.assertIn("weight", fused.wo.sharding_config.state_shardings)
+        self.assertIsNotNone(
+            stock_layer.attention.qkv_linear.sharding_config.in_dst_shardings
+        )
+        self.assertIsNotNone(
+            async_layer.attention.qkv_linear.sharding_config.in_dst_shardings
+        )
+        self.assertIsNotNone(stock_layer.attention.wo.sharding_config.out_src_shardings)
+        self.assertIsNotNone(stock_layer.attention.wo.sharding_config.out_dst_shardings)
+        self.assertIsNotNone(async_layer.attention.wo.sharding_config.out_src_shardings)
+        self.assertIsNotNone(async_layer.attention.wo.sharding_config.out_dst_shardings)
+        self.assertIn(
+            "weight", async_layer.attention.wo.sharding_config.state_shardings
+        )
+
+        self.assertIsNone(async_layer.feed_forward.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(async_layer.feed_forward.sharding_config.out_src_shardings)
+        self.assertIsNone(
+            async_layer.feed_forward.w2.sharding_config.out_src_shardings
+        )
+        self.assertIsNone(
+            async_layer.feed_forward.w2.sharding_config.out_dst_shardings
+        )
 
     def test_projection_boundaries_survive_lora_config_wrappers(self):
-        """LoRA retains TP communication on the converted projection leaves."""
-        model = LoRAConverter.Config().build().convert(self._model_config())
+        """The transformed FFN boundary encloses LoRA projection work."""
+        model = TensorParallelFeedForwardTransform().transform(self._model_config())
+        model = LoRAConverter.Config().build().convert(model)
         layer = model.layers[0]
         set_gqa_attention_sharding(layer.attention, enable_sp=True)
         set_dense_ffn_sharding(
@@ -153,7 +173,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             layer.attention.qkv_linear.sharding_config.in_dst_shardings
         )
         self.assertIsNone(layer.feed_forward.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
+        self.assertIsNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
 
 
 class TestAsyncTensorParallelSharding(DTensorTestBase):
@@ -266,13 +286,13 @@ class TestDistGEMMFeedForwardNumerics(DTensorTestBase):
             .build()
             .to(dev)
         )
-        async_config = make_ffn_config(
+        base_async_config = make_ffn_config(
             dim=dim,
             hidden_dim=hidden,
             w1_param_init=init,
             w2w3_param_init=init,
         )
-        AsyncTensorParallelTransform().transform(async_config)
+        async_config = convert_config_type(base_async_config, DistGEMMFeedForward)
         dist_gemm = async_config.build().to(dev)
 
         with torch.no_grad():
@@ -341,12 +361,10 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
 
         torch.manual_seed(0)
         native = make().build().to(dev)
-        async_config = make()
-        AsyncTensorParallelTransform().transform(async_config)
+        async_config = convert_config_type(make(), DistGEMMFeedForward)
         async_config.activation_fn = fused_swiglu(async_config.activation_fn)
         fused = async_config.build().to(dev)
-        self.assertIsInstance(fused.w13, AsyncAllGatherLinear)
-        self.assertIsInstance(fused.w2, AsyncLinearReduceScatter)
+        self.assertIsInstance(fused, DistGEMMFeedForward)
 
         with torch.no_grad():
             for w in (native.w13.weight, native.w2.weight):
