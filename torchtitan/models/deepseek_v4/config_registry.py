@@ -685,7 +685,7 @@ def deepseek_v4_flash_8k_ep16_blk32_sac(seq_len: int | None = 8192) -> Trainer.C
     it was not at the EP=64 / block_size 128 base.
     """
     config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
-    config.model_spec.ac = SelectiveAC.Config()
+    config.activation_checkpoint = SelectiveAC.Config()
     return config
 
 
@@ -700,7 +700,7 @@ def deepseek_v4_flash_8k_ep16_blk32_no_ac(
     what this run measures.
     """
     config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
-    config.model_spec.ac = None
+    config.activation_checkpoint = None
     return config
 
 
@@ -717,4 +717,34 @@ def deepseek_v4_flash_8k_ep16_blk16(seq_len: int | None = 8192) -> Trainer.Confi
         inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
         if isinstance(inner, FlexAttention.Config):
             inner.block_size = 16
+    return config
+
+
+def deepseek_v4_flash_8k_ep4_blk32(seq_len: int | None = 8192) -> Trainer.Config:
+    """F22. block_size 32 with EP=4 rather than EP=16.
+
+    On the block_size 128 base the EP sweep was nearly flat between 4 and 16
+    (EP=16 21.39, EP=8 21.84, EP=4 22.04, EP=1 20.80), so EP=4 leads by ~3 %
+    -- barely over the noise floor, but in the same direction twice. Worth one
+    run composed with block_size 32 to see if the ordering holds at the top.
+    """
+    config = deepseek_v4_flash_8k_ep(4, seq_len)
+    for layer in config.model_spec.model.layers:
+        inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.block_size = 32
+    return config
+
+
+def deepseek_v4_flash_8k_ep16_blk32_batch2(
+    seq_len: int | None = 8192,
+) -> Trainer.Config:
+    """F23. Composed base with 2x microbatch.
+
+    The 4x attempt (job 330) burned the full 3 h wall clock without reaching
+    step 1 -- not an OOM, a compile/autotune blowup at 32768 tokens. 2x halves
+    the new shape pressure while still testing whether batch pays here at all.
+    """
+    config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     return config
