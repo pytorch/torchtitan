@@ -42,6 +42,8 @@ class FluxTrainer(Trainer):
         inference: Inference = field(default_factory=Inference)
 
     def __init__(self, config: Config):
+        if config.training.enable_optimizer_cuda_graph:
+            raise ValueError("Optimizer CUDA graphs are not supported with FLUX.")
         super().__init__(config)
 
         # Flux samples diffusion noise and timesteps during each model step, so
@@ -143,7 +145,7 @@ class FluxTrainer(Trainer):
             )
             yield input_dict
 
-    def forward_backward_step(
+    def _forward_backward_step(
         self,
         *,
         input_dict: dict[str, Any] | list[dict[str, Any]],
@@ -156,7 +158,8 @@ class FluxTrainer(Trainer):
             input_dict: Dictionary containing model inputs and labels.
             global_valid_tokens: Optional tensor tracking the total number of
                 valid tokens across all processes.
-                This field is a placeholder for now as we rescale the loss within forward_backward_step for FLUX.
+                This field is a placeholder because FLUX rescales the loss in
+                this method.
 
         Returns:
             torch.Tensor: The computed loss value for this training step
@@ -282,7 +285,7 @@ class FluxTrainer(Trainer):
     def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         self.optimizers.zero_grad()
         # Save the current step learning rate for logging
-        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+        lr = self.lr_schedulers.get_host_lrs_per_scheduler()[0][0]
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -293,7 +296,7 @@ class FluxTrainer(Trainer):
 
         input_dict = next(data_iterator)
 
-        loss = self.forward_backward_step(input_dict=input_dict)
+        loss = self._forward_backward_step(input_dict=input_dict)
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],

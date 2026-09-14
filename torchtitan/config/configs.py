@@ -27,9 +27,10 @@ The command-line surface is frozen either way, so annotate a new field with
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Annotated, Literal
 
 import torch
+import tyro
 
 
 @dataclass(kw_only=True, slots=True)
@@ -84,6 +85,12 @@ class TrainingConfig:
     is supported with single-stage schedules such as GPipe and 1F1B. CUDA graphs
     are independent of ``torch.compile(mode="reduce-overhead")``, which performs
     its own CUDA graph capture.
+    """
+
+    enable_optimizer_cuda_graph: bool = False
+    """Capture clipping and fused Adam or AdamW updates in a second CUDA graph.
+
+    Requires forward-backward CUDA graphs and a fused Adam or AdamW optimizer.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
@@ -159,6 +166,12 @@ class ParallelismConfig:
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
 
+    fsdp_defer_gradient_reduction: Annotated[bool, tyro.conf.Suppress] = False
+    """
+    Keep FSDP parameters unsharded across gradient accumulation iterations and
+    reduce gradients only after the final backward.
+    """
+
     enable_fsdp_symm_mem: bool = False
     """
     Whether to enable FSDP2 symmetric-memory communication optimizations for
@@ -228,6 +241,14 @@ class ParallelismConfig:
     Number of pipeline microbatches per data-parallel rank and gradient
     accumulation iteration. This setting is ignored when pipeline parallelism
     is disabled (`pipeline_parallel_degree = 1`, the default).
+    """
+
+    pipeline_parallel_defer_reduce_grad_wait: Annotated[
+        bool, tyro.conf.Suppress
+    ] = False
+    """
+    Allow FSDP gradient reduction to overlap the next local pipeline stage's
+    backward computation. Requires a multi-stage pipeline schedule.
     """
 
     context_parallel_degree: int = 1

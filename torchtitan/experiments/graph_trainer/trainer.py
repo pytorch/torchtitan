@@ -7,7 +7,7 @@
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -133,6 +133,8 @@ def make_fwd_bwd_step(model, loss_fn, *, accumulate_gradients: bool = False):
 
 
 class GraphTrainer(Trainer):
+    _use_accumulation_cuda_graph = False
+
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
         compile: GraphTrainerCompileConfig = field(
@@ -140,6 +142,10 @@ class GraphTrainer(Trainer):
         )
 
     def __init__(self, config):
+        if config.training.enable_optimizer_cuda_graph:
+            raise ValueError(
+                "Optimizer CUDA graphs are not supported with GraphTrainer."
+            )
         super().__init__(config)
 
         validate_memory_policy_config(self.config.compile)
@@ -171,30 +177,21 @@ class GraphTrainer(Trainer):
     def forward_backward_step(
         self,
         *,
-        input_dict: dict[str, Any] | list[dict[str, Any]],
+        prepared_inputs: tuple[Any, ...],
         global_valid_tokens: torch.Tensor,
+        finalize_gradients: bool = True,
     ) -> torch.Tensor:
         if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
             return super().forward_backward_step(
-                input_dict=input_dict,
+                prepared_inputs=prepared_inputs,
                 global_valid_tokens=global_valid_tokens,
+                finalize_gradients=finalize_gradients,
             )
 
-        assert isinstance(input_dict, dict)
+        assert finalize_gradients or self._fsdp_root is not None
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
-
-        with sl.log_trace_span("preprocess_inputs"):
-            inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
-                input_dict,
-                parallel_dims=self.parallel_dims,
-                parallelism=self.config.parallelism,
-            )
-            # MTP returns one labels tensor per prediction; index 0 contains
-            # the complete main-model labels used for token accounting.
-            self.ntokens_seen += (
-                labels[0].numel() if isinstance(labels, tuple) else labels.numel()
-            )
+        inputs, labels, extra_kwargs = prepared_inputs
         # remove_duplicate=False to preserve duplicate parameter entries
         # from weight tying (e.g. shared embedding/output weights).
         params = self._get_trainable_parameters(model)
