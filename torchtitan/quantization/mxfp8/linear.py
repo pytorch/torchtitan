@@ -26,7 +26,7 @@ from torchao.prototype.mx_formats.kernels import (
     triton_mx_block_rearrange,
 )
 
-from torchtitan.models.common.linear import Linear, StackedLinear
+from torchtitan.models.common.linear import Linear
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
@@ -39,7 +39,6 @@ from .tensor import (
 __all__ = [
     "InputActivationFormatForBackward",
     "MXFP8Linear",
-    "MXFP8StackedLinear",
 ]
 
 # Activation and gradient quantization takes a scaling mode; the 32x32 weight
@@ -349,6 +348,7 @@ class MXFP8Linear(Linear):
         """
 
         def __post_init__(self) -> None:
+            Linear.Config.__post_init__(self)
             if (
                 self.input_activation_format_for_backward
                 not in _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD
@@ -381,88 +381,34 @@ class MXFP8Linear(Linear):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        local_out_features = self.weight.shape[-2]
+        if local_out_features % _MXFP8_BLOCK_SIZE:
+            raise ValueError(
+                "MXFP8 requires local out_features divisible by "
+                f"{_MXFP8_BLOCK_SIZE}; got {local_out_features}. Adjust the "
+                "Linear out_features or TP degree so quantization blocks do "
+                "not span projection boundaries."
+            )
+
         # Always a plain tensor: spmd_types carries TP and EP as annotations
         # instead of wrapping the weight as a model-parallel DTensor.
-        weight_NK = self.weight
+        weight_NK = self.weight if self.num_linears == 1 else self.weight.flatten(0, -2)
         # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
         # not what forward usually sees. Under FSDP the post-all-gather hook has
         # already replaced it for this unshard lifetime with the storage-free
         # _UnshardedFSDPTensor holding the quantized operands, so the weight
         # arrives here already quantized and the type identifies which state we
         # are in.
-        return _mxfp8_linear(
-            input,
-            weight_NK,
-            self.bias,
-            self.input_activation_format_for_backward,
-        )
-
-
-class MXFP8StackedLinear(StackedLinear):
-    """MXFP8 linear whose parameter retains stacked matrix dimensions."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(StackedLinear.Config):
-        input_activation_format_for_backward: InputActivationFormatForBackward = "bf16"
-
-        def __post_init__(self) -> None:
-            StackedLinear.Config.__post_init__(self)
-            if (
-                self.input_activation_format_for_backward
-                not in _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD
-            ):
-                raise ValueError(
-                    "MXFP8 input_activation_format_for_backward must be one of "
-                    f"{_INPUT_ACTIVATION_FORMATS_FOR_BACKWARD}; got "
-                    f"{self.input_activation_format_for_backward!r}."
-                )
-            for name, value in (
-                ("in_features", self.in_features),
-                ("out_features", self.out_features),
-            ):
-                if value % _MXFP8_BLOCK_SIZE:
-                    raise ValueError(
-                        f"MXFP8 requires {name} divisible by {_MXFP8_BLOCK_SIZE}; "
-                        f"got {name}={value}."
-                    )
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.input_activation_format_for_backward = (
-            config.input_activation_format_for_backward
-        )
-        self.weight = nn.Parameter(
-            _LinearShardedTensorWithMXFP8Compute(self.weight.data),
-            requires_grad=self.weight.requires_grad,
-        )
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # The local weight is [num_linears, local_out_features, in_features].
-        # TP shards dimension 1, so validate the post-TP width rather than only
-        # the global out_features checked by Config.
-        local_out_features = self.weight.shape[-2]
-        if local_out_features % _MXFP8_BLOCK_SIZE:
-            raise ValueError(
-                "MXFP8 requires local out_features divisible by "
-                f"{_MXFP8_BLOCK_SIZE}; got {local_out_features}. Adjust the "
-                "StackedLinear out_features or TP degree so quantization "
-                "blocks do not span projection boundaries."
-            )
-
-        # MXFP8 GEMM consumes a 2D [N, K] weight. Flattening
-        # [num_linears, local_out_features, in_features] preserves the physical
-        # order: each linear occupies one contiguous row range. The divisibility
-        # check above guarantees that a 32-row quantization block cannot cross
-        # from one linear into the next.
-        weight_NK = self.weight.flatten(0, -2)
-        bias_N = None if self.bias is None else self.bias.flatten()
         output = _mxfp8_linear(
             input,
             weight_NK,
-            bias_N,
+            (
+                self.bias
+                if self.bias is None or self.num_linears == 1
+                else self.bias.flatten()
+            ),
             self.input_activation_format_for_backward,
         )
-
-        # Restore the public StackedLinear output shape
-        # [..., num_linears, local_out_features] from the flat GEMM result.
+        if self.num_linears == 1:
+            return output
         return output.unflatten(-1, self.weight.shape[:-1])

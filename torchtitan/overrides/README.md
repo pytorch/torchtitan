@@ -382,7 +382,7 @@ machinery.
 |-----------------|------------------------------|-------|
 | RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
 | GroupedExperts.Config | Possibly | `Float8GroupedExpertsConverter` rewrites this |
-| Linear.Config / StackedLinear.Config | Yes | Float8/LoRA replace these |
+| Linear.Config | Yes | Float8/LoRA replace these |
 
 Where a converter already rewrote a node, target that node by location with
 `fqns` so the override only claims the instances you intend (e.g. specific
@@ -437,7 +437,7 @@ One thing worth stating plainly:
 
 - **Fusion under TP.** Fusing weights can interact subtly with tensor
   parallelism -- the fused tensor's row order must admit a correct shard.
-  The default `FeedForward` stores a `StackedLinear` weight
+  The default `FeedForward` stores a `Linear` weight
   `(2, hidden, dim)`. Sharding dimension 1 gives each TP rank matching feature
   slices of the gate and up projections while keeping their rows in separate
   contiguous slabs. The output retains the same `(2, hidden)` structure. This

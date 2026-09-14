@@ -16,7 +16,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.common.linear import StackedLinearBase
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.qwen3.model import Qwen3Model
 
 
@@ -142,7 +142,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         self.assertEqual(_get_expert_shard_dim(model), 1)
 
 
-class TestApplyFsdpStackedLinearSharding(DTensorTestBase):
+class TestApplyFsdpStackedWeightSharding(DTensorTestBase):
     """FSDP shards stacked projections on their matrix-row dimension."""
 
     @property
@@ -163,19 +163,14 @@ class TestApplyFsdpStackedLinearSharding(DTensorTestBase):
             pp_enabled=False,
         )
 
-        stacked_fqns = set()
-        for fqn, module in model.named_modules():
-            if not isinstance(module, StackedLinearBase):
-                continue
-            stacked_fqns.add(fqn.rsplit(".", 1)[-1])
-            shard_dims = {
-                placement.dim
-                for placement in module.weight.placements
-                if isinstance(placement, Shard)
-            }
-            self.assertEqual(shard_dims, {1})
-
-        self.assertEqual(stacked_fqns, {"w13"})
+        w13 = model.layers["0"].feed_forward.w13
+        self.assertIsInstance(w13, Linear)
+        shard_dims = {
+            placement.dim
+            for placement in w13.weight.placements
+            if isinstance(placement, Shard)
+        }
+        self.assertEqual(shard_dims, {1})
         state_dict = model.state_dict()
         self.assertNotIn("layers.0.feed_forward.w13.weight", state_dict)
         self.assertEqual(

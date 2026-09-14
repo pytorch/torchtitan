@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.linear import Linear, StackedLinear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -58,7 +58,6 @@ def _lora_adapter_sharding(
 
 
 _lora_class_cache: dict[type, type] = {}
-_stacked_lora_class_cache: dict[type, type] = {}
 _frozen_config_class_cache: dict[type, type] = {}
 
 
@@ -85,9 +84,22 @@ def _get_lora_cls(parent_cls: type) -> type:
             for param in nn.Module.parameters(self):
                 param.requires_grad_(False)
             self._lora_scaling = config.alpha / config.rank
-            lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
-                config.sharding_config
-            )
+            if config.num_linears > 1:
+                # A stacked base projection is logically one fused linear with
+                # a shared A and a stacked B. Its Shard(1) placement shards the
+                # per-linear output dimension, unlike Shard(1) on a regular
+                # 2D weight, which denotes rowwise input sharding.
+                replicated_weight = ShardingConfig(
+                    state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+                )
+                lora_a_sharding = (
+                    replicated_weight if config.sharding_config is not None else None
+                )
+                lora_b_sharding = config.sharding_config
+            else:
+                lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
+                    config.sharding_config
+                )
             self.lora_a = Linear.Config(
                 in_features=config.in_features,
                 out_features=config.rank,
@@ -100,6 +112,7 @@ def _get_lora_cls(parent_cls: type) -> type:
             self.lora_b = Linear.Config(
                 in_features=config.rank,
                 out_features=config.out_features,
+                num_linears=config.num_linears,
                 bias=False,
                 sharding_config=lora_b_sharding,
                 param_init={"weight": nn.init.zeros_},
@@ -114,65 +127,6 @@ def _get_lora_cls(parent_cls: type) -> type:
     LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
     _lora_class_cache[parent_cls] = LoRALinear
     return LoRALinear
-
-
-def _get_stacked_lora_cls(parent_cls: type) -> type:
-    """Get or create a LoRA subclass for a stacked linear projection."""
-    if parent_cls in _stacked_lora_class_cache:
-        return _stacked_lora_class_cache[parent_cls]
-
-    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
-
-    class LoRAStackedLinear(parent_cls):  # type: ignore[valid-type, misc]
-        @dataclass(kw_only=True, slots=True)
-        class Config(parent_config_cls):  # type: ignore[misc]
-            rank: int
-            alpha: float
-
-        def __init__(self, config: Config) -> None:
-            super().__init__(config)
-            for param in nn.Module.parameters(self):
-                param.requires_grad_(False)
-            self._lora_scaling = config.alpha / config.rank
-            replicated_weight = ShardingConfig(
-                state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-            )
-            # Treat the base [num_linears, out_features, in_features] weight as
-            # one fused [num_linears * out_features, in_features] projection.
-            # Standard LoRA therefore has one shared A [rank, in_features] and
-            # a fused B [num_linears * out_features, rank]. Keep B as a
-            # StackedLinear [num_linears, out_features, rank] so its logical
-            # projection dimension remains explicit and TP can shard
-            # out_features without separating the projections across ranks.
-            self.lora_a = Linear.Config(
-                in_features=config.in_features,
-                out_features=config.rank,
-                bias=False,
-                sharding_config=(
-                    replicated_weight if config.sharding_config is not None else None
-                ),
-                param_init={
-                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
-                },
-            ).build()
-            self.lora_b = StackedLinear.Config(
-                in_features=config.rank,
-                out_features=config.out_features,
-                num_linears=config.num_linears,
-                bias=False,
-                sharding_config=config.sharding_config,
-                param_init={"weight": nn.init.zeros_},
-            ).build()
-
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            base_out = super().forward(input)
-            lora_out = self.lora_b(self.lora_a(input))
-            return base_out + self._lora_scaling * lora_out
-
-    LoRAStackedLinear.__name__ = f"LoRA{parent_cls.__name__}"
-    LoRAStackedLinear.__qualname__ = f"LoRA{parent_cls.__qualname__}"
-    _stacked_lora_class_cache[parent_cls] = LoRAStackedLinear
-    return LoRAStackedLinear
 
 
 def _get_frozen_config_cls(
@@ -204,9 +158,8 @@ def _make_frozen_config(cfg: Module.Config) -> Module.Config:
 class LoRAConverter(ModelConfigConverter):
     """Apply LoRA adapters to supported projection layers in a model.
 
-    The base converter supports ``Linear.Config`` and
-    ``StackedLinear.Config``. Subclasses may extend ``_supports_lora`` and
-    ``_make_lora_config`` for other projection types.
+    The base converter supports ``Linear.Config``. Subclasses may extend
+    ``_supports_lora`` and ``_make_lora_config`` for other projection types.
     Non-target modules are replaced with dynamic frozen config subclasses that
     freeze direct parameters at build time.
 
@@ -252,16 +205,12 @@ class LoRAConverter(ModelConfigConverter):
 
         Subclasses may extend this hook for other projection types.
         """
-        return isinstance(cfg, (Linear.Config, StackedLinear.Config))
+        return isinstance(cfg, Linear.Config)
 
     def _make_lora_config(self, cfg: Module.Config) -> Module.Config:
         """Create an adapter config for a supported projection."""
         assert cfg._owner is not None
-        lora_cls = (
-            _get_stacked_lora_cls(cfg._owner)
-            if isinstance(cfg, StackedLinear.Config)
-            else _get_lora_cls(cfg._owner)
-        )
+        lora_cls = _get_lora_cls(cfg._owner)
         return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
             **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
             rank=self.rank,

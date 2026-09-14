@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.config_utils import fused_gate_up_param_init
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear, StackedLinear
+from torchtitan.models.common.linear import Linear
 
 
 def _fill(value: float) -> Callable[[torch.Tensor], None]:
@@ -24,7 +24,7 @@ def _fill(value: float) -> Callable[[torch.Tensor], None]:
 
 def test_feed_forward_uses_one_physical_gate_up_linear():
     config = FeedForward.Config(
-        w13=StackedLinear.Config(
+        w13=Linear.Config(
             in_features=4,
             out_features=8,
             num_linears=2,
@@ -58,7 +58,7 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
 
 def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     config = FeedForward.Config(
-        w13=StackedLinear.Config(in_features=4, out_features=8, num_linears=2),
+        w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=Linear.Config(in_features=8, out_features=4),
     )
     feed_forward = config.build()
@@ -96,7 +96,7 @@ def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
 def test_feed_forward_uses_configured_activation():
     activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
     config = FeedForward.Config(
-        w13=StackedLinear.Config(in_features=4, out_features=8, num_linears=2),
+        w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=Linear.Config(in_features=8, out_features=4),
         activation_fn=activation_fn,
     )

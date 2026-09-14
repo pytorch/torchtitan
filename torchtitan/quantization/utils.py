@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.models.common.linear import Linear, StackedLinear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
@@ -27,19 +27,6 @@ def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) ->
     # If the fqn matches any filtered fqn, then we should not convert this module.
     is_filtered_fqn = any(filter_fqn in fqn for filter_fqn in filter_fqns)
 
-    return dims_multiples_of_16 and not is_filtered_fqn
-
-
-def stacked_module_filter_fn(
-    config: StackedLinear.Config,
-    fqn: str,
-    filter_fqns: list[str],
-) -> bool:
-    """Float8 filter for a stack of matrices."""
-    dims_multiples_of_16 = (
-        config.in_features % 16 == 0 and config.out_features % 16 == 0
-    )
-    is_filtered_fqn = any(filter_fqn in fqn for filter_fqn in filter_fqns)
     return dims_multiples_of_16 and not is_filtered_fqn
 
 
@@ -79,10 +66,10 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
 
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
-    from .float8 import _float8_experts_cache, Float8Linear, Float8StackedLinear
-    from .mxfp8 import MXFP8Linear, MXFP8StackedLinear
+    from .float8 import _float8_experts_cache, Float8Linear
+    from .mxfp8 import MXFP8Linear
     from .mxfp8.experts import _mxfp8_experts_cache
-    from .nvfp4 import NVFP4Linear, NVFP4StackedLinear
+    from .nvfp4 import NVFP4Linear
 
     quant_linear_types: list[type] = []
     if Float8Linear is not None:
@@ -96,19 +83,6 @@ def has_quantization(model_config) -> bool:
         isinstance(config, tuple(quant_linear_types))
         for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
     )
-    quant_stacked_types = tuple(
-        cls.Config
-        for cls in (
-            Float8StackedLinear,
-            MXFP8StackedLinear,
-            NVFP4StackedLinear,
-        )
-        if cls is not None
-    )
-    has_quant_stacked = bool(quant_stacked_types) and any(
-        isinstance(config, quant_stacked_types)
-        for _fqn, config, _parent, _attr in model_config.traverse(StackedLinear.Config)
-    )
     quant_experts_types = tuple(
         cls.Config  # type: ignore[attr-defined]
         for cls in (*_float8_experts_cache.values(), *_mxfp8_experts_cache.values())
@@ -117,4 +91,4 @@ def has_quantization(model_config) -> bool:
         isinstance(config, quant_experts_types)
         for _fqn, config, _parent, _attr in model_config.traverse(GroupedExperts.Config)
     )
-    return has_quant_linear or has_quant_stacked or has_quant_moe
+    return has_quant_linear or has_quant_moe

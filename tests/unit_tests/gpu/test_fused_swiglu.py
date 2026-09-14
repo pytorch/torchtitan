@@ -22,7 +22,7 @@ import torch
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear, StackedLinear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -32,9 +32,9 @@ _DIM = 16
 _HIDDEN = 32
 
 
-class _ConvertedLinear(StackedLinear):
+class _ConvertedLinear(Linear):
     @dataclass(kw_only=True, slots=True)
-    class Config(StackedLinear.Config):
+    class Config(Linear.Config):
         pass
 
 
@@ -54,7 +54,7 @@ def _logical_w13(feed_forward: FeedForward) -> torch.Tensor:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w13=StackedLinear.Config(in_features=_DIM, out_features=_HIDDEN, num_linears=2),
+        w13=Linear.Config(in_features=_DIM, out_features=_HIDDEN, num_linears=2),
         w2=Linear.Config(in_features=_HIDDEN, out_features=_DIM),
     )
 
@@ -75,7 +75,7 @@ class TestFusedSwiGLU(unittest.TestCase):
 
     def test_gate_up_projection_is_linear(self):
         fused = _build_fused()
-        self.assertIsInstance(fused.w13, StackedLinear)
+        self.assertIsInstance(fused.w13, Linear)
         self.assertEqual(tuple(fused.w13.weight.shape), (2, _HIDDEN, _DIM))
         self.assertEqual(
             {name for name, _ in fused.named_parameters()},
