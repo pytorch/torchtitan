@@ -25,14 +25,14 @@ for MoE models. Generator sequence parallelism was disabled.
 |---|---|
 | Llama 3 | ✅ Supported |
 | Muse Glimmer | ✅ Supported |
-| Qwen 3 | ✅ Supported (text only) |
+| Qwen 3 | ✅ Supported |
 | Qwen 3.5/3.6/3.8 | ✅ Supported (text only) |
 | GPT-OSS | ✅ Supported |
 | DeepSeek V3 | Not supported |
 | DeepSeek V4 | Not supported |
 | FLUX | Not supported |
 | Kimi K2.7 | Not supported |
-| Kimi K3 | Support soon |
+| Kimi K3 | Support coming soon |
 
 ## Architecture
 
