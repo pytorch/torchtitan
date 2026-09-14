@@ -17,7 +17,10 @@ from torchtitan.components.dist_moe import (
     DistMoeRoutedExperts,
     MXFP8DistMoeRoutedExperts,
 )
-from torchtitan.components.dist_moe.backend import _DistMoeRuntime
+from torchtitan.components.dist_moe.backend import (
+    _DistMoeRuntime,
+    _validate_dist_moe_runtime,
+)
 from torchtitan.config.transform import DistMoeTransform, MXFP8DistMoeTransform
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     config_registry as graph_configs,
@@ -224,19 +227,38 @@ def test_dist_moe_config_rejects_invalid_values(kwargs, message):
         )
 
 
+def test_runtime_policy_allows_layer_specific_initializers(monkeypatch):
+    config = eager_configs.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
+    expert_configs = [
+        entry[1]
+        for entry in config.model_spec.model.traverse(DistMoeRoutedExperts.Config)
+    ]
+    modules = tuple(expert_config.build() for expert_config in expert_configs[:2])
+    assert modules[0]._dist_moe_config.w13 != modules[1]._dist_moe_config.w13
+    assert modules[0]._dist_moe_config.w2 != modules[1]._dist_moe_config.w2
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (10, 0))
+
+    policy = _validate_dist_moe_runtime(modules, device=torch.device("cuda"))
+
+    assert policy is modules[0]._dist_moe_config
+    modules[1]._dist_moe_config.activation_slot_policy = "microbatch"
+    with pytest.raises(ValueError, match="activation-slot and VMM-prefetch policy"):
+        _validate_dist_moe_runtime(modules, device=torch.device("cuda"))
+
+
 @pytest.mark.parametrize(
-    "factory,num_experts_modules",
+    "factory,num_experts_modules,max_routing_imbalance_factor",
     [
-        (eager_configs.deepseek_v3_debugmodel_dist_moe_bf16, 5),
-        (eager_configs.deepseek_v3_16b_dist_moe_bf16, 26),
-        (eager_configs.deepseek_v3_671b_dist_moe_bf16, 58),
-        (graph_configs.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16, 5),
-        (graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_bf16, 26),
-        (graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_bf16, 58),
+        (eager_configs.deepseek_v3_debugmodel_dist_moe_bf16, 5, 1.0),
+        (eager_configs.deepseek_v3_16b_dist_moe_bf16, 26, 4.0),
+        (eager_configs.deepseek_v3_671b_dist_moe_bf16, 58, 4.0),
+        (graph_configs.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16, 5, 1.0),
+        (graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_bf16, 26, 4.0),
+        (graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_bf16, 58, 4.0),
     ],
 )
 def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
-    factory, num_experts_modules
+    factory, num_experts_modules, max_routing_imbalance_factor
 ):
     config = factory()
     model_config = config.model_spec.model
@@ -246,6 +268,10 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     assert all(type(entry[1]) is DistMoeRoutedExperts.Config for entry in experts)
     assert all(
         entry[1].vmm_host_scratch_imbalance_factor is None and not entry[1].prefetch_vmm
+        for entry in experts
+    )
+    assert all(
+        entry[1].max_routing_imbalance_factor == max_routing_imbalance_factor
         for entry in experts
     )
     assert all(
@@ -265,18 +291,18 @@ def test_dist_moe_recipe_supports_cuda_graphs_with_expert_parallelism():
 
 
 @pytest.mark.parametrize(
-    "factory,num_experts_modules",
+    "factory,num_experts_modules,max_routing_imbalance_factor",
     [
-        (eager_configs.deepseek_v3_debugmodel_dist_moe_mxfp8, 5),
-        (eager_configs.deepseek_v3_16b_dist_moe_mxfp8, 26),
-        (eager_configs.deepseek_v3_671b_dist_moe_mxfp8, 58),
-        (graph_configs.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8, 5),
-        (graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_mxfp8, 26),
-        (graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_mxfp8, 58),
+        (eager_configs.deepseek_v3_debugmodel_dist_moe_mxfp8, 5, 1.0),
+        (eager_configs.deepseek_v3_16b_dist_moe_mxfp8, 26, 4.0),
+        (eager_configs.deepseek_v3_671b_dist_moe_mxfp8, 58, 4.0),
+        (graph_configs.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8, 5, 1.0),
+        (graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_mxfp8, 26, 4.0),
+        (graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_mxfp8, 58, 4.0),
     ],
 )
 def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
-    factory, num_experts_modules, monkeypatch
+    factory, num_experts_modules, max_routing_imbalance_factor, monkeypatch
 ):
     pytest.importorskip("torchao")
     from torchtitan.quantization import MXFP8Linear
@@ -298,6 +324,10 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     )
     assert all(
         entry[1].vmm_host_scratch_imbalance_factor is None and not entry[1].prefetch_vmm
+        for entry in experts
+    )
+    assert all(
+        entry[1].max_routing_imbalance_factor == max_routing_imbalance_factor
         for entry in experts
     )
     assert "lm_head" in linears

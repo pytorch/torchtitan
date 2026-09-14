@@ -141,8 +141,8 @@ subclass.
 
 GraphPP does not yet carry schedule-action metadata into reusable stage graphs.
 It therefore cannot use schedule-derived DistMoE pipeline slots until that
-graph-runtime contract is implemented. Non-pipeline GraphTrainer remains
-supported.
+[graph-runtime contract](https://github.com/pytorch/torchtitan/issues/4655) is
+implemented. Non-pipeline GraphTrainer remains supported.
 
 ## Lifecycle And Failure Behavior
 
