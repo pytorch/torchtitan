@@ -10,6 +10,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
@@ -33,8 +34,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -138,9 +137,8 @@ def _shared_experts_config(
         w2w3_param_init=_depth_init(layer_id),
     )
     return SigmoidGatedFeedForward.Config(
-        w1=ffn.w1,
+        w13=ffn.w13,
         w2=ffn.w2,
-        w3=ffn.w3,
         gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
     )
 
