@@ -6,17 +6,24 @@
 
 import copy
 import unittest
+from unittest.mock import patch
 
+import spmd_types as spmd
 import torch
-from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 
+from torchtitan.config.transform import TensorParallelTransform
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.config_utils import make_ffn_config
-from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
+from torchtitan.models.common.decoder_sharding import (
+    dense_activation_placement,
+    dense_sequence_parallel_placement,
+    set_dense_ffn_sharding,
+)
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -41,28 +48,41 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     w2w3_param_init=init,
                 )
                 reference = copy.deepcopy(base_config).build().to(device)
-                parallel = TensorParallelFeedForward.Config(
-                    w13=copy.deepcopy(base_config.w13),
-                    w2=copy.deepcopy(base_config.w2),
-                    activation_fn=copy.deepcopy(base_config.activation_fn),
-                    enable_sequence_parallel=enable_sp,
-                ).build()
-                parallel = parallel.to(device)
+                parallel_config = TensorParallelTransform().transform(
+                    copy.deepcopy(base_config)
+                )
+                set_dense_ffn_sharding(
+                    parallel_config,
+                    attn_x_layout=(
+                        dense_sequence_parallel_placement()
+                        if enable_sp
+                        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+                    ),
+                    enable_sp=enable_sp,
+                )
+                parallel = parallel_config.build().to(device)
 
                 with torch.no_grad():
-                    for weight in (reference.w13.weight, reference.w2.weight):
-                        torch.manual_seed(hash(tuple(weight.shape)) % 2**31)
-                        weight.copy_(torch.randn_like(weight) * 0.1)
-                    parallel.w13.weight = torch.nn.Parameter(
-                        reference.w13.weight.chunk(self.world_size, 0)[
-                            self.rank
-                        ].contiguous()
-                    )
-                    parallel.w2.weight = torch.nn.Parameter(
-                        reference.w2.weight.chunk(self.world_size, 1)[
-                            self.rank
-                        ].contiguous()
-                    )
+                    for reference_weight, parallel_weight in (
+                        (reference.w13.weight, parallel.w13.weight),
+                        (reference.w2.weight, parallel.w2.weight),
+                    ):
+                        torch.manual_seed(hash(tuple(reference_weight.shape)) % 2**31)
+                        reference_weight.copy_(torch.randn_like(reference_weight) * 0.1)
+                        parallel_weight.copy_(reference_weight)
+
+                parallel_dims = ParallelDims(
+                    dp_replicate=1,
+                    dp_shard=1,
+                    cp=1,
+                    tp=self.world_size,
+                    pp=1,
+                    ep=1,
+                    world_size=self.world_size,
+                )
+                with patch("torchtitan.distributed.parallel_dims.device_type", device):
+                    parallel_dims.build_mesh()
+                parallel.parallelize(parallel_dims)
 
                 torch.manual_seed(1)
                 x_full = torch.randn(num_tokens, dim, device=device, requires_grad=True)
@@ -74,9 +94,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     if enable_sp
                     else x_full.detach().clone()
                 ).requires_grad_()
-                mesh = init_device_mesh(
-                    device, (self.world_size,), mesh_dim_names=("tp",)
-                )
+                mesh = parallel_dims.spmd_dense_mesh()
                 with set_current_spmd_mesh(mesh):
                     parallel_out = parallel(x_local)
                     parallel_out.sum().backward()

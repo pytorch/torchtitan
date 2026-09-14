@@ -80,32 +80,16 @@ class FeedForward(Module):
                 [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=1
             ).flatten(0, 1)
 
-    def _project_w13(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the gate/up projection for the ``w13`` remat region.
-
-        Tensor-parallel implementations override this boundary to include the
-        input redistribution in the same remat region as the projection.
-        """
-        return self.w13(x)
-
-    def _project_w2(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the output projection for the ``w2`` remat region.
-
-        Tensor-parallel implementations override this boundary to include the
-        output reduction in the same remat region as the projection.
-        """
-        return self.w2(x)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up_TF = remat.region(
-            self._project_w13,
+            self.w13,
             self.remat_region_name("w13"),
             recompute=self.remat_should_recompute("w13"),
         )(x)
         gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
         remat.recompute_needs_tensor(gate_TF, up_TF)
         out_TD = remat.region(
-            self._project_w2,
+            self.w2,
             self.remat_region_name("w2"),
             recompute=self.remat_should_recompute("w2"),
         )(self.activation_fn(gate_TF, up_TF))
