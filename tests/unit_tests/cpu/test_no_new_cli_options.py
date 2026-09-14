@@ -157,6 +157,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "parallelism.pipeline_parallel_max_param_unsharded_stages",
         "parallelism.pipeline_parallel_schedule",
         "parallelism.pipeline_parallel_schedule_csv",
+        "parallelism.pipeline_parallel_unshard_lookahead",
         "parallelism.tensor_parallel_degree",
         "profiler.enable_memory_snapshot",
         "profiler.enable_profiling",
