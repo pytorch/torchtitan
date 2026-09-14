@@ -241,13 +241,18 @@ class ParallelismConfig:
     pipeline_parallel_unshard_lookahead: Literal["full", "auto"] | tuple[
         int, ...
     ] = "auto"
-    """FSDP prefetch distance for a looped pipeline schedule.
+    """FSDP all-gather prefetch distance for looped pipeline schedules.
 
-    ``"auto"`` uses a schedule-derived, rank-aware distance bounded by
-    ``pipeline_parallel_max_param_unsharded_stages`` and is TorchTitan's
-    default. ``"full"`` requests PyTorch's full-residency compatibility policy.
-    A tuple provides one explicit distance per pipeline rank for expert tuning
-    of asymmetric schedules.
+    This is independent of parameter residency:
+    ``pipeline_parallel_max_param_unsharded_stages`` controls which stages stay
+    resident and when they reshard, while this setting controls only how early
+    eligible unshards are issued. ``"full"`` uses that entire residency window
+    on every rank and preserves PyTorch's schedule default. ``"auto"``, the
+    TorchTitan default, resolves rank ``r`` to
+    ``min(r + 2, max_unsharded_stages)``. A tuple provides one positive distance
+    per PP rank for expert tuning; its length must equal the PP degree and no
+    value may exceed the residency bound. See ``docs/composability.md`` for the
+    scheduling contract and measured tradeoffs.
     """
 
     context_parallel_degree: int = 1
@@ -396,14 +401,20 @@ class CommConfig:
     """Flight recorder trace files prefix"""
 
     mode: Literal["default", "fake_backend", "real_pp_fake_spmd_backend"] = "default"
-    """
-    Communication mode for distributed training.
+    """Communication topology used for training or distributed debugging.
 
     Options:
-    - "default": Normal distributed training with real communication
-    - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
-    - "real_pp_fake_spmd_backend": Real pipeline communication with fake SPMD
-      communication. The physical world size must equal the PP degree.
+    - ``"default"`` uses real process groups for every configured mesh axis.
+    - ``"fake_backend"`` represents one selected rank of the complete logical
+      mesh with fake process groups. It validates configuration, shapes,
+      ownership, and PyTorch-managed memory, but performs no real transport.
+    - ``"real_pp_fake_spmd_backend"`` runs one physical process per PP rank and
+      uses a real NCCL PP group while DP, TP, CP, and EP remain fake. It
+      exercises pipeline transport, buffers, and CUDA graphs without allocating
+      the complete logical world.
+
+    See ``docs/debugging.md`` for the required ``NGPU``, ``FAKE_PP_RANK``, and
+    ``FAKE_SPMD_RANK`` environment variables, launch examples, and limitations.
     """
 
 
