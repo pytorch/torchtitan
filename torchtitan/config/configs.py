@@ -238,16 +238,16 @@ class ParallelismConfig:
     potentially exposing additional FSDP all-gather communication.
     """
 
-    pipeline_parallel_unshard_lookahead: Literal["default", "auto"] | tuple[
+    pipeline_parallel_unshard_lookahead: Literal["full", "auto"] | tuple[
         int, ...
-    ] = "default"
+    ] = "auto"
     """FSDP prefetch distance for a looped pipeline schedule.
 
-    ``"default"`` preserves PyTorch's full-residency behavior. ``"auto"``
-    uses a rank-aware distance bounded by
-    ``pipeline_parallel_max_param_unsharded_stages``. A tuple provides one
-    explicit distance per pipeline rank for schedules that benefit from
-    asymmetric prefetch.
+    ``"auto"`` uses a schedule-derived, rank-aware distance bounded by
+    ``pipeline_parallel_max_param_unsharded_stages`` and is TorchTitan's
+    default. ``"full"`` requests PyTorch's full-residency compatibility policy.
+    A tuple provides one explicit distance per pipeline rank for expert tuning
+    of asymmetric schedules.
     """
 
     context_parallel_degree: int = 1
@@ -292,7 +292,7 @@ class ParallelismConfig:
             )
         lookahead = self.pipeline_parallel_unshard_lookahead
         if isinstance(lookahead, str):
-            valid_lookahead = lookahead in {"default", "auto"}
+            valid_lookahead = lookahead in {"full", "auto"}
         elif isinstance(lookahead, tuple):
             valid_lookahead = len(lookahead) == self.pipeline_parallel_degree and all(
                 not isinstance(value, bool) and isinstance(value, int) and value >= 1
@@ -305,7 +305,7 @@ class ParallelismConfig:
             valid_lookahead = False
         if not valid_lookahead:
             raise ValueError(
-                "pipeline_parallel_unshard_lookahead must be 'default', 'auto', "
+                "pipeline_parallel_unshard_lookahead must be 'full', 'auto', "
                 "or a tuple with one positive integer per pipeline rank. "
                 "Tuple values may not exceed "
                 "pipeline_parallel_max_param_unsharded_stages when that limit "
