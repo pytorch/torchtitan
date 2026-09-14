@@ -549,9 +549,9 @@ class TestRematRegions(unittest.TestCase):
             ([], (2, 2, 2, 2, 2, 2, 2)),
             (["attn.qkv"], (1, 1, 1, 2, 2, 2, 2)),
             (["attn.inner_attention"], (2, 2, 2, 1, 2, 2, 2)),
-            (["attn.proj"], (2, 2, 2, 2, 1, 2, 2)),
-            (["mlp.fc1"], (2, 2, 2, 2, 2, 1, 2)),
-            (["mlp.fc2"], (2, 2, 2, 2, 2, 2, 1)),
+            (["attn.wo"], (2, 2, 2, 2, 1, 2, 2)),
+            (["mlp.w1"], (2, 2, 2, 2, 2, 1, 2)),
+            (["mlp.w2"], (2, 2, 2, 2, 2, 2, 1)),
             (["attn.*", "mlp.*"], (1, 1, 1, 1, 1, 1, 1)),
         ):
             with self.subTest(save_regions=save_regions):
