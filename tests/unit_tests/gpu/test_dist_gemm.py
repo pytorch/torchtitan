@@ -33,7 +33,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
-    convert_config_type,
     LoRAConverter,
     TensorParallelTransform,
     transform_model_config_,
@@ -46,11 +45,12 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_attention_sharding,
 )
 from torchtitan.models.common.dist_gemm import (
+    AsyncAllGatherLinear,
     AsyncAllGatherQKVLinear,
     AsyncLinearReduceScatter,
-    DistGEMMFeedForward,
 )
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
 
 DIM = 256
 N_HEADS = 8
@@ -82,7 +82,11 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
                 layer.attention.qkv_linear, AsyncAllGatherQKVLinear.Config
             )
             self.assertIsInstance(layer.attention.wo, AsyncLinearReduceScatter.Config)
-            self.assertIsInstance(layer.feed_forward, DistGEMMFeedForward.Config)
+            self.assertIsInstance(layer.feed_forward, TensorParallelFeedForward.Config)
+            self.assertIsInstance(layer.feed_forward.w13, AsyncAllGatherLinear.Config)
+            self.assertIsInstance(
+                layer.feed_forward.w2, AsyncLinearReduceScatter.Config
+            )
 
     def test_stock_parameter_shapes_survive(self):
         """Fused modules keep the stock layouts, or checkpoints stop loading."""
@@ -136,20 +140,23 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         self.assertIsNotNone(
             stock_layer.attention.qkv_linear.sharding_config.in_dst_shardings
         )
-        self.assertIsNotNone(
+        self.assertIsNone(
             async_layer.attention.qkv_linear.sharding_config.in_dst_shardings
         )
         self.assertIsNotNone(stock_layer.attention.wo.sharding_config.out_src_shardings)
         self.assertIsNotNone(stock_layer.attention.wo.sharding_config.out_dst_shardings)
         self.assertIsNotNone(async_layer.attention.wo.sharding_config.out_src_shardings)
-        self.assertIsNotNone(async_layer.attention.wo.sharding_config.out_dst_shardings)
+        self.assertIsNone(async_layer.attention.wo.sharding_config.out_dst_shardings)
         self.assertIn(
             "weight", async_layer.attention.wo.sharding_config.state_shardings
         )
 
         self.assertIsNone(async_layer.feed_forward.sharding_config.in_dst_shardings)
         self.assertIsNotNone(async_layer.feed_forward.sharding_config.out_src_shardings)
-        self.assertIsNone(async_layer.feed_forward.w2.sharding_config.out_src_shardings)
+        self.assertIsNone(async_layer.feed_forward.w13.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(
+            async_layer.feed_forward.w2.sharding_config.out_src_shardings
+        )
         self.assertIsNone(async_layer.feed_forward.w2.sharding_config.out_dst_shardings)
 
     def test_projection_boundaries_survive_lora_config_wrappers(self):
@@ -169,7 +176,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             layer.attention.qkv_linear.sharding_config.in_dst_shardings
         )
         self.assertIsNone(layer.feed_forward.sharding_config.in_dst_shardings)
-        self.assertIsNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
 
 
 class TestAsyncTensorParallelSharding(DTensorTestBase):
@@ -222,14 +229,9 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
-    @with_comms
-    def test_qkv_converter_keeps_synchronous_projection_boundary(self):
-        """A converted wqkv must not be bypassed by the async QKV kernel."""
-        parallel_dims = self._parallel_dims()
-        model = transform_model_config_(
-            TestAsyncTensorParallelConfig._model_config(),
-            [AsyncTensorParallelTransform()],
-        )
+    def test_qkv_converter_is_rejected(self):
+        """Async QKV does not support a converter-defined projection."""
+        model = TestAsyncTensorParallelConfig._model_config()
         model = (
             LoRAConverter.Config(
                 rank=2,
@@ -239,20 +241,15 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             .build()
             .convert(model)
         )
-        attn_cfg = model.layers[0].attention
-        set_gqa_attention_sharding(attn_cfg, enable_sp=True)
-        attn = attn_cfg.build().to(self.device_type)
-        attn.parallelize(parallel_dims)
-
-        self.assertIsInstance(attn.qkv_linear, AsyncAllGatherQKVLinear)
-        self.assertIsNotNone(attn.qkv_linear._sharding_config.in_dst_shardings)
+        with self.assertRaisesRegex(ValueError, "converted QKV projections"):
+            transform_model_config_(model, [AsyncTensorParallelTransform()])
 
 
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
-class TestDistGEMMFeedForwardNumerics(DTensorTestBase):
-    """The dist-GEMM FFN must match the standard one under TP+SP.
+class TestAsyncFeedForwardNumerics(DTensorTestBase):
+    """The async FFN projections must match the standard FFN under TP+SP.
 
     The test manually shards w13 colwise and w2 rowwise. DistGEMM must
     all-gather the sequence-sharded input before w13 and reduce-scatter w2's
@@ -288,7 +285,7 @@ class TestDistGEMMFeedForwardNumerics(DTensorTestBase):
             w1_param_init=init,
             w2w3_param_init=init,
         )
-        async_config = convert_config_type(base_async_config, DistGEMMFeedForward)
+        async_config = AsyncTensorParallelTransform().transform(base_async_config)
         dist_gemm = async_config.build().to(dev)
 
         with torch.no_grad():
@@ -324,10 +321,10 @@ class TestDistGEMMFeedForwardNumerics(DTensorTestBase):
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
-class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
+class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
     """The Triton-activation FFN with TP overlap must match native SwiGLU.
 
-    Same communication contract as TestDistGEMMFeedForwardNumerics, with the
+    Same communication contract as TestAsyncFeedForwardNumerics, with the
     Triton SiLU-and-multiply override composed on top. Lives here rather than in
     test_fused_swiglu.py, which is CPU-only by design.
     """
@@ -357,10 +354,12 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
 
         torch.manual_seed(0)
         native = make().build().to(dev)
-        async_config = convert_config_type(make(), DistGEMMFeedForward)
+        async_config = AsyncTensorParallelTransform().transform(make())
         async_config.activation_fn = fused_swiglu(async_config.activation_fn)
         fused = async_config.build().to(dev)
-        self.assertIsInstance(fused, DistGEMMFeedForward)
+        self.assertIsInstance(fused, TensorParallelFeedForward)
+        self.assertIsInstance(fused.w13, AsyncAllGatherLinear)
+        self.assertIsInstance(fused.w2, AsyncLinearReduceScatter)
 
         with torch.no_grad():
             for w in (native.w13.weight, native.w2.weight):

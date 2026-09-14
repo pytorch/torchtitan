@@ -27,9 +27,9 @@ config.parallelism.tensor_parallel_degree = 8
 config = apply_transforms(config, [TensorParallelTransform()])
 ```
 
-The transform selects communication-aware QKV, attention-output, and dense FFN
-implementations. Pass ``feed_forward=DistGEMMFeedForward`` to overlap the FFN
-collectives with the adjacent GEMMs.
+The transform places synchronous collectives on QKV, attention-output, and
+dense FFN projection boundaries. ``AsyncTensorParallelTransform`` selects
+implementations that overlap those collectives with the adjacent GEMMs.
 
 `apply_transforms` deep-copies the trainer config. It orders and applies the
 transforms, then validates the result. It returns the changed copy. The input

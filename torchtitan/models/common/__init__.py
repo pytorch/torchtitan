@@ -6,7 +6,6 @@
 
 from .activation import ActivationFn, SiTUGLU, SwiGLU
 from .attention import (
-    AllGatherQKVLinear,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
@@ -26,6 +25,7 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
 from .linear import (
+    AllGatherLinear,
     Linear,
     LinearReduceScatter,
     PartialBiasRowwiseLinear,
@@ -46,7 +46,7 @@ from .rope import ComplexRoPE, CosSinRoPE, RoPE
 from .tensor_parallel import TensorParallelFeedForward
 
 __all__ = [
-    "AllGatherQKVLinear",
+    "AllGatherLinear",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
