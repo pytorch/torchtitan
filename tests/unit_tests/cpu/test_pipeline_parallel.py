@@ -220,3 +220,43 @@ def test_pp_rank_to_stage_mapping_requires_even_division():
 def test_get_pipeline_metadata_requires_layers_attribute():
     with pytest.raises(ValueError, match="Model does not have layers attribute."):
         _get_pipeline_metadata(object(), ParallelismConfig(), object())
+
+
+@pytest.mark.parametrize(
+    ("configured_limit", "expected_limit"),
+    [(None, 2), (1, 1)],
+)
+def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_limit):
+    class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
+        __slots__ = ("kwargs",)
+
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        pipeline_parallel, "get_schedule_class", lambda _: CapturingSchedule
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_max_param_unsharded_stages=configured_limit,
+    )
+
+    schedule = pipeline_parallel._build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda: None,
+    )
+
+    assert schedule.kwargs["max_active_stages"] == expected_limit
+    assert schedule.kwargs["reuse_recv_buffers"] is True
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_pipeline_param_residency_limit_must_be_positive(limit):
+    with pytest.raises(
+        ValueError,
+        match="pipeline_parallel_max_param_unsharded_stages must be positive",
+    ):
+        ParallelismConfig(pipeline_parallel_max_param_unsharded_stages=limit)
