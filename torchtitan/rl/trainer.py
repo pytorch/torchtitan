@@ -117,9 +117,7 @@ class Trainer(Configurable):
             # CUDA graphs require fixed-shape varlen metadata. In eager mode,
             # preserve the dynamic metadata path instead of padding it with
             # empty document segments.
-            max_num_documents = (
-                config.training.num_tokens_per_microbatch_per_dp_rank
-            )
+            max_num_documents = config.training.num_tokens_per_microbatch_per_dp_rank
 
         self.engine = TrainingEngine(
             config,
