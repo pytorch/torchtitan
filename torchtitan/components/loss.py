@@ -8,7 +8,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -34,20 +34,28 @@ def cross_entropy_loss(
     labels: torch.Tensor,
     *,
     global_vocab_size: int | None = None,
+    reduction: Literal["sum", "none"] = "sum",
 ) -> torch.Tensor:
-    """Cross-entropy over ``pred[T, V]`` and ``labels[T]`` with sum reduction."""
+    """Cross-entropy over ``pred[T, V]`` and ``labels[T]``."""
+    if reduction not in ("sum", "none"):
+        raise ValueError(f"Unsupported cross-entropy reduction: {reduction}")
     if spmd_mesh_size("tp") > 1:
+        if global_vocab_size is None:
+            raise ValueError(
+                "global_vocab_size is required for vocab-parallel cross-entropy"
+            )
         return _LossParallelCrossEntropy.apply(
             pred.float(),
             labels,
             current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
             global_vocab_size,
+            reduction,
         )
 
     return torch.nn.functional.cross_entropy(
         pred.float(),
         labels,
-        reduction="sum",
+        reduction=reduction,
         ignore_index=IGNORE_INDEX,
     )
 
@@ -207,6 +215,59 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         return grad_logits, None, None, None, None
 
 
+class _VocabParallelEntropy(torch.autograd.Function):
+    """Exact per-token entropy from vocab-sharded logits without a gather."""
+
+    @staticmethod
+    def spmd_typecheck(
+        result: torch.Tensor,
+        *,
+        logits: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+    ) -> None:
+        """SPMD type: logits S(-1)@TP -> entropy I@TP."""
+        spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
+        spmd.assert_local_type_like(
+            result,
+            logits,
+            {tp_group: spmd.I},  # pyrefly: ignore [bad-argument-type]
+        )
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx,
+        logits: torch.Tensor,
+        tp_group: dist.ProcessGroup,
+    ) -> torch.Tensor:
+        del ctx
+        logits = logits.float()
+
+        local_max = torch.amax(logits, dim=-1, keepdim=True)
+        global_max = funcol.all_reduce(
+            local_max, reduceOp=dist.ReduceOp.MAX.name, group=tp_group
+        )
+
+        shifted = logits - global_max
+        shifted_exp = torch.exp(shifted)
+        local_sumexp = shifted_exp.sum(dim=-1)
+        # Avoid 0 * -inf for finite distributions with masked logits while
+        # preserving NaNs for invalid distributions such as all -inf logits.
+        shifted_weighted = torch.where(
+            torch.isneginf(shifted),
+            torch.zeros_like(shifted),
+            shifted_exp * shifted,
+        )
+        local_weighted_sum = shifted_weighted.sum(dim=-1)
+        global_stats = funcol.all_reduce(
+            torch.stack((local_sumexp, local_weighted_sum)),
+            reduceOp=dist.ReduceOp.SUM.name,
+            group=tp_group,
+        )
+        sumexp, weighted_sum = global_stats.unbind()
+        return torch.log(sumexp) - weighted_sum / sumexp
+
+
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """MSE loss with sum reduction for Transformer models training."""
     return torch.nn.functional.mse_loss(
@@ -317,12 +378,15 @@ def compute_logprobs(
     labels: torch.Tensor,
     *,
     return_entropy: bool = False,
+    global_vocab_size: int | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Per-token logprobs from ``logits[T, V]`` and ``labels[T]``.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
-    ``[T]``. Both share the single vocab gather + fp32 upcast.
+    ``[T]``. When ``global_vocab_size`` is provided for vocab-parallel logits,
+    both values are computed from local shards and small per-token reductions;
+    otherwise the existing full-vocab gather path is retained.
     Entropy is a metric only, so it is computed under ``no_grad``: it never
     contributes gradient and must not build an autograd graph over the logits
     softmax.
@@ -330,7 +394,26 @@ def compute_logprobs(
     Returns ``logprobs`` when ``return_entropy`` is False, else
     ``(logprobs, entropy)``.
     """
-    if spmd_mesh_size("tp") > 1:
+    tp_size = spmd_mesh_size("tp")
+    if tp_size > 1 and global_vocab_size is not None:
+        logprobs = -cross_entropy_loss(
+            logits,
+            labels,
+            global_vocab_size=global_vocab_size,
+            reduction="none",
+        )
+        if not return_entropy:
+            return logprobs
+        with torch.no_grad():
+            mesh = current_spmd_mesh()
+            assert mesh is not None
+            entropy = _VocabParallelEntropy.apply(
+                logits,
+                mesh.get_group("tp"),
+            )
+        return logprobs, entropy
+
+    if tp_size > 1:
         # The model returns a plain local vocab shard. Labels are global token
         # ids, so cross_entropy needs full-vocab logits.
         # dst=I, not R: the vocab all-gather's grad is the replicated upstream

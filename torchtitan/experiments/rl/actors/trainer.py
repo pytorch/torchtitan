@@ -6,7 +6,7 @@
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
@@ -33,15 +33,42 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.experiments.rl.losses import GRPOLoss
+from torchtitan.experiments.rl.losses import DAPOLoss, GRPOLoss
 from torchtitan.experiments.rl.types import OptimStepOutput, TrainingMicrobatch
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 
 logger = logging.getLogger(__name__)
+
+
+def _configure_policy_loss_vocab_size(
+    loss_config: BaseLoss.Config,
+    *,
+    model_spec: ModelSpec,
+    batch_invariant: bool,
+) -> BaseLoss.Config:
+    """Inject model vocab metadata into RL policy losses without exposing a CLI."""
+    if isinstance(loss_config, ChunkedLossWrapper.Config):
+        configured_inner = _configure_policy_loss_vocab_size(
+            loss_config.loss_fn,
+            model_spec=model_spec,
+            batch_invariant=batch_invariant,
+        )
+        if configured_inner is loss_config.loss_fn:
+            return loss_config
+        return replace(loss_config, loss_fn=configured_inner)
+
+    if isinstance(loss_config, (DAPOLoss.Config, GRPOLoss.Config)):
+        # Batch-invariant mode intentionally keeps the full-gather operation
+        # sequence shared with the patched vLLM logprob implementation.
+        global_vocab_size = None if batch_invariant else decoder_vocab_size(model_spec)
+        return replace(loss_config, global_vocab_size=global_vocab_size)
+
+    return loss_config
 
 
 class PolicyTrainer(Actor, Configurable):
@@ -115,7 +142,12 @@ class PolicyTrainer(Actor, Configurable):
         self.config = config
         self.compile_config = compile_config
         self.max_num_documents = max_num_documents
-        self.loss_fn = config.loss.build()
+        loss_config = _configure_policy_loss_vocab_size(
+            config.loss,
+            model_spec=model_spec,
+            batch_invariant=config.debug.batch_invariant,
+        )
+        self.loss_fn = loss_config.build()
         # TODO: add support to compile the loss.
 
         # Only cast if generator dtype differs from training dtype, otherwise

@@ -9,6 +9,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Annotated
+
+import tyro
 
 from torchtitan.components.loss import BaseLoss
 from torchtitan.experiments.rl.losses.dapo import DAPOLoss
@@ -26,11 +29,15 @@ class GRPOLoss(DAPOLoss):
         clip_eps: float = 0.2
         """Symmetric PPO clip: the ratio is clamped to ``[1 - clip_eps, 1 + clip_eps]``."""
 
+        global_vocab_size: Annotated[int | None, tyro.conf.Suppress] = None
+        """Full vocabulary size injected by the trainer for TP policy statistics."""
+
     def __init__(self, config: Config, **kwargs) -> None:
         super().__init__(
             DAPOLoss.Config(
                 ratio_clip_low=config.clip_eps,
                 ratio_clip_high=config.clip_eps,
+                global_vocab_size=config.global_vocab_size,
             ),
             **kwargs,
         )
