@@ -353,13 +353,12 @@ def _build_pipeline_schedule(
         return loss
 
     if looped_schedule:
-        lookahead = parallelism.pipeline_parallel_unshard_lookahead
         schedule_kwargs: dict[str, Any] = {
             "reuse_recv_buffers": True,
             "max_active_stages": (
                 parallelism.pipeline_parallel_max_param_unsharded_stages or len(stages)
             ),
-            "unshard_lookahead": "default" if lookahead == "full" else lookahead,
+            "unshard_lookahead": parallelism.pipeline_parallel_unshard_lookahead,
         }
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]

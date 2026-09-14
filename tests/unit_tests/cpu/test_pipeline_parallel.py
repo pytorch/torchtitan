@@ -305,7 +305,7 @@ def test_pipeline_param_residency_limit_must_be_positive(limit):
 
 @pytest.mark.parametrize(
     "lookahead",
-    [None, True, 2, "adaptive", [1, 2], (1,), (1, 4), (1, False)],
+    [None, True, 2, "full", "adaptive", [1, 2], (1,), (1, 4), (1, False)],
 )
 def test_unshard_lookahead_rejects_invalid_values(lookahead):
     with pytest.raises(ValueError, match="pipeline_parallel_unshard_lookahead"):
@@ -318,7 +318,7 @@ def test_unshard_lookahead_rejects_invalid_values(lookahead):
 
 @pytest.mark.parametrize(
     ("lookahead", "expected"),
-    [("auto", "auto"), ("full", "default"), ((1, 3), (1, 3))],
+    [("default", "default"), ("auto", "auto"), ((1, 3), (1, 3))],
 )
 def test_unshard_lookahead_is_forwarded_to_multistage_schedule(
     monkeypatch, lookahead, expected
