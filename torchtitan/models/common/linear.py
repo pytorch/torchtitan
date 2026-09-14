@@ -112,9 +112,14 @@ class StackedLinear(StackedLinearBase, Module):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # F.linear expects a 2D [N, K] weight. Flatten every logical output
+        # dimension while preserving the final in_features dimension:
+        # [num_linears, out_features, in_features] ->
+        # [num_linears * out_features, in_features].
         weight = self.weight.flatten(0, -2)
         bias = None if self.bias is None else self.bias.flatten()
         output = F.linear(input, weight, bias)
+        # Restore the logical output dimensions on the GEMM result.
         return output.unflatten(-1, self.weight.shape[:-1])
 
 
