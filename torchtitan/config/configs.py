@@ -251,6 +251,15 @@ class ParallelismConfig:
     backward computation. Requires a multi-stage pipeline schedule.
     """
 
+    pipeline_parallel_max_outstanding_sends: Annotated[
+        int | None, tyro.conf.Suppress
+    ] = None
+    """
+    Maximum number of pending pipeline send batches per rank. Must be a
+    non-negative integer. Requires the Interleaved1F1B schedule. None keeps the
+    schedule's default waits without adding a hard limit.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 

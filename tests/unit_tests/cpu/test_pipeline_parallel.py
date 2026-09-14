@@ -8,7 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch.nn as nn
-from torch.distributed.pipelining.schedules import PipelineScheduleMulti
+from torch.distributed.pipelining.schedules import (
+    PipelineScheduleMulti,
+    ScheduleInterleaved1F1B,
+)
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
@@ -293,5 +296,65 @@ def test_deferred_reduce_grad_wait_requires_fsdp_stage(monkeypatch):
             parallelism=parallelism,
             num_microbatches=4,
             stages=[SimpleNamespace(submod=object()) for _ in range(2)],
+            loss_fn=lambda *args, **kwargs: (object(), object()),
+        )
+
+
+def test_build_pipeline_schedule_forwards_max_outstanding_sends(monkeypatch):
+    schedule_kwargs = {}
+
+    class TestSchedule(ScheduleInterleaved1F1B):
+        def __init__(self, *args, **kwargs):
+            schedule_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "torchtitan.distributed.pipeline_parallel.get_schedule_class",
+        lambda _: TestSchedule,
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_max_outstanding_sends=2,
+    )
+
+    _build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda *args, **kwargs: (object(), object()),
+    )
+
+    assert schedule_kwargs["max_outstanding_sends"] == 2
+
+
+def test_max_outstanding_sends_requires_interleaved_schedule():
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="1F1B",
+        pipeline_parallel_max_outstanding_sends=2,
+    )
+
+    with pytest.raises(ValueError, match="requires Interleaved1F1B"):
+        _build_pipeline_schedule(
+            parallelism=parallelism,
+            num_microbatches=4,
+            stages=[object()],
+            loss_fn=lambda *args, **kwargs: (object(), object()),
+        )
+
+
+@pytest.mark.parametrize("value", [-1, 1.5, True])
+def test_max_outstanding_sends_rejects_invalid_value(value):
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_max_outstanding_sends=value,
+    )
+
+    with pytest.raises(ValueError, match="must be a non-negative integer"):
+        _build_pipeline_schedule(
+            parallelism=parallelism,
+            num_microbatches=4,
+            stages=[object(), object()],
             loss_fn=lambda *args, **kwargs: (object(), object()),
         )
