@@ -69,8 +69,10 @@ def _get_expert_shard_dims(model: Qwen3Model) -> tuple[int | None, int | None]:
     for layer in model.layers.values():
         if layer.moe_enabled:
             # pyrefly: ignore [missing-attribute]
-            experts = layer.moe.routed_experts.inner_experts
-            return _shard_dim(experts.w13_E2FD), _shard_dim(experts.w2_EDF)
+            routed_experts = layer.moe.routed_experts
+            return _shard_dim(routed_experts.w13.weight), _shard_dim(
+                routed_experts.w2.weight
+            )
     return None, None
 
 
@@ -91,7 +93,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
     @with_comms
     def test_no_ep_fsdp_gt_num_experts_shards_feature_dimensions(self):
-        """When FSDP cannot shard E, it shards each projection's feature dim."""
+        """When FSDP cannot shard E, it shards each linear's feature dim."""
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
         model = _build_qwen3_moe_model(num_experts=2).to(self.device_type)
 
@@ -125,7 +127,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
     @with_comms
     def test_with_ep_fsdp_gt_num_experts_shards_feature_dimensions(self):
-        """Sparse FSDP also falls back to each projection's feature dim."""
+        """Sparse FSDP also falls back to each linear's feature dim."""
         # edp_mesh: 2D mesh [efsdp=2, ep=2], dp_mesh: 1D mesh [4]
         edp_mesh = init_device_mesh(
             self.device_type, (2, 2), mesh_dim_names=("efsdp", "ep")
@@ -153,7 +155,8 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         config = model_registry("debugmodel", seq_len=128, attn_backend="flex").model
         for layer_config in config.layers:
             # Keep GPT-OSS's real parameter names while reducing test memory.
-            layer_config.moe.routed_experts.inner_experts.hidden_dim = 16
+            layer_config.moe.routed_experts.w13.out_features = (2, 16)
+            layer_config.moe.routed_experts.w2.in_features = 16
         model = config.build().to(self.device_type)
         edp_mesh = init_device_mesh(
             self.device_type, (2, 2), mesh_dim_names=("efsdp", "ep")
@@ -171,9 +174,13 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         for layer in model.layers.values():
-            experts = layer.moe.routed_experts.inner_experts
+            experts = layer.moe.routed_experts
             self.assertEqual(
-                {_shard_dim(param) for param in experts.parameters()},
+                {
+                    _shard_dim(param)
+                    for linear in (experts.w13, experts.w2)
+                    for param in linear.parameters()
+                },
                 {0},
             )
 
