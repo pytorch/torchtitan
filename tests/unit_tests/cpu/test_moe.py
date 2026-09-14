@@ -23,6 +23,7 @@ from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.moe_sharding import (
     _moe_sharding_config,
+    _router_sharding_config,
     set_moe_block_padding_mask_sharding,
 )
 from torchtitan.protocols.sharding import ShardingConfig
@@ -276,24 +277,51 @@ class TestMoE(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "routing-map token axis"):
             router(x_TD, padding_mask_T=torch.zeros(3, dtype=torch.bool))
 
-    def test_padding_mask_sharding_matches_router_token_layout(self):
+    def test_padding_mask_sharding_follows_input_token_layout(self):
         for enable_sp in (False, True):
             for enable_ep in (False, True):
-                config = _moe_sharding_config(
+                moe_config = _moe_sharding_config(
                     enable_ep=enable_ep,
                     enable_sp=enable_sp,
                 )
-                assert config.in_src_shardings is not None
-                assert config.in_dst_shardings is not None
+                assert moe_config.in_src_shardings is not None
+                assert moe_config.in_dst_shardings is not None
                 self.assertEqual(
-                    _per_axis_types(config.in_src_shardings["padding_mask_T"]),
+                    _per_axis_types(moe_config.in_src_shardings["padding_mask_T"]),
                     _per_axis_types(token_id_placement(enable_sp=enable_sp)),
                 )
                 self.assertEqual(
-                    _per_axis_types(config.in_dst_shardings["padding_mask_T"]),
+                    _per_axis_types(moe_config.in_dst_shardings["padding_mask_T"]),
                     _per_axis_types(
                         token_id_placement(enable_sp=enable_sp and enable_ep)
                     ),
+                )
+                self.assertEqual(
+                    moe_config.in_src_shardings["x_TD"].partition_spec[0],
+                    moe_config.in_src_shardings["padding_mask_T"].partition_spec[0],
+                )
+                self.assertEqual(
+                    moe_config.in_dst_shardings["x_TD"].partition_spec[0],
+                    moe_config.in_dst_shardings["padding_mask_T"].partition_spec[0],
+                )
+
+                router_config = _router_sharding_config(
+                    enable_ep=enable_ep,
+                    enable_sp=enable_sp,
+                )
+                assert router_config.in_src_shardings is not None
+                assert router_config.in_dst_shardings is not None
+                self.assertEqual(
+                    router_config.in_src_shardings,
+                    moe_config.in_dst_shardings,
+                )
+                self.assertEqual(
+                    router_config.in_dst_shardings["x_TD"].partition_spec[0],
+                    router_config.in_dst_shardings["padding_mask_T"].partition_spec[0],
+                )
+                self.assertEqual(
+                    _per_axis_types(router_config.in_dst_shardings["padding_mask_T"]),
+                    _per_axis_types(token_id_placement(enable_sp=enable_ep)),
                 )
 
     def test_moe_block_sequence_shards_padding_mask(self):

@@ -151,7 +151,7 @@ def _run_torchft_moe_load_balancing_step(rank, store_path):
         expected_global_counts = torch.tensor([[10, 20], [20, 10]])
         local_counts = torch.tensor(local_counts_by_rank[rank])
         for layer, counts in zip(model.layers.values(), local_counts):
-            layer.moe.tokens_per_expert_E.copy_(counts)
+            layer.moe.router.tokens_per_expert_E.copy_(counts)
 
         config = TorchFTOptimizersContainer.Config(
             implementation="for-loop",
@@ -202,11 +202,11 @@ def _run_torchft_moe_load_balancing_step(rank, store_path):
 
         # The next training step must start with empty load counters.
         torch.testing.assert_close(
-            model.layers["0"].moe.tokens_per_expert_E,
+            model.layers["0"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.tokens_per_expert_E,
+            model.layers["1"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
 
