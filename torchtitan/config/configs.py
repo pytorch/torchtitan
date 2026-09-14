@@ -394,13 +394,15 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    mode: Literal["default", "fake_backend"] = "default"
+    mode: Literal["default", "fake_backend", "real_pp_fake_spmd_backend"] = "default"
     """
     Communication mode for distributed training.
 
     Options:
     - "default": Normal distributed training with real communication
     - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
+    - "real_pp_fake_spmd_backend": Real pipeline communication with fake SPMD
+      communication. The physical world size must equal the PP degree.
     """
 
 

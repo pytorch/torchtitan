@@ -701,12 +701,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         dist_config.pipeline_per_direction_p2p = (
             config.parallelism.pipeline_parallel_degree > 1
         )
-        world_size = dist_utils.init_distributed(
+        topology = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=config.dump_folder,
+            pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
-        return ParallelDims.from_config(config.parallelism, world_size)
+        return ParallelDims.from_config(config.parallelism, topology)
 
     def batch_generator(
         self, data_iterable: Iterable[TrainerBatch]
