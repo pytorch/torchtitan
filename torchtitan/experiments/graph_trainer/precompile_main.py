@@ -223,14 +223,14 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
         get_spmd_precompile_meshes,
+        make_monolithic_fwd_bwd_step,
         precompile_fx_trace_save,
     )
-    from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
     loss_fn = config.loss.build(compile_config=compile_config)
     _prepare_loss_for_precompile(model, loss_fn)
 
-    fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
+    fwd_bwd_fn = make_monolithic_fwd_bwd_step(model, loss_fn)
 
     num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
     vocab_size = model_config.vocab_size

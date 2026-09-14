@@ -132,9 +132,8 @@ class _StageGraphMeta:
     4. Grad outputs: ``param_grad_values`` and ``input_grad_values`` describe
        how flat graph outputs rewrap into parameter grads and input grads sent
        to the previous stage.
-    5. FSDP edges: ``unshard_flat_param_indices`` and
-       ``reduce_grad_input_names`` bind optional ``UNSHARD`` and ``REDUCE_GRAD``
-       graphs to the same flat calling convention.
+    5. FSDP edges: ``unshard_flat_param_indices`` binds the optional
+       ``UNSHARD`` graph to the same flat calling convention.
 
     Counts ending in ``_values`` refer to flat graph values, not privacy. This
     metadata is private to ``GraphTrainerStageGraphs``; the PP runtime must not
@@ -144,6 +143,7 @@ class _StageGraphMeta:
     num_user_outputs: int
     num_saved_for_backward: int
     num_param_grad_values: int
+    num_unsharded_param_grad_values: int
     num_input_grad_values: int
     num_flat_param_values: int
     fwd_output_values: GraphPPValueSpec
@@ -152,8 +152,6 @@ class _StageGraphMeta:
     partition: PartitionGraphMeta
     fwd_input_names: tuple[str, ...]
     fwd_flat_input_indices: tuple[int, ...]
-    bw_no_fsdp_output_names: tuple[str, ...] = ()
-    reduce_grad_input_names: tuple[str, ...] = ()
     unshard_flat_param_indices: tuple[int, ...] = ()
     num_fw_param_inputs: int = 0
     is_last_stage: bool = False
@@ -217,7 +215,11 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
 
     @property
     def num_unsharded_param_grad_values(self) -> int:
-        return self.meta.num_param_grad_values
+        return self.meta.num_unsharded_param_grad_values
+
+    @property
+    def requires_grad_reduction(self) -> bool:
+        return self.modules.reduce_grad is not None
 
     def unshard_params(
         self,
@@ -459,7 +461,7 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
     ) -> tuple[list[Any], list[Any]]:
         """Split ``full_bw`` outputs into input grads and param grads."""
 
-        num_param_grads = self.meta.num_param_grad_values
+        num_param_grads = self.meta.num_unsharded_param_grad_values
         param_grads = list(bw_outputs[:num_param_grads])
         input_grads = self.meta.input_grad_values.wrap_flat_values(
             bw_outputs[num_param_grads:]
@@ -538,11 +540,11 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
         raw_grads = list(unsharded_param_grads)
         if (
             runtime_validate
-            and len(raw_grads) != self.meta.num_param_grad_values
+            and len(raw_grads) != self.meta.num_unsharded_param_grad_values
         ):
             raise ValueError(
                 "GraphPP raw unsharded grad count mismatch: "
-                f"expected {self.meta.num_param_grad_values}, got "
+                f"expected {self.meta.num_unsharded_param_grad_values}, got "
                 f"{len(raw_grads)}"
             )
         return raw_grads
@@ -561,20 +563,7 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
         )
         if self.modules.reduce_grad is None:
             return raw_grads
-        # ``bw_no_fsdp`` returns one raw grad slot per trainable parameter.
-        # ``reduce_grad`` consumes the subset/name order selected by the FSDP
-        # split pass and returns the original sharded/reduced grad slots.
-        grad_values_by_name = dict(
-            zip(
-                self.meta.bw_no_fsdp_output_names[: self.meta.num_param_grad_values],
-                raw_grads,
-                strict=True,
-            )
-        )
-        reduce_grad_args = [
-            grad_values_by_name[name] for name in self.meta.reduce_grad_input_names
-        ]
-        return list(_execute_graph_module(self.modules.reduce_grad, reduce_grad_args))
+        return list(_execute_graph_module(self.modules.reduce_grad, raw_grads))
 
     def param_grads_for_accumulation(
         self,
@@ -632,7 +621,7 @@ class GraphTrainerOverlapGraphs(GraphPPOverlapGraphs):
             multiplex_args,
         )
         num_bw_outputs = (
-            self.bw_graphs.meta.num_param_grad_values
+            self.bw_graphs.meta.num_unsharded_param_grad_values
             + self.bw_graphs.meta.num_input_grad_values
         )
         input_grads, param_grads = self.bw_graphs._split_full_backward_outputs(
@@ -923,6 +912,7 @@ def _build_stage_graphs(
     model_config: BaseModel.Config | None = None,
     parallelism: ParallelismConfig | None = None,
     compile_graphs: bool = True,
+    extract_fsdp_grad_reduction: bool = True,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     maybe_register_blockmask_pytree_node()
@@ -1089,13 +1079,25 @@ def _build_stage_graphs(
         fwd_input_names=partition_meta.fwd_input_names,
         fwd_flat_input_indices=partition_meta.fwd_flat_input_indices,
     )
-    fsdp_bw = split_backward_fsdp_collectives(
-        bw_module,
-        num_param_grads=num_param_grad_values,
-    )
+    if extract_fsdp_grad_reduction:
+        fsdp_bw_module = split_backward_fsdp_collectives(
+            bw_module,
+            num_param_grads=num_param_grad_values,
+        )
+        runtime_bw_module = fsdp_bw_module.bw_no_fsdp_module
+        reduce_grad_module = fsdp_bw_module.reduce_grad_module
+        num_backward_param_grad_values = (
+            fsdp_bw_module.num_unsharded_param_grad_values
+        )
+    else:
+        # Keep FSDP synchronization in FULL_BACKWARD. Its outputs already have
+        # the reduced parameter layouts expected by live ``param.grad`` fields.
+        runtime_bw_module = bw_module
+        reduce_grad_module = None
+        num_backward_param_grad_values = num_param_grad_values
     didw_split: GraphPPDiDwSplit | None = split_di_dw_graph(
-        fsdp_bw.bw_no_fsdp_module,
-        num_param_grads=num_param_grad_values,
+        runtime_bw_module,
+        num_param_grads=num_backward_param_grad_values,
     )
     if didw_split is not None and didw_split.num_input_grads != num_input_grad_values:
         raise ValueError(
@@ -1106,11 +1108,11 @@ def _build_stage_graphs(
     # to pack/unpack its flat graph inputs and outputs.
     graph_modules = _StageGraphModules(
         fw=fsdp_fw.fw_no_fsdp_module,
-        full_bw=fsdp_bw.bw_no_fsdp_module,
+        full_bw=runtime_bw_module,
         bw_di=None if didw_split is None else didw_split.bw_di_module,
         bw_dw=None if didw_split is None else didw_split.bw_dw_module,
         unshard=fsdp_fw.unshard_module,
-        reduce_grad=fsdp_bw.reduce_grad_module,
+        reduce_grad=reduce_grad_module,
     )
     _annotate_graph_pp_modules(
         graph_modules,
@@ -1120,6 +1122,9 @@ def _build_stage_graphs(
         num_user_outputs=partition_meta.num_fwd_user_outputs,
         num_saved_for_backward=partition_meta.num_saved_for_backward,
         num_param_grad_values=num_param_grad_values,
+        num_unsharded_param_grad_values=(
+            num_backward_param_grad_values
+        ),
         num_input_grad_values=num_input_grad_values,
         num_flat_param_values=num_state_param_values,
         fwd_output_values=fwd_output_values,
@@ -1128,8 +1133,6 @@ def _build_stage_graphs(
         partition=partition_meta,
         fwd_input_names=fsdp_fw.fw_no_fsdp_input_names,
         fwd_flat_input_indices=fsdp_fw.fw_no_fsdp_flat_input_indices,
-        bw_no_fsdp_output_names=fsdp_bw.bw_no_fsdp_output_names,
-        reduce_grad_input_names=fsdp_bw.reduce_grad_input_names,
         unshard_flat_param_indices=fsdp_fw.unshard_flat_param_indices,
         num_fw_param_inputs=fsdp_fw.num_fw_param_inputs,
         is_last_stage=stage.is_last,
@@ -1274,17 +1277,25 @@ class GraphTrainerStageGraphProvider:
             ``None`` when compile passes are disabled in tests.
         parallelism: Parallelism config consumed by GraphTrainer compile passes,
             or ``None`` when compile passes are disabled in tests.
+        cudagraph_managed_by_runtime: Whether an outer runtime wrapper owns
+            CUDA graph capture for the complete schedule.
+        extract_fsdp_grad_reduction: Whether to extract FSDP synchronization
+            from backward into a separately scheduled graph.
     """
 
     loss_fn: Callable
     compile_config: GraphTrainerCompileConfig
     model_config: BaseModel.Config | None
     parallelism: ParallelismConfig | None
+    cudagraph_managed_by_runtime: bool = False
+    extract_fsdp_grad_reduction: bool = True
     _warned_cudagraph: bool = False
     _overlap_graphs: dict[tuple[int, int], GraphPPOverlapGraphs] | None = None
 
     def _warn_if_cudagraph_pass_requested(self) -> None:
         if self._warned_cudagraph:
+            return
+        if self.cudagraph_managed_by_runtime:
             return
         if not self.compile_config.enable or not self.compile_config.enable_passes:
             return
@@ -1366,6 +1377,7 @@ class GraphTrainerStageGraphProvider:
                 model_config=self.model_config,
                 parallelism=self.parallelism,
                 compile_graphs=False,
+                extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
             )
 
         self._warn_if_cudagraph_pass_requested()

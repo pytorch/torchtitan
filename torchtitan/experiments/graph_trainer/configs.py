@@ -86,17 +86,8 @@ class GraphTrainerCompileConfig(CompileConfig):
     partitioning contracts depend on canonical graph structure.
     """
 
-    enable_inplace_graph_gradient_accumulation: bool = False
-    """Accumulate SPMD AOT gradients in-place into trainer-owned buffers.
-
-    This makes gradient accumulation CUDA-graph safe by avoiding clones of
-    replay-owned gradient outputs.
-
-    TODO: Add support for:
-        GraphPP
-        precompile
-        parameter aliases
-        custom pass pipelines.
+    enable_deferred_fsdp_gradient_sync: bool = False
+    """Reduce FSDP gradients (reduce_scatter) once after all microbatches.
     """
 
     disable_passes: list[str] = field(default_factory=list)
@@ -184,10 +175,10 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     precompile_artifact_dir: str = ""
     """
-    Directory for precompiled artifacts. Setting this enables precompile:
-    precompile_main.py saves the artifact here, and training loads it from
-    here to skip compilation. For multi-node setups use a shared filesystem
-    path.
+    Directory for precompiled artifacts. ``precompile_main.py`` can save the
+    legacy monolithic artifact here, but GraphPipelineRuntime cannot load that
+    format yet. AOT GraphTrainer rejects this setting until stage-graph
+    artifacts are supported.
     """
 
     enable_autoparallel: bool = False

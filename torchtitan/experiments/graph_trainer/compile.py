@@ -11,10 +11,9 @@ Supports two compilation modes via --compile.mode:
 - JIT: standard torch.compile() with custom backend (deprecated)
 - aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx (default)
 
-Additionally supports pre-compile via --compile.precompile_artifact_dir:
-- When set during training, loads a precompiled artifact and skips compilation
-  entirely
-- Generate artifacts with precompile_main.py
+The standalone precompile utility still produces legacy monolithic AOT
+artifacts. GraphPipelineRuntime requires a stage-graph artifact format before
+GraphTrainer training can load them.
 """
 
 import warnings
@@ -103,14 +102,13 @@ def apply_compile(
             compile_config,
         )
     elif mode == "aot_fx_trace":
-        # aot_fx_trace traces fwd+loss+bwd together inside forward_backward_step,
-        # so no model-level wrapping is needed here. If precompile_artifact_dir
-        # is set, the precompiled artifact will be loaded lazily in
-        # GraphTrainer._make_fx_forward_backward_step.
+        # GraphPipelineRuntime traces stage graphs lazily on its first step, so
+        # no model-level wrapping is needed here. precompile_main drives its
+        # standalone monolithic tracing path separately.
         if compile_config.precompile_artifact_dir:
             logger.info(
-                "aot_fx_trace compile mode: precompiled artifact will be loaded "
-                f"from {compile_config.precompile_artifact_dir}"
+                "aot_fx_trace compile mode: precompile artifact path is "
+                f"{compile_config.precompile_artifact_dir}"
             )
         else:
             logger.info(

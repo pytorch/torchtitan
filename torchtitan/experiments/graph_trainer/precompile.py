@@ -22,6 +22,10 @@ import torch.utils._pytree as pytree
 from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    compute_annotated_loss,
+    compute_parameter_gradients,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     _unwrap_subclasses,
     extract_train_state,
@@ -32,6 +36,28 @@ from torchtitan.experiments.graph_trainer.storage import StorageAdapter
 from torchtitan.tools.logging import logger
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
+
+
+def make_monolithic_fwd_bwd_step(model, loss_fn):
+    """Build the legacy whole-step function used by precompile tooling."""
+
+    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
+        pred = model(inputs, **extra_kwargs)
+        loss = compute_annotated_loss(
+            loss_fn,
+            pred,
+            labels,
+            {"global_valid_tokens": global_valid_tokens},
+        )
+        named_params = [
+            (name, parameter)
+            for name, parameter in model.named_parameters(remove_duplicate=False)
+            if parameter.requires_grad
+        ]
+        grads = compute_parameter_gradients(loss, named_params)
+        return [loss, *grads]
+
+    return fwd_bwd_step
 
 
 def flatten_runtime_inputs(
@@ -339,9 +365,9 @@ def precompile_fx_trace_load(
 ) -> TracedResult:
     """Load a precompiled aot_fx_trace artifact.
 
-    Returns a TracedResult with the deserialized GraphModule and
-    metadata. The caller uses this with run_traced(..., module=model) to
-    execute the graph (same path as non-precompiled aot_fx_trace).
+    Returns a TracedResult with the deserialized GraphModule and metadata.
+    ``run_traced`` can execute it for standalone artifact validation. Training
+    requires a stage-graph artifact consumable by ``GraphPipelineRuntime``.
 
     DeviceMesh objects are graph inputs (placeholders), not baked-in
     constants, so ProcessGroup names are resolved at runtime from

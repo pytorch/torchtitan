@@ -29,6 +29,7 @@ from torch.distributed.pipelining.schedules import (
 )
 from torch.distributed.pipelining.stage import _normalize_model_output_as_tuple
 
+from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.common_utils import accumulate_param_grads_
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
@@ -45,6 +46,7 @@ from torchtitan.tools.logging import logger
 
 __all__ = [
     "GraphPipelineRuntime",
+    "GraphPipelineStepRunner",
     "register_graph_pp_schedule",
 ]
 
@@ -99,7 +101,9 @@ def _accumulate_flat_grad_values_(
                 )
             continue
         if accumulated[index] is None:
-            accumulated[index] = grad
+            # Compiled and CUDA-graph callables may reuse output storage on the
+            # next microbatch. Keep the accumulator independent of that storage.
+            accumulated[index] = grad.clone()
         else:
             accumulated[index] += grad
 
@@ -124,6 +128,20 @@ def _accumulate_stage_unsharded_grads(
         stage.state.unsharded_param_grads,
         grads,
         label="unsharded",
+        runtime_validate=stage._runtime_validate,
+    )
+
+
+def _accumulate_stage_sharded_grad_values(
+    stage: GraphPipelineStage,
+    grads: list[Any],
+) -> None:
+    if not stage.state.sharded_param_grads:
+        stage.state.sharded_param_grads = [None] * len(grads)
+    _accumulate_flat_grad_values_(
+        stage.state.sharded_param_grads,
+        grads,
+        label="reduced",
         runtime_validate=stage._runtime_validate,
     )
 
@@ -333,6 +351,8 @@ class GraphPipelineRuntime:
             that attaches bound stage graphs before the first runtime action.
             If omitted, every local stage must already have ``stage.graphs``
             populated.
+        clone_grads_to_initialize_param_grad (bool): Keep newly initialized
+            parameter gradients independent of reusable graph-output storage.
 
     Raises:
         TypeError: If any local schedule stage is not a ``GraphPipelineStage``.
@@ -343,9 +363,13 @@ class GraphPipelineRuntime:
         schedule: _PipelineScheduleRuntime,
         *,
         graph_provider: GraphPPStageGraphsProvider | None = None,
+        clone_grads_to_initialize_param_grad: bool = False,
     ) -> None:
         self.schedule = schedule
         self.graph_provider = graph_provider
+        self._clone_grads_to_initialize_param_grad = (
+            clone_grads_to_initialize_param_grad
+        )
         self.overlap_graphs: dict[tuple[int, int], GraphPPOverlapGraphs] = {}
         self.stage_graphs: dict[int, GraphPPStageGraphs] = {}
         self.loss_kwargs: dict[str, Any] = {}
@@ -405,33 +429,68 @@ class GraphPipelineRuntime:
         stage.state.flat_buffer_values = flat_buffer_values
         stage.state.trainable_params = trainable_params
         stage.state.unsharded_param_values = []
-        stage.state.unsharded_param_grads = [
-            None
-        ] * graphs.num_unsharded_param_grad_values
+        stage.state.unsharded_param_grads = (
+            [None] * graphs.num_unsharded_param_grad_values
+            if graphs.requires_grad_reduction
+            else []
+        )
         stage.state.sharded_param_grads = []
         stage._graph_pp_grads_scaled = False
 
     def _ensure_reduced_grads(self, stage: GraphPipelineStage) -> None:
-        if stage.state.sharded_param_grads:
-            return
         if not any(grad is not None for grad in stage.state.unsharded_param_grads):
             return
         graphs = self.stage_graphs[stage.stage_index]
-        stage.state.sharded_param_grads = graphs.reduce_grads(
+        reduced_grads = graphs.reduce_grads(
             stage.state.unsharded_param_grads,
             runtime_validate=stage._runtime_validate,
         )
-        _scale_graph_pp_sharded_grads(stage, self.schedule)
+        _accumulate_stage_sharded_grad_values(stage, reduced_grads)
+        stage.state.unsharded_param_grads = [
+            None
+        ] * graphs.num_unsharded_param_grad_values
 
     def _accumulate_stage_sharded_grads(self, stage: GraphPipelineStage) -> None:
         self._ensure_reduced_grads(stage)
         if not stage.state.sharded_param_grads:
             return
+        _scale_graph_pp_sharded_grads(stage, self.schedule)
         graphs = self.stage_graphs[stage.stage_index]
         param_grads = graphs.param_grads_for_accumulation(
             stage.state.sharded_param_grads
         )
-        accumulate_param_grads_(stage.state.trainable_params, param_grads)
+        accumulate_param_grads_(
+            stage.state.trainable_params,
+            param_grads,
+            clone_grads_to_initialize_param_grad=(
+                self._clone_grads_to_initialize_param_grad
+            ),
+        )
+
+    def _accumulate_stage_backward_grads(
+        self,
+        stage: GraphPipelineStage,
+        graphs: GraphPPStageGraphs,
+        grads: list[Any],
+    ) -> None:
+        if graphs.requires_grad_reduction:
+            _accumulate_stage_unsharded_grads(stage, grads)
+            return
+
+        # Fused backward graphs already return reduced gradients. Publish them
+        # immediately so PP=1 does not retain an additional gradient-sized
+        # runtime accumulator. Clone only when initializing ``param.grad`` so a
+        # later compiled-graph invocation cannot overwrite aliased output storage.
+        grad_scale_factor = (
+            self.schedule._n_microbatches if self.schedule.scale_grads else 1
+        )
+        _scale_grad_values_(grads, grad_scale_factor)
+        param_grads = graphs.param_grads_for_accumulation(grads)
+        accumulate_param_grads_(
+            stage.state.trainable_params,
+            param_grads,
+            clone_grads_to_initialize_param_grad=True,
+        )
 
     def _handle_forward(self, action: _Action, ctx: _PipelineContext) -> None:
         self.ensure_ready(ctx)
@@ -485,7 +544,7 @@ class GraphPipelineRuntime:
             output_grads_from_next,
             runtime_validate=stage._runtime_validate,
         )
-        _accumulate_stage_unsharded_grads(stage, param_grads)
+        self._accumulate_stage_backward_grads(stage, graphs, param_grads)
         _post_backward_common(
             stage,
             mb_index,
@@ -558,7 +617,7 @@ class GraphPipelineRuntime:
             stage.saved_values_for_backward_weight_cache.pop(mb_index)
         )
         param_grads = graphs.backward_weight(saved_values_for_backward_weight)
-        _accumulate_stage_unsharded_grads(stage, param_grads)
+        self._accumulate_stage_backward_grads(stage, graphs, param_grads)
 
     def _handle_unshard(self, action: _Action, ctx: _PipelineContext) -> None:
         self.ensure_ready(ctx)
@@ -575,11 +634,9 @@ class GraphPipelineRuntime:
         self.ensure_ready(ctx)
         _, stage = _stage_map_and_stage_from_action(self.schedule, action)
         graphs = self.stage_graphs[stage.stage_index]
-        stage.state.sharded_param_grads = graphs.reduce_grads(
-            stage.state.unsharded_param_grads,
-            runtime_validate=stage._runtime_validate,
-        )
-        _scale_graph_pp_sharded_grads(stage, self.schedule)
+        if not graphs.requires_grad_reduction:
+            return
+        self._ensure_reduced_grads(stage)
 
     def _handle_overlap_fw_bw(self, action: _Action, ctx: _PipelineContext) -> None:
         fw_action, bw_action = overlap_fw_bw_sub_actions(action)
@@ -635,7 +692,7 @@ class GraphPipelineRuntime:
             runtime_validate=(fw_stage._runtime_validate or bw_stage._runtime_validate),
         )
 
-        _accumulate_stage_unsharded_grads(bw_stage, param_grads)
+        self._accumulate_stage_backward_grads(bw_stage, bw_graphs, param_grads)
         _post_fwd_common(
             fw_stage,
             fw_mb_index,
@@ -706,10 +763,82 @@ class GraphPipelineRuntime:
             self._graph_pp_ready = False
 
 
+class GraphPipelineStepRunner:
+    """Adapt a one-stage graph pipeline runtime to a complete trainer step.
+
+    ``GraphPipelineRuntime`` deliberately exposes the upstream PP calling
+    convention. This adapter owns only the non-PP trainer boundary: prepared
+    microbatch packing, loss aggregation, and optional whole-step CUDA graph
+    capture. It does not know how stage graphs are traced or executed.
+    """
+
+    def __init__(
+        self,
+        runtime: GraphPipelineRuntime,
+        *,
+        num_microbatches: int,
+        use_cuda_graph: bool,
+        sdc_num_steps: int = 0,
+        sdc_num_replays: int = 0,
+    ) -> None:
+        if num_microbatches < 1:
+            raise ValueError(
+                "GraphPipelineStepRunner requires at least one microbatch, got "
+                f"{num_microbatches}"
+            )
+        self.runtime = runtime
+        self.num_microbatches = num_microbatches
+        step = self._step
+        self._call = (
+            wrap_with_cuda_graph(
+                step,
+                gradient_accumulation_steps=1,
+                sdc_num_steps=sdc_num_steps,
+                sdc_num_replays=sdc_num_replays,
+            )
+            if use_cuda_graph
+            else step
+        )
+
+    def _step(
+        self,
+        microbatches: tuple[tuple[Any, Any, dict[str, Any]], ...],
+        global_valid_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        if len(microbatches) != self.num_microbatches:
+            raise ValueError(
+                "GraphPipelineStepRunner expected "
+                f"{self.num_microbatches} microbatches, got {len(microbatches)}"
+            )
+        losses: list[torch.Tensor] = []
+        self.runtime.step(
+            arg_mbs=[(inputs,) for inputs, _labels, _kwargs in microbatches],
+            kwarg_mbs=[kwargs for _inputs, _labels, kwargs in microbatches],
+            target_mbs=[labels for _inputs, labels, _kwargs in microbatches],
+            losses=losses,
+            loss_kwargs={"global_valid_tokens": global_valid_tokens},
+            return_outputs=False,
+        )
+        if len(losses) != self.num_microbatches:
+            raise RuntimeError(
+                "Graph pipeline returned "
+                f"{len(losses)} losses for {self.num_microbatches} microbatches"
+            )
+        return torch.stack(losses).sum()
+
+    def __call__(
+        self,
+        microbatches: tuple[tuple[Any, Any, dict[str, Any]], ...],
+        global_valid_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._call(microbatches, global_valid_tokens)
+
+
 def register_graph_pp_schedule(
     schedule: _PipelineScheduleRuntime,
     *,
     graph_provider: GraphPPStageGraphsProvider | None = None,
+    clone_grads_to_initialize_param_grad: bool = False,
 ) -> GraphPipelineRuntime:
     """Register GraphPP action handlers on a runtime PP schedule.
 
@@ -719,6 +848,8 @@ def register_graph_pp_schedule(
         graph_provider (GraphPPStageGraphsProvider | None): Optional provider
             that builds or attaches stage graphs before the first runtime
             action in each step.
+        clone_grads_to_initialize_param_grad (bool): Keep newly initialized
+            parameter gradients independent of reusable graph-output storage.
 
     Returns:
         GraphPipelineRuntime: Runtime that owns the registered bound action handlers.
@@ -729,6 +860,7 @@ def register_graph_pp_schedule(
     runtime = GraphPipelineRuntime(
         schedule,
         graph_provider=graph_provider,
+        clone_grads_to_initialize_param_grad=clone_grads_to_initialize_param_grad,
     )
     for computation_type, handler in (
         (FORWARD, runtime._handle_forward),

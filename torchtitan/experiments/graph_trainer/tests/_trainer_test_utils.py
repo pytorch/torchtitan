@@ -13,9 +13,26 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.utils import get_spmd_context
+from torchtitan.experiments.graph_trainer.common_utils import accumulate_param_grads_
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
+    trace_input_preparer_keys,
+)
+from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    minimal_fx_tracer,
+    run_traced,
+)
+from torchtitan.experiments.graph_trainer.passes import (
+    apply_graph_passes,
+    construct_default_graph_passes,
+    construct_mandatory_graph_passes,
+)
+from torchtitan.experiments.graph_trainer.precompile import make_monolithic_fwd_bwd_step
+from torchtitan.experiments.graph_trainer.registry import (
+    PASS_PIPELINE_REGISTRY,
+    TRACE_CALL_INPUT_PREPARERS,
+    TRACE_INPUT_PREPARERS,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.trainer import Trainer
@@ -28,7 +45,6 @@ def build_minimal_trainer(
     *,
     activation_checkpoint_mode: str = "none",
     compile_enable_passes: bool = True,
-    compile_enable_inplace_graph_gradient_accumulation: bool = False,
     compile_passes: list[str] | None = None,
     compile_ep_overlap_enabled: bool = False,
     compile_ep_overlap_chunk_dim: str = "batch",
@@ -64,9 +80,6 @@ def build_minimal_trainer(
                 enable=True,
                 mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
-                enable_inplace_graph_gradient_accumulation=(
-                    compile_enable_inplace_graph_gradient_accumulation
-                ),
                 passes=[] if compile_passes is None else list(compile_passes),
                 disable_passes=(
                     []
@@ -99,11 +112,80 @@ def build_minimal_trainer(
                 spmd_backend="partial_dtensor",
             ),
         )
-        trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
-        trainer._graph_runner = None
-        trainer._trainable_params = None
-        trainer._graph_gradient_state = None
+        trainer._test_graph_call = None
+
+        def prepare_trace_inputs(args, kwargs) -> None:
+            for pass_name in trace_input_preparer_keys(trainer.config.compile):
+                prepare = TRACE_INPUT_PREPARERS.get(pass_name)
+                if prepare is not None:
+                    prepare(trainer.config.compile, args, kwargs)
+
+        def prepare_trace_call_inputs(args, kwargs):
+            for pass_name in trace_input_preparer_keys(trainer.config.compile):
+                prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
+                if prepare is not None:
+                    prepared = prepare(trainer.config.compile, args, kwargs)
+                    if prepared is not None:
+                        args, kwargs = prepared
+            return args, kwargs
+
+        def run_direct_graph_step(microbatches, global_valid_tokens):
+            assert len(microbatches) == 1
+            inputs, labels, extra_kwargs = microbatches[0]
+            if trainer._traced_step is None:
+                fwd_bwd_fn = make_monolithic_fwd_bwd_step(model, trainer.loss_fn)
+                with trainer.train_context():
+                    trainer._traced_step = minimal_fx_tracer(
+                        fwd_bwd_fn,
+                        module=model,
+                        prepare_inputs=prepare_trace_inputs,
+                        prepare_call_inputs=prepare_trace_call_inputs,
+                    )(inputs, labels, global_valid_tokens, extra_kwargs)
+                if trainer.config.compile.enable_passes:
+                    pipeline_fn = PASS_PIPELINE_REGISTRY.get(
+                        trainer.config.compile.pass_pipeline,
+                        construct_default_graph_passes,
+                    )
+                    passes = pipeline_fn(
+                        trainer._traced_step,
+                        trainer.config,
+                        parallel_dims=trainer.parallel_dims,
+                    )
+                else:
+                    passes = construct_mandatory_graph_passes()
+                trainer._traced_step.gm = apply_graph_passes(
+                    trainer._traced_step.gm,
+                    trainer._traced_step.example_inputs,
+                    passes,
+                    compile_config=trainer.config.compile,
+                    respect_disable_passes=trainer.config.compile.enable_passes,
+                )
+                trainer._test_graph_call = run_traced(
+                    trainer._traced_step,
+                    module=model,
+                )
+
+            outputs = trainer._test_graph_call(
+                inputs,
+                labels,
+                global_valid_tokens,
+                extra_kwargs,
+            )
+            params = tuple(
+                parameter for parameter in model.parameters() if parameter.requires_grad
+            )
+            accumulate_param_grads_(
+                params,
+                outputs[1:],
+                clone_grads_to_initialize_param_grad=True,
+            )
+            return outputs[0]
+
+        # Compiler component tests use a direct traced callable so they can
+        # inspect the unsplit graph. Production GraphTrainer always installs a
+        # GraphPipelineStepRunner instead.
+        trainer._graph_pipeline_runner = run_direct_graph_step
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),

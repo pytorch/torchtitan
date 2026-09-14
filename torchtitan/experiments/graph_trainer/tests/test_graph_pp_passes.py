@@ -31,10 +31,12 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     deduplicate_fsdp_unshard_chains_pass,
 )
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
+    find_fsdp_reduce_grad_input,
     find_fsdp_unshard_output,
     find_fsdp_unshard_outputs_by_param,
     find_fsdp_unshard_save_node,
     find_fsdp_unshard_save_nodes,
+    is_all_gather_into_tensor,
 )
 from torchtitan.experiments.graph_trainer.graph_pp import (
     partition_joint_graph,
@@ -761,6 +763,34 @@ def _make_backward_graph_without_fsdp() -> fx.GraphModule:
     return _make_graph_module(graph)
 
 
+def _make_bucketed_backward_graph() -> fx.GraphModule:
+    graph = fx.Graph()
+    first_grad = graph.placeholder("first_grad")
+    second_grad = graph.placeholder("second_grad")
+    pre_bucket = graph.call_function(
+        torch.ops.bucketing._pre_bucket_reduce_scatter.default,
+        args=([first_grad, second_grad], 2),
+    )
+    reduce_scatter = graph.call_function(
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        args=(pre_bucket, "sum", 2, _FAKE_PG),
+    )
+    wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(reduce_scatter,),
+    )
+    split = graph.call_function(
+        torch.ops.aten.split_with_sizes.default,
+        args=(wait, [3, 5], 0),
+    )
+    first = graph.call_function(operator.getitem, args=(split, 0))
+    second = graph.call_function(operator.getitem, args=(split, 1))
+    first = graph.call_function(torch.ops.aten.reshape.default, args=(first, [3]))
+    second = graph.call_function(torch.ops.aten.reshape.default, args=(second, [5]))
+    graph.output((first, second))
+    return _make_graph_module(graph)
+
+
 class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
     def test_forward_pattern_batch_lookup(self) -> None:
         gm = _make_forward_graph_with_unshard_and_replicated_param()
@@ -773,6 +803,43 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
 
         self.assertEqual(len(outputs_by_param[sharded_param]), 1)
         self.assertEqual(outputs_by_param[replicated_param], ())
+
+    def test_bucketed_all_gather_out_is_recognized(self) -> None:
+        graph = fx.Graph()
+        local_shard = graph.placeholder("local_shard")
+        gathered = graph.placeholder("gathered")
+        all_gather = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+            args=(local_shard, 2, _FAKE_PG),
+            kwargs={"out": gathered},
+        )
+        graph.output(all_gather)
+
+        self.assertTrue(is_all_gather_into_tensor(all_gather))
+
+    def test_bucketed_reduce_scatter_finds_shared_pre_bucket_input(self) -> None:
+        gm = _make_bucketed_backward_graph()
+        pre_bucket = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.bucketing._pre_bucket_reduce_scatter.default,
+        )[0]
+        outputs = gm.graph.find_nodes(op="output")[0].args[0]
+
+        self.assertIs(
+            find_fsdp_reduce_grad_input(outputs[0]),
+            pre_bucket,
+        )
+        self.assertIs(
+            find_fsdp_reduce_grad_input(outputs[1]),
+            pre_bucket,
+        )
+
+        split = split_backward_fsdp_collectives(gm, num_param_grads=2)
+        self.assertEqual(split.num_unsharded_param_grad_values, 1)
+        self.assertEqual(
+            split.bw_no_fsdp_output_names,
+            split.reduce_grad_input_names,
+        )
 
     def test_forward_pattern_matches_reshard_force_save_pattern(self) -> None:
         gm = _make_forward_graph_with_unshard_and_replicated_param()
@@ -1093,7 +1160,8 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             split.reduce_grad_input_names,
             split.bw_no_fsdp_output_names[:2],
         )
-        self.assertEqual(len(split.bw_no_fsdp_output_names), 4)
+        self.assertEqual(split.num_unsharded_param_grad_values, 2)
+        self.assertEqual(len(split.bw_no_fsdp_output_names), 3)
         self.assertEqual(split.bw_no_fsdp_output_names[-1], "input_grad")
 
     def test_backward_split_no_fsdp_is_noop_and_validates_grad_count(self) -> None:
@@ -1178,20 +1246,12 @@ class GraphPPFSDPCollectiveSplitDsv3Test(_GraphPPDsv3FSDPTest):
         )
         bw_outputs = _boxed_run(bw_module, list(bw_args))
         bw_no_fsdp_outputs = _boxed_run(bw_split.bw_no_fsdp_module, list(bw_args))
-        grad_values_by_name = dict(
-            zip(
-                bw_split.bw_no_fsdp_output_names[: traced_block.num_param_grad_values],
-                bw_no_fsdp_outputs[: traced_block.num_param_grad_values],
-                strict=True,
-            )
-        )
-        reduce_grad_args = [
-            grad_values_by_name[name] for name in bw_split.reduce_grad_input_names
-        ]
+        num_unsharded_grads = bw_split.num_unsharded_param_grad_values
+        reduce_grad_args = list(bw_no_fsdp_outputs[:num_unsharded_grads])
         reduced_grads = _boxed_run(bw_split.reduce_grad_module, reduce_grad_args)
         split_bw_outputs = (
             *reduced_grads,
-            *bw_no_fsdp_outputs[traced_block.num_param_grad_values :],
+            *bw_no_fsdp_outputs[num_unsharded_grads:],
         )
         _assert_tensor_sequence_equal(self, split_bw_outputs, bw_outputs)
 

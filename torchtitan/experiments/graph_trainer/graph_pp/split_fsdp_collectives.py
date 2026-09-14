@@ -77,12 +77,15 @@ class GraphPPFSDPBackwardSplit:
         reduce_grad_input_names (tuple[str, ...]): ``reduce_grad_module``
             placeholder names, or empty when ``reduce_grad_module`` is
             ``None``.
+        num_unsharded_param_grad_values (int): Number of unique pre-reduction
+            gradient values returned by ``bw_no_fsdp_module``.
     """
 
     bw_no_fsdp_module: fx.GraphModule
     reduce_grad_module: fx.GraphModule | None
     bw_no_fsdp_output_names: tuple[str, ...]
     reduce_grad_input_names: tuple[str, ...]
+    num_unsharded_param_grad_values: int
 
 
 def split_forward_fsdp_collectives(
@@ -265,10 +268,10 @@ def split_backward_fsdp_collectives(
         -> original_param_grad_outputs
 
     Backward outputs are ordered as parameter-grad leaves followed by input
-    grads. Parameter-grad slots that do not end in a reduce-scatter/all-reduce
-    chain, including ``None`` slots for unused or non-differentiable params,
-    are kept in place to preserve the one-output-per-param-grad calling
-    convention.
+    grads. Shared bucket inputs are returned once from ``bw_no_fsdp`` so the
+    runtime accumulates each bucket exactly once per microbatch. The
+    ``reduce_grad`` graph restores the original one-output-per-param-grad
+    calling convention after synchronization.
 
     NOTE: The pre-reduce dtype cast remains in ``bw_no_fsdp``. This matches
     eager FSDP accumulation with gradient sync disabled, where local grads are
@@ -325,6 +328,7 @@ def split_backward_fsdp_collectives(
             reduce_grad_module=None,
             bw_no_fsdp_output_names=output_names(bw_module),
             reduce_grad_input_names=(),
+            num_unsharded_param_grad_values=num_param_grads,
         )
 
     unique_reduce_grad_inputs = unique_in_order(
@@ -332,7 +336,7 @@ def split_backward_fsdp_collectives(
         for input_node in reduce_grad_inputs
         if isinstance(input_node, fx.Node)
     )
-    bw_no_fsdp_output_descs = [None] * len(reduce_grad_inputs)
+    bw_no_fsdp_output_descs = [None] * len(unique_reduce_grad_inputs)
     with allow_fx_graph_extraction_of_side_effectful_ops(
         {
             torch.ops._c10d_functional.wait_tensor,
@@ -342,7 +346,7 @@ def split_backward_fsdp_collectives(
         bw_no_fsdp_graph = _extract_graph_with_inputs_outputs(
             graph,
             placeholders,
-            reduce_grad_inputs + list(remaining_outputs),
+            unique_reduce_grad_inputs + list(remaining_outputs),
             bw_no_fsdp_output_descs + remaining_output_descs,
             "bw_no_fsdp",
             ignore_must_be_in_fw_bw=True,
@@ -365,4 +369,5 @@ def split_backward_fsdp_collectives(
         reduce_grad_module=reduce_grad_module,
         bw_no_fsdp_output_names=output_names(bw_no_fsdp_module),
         reduce_grad_input_names=placeholder_names(reduce_grad_module),
+        num_unsharded_param_grad_values=len(unique_reduce_grad_inputs),
     )

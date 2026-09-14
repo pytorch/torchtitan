@@ -96,7 +96,21 @@ before it, and transfer backward metadata into that ShapeEnv. This preserves
 forward collective-size provenance for full Inductor without changing the shared
 compiler passes.
 
-GraphPP follows the same subclass boundary as the non-PP GraphTrainer tracer.
+Every `aot_fx_trace` GraphTrainer step now executes through
+`GraphPipelineRuntime`. Non-PP training is represented as one pipeline stage,
+and its gradient-accumulation batches are runtime microbatches. This gives PP
+and non-PP training the same forward, backward, FSDP unshard, gradient
+reduction, and reshard boundaries. There is no separate direct training runner.
+
+One-stage execution keeps FSDP gradient synchronization inside each backward
+graph by default, so a single-microbatch step has no separate `REDUCE_GRAD`
+action and does not materialize unreduced gradients across a graph boundary.
+With multiple accumulation microbatches,
+`--compile.enable_deferred_fsdp_gradient_sync` instead extracts the FSDP
+reduction, accumulates unreduced gradients in place, and schedules one
+`REDUCE_GRAD` after the final microbatch.
+
+GraphPP follows the same subclass boundary as the direct GraphTrainer tracer.
 Extracted graphs run on flat plain tensor leaves. Values exposed to the PP
 runtime are rewrapped from tracer metadata: stage forward outputs, input
 gradients sent to previous stages, and parameter gradients before assignment to
@@ -104,9 +118,11 @@ live `param.grad`. Internal values remain flat because they never leave GraphPP
 graph execution: saved-for-backward tensors, unsharded FSDP params, raw grad
 leaves, reduce-grad inputs, and multiplexed intermediate outputs.
 
-Current limitations: GraphPP does not load precompile artifacts yet, CUDA graph
-capture should target the `GraphPipelineRuntime` steady-state path in a future change,
-and EP-overlap annotations will be composed with GraphPP in a later PR.
+The one-stage runtime supports whole-step CUDA graph capture. Multi-stage PP
+does not yet use that capture path. Precompiled artifacts, activation offload,
+custom pass pipelines with trace-input hooks, and EP-overlap annotations are
+not yet supported by `GraphPipelineRuntime`; these configurations fail
+explicitly.
 
 ### Compiler Optimizations
 
@@ -223,73 +239,12 @@ than requiring bitwise-identical losses.
 
 ### Pre-compile (Compile-on-One-Rank)
 
-Pre-compile lets you compile AOT graphs on a single GPU and save them to disk,
-then load them on all ranks during training — skipping compilation entirely.
-This uses compile-on-one-rank (CooR) to produce a rank-agnostic artifact.
-Setting `--compile.precompile_artifact_dir` enables precompile in both steps.
-
-**Artifact ephemerality:** Precompiled artifacts are tied to the exact PyTorch
-version, CUDA version, model architecture, and parallelism configuration used
-to create them. Changing any of these requires regenerating the artifacts.
-Stale artifacts are detected automatically via config fingerprinting and
-will raise an error at load time. Delete old artifacts and re-run
-precompile when upgrading PyTorch or changing the model/parallelism setup.
-
-#### Llama3 (dense model)
-
-```bash
-# Step 1: precompile on a single process (needs only 1 GPU)
-python -m torchtitan.experiments.graph_trainer.precompile_main \
-    --module graph_trainer.llama3 \
-    --config graph_trainer_llama3_debugmodel \
-    --compile.precompile_artifact_dir /tmp/precompile_artifacts \
-    --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2
-
-# Step 2: load and train with torchrun (uses all GPUs)
-# Uses run_train_precompile.sh which passes --virtual-local-rank to torchrun.
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
-    ./torchtitan/experiments/graph_trainer/run_train_precompile.sh \
-    --compile.precompile_artifact_dir /tmp/precompile_artifacts \
-    --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2
-```
-
-#### DeepSeek-v3 (MoE model with expert parallelism)
-
-```bash
-# Step 1: precompile on a single process (needs only 1 GPU)
-python -m torchtitan.experiments.graph_trainer.precompile_main \
-    --module graph_trainer.deepseek_v3 \
-    --config graph_trainer_deepseek_v3_debugmodel \
-    --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
-    --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 4
-
-# Step 2: load and train with torchrun (uses all GPUs)
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
-    ./torchtitan/experiments/graph_trainer/run_train_precompile.sh \
-    --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
-    --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 4
-```
-
-<details>
-<summary><code>--virtual-local-rank</code> explained</summary>
-
-This torchrun flag makes every worker process see `LOCAL_RANK=0` and target
-`cuda:0`. torchrun isolates each worker's GPU via `CUDA_VISIBLE_DEVICES`, so
-`cuda:0` maps to a different physical GPU per worker. This is required for
-CooR because the precompiled artifact was compiled on a single process
-targeting `cuda:0`, and CooR handles rank-specific computation dynamically
-at runtime via `_runtime_compute_coordinate_on_dim`.
-</details>
-
-Pre-compile works with any compiler pass that produces serializable output,
-including `full_inductor_compilation` and `regional_inductor`. Use a shared
-filesystem path for the artifact directory in multi-node setups.
+The existing precompile format stores one monolithic forward-loss-backward
+graph. `GraphPipelineRuntime` instead binds separate forward, backward, FSDP,
+and optional overlap graphs, so it cannot consume that artifact format.
+`precompile_main` can still generate the legacy artifact for development, but
+GraphTrainer rejects
+`--compile.precompile_artifact_dir` until a stage-graph artifact format exists.
 
 ### Composability Support
 

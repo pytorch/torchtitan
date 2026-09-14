@@ -38,12 +38,17 @@ class GraphPPStageGraphs(Protocol):
 
     @property
     def num_unsharded_param_grad_values(self) -> int:
-        """Return the number of unsharded param-grad accumulator slots.
+        """Return the number of backward param-grad accumulator slots.
 
         Returns:
             int: Number of flat values in ``GraphPPStageRuntimeState`` used to
-            accumulate unsharded parameter gradients across microbatches.
+            accumulate parameter gradients across microbatches. The values are
+            unreduced only when ``requires_grad_reduction`` is true.
         """
+
+    @property
+    def requires_grad_reduction(self) -> bool:
+        """Return whether backward gradients require ``reduce_grads``."""
 
     def unshard_params(
         self,
@@ -282,10 +287,9 @@ class GraphPPStageRuntimeState:
             module.
         unsharded_param_values (list[Any]): Flat unsharded params consumed by
             forward graphs.
-        unsharded_param_grads (list[Any]): Flat unsharded gradient accumulator
-            slots.
-        sharded_param_grads (list[Any]): Flat reduced gradients after
-            ``reduce_grads``.
+        unsharded_param_grads (list[Any]): Flat unreduced gradient accumulator
+            slots used when reduction is scheduled separately.
+        sharded_param_grads (list[Any]): Flat reduced gradient accumulator.
         trainable_params (list[torch.Tensor]): Stage parameters that receive
             accumulated gradients.
     """

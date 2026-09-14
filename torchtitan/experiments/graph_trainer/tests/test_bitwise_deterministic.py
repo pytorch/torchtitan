@@ -261,15 +261,15 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             flatten_runtime_inputs,
+            make_monolithic_fwd_bwd_step,
             precompile_fx_trace_load,
             precompile_fx_trace_save,
         )
         from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-        from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
         self.annotate_model(model)
         loss_fn = CrossEntropyLoss.Config().build()
-        fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
+        fwd_bwd_fn = make_monolithic_fwd_bwd_step(model, loss_fn)
 
         global_valid_tokens = torch.tensor(NUM_TOKENS, dtype=torch.float, device="cuda")
         extra_kwargs: dict[str, object] = {

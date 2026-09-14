@@ -7,14 +7,21 @@
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import (
+    _Action,
     _PipelineScheduleRuntime,
+    FORWARD,
+    FULL_BACKWARD,
     get_schedule_class,
+    REDUCE_GRAD,
+    RESHARD,
+    UNSHARD,
 )
 
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
     _build_pipeline_schedule,
@@ -23,7 +30,10 @@ from torchtitan.distributed.pipeline_parallel import (
     _get_pp_rank_to_stage_indices_mapping,
     _split_module,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
+    trace_input_preparer_keys,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
     GraphTrainerStageGraphProvider,
 )
@@ -32,9 +42,144 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     register_graph_pp_schedule,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
+from torchtitan.experiments.graph_trainer.registry import (
+    PASS_PIPELINE_REGISTRY,
+    TRACE_CALL_INPUT_PREPARERS,
+    TRACE_INPUT_PREPARERS,
+)
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger
+
+
+def _validate_graph_pipeline_compile_config(
+    compile_config: GraphTrainerCompileConfig,
+) -> None:
+    if compile_config.mode != "aot_fx_trace":
+        raise ValueError("GraphPipelineRuntime requires --compile.mode aot_fx_trace")
+    if compile_config.precompile_artifact_dir:
+        raise ValueError(
+            "GraphPipelineRuntime does not support "
+            "--compile.precompile_artifact_dir yet. Existing precompiled "
+            "artifacts contain one monolithic train-step graph, while the "
+            "runtime requires separately bound forward, backward, and FSDP graphs."
+        )
+    if compile_config.ep_overlap.enabled:
+        raise ValueError(
+            "GraphPipelineRuntime does not support --compile.ep_overlap.enabled "
+            "yet. GraphPP stage tracing does not apply the EP-overlap trace-input "
+            "preparers."
+        )
+    if compile_config.memory_policy == "sac_and_offload":
+        raise ValueError(
+            "GraphPipelineRuntime does not support "
+            "--compile.memory_policy sac_and_offload yet. The GraphPP partition "
+            "must preserve offload and reload pairs across the forward/backward "
+            "boundary."
+        )
+    if compile_config.pass_pipeline in PASS_PIPELINE_REGISTRY:
+        raise ValueError(
+            "GraphPipelineRuntime does not support custom pass pipelines yet"
+        )
+    trace_preparer_names = set(trace_input_preparer_keys(compile_config))
+    unsupported_preparers = trace_preparer_names.intersection(
+        TRACE_INPUT_PREPARERS.keys() | TRACE_CALL_INPUT_PREPARERS.keys()
+    )
+    if unsupported_preparers:
+        raise ValueError(
+            "GraphPipelineRuntime does not support trace-input preparers yet: "
+            f"{sorted(unsupported_preparers)}"
+        )
+
+
+def graph_train_step_runtime(
+    model: nn.Module,
+    *,
+    num_microbatches: int,
+    parallel_dims: ParallelDims,
+    parallelism: ParallelismConfig,
+    compile_config: GraphTrainerCompileConfig,
+    device: torch.device,
+    model_config: BaseModel.Config | None,
+    loss_fn: LossFunction,
+    use_cuda_graph: bool = False,
+) -> GraphPipelineRuntime:
+    """Build the non-PP graph path as a one-stage pipeline runtime."""
+    _validate_graph_pipeline_compile_config(compile_config)
+    if num_microbatches < 1:
+        raise ValueError(
+            "GraphPipelineRuntime requires at least one microbatch, got "
+            f"{num_microbatches}"
+        )
+    defer_fsdp_gradient_sync = compile_config.enable_deferred_fsdp_gradient_sync
+    if defer_fsdp_gradient_sync and not parallel_dims.fsdp_enabled:
+        raise ValueError("Deferred FSDP gradient synchronization requires FSDP")
+    if defer_fsdp_gradient_sync and num_microbatches < 2:
+        raise ValueError(
+            "Deferred FSDP gradient synchronization requires at least two "
+            "microbatches"
+        )
+
+    pp_mesh = parallel_dims.get_optional_mesh("pp", include_singleton_axes=True)
+    assert pp_mesh is not None
+    stage = GraphPipelineStage(
+        model,
+        stage_index=0,
+        num_stages=1,
+        device=device,
+        group=pp_mesh.get_group("pp"),
+    )
+
+    def scalar_loss_fn(*args: object, **kwargs: object) -> torch.Tensor:
+        loss = loss_fn(*args, **kwargs)
+        return loss[0] if isinstance(loss, tuple) else loss
+
+    schedule = _PipelineScheduleRuntime(
+        [stage],
+        n_microbatches=num_microbatches,
+        loss_fn=scalar_loss_fn,
+        scale_grads=False,
+        backward_requires_autograd=False,
+    )
+    reuse_unsharded_parameters = not get_fsdp_reshard_after_forward_policy(
+        parallelism.fsdp_reshard_after_forward,
+        pp_enabled=False,
+    )
+    actions = []
+    if reuse_unsharded_parameters:
+        actions.append(_Action(0, UNSHARD))
+    for microbatch_index in range(num_microbatches):
+        if not reuse_unsharded_parameters:
+            actions.append(_Action(0, UNSHARD))
+        actions.extend(
+            (
+                _Action(0, FORWARD, microbatch_index),
+                _Action(0, FULL_BACKWARD, microbatch_index),
+            )
+        )
+        if not reuse_unsharded_parameters:
+            actions.append(_Action(0, RESHARD))
+    if defer_fsdp_gradient_sync:
+        actions.append(_Action(0, REDUCE_GRAD))
+    if reuse_unsharded_parameters:
+        actions.append(_Action(0, RESHARD))
+    schedule._prepare_schedule_with_comms({0: actions}, format="compute_comms")
+
+    graph_provider = GraphTrainerStageGraphProvider(
+        loss_fn=loss_fn,
+        compile_config=compile_config,
+        model_config=model_config,
+        parallelism=parallelism,
+        # The trainer-side GraphPipelineStepRunner owns the CUDA graph policy,
+        # including the decision to leave capture disabled.
+        cudagraph_managed_by_runtime=True,
+        extract_fsdp_grad_reduction=defer_fsdp_gradient_sync,
+    )
+    return register_graph_pp_schedule(
+        schedule,
+        graph_provider=graph_provider,
+        clone_grads_to_initialize_param_grad=use_cuda_graph,
+    )
 
 
 def _validate_graph_pp_config(
@@ -42,13 +187,7 @@ def _validate_graph_pp_config(
     compile_config: GraphTrainerCompileConfig,
     parallelism: ParallelismConfig,
 ) -> None:
-    if compile_config.mode != "aot_fx_trace":
-        raise ValueError("GraphPP requires --compile.mode aot_fx_trace")
-    if compile_config.precompile_artifact_dir:
-        raise ValueError(
-            "GraphPP does not support --compile.precompile_artifact_dir yet. "
-            "Trace and graph construction are stage-local runtime operations."
-        )
+    _validate_graph_pipeline_compile_config(compile_config)
     if parallelism.fsdp_reshard_after_forward == "always":
         raise ValueError(
             "GraphPP assumes ZeRO-2 style FSDP with "

@@ -929,7 +929,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         input_dict[key] = value.to(self.device, non_blocking=True)
                 input_dict_mbs.append(input_dict)
 
-            if parallel_dims.pp_enabled:
+            if parallel_dims.pp_enabled or self.num_pp_microbatches > 1:
                 fwd_bwd_input_dict = input_dict_mbs
             else:
                 assert len(input_dict_mbs) == 1
