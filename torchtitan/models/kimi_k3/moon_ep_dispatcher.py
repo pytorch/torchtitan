@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -157,13 +158,16 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
+        static_token_capacity: ClassVar[bool] = True
+        ep1_local_fallback: ClassVar[bool] = True
+
         hidden_dim: int | None = None
         """Feature width of the tokens entering dispatch (sizes the buffer)."""
 
         num_max_tokens_per_rank: int | None = None
         """MoonEP's ``S``: the exact per-rank token count of every dispatch,
-        a static shape. Filled from the training config by the model's
-        ``update_from_config``; never a guess."""
+        a static shape. Filled from the training config by core's
+        ``update_ep_token_dispatcher_config``; never a guess."""
 
         num_prefetch_slots: int | None = None
         """MoonEP's ``B``; None is its default, ``E // num_ep_ranks``, which

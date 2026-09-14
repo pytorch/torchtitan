@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import spmd_types as spmd
 import torch
@@ -171,7 +171,11 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        pass
+        # A persistent backend preallocates for a static per-rank token count
+        # (``num_max_tokens_per_rank``, filled by update_ep_token_dispatcher_config);
+        # one with a local fallback also runs without EP.
+        static_token_capacity: ClassVar[bool] = False
+        ep1_local_fallback: ClassVar[bool] = False
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -762,6 +766,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
+        static_token_capacity: ClassVar[bool] = True
         # Select the dispatch layout. False (default, also forced under autograd): compact,
         # host-synced, backward-able path for training. True: static, no-host-sync expand
         # layout so the MoE forward is CUDA-graph-capturable -- inference only (covers BOTH
@@ -896,6 +901,8 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
                 ``num_max_tokens_per_rank``.
         """
 
+        static_token_capacity: ClassVar[bool] = True
+
         non_blocking_capacity_factor: float | None = None
         pad_multiple: int | None = None
         hidden_dim: int | None = None
@@ -990,15 +997,17 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
     from torchtitan.models.common.moe import MoE
 
     parallelism = config.parallelism
-    dispatcher_cfgs = []
+    dispatcher_cfgs: list[Any] = []
     for _, moe_cfg, _, _ in model_config.traverse(MoE.Config):
         token_dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
-        if not isinstance(
-            token_dispatcher_cfg,
-            (
-                DeepEPTokenDispatcher.Config,
-                HybridEPTokenDispatcher.Config,
-            ),
+        if not (
+            isinstance(token_dispatcher_cfg, BaseEPTokenDispatcher.Config)
+            and token_dispatcher_cfg.static_token_capacity
+        ):
+            continue
+        if (
+            parallelism.expert_parallel_degree == 1
+            and token_dispatcher_cfg.ep1_local_fallback
         ):
             continue
         dispatcher_cfgs.append(token_dispatcher_cfg)
