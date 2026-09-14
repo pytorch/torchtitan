@@ -302,7 +302,8 @@ class DistMoeRoutedExperts(RoutedExperts):
         """Return W13 and W2 operands for the standalone DistMoE call."""
         w13_E2FD = self.w13.weight
         w2_EDF = self.w2.weight
-        return w13_E2FD.flatten(1, 2), w2_EDF
+        w13_EFD = w13_E2FD.flatten(1, 2)
+        return w13_EFD, w2_EDF
 
     def _build_dist_moe_postprocess(self) -> DistMoeInputScaledRMSNorm | None:
         """Translate the current postprocess parameters to a kernel descriptor."""
@@ -346,6 +347,9 @@ class DistMoeRoutedExperts(RoutedExperts):
         if runtime is None or runtime.context is None:
             raise RuntimeError("DistMoE context is not initialized")
         w13_operand, w2_operand = self._dist_moe_weight_operands()
+        # FSDP replaces module-visible weights for each unshard lifetime, and
+        # the postprocess descriptor captures its current parameter. Build the
+        # options here so neither reference survives a reshard.
         options = DistMoeExecutionOptions(
             inplace_wgrad_accum=self._dist_moe_config.inplace_wgrad_accum,
             wgrad_parameter_owners=(self.w13.weight, self.w2.weight)
