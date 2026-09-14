@@ -29,12 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 def _import_moonep():
-    """Import MoonEP, or explain what is missing.
-
-    Optional in the same sense as fla and DeepEP: absent on a machine that
-    cannot run it, and the error names the package rather than surfacing as an
-    AttributeError deep in dispatch.
-    """
     try:
         import moonep  # pyrefly: ignore [missing-import]
     except ImportError as err:
@@ -47,21 +41,16 @@ def _import_moonep():
     return moonep
 
 
+# Routing weights ride along as a second output so their gradient reaches the router.
 class _MoonEPDispatch(torch.autograd.Function):
-    """``buffer.dispatch``; its backward is a combine of the grads.
-
-    Routing weights ride along as a second output so their gradient reaches
-    the router.
-    """
-
     @staticmethod
-    # pyrefly: ignore [bad-override]
-    def forward(ctx, buffer, plan_out, x_SH, weights_SK, ids_SK, counts_E):
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, buffer, plan_out, x_SH, weights_SK, ids_SK, counts_E
+    ):
         hidden_nvsh, weights_nvs, cu_seqlens, plan = buffer.dispatch(
             x_SH, weights_SK, ids_SK, counts_E, zero_copy=False
         )
-        # The plan is not a tensor, so it leaves through the caller's box
-        # rather than as an output.
+        # The plan is not a tensor, so it leaves through the caller's list.
         plan_out.append(plan)
         ctx.buffer = buffer
         ctx.plan = plan
@@ -69,16 +58,16 @@ class _MoonEPDispatch(torch.autograd.Function):
         return hidden_nvsh, weights_nvs, cu_seqlens
 
     @staticmethod
-    # pyrefly: ignore [bad-override]
-    def backward(ctx, grad_hidden_nvsh, grad_weights_nvs, _grad_cu):
+    def backward(  # pyrefly: ignore[bad-override]
+        ctx, grad_hidden_nvsh, grad_weights_nvs, _grad_cu
+    ):
         if grad_hidden_nvsh is None and grad_weights_nvs is None:
             return None, None, None, None, None, None
         if grad_hidden_nvsh is None:
             grad_hidden_nvsh = torch.zeros(
                 ctx.shape_nvsh, dtype=torch.bfloat16, device=grad_weights_nvs.device
             )
-        # One combine sums each token's K hidden-grad copies and, when handed
-        # the weight grads, gathers them back to [S, K].
+        # One combine returns both the hidden and the routing-weight grads.
         grad_x_SH, grad_weights_SK, _ = ctx.buffer.combine(
             plan=ctx.plan,
             hidden_nvsh=grad_hidden_nvsh.to(torch.bfloat16).contiguous(),
@@ -92,19 +81,15 @@ class _MoonEPDispatch(torch.autograd.Function):
 
 
 class _MoonEPCombine(torch.autograd.Function):
-    """``buffer.combine``; its backward is a re-dispatch on the same plan."""
-
     @staticmethod
-    # pyrefly: ignore [bad-override]
-    def forward(ctx, buffer, plan, hidden_nvsh):
+    def forward(ctx, buffer, plan, hidden_nvsh):  # pyrefly: ignore[bad-override]
         out_SH, _, _ = buffer.combine(plan=plan, hidden_nvsh=hidden_nvsh)
         ctx.buffer = buffer
         ctx.plan = plan
         return out_SH
 
     @staticmethod
-    # pyrefly: ignore [bad-override]
-    def backward(ctx, grad_out_SH):
+    def backward(ctx, grad_out_SH):  # pyrefly: ignore[bad-override]
         grad_hidden_nvsh, _, _, _ = ctx.buffer.dispatch(
             grad_out_SH.to(torch.bfloat16), plan=ctx.plan
         )
@@ -121,11 +106,7 @@ class MoonEPDispatchMetadata:
 
 
 class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
-    """Balanced EP dispatch through MoonEP's kernels.
-
-    With no EP mesh it falls back to local dispatch, so a flavor carrying this
-    config still runs unsharded.
-    """
+    """EP token dispatch through MoonEP; local dispatch when the EP mesh is None."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
@@ -136,13 +117,11 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         """Feature width of the tokens entering dispatch (sizes the buffer)."""
 
         num_max_tokens_per_rank: int | None = None
-        """MoonEP's ``S``: the exact per-rank token count of every dispatch,
-        a static shape. Filled from the training config by core's
-        ``update_ep_token_dispatcher_config``; never a guess."""
+        """MoonEP's ``S``, the per-rank token count of every dispatch; filled by
+        ``update_ep_token_dispatcher_config``."""
 
         num_prefetch_slots: int | None = None
-        """MoonEP's ``B``; None is ``E // num_ep_ranks``, which training
-        requires. The experts read it at attach."""
+        """MoonEP's ``B``; None is ``E // num_ep_ranks``, which training requires."""
 
         num_sms: int = 32
         """SMs MoonEP's kernels may occupy (its default)."""
@@ -161,19 +140,16 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         self._current: tuple[object, torch.Tensor] | None = None
 
     def _buffer_factory(self, **kwargs):
-        """``moonep.Buffer`` by default; the tests substitute their double."""
         return _import_moonep().Buffer(**kwargs)
 
     def current_plan(self) -> tuple[object, torch.Tensor]:
-        """The plan and ``cu_seqlens`` of the dispatch in flight, for the
-        expert side."""
+        """The plan and ``cu_seqlens`` of the dispatch in flight."""
         if self._current is None:
             raise RuntimeError("MoonEP experts ran before a dispatch in this step.")
         return self._current
 
     def init_buffer(self) -> None:
-        """Allocate MoonEP's persistent buffer on the EP group, once, from
-        ``wire_meshes`` (a collective)."""
+        """Allocate MoonEP's persistent buffer on the EP group (a collective)."""
         if self.ep_mesh is None:
             return
         if self.hidden_dim is None or self.num_max_tokens_per_rank is None:
@@ -212,12 +188,7 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, object]:
-        """Route the padded local tokens through MoonEP's planner.
-
-        Returns ``(routed_input_RD, num_tokens_per_row, metadata)``: the
-        received tokens in MoonEP's row order and the token count of each of
-        the ``E + B`` rows, which ``MoonEPGroupedExperts`` consumes.
-        """
+        """Return the routed tokens, their count per ``E + B`` row, and metadata."""
         if self.ep_mesh is None:
             return LocalTokenDispatcher.dispatch(
                 self,
@@ -265,12 +236,7 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         metadata: object,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Invert ``dispatch``: one weighted row per original token, in order.
-
-        The routing weights are applied here, in autograd, exactly as the
-        standard dispatcher does before its scatter-add; MoonEP's combine only
-        sums the copies.
-        """
+        """Apply the routing weights here; MoonEP's combine only sums the copies."""
         if self.ep_mesh is None:
             if not isinstance(metadata, LocalDispatchMetadata):
                 raise TypeError(f"expected LocalDispatchMetadata, got {type(metadata)}")

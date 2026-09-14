@@ -56,9 +56,8 @@ class KimiLatentMoE(MoE):
 
     def parallelize(self, parallel_dims) -> None:
         super().parallelize(parallel_dims)
-        # MoonEP's expert side needs the dispatcher's plan and the EP mesh;
-        # both exist only after the children above have been parallelized.
-        # Imported here: moon_ep_experts imports this module.
+        # The dispatcher's plan and EP mesh exist only after the children parallelize;
+        # imported here because moon_ep_experts imports this module.
         from torchtitan.models.kimi_k3.moon_ep_dispatcher import MoonEPTokenDispatcher
         from torchtitan.models.kimi_k3.moon_ep_experts import (
             check_moonep_mesh,

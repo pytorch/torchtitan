@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import torch
+import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.moe import GroupedExperts
@@ -39,20 +40,17 @@ class MoonEPTableBackend(Protocol):
     def alloc_weight_table(
         self, name: str, rows: int, in_dim: int, out_dim: int
     ) -> torch.Tensor:
-        """bf16 ``[rows, in, out]``: rows ``[0, E)`` the experts, ``[E, E+B)``
-        the prefetch slots."""
+        """bf16 ``[E + B, in, out]``: the experts, then the prefetch slots."""
         ...
 
     def alloc_grad_table(
         self, name: str, rows: int, in_dim: int, out_dim: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """fp32 ``[rows, in, out]`` plus this rank's ``[B, in, out]`` reduce
-        buffer, the one other ranks read the slot grads from."""
+        """fp32 ``[E + B, in, out]`` and this rank's ``[B, in, out]`` slot grads."""
         ...
 
     def prefetch(self, plan, tables: dict[str, torch.Tensor]) -> None:
-        """Fill rows ``[E, E+B)`` of every table with the experts the plan
-        copied onto this rank, reading them from their home ranks."""
+        """Fill the slot rows with the experts the plan copied onto this rank."""
         ...
 
     def reduce_grad(
@@ -62,16 +60,11 @@ class MoonEPTableBackend(Protocol):
         ...
 
 
-def _ep_coords(ep_mesh) -> tuple[int, int]:
-    return ep_mesh.get_local_rank(), ep_mesh.size()
-
-
 class _MoonEPExpertFunction(torch.autograd.Function):
-    """Prefetch, the three grouped GEMMs, and the grad routing around them."""
-
     @staticmethod
-    # pyrefly: ignore [bad-override]
-    def forward(ctx, experts, x_RD, w1_l, w2_l, w3_l, cu_seqlens, plan):
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, experts, x_RD, w1_l, w2_l, w3_l, cu_seqlens, plan
+    ):
         experts._refresh_local_rows(w1_l, w2_l, w3_l)
         experts._backend.prefetch(plan, experts._tables)
         with torch.no_grad():
@@ -82,12 +75,10 @@ class _MoonEPExpertFunction(torch.autograd.Function):
         return out_RD
 
     @staticmethod
-    # pyrefly: ignore [bad-override]
-    def backward(ctx, grad_out_RD):
+    def backward(ctx, grad_out_RD):  # pyrefly: ignore[bad-override]
         experts = ctx.experts
         x_RD, cu_seqlens = ctx.saved_tensors
-        # Recompute with the tables as leaves, so the grouped GEMM's own
-        # backward yields the [E+B] table grads.
+        # Recompute with the tables as leaves to get the [E + B] table grads.
         x_leaf = x_RD.detach().requires_grad_(True)
         leaves = {
             n: experts._tables[n].detach().requires_grad_(True) for n in _PROJECTIONS
@@ -107,8 +98,7 @@ class _MoonEPExpertFunction(torch.autograd.Function):
             full_grad[lo:hi].copy_(table_grads[name][lo:hi])
             full_grad[E : E + B].copy_(table_grads[name][E : E + B])
         experts._backend.reduce_grad(ctx.plan, experts._grad_tables)
-        # Back to parameter orientation: tables are [row, in, out], the
-        # parameters are w1_EFD/w3_EFD = [E, F, D] and w2_EDF = [E, D, F].
+        # Tables are [row, in, out]; w1_EFD / w3_EFD are [E, F, D], w2_EDF [E, D, F].
         grad_w1 = experts._grad_tables["gate"][0][lo:hi].transpose(-2, -1)
         grad_w3 = experts._grad_tables["up"][0][lo:hi].transpose(-2, -1)
         grad_w2 = experts._grad_tables["down"][0][lo:hi].transpose(-2, -1)
@@ -124,10 +114,7 @@ class _MoonEPExpertFunction(torch.autograd.Function):
 
 
 class MoonEPGroupedExperts(GroupedExperts):
-    """``GroupedExperts`` computed over MoonEP's ``[E+B]`` tables.
-
-    Without an EP mesh it is exactly the parent: local experts, local counts.
-    """
+    """``GroupedExperts`` over MoonEP's ``[E + B]`` tables; the parent without EP."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedExperts.Config):
@@ -142,11 +129,9 @@ class MoonEPGroupedExperts(GroupedExperts):
         self._local_rows: tuple[int, int] = (0, 0)
         self.num_prefetch_slots = 0
 
-    # -- wiring --------------------------------------------------------------
     def attach(self, dispatcher, backend: MoonEPTableBackend, ep_mesh) -> None:
-        """Bind the dispatcher whose plan and slot count this module uses and
-        allocate the tables; called from the MoE's parallelize."""
-        rank, size = _ep_coords(ep_mesh)
+        """Bind the dispatcher and the table backend and allocate the tables."""
+        rank, size = ep_mesh.get_local_rank(), ep_mesh.size()
         if self.num_experts % size != 0:
             raise ValueError(
                 f"MoonEP needs num_experts ({self.num_experts}) divisible by "
@@ -195,14 +180,12 @@ class MoonEPGroupedExperts(GroupedExperts):
             A=h_RF, weight_EOI=tables["down"].transpose(-2, -1), offs=cu_seqlens
         )
 
-    # -- forward -------------------------------------------------------------
     def forward(
         self,
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        # Under MoonEP the second argument is the token count of each of the
-        # [E+B] rows; without an EP mesh it is the parent's per-expert count.
+        # With MoonEP the counts are per table row ([E + B]), not per local expert.
         if self._dispatcher is None:
             return super().forward(x_RD, num_tokens_per_expert_E)
         plan, cu_seqlens = self._dispatcher.current_plan()
@@ -238,20 +221,15 @@ def check_moonep_mesh(parallel_dims) -> None:
 
 
 class MoonEPTableBackendNVLink:
-    """The table backend over ``moonep.buffer``'s public primitives.
+    """Table backend over ``moonep.buffer.create_nvl_single_owner_tensor`` mappings.
 
-    The tables are ordinary local tensors. Every rank owns an NVLink-mapped copy
-    of its expert chunk (bf16) and of its slot grads (fp32), made with
-    ``create_nvl_single_owner_tensor``, and maps every other rank's;
-    ``plan.experts_to_copy`` ([R, B] int32, the global expert id in rank r's
-    slot b, negative when empty) says what moves where. Per MoE layer per step
-    this costs three barriers on the EP group (one in ``prefetch``, two in
-    ``reduce_grad``) and two host reads of ``experts_to_copy``.
+    ``plan.experts_to_copy`` is ``[R, B]`` int32: the global expert id in rank r's
+    slot b, negative when empty.
     """
 
     def __init__(self, ep_mesh):
         self.ep_mesh = ep_mesh
-        self.rank, self.size = _ep_coords(ep_mesh)
+        self.rank, self.size = ep_mesh.get_local_rank(), ep_mesh.size()
         self.group = ep_mesh.get_group()
         self.num_experts = 0
         self.num_slots = 0
@@ -264,10 +242,6 @@ class MoonEPTableBackendNVLink:
         self.num_experts, self.num_slots = num_experts, num_slots
 
     def _map_all_owners(self, rows: int, in_dim: int, out_dim: int, dtype):
-        """One mapped tensor per owner, allocated collectively in rank order as
-        MoonEP's e2e test does it."""
-        import torch.distributed as dist
-
         moonep = _import_moonep()
         padded = moonep.buffer.pad_dim0_for_alignment([rows, in_dim, out_dim], dtype)
         mapped = []
@@ -320,10 +294,7 @@ class MoonEPTableBackendNVLink:
         return full, self._reduce_owned[name]
 
     def prefetch(self, plan, tables):
-        import torch.distributed as dist
-
         local = self.num_experts // self.size
-        # Publish this rank's chunk, then read what the plan copied onto it.
         for name, table in tables.items():
             self._owned[name].copy_(table[self.rank * local : (self.rank + 1) * local])
         dist.barrier(group=self.group)
@@ -335,8 +306,6 @@ class MoonEPTableBackendNVLink:
                 table[self.num_experts + b].copy_(self._mapped[name][home][row])
 
     def reduce_grad(self, plan, grads):
-        import torch.distributed as dist
-
         local = self.num_experts // self.size
         E, B = self.num_experts, self.num_slots
         for name, (full_grad, _) in grads.items():

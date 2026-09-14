@@ -264,8 +264,7 @@ def _latent_moe_config(
         ),
         routed_down=_linear(dim, latent_dim),
         routed_experts=RoutedExperts.Config(
-            # MoonEP computes the experts over its [E+B] tables, so it needs
-            # the expert module as well as the dispatcher.
+            # MoonEP's experts compute over its [E + B] tables.
             inner_experts=(
                 MoonEPGroupedExperts.Config
                 if moe_comm_backend == "moonep"
@@ -282,10 +281,9 @@ def _latent_moe_config(
                 },
             ),
             # core's dispatcher factory: standard / deepep / hybridep per spec,
-            # as deepseek_v3; falls back to local dispatch when the ep mesh is
-            # None. "moonep" is Kimi K3's own transport and stays in the model
-            # folder, like fla. Either way the routed experts consume the
-            # LATENT stream, so the dispatcher buffers size by latent_dim.
+            # as deepseek_v3; falls back to local
+            # dispatch when the ep mesh is None.
+            # "moonep" is Kimi K3's own transport (moon_ep_dispatcher.py).
             token_dispatcher=(
                 MoonEPTokenDispatcher.Config(
                     num_experts=num_experts,
@@ -297,6 +295,8 @@ def _latent_moe_config(
                     num_experts=num_experts,
                     top_k=top_k,
                     comm_backend=moe_comm_backend,
+                    # The routed experts consume the LATENT stream, so the
+                    # dispatcher buffers size by latent_dim, not model dim.
                     hidden_dim=latent_dim,
                 )
             ),

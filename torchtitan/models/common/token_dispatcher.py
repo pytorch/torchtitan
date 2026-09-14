@@ -171,9 +171,7 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        # A persistent backend preallocates for a static per-rank token count
-        # (``num_max_tokens_per_rank``, filled by update_ep_token_dispatcher_config);
-        # one with a local fallback also runs without EP.
+        # Persistent backends fill num_max_tokens_per_rank; some also run without EP.
         static_token_capacity: ClassVar[bool] = False
         ep1_local_fallback: ClassVar[bool] = False
 
