@@ -12,8 +12,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from torchtitan.experiments.rl.models.cast_linear import CastLinear, LMHeadCastConverter
-from torchtitan.models.common.linear import Linear
+from torchtitan.config.transform import LMHeadCastConverter
+from torchtitan.models.common.linear import CastLinear, Linear
 from torchtitan.models.qwen3 import qwen3_configs
 
 
