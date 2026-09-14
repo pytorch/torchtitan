@@ -17,6 +17,8 @@ set -ex
 #    - Useful for validating configuration and model setup
 #    Example: NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
 #    Set RANK to simulate a nonzero global rank, for example RANK=16.
+# Real-PP/fake-SPMD uses torchrun directly because NGPU is the logical world
+# size rather than the physical process count. See docs/debugging.md.
 
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
