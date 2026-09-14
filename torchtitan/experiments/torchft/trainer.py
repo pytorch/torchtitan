@@ -111,7 +111,6 @@ class FaultTolerantTrainer(TrainingEngine):
             max_context_length=config.training.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
         )
-        self.max_num_documents = self.dataloader.max_num_documents
 
         # build model (using meta init)
         model_config = model_spec.model
@@ -119,14 +118,12 @@ class FaultTolerantTrainer(TrainingEngine):
         model_config.update_from_config(
             config=config,
         )
-        self.model_config = model_config
 
         # Apply overrides after model config updates, before building the model.
         if config.override.imports:
             apply_overrides(config.override, config)
         # Overrides can change fields checked during config construction.
         config.__post_init__()
-
         logger.info(
             f"Building {model_spec.name} {model_spec.flavor} "
             f"with {json.dumps(model_config.to_dict(), indent=2, ensure_ascii=False)}"
@@ -176,8 +173,11 @@ class FaultTolerantTrainer(TrainingEngine):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = config.loss.build(
+        super().__init__(
+            config,
+            model_config=model_config,
             compile_config=config.compile,
+            max_num_documents=self.dataloader.max_num_documents,
         )
 
         self.num_pp_microbatches = num_pp_microbatches

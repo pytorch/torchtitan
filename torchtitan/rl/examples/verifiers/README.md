@@ -11,24 +11,23 @@ The ownership boundary is:
 - Verifiers runs the environment, agent or tool loop, runtime, and task reward.
 - The adapter converts samples and traces between the two systems.
 
-Reusable bridge code lives in [`components/`](./components). Each experiment
-has its own package and dependencies; [`dapo_math/`](./dapo_math) is the first
-example.
+Reusable bridge code lives alongside this README. Each experiment has its own
+package and dependencies; [`dapo_math/`](./dapo_math) is the first example.
 
 ## Integration flow
 
 ![TorchTitan and Verifiers integration architecture](./assets/integration_architecture.svg)
 
-1. `components/data.py` loads a Verifiers taskset in the TitanRL controller,
+1. [`data.py`](./data.py) loads a Verifiers taskset in the TitanRL controller,
    where TitanRL samples each rollout task. It converts the task's typed data
    to a plain dictionary because `VerifiersEnvClient` sends that data as
    msgpack over ZMQ to the separately spawned environment-server process. The
    server reconstructs the typed task before running the Verifiers environment.
-2. `components/env_server.py` currently spawns and owns the Verifiers server as
+2. [`env_server.py`](./env_server.py) currently spawns and owns the Verifiers server as
    a separate local process on the TitanRL controller host. The configured
    Verifiers runtime is independent: we can select `SubprocessConfig`,
    `DockerConfig`, or `PrimeConfig` for the agent.
-3. `components/generation_server.py` exposes TitanRL's `GenerateFn` through the
+3. [`generation_server.py`](./generation_server.py) exposes TitanRL's `GenerateFn` through the
    HTTP token-generation protocol expected by Verifiers. It also retains the
    policy-version span and metrics that are absent from Verifiers traces.
 4. `rollouter.py` sends samples to Verifiers and converts the
@@ -51,7 +50,10 @@ Create one package per task, with its own dependency list:
 
 ```text
 verifiers/
-  components/
+  data.py
+  env_server.py
+  generation_server.py
+  rollouter.py
   my_task/
     __init__.py
     config_registry.py
