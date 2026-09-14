@@ -87,14 +87,14 @@ class VisionMLP(Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         hidden_TF = remat.region(
             self.linear_fc1,
-            self.remat_region_name("fc1"),
-            recompute=self.remat_should_recompute("fc1"),
+            self.remat_region_name("w1"),
+            recompute=self.remat_should_recompute("w1"),
         )(x)
         remat.recompute_needs_tensor(hidden_TF)
         out_TD = remat.region(
             self.linear_fc2,
-            self.remat_region_name("fc2"),
-            recompute=self.remat_should_recompute("fc2"),
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
         )(self.act_fn(hidden_TF))
         remat.recompute_needs_tensor(out_TD)
         return out_TD
@@ -173,8 +173,8 @@ class VisionAttention(Module):
         out_TD = out_THDh.reshape(num_tokens, -1)
         out_TD = remat.region(
             self.proj,
-            self.remat_region_name("proj"),
-            recompute=self.remat_should_recompute("proj"),
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
         )(out_TD)
         remat.recompute_needs_tensor(out_TD)
         return out_TD
