@@ -238,6 +238,17 @@ class ParallelismConfig:
     potentially exposing additional FSDP all-gather communication.
     """
 
+    pipeline_parallel_unshard_lookahead: Literal["auto", "full"] | tuple[
+        int, ...
+    ] = "auto"
+    """FSDP prefetch distance for a looped pipeline schedule.
+
+    ``"auto"`` uses a rank-aware distance bounded by
+    ``pipeline_parallel_max_param_unsharded_stages``. ``"full"`` prefetches
+    the full residency window. A tuple provides one explicit distance per
+    pipeline rank for schedules that benefit from asymmetric prefetch.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -277,6 +288,28 @@ class ParallelismConfig:
         ):
             raise ValueError(
                 "pipeline_parallel_max_param_unsharded_stages must be positive"
+            )
+        lookahead = self.pipeline_parallel_unshard_lookahead
+        if isinstance(lookahead, str):
+            valid_lookahead = lookahead in {"auto", "full"}
+        elif isinstance(lookahead, tuple):
+            valid_lookahead = len(lookahead) == self.pipeline_parallel_degree and all(
+                not isinstance(value, bool) and isinstance(value, int) and value >= 1
+                for value in lookahead
+            )
+            max_unsharded = self.pipeline_parallel_max_param_unsharded_stages
+            if valid_lookahead and max_unsharded is not None:
+                valid_lookahead = all(value <= max_unsharded for value in lookahead)
+        else:
+            valid_lookahead = False
+        if not valid_lookahead:
+            raise ValueError(
+                "pipeline_parallel_unshard_lookahead must be 'auto', 'full', "
+                "or a tuple with one positive integer per pipeline rank. "
+                "Tuple values may not exceed "
+                "pipeline_parallel_max_param_unsharded_stages when that limit "
+                f"is set; got {lookahead!r} for pipeline degree "
+                f"{self.pipeline_parallel_degree}"
             )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
