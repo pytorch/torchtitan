@@ -24,6 +24,11 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
+from torchtitan.components.dist_moe import (
+    DistMoeRoutedExperts,
+    DistMoeRuntime,
+    prepare_dist_moe_runtime,
+)
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -129,6 +134,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 )
 
             self._validate_sdc_replay()
+            self._validate_dist_moe()
 
             num_pp_microbatches = self.parallelism.num_pp_microbatches
             if num_pp_microbatches <= 0:
@@ -201,9 +207,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if self.parallelism.expert_parallel_degree == 1:
                 return
 
-            for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
+            for _, dispatcher_config, parent, _ in self.model_spec.model.traverse(
                 LocalTokenDispatcher.Config
             ):
+                if isinstance(parent, DistMoeRoutedExperts.Config):
+                    continue
                 if (
                     isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
                     and dispatcher_config.non_blocking_capacity_factor is not None
@@ -218,6 +226,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
+
+        def _validate_dist_moe(self) -> None:
+            """Validate DistMoE settings available from the model config."""
+            if not any(self.model_spec.model.traverse(DistMoeRoutedExperts.Config)):
+                return
+            if self.training.mixed_precision_param != "bfloat16":
+                raise ValueError("DistMoE requires mixed_precision_param='bfloat16'")
 
         def _validate_sdc_replay(self) -> None:
             if self.sdc_replayer is None:
@@ -311,6 +326,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     pp_has_first_stage: bool
     pp_has_last_stage: bool
     sdc_replayer: SDCReplayer | None
+    dist_moe_runtime: DistMoeRuntime | None
 
     # additional training states
     step: int
@@ -465,6 +481,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
             num_tokens_per_dp_rank * dp_degree
         )
+        self.dist_moe_runtime = None
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
             if parallel_dims.pp_enabled:
@@ -497,19 +514,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # model_parts is used instead
                 del model
 
-                for m in self.model_parts:
-                    m.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
-                    m.train()
-
-                # confirm that user will be able to view loss metrics on the console
-                ensure_pp_loss_visible(
+                self.dist_moe_runtime = prepare_dist_moe_runtime(
+                    config=config,
+                    model_parts=self.model_parts,
                     parallel_dims=parallel_dims,
-                    pp_schedule=config.parallelism.pipeline_parallel_schedule,
-                    color=color,
+                    device=self.device,
+                    pp_schedule=self.pp_schedule,
                 )
             else:
                 if not config.checkpoint.create_seed_checkpoint:
@@ -525,14 +535,40 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         dump_folder=config.dump_folder,
                     )
 
-                model.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-                model.train()
-
                 self.model_parts = [model]
+                self.dist_moe_runtime = prepare_dist_moe_runtime(
+                    config=config,
+                    model_parts=self.model_parts,
+                    parallel_dims=parallel_dims,
+                    device=self.device,
+                    pp_schedule=None,
+                )
+
+            try:
+                for model_part in self.model_parts:
+                    model_part.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, model_part).init_weights(
+                            buffer_device=buffer_device
+                        )
+                    model_part.train()
+                if self.dist_moe_runtime is not None:
+                    self.dist_moe_runtime.initialize()
+            except Exception:
+                if self.dist_moe_runtime is not None:
+                    self.dist_moe_runtime.close()
+                    self.dist_moe_runtime = None
+                raise
+
+            # confirm that user will be able to view loss metrics on the console
+            if parallel_dims.pp_enabled:
+                ensure_pp_loss_visible(
+                    parallel_dims=parallel_dims,
+                    pp_schedule=config.parallelism.pipeline_parallel_schedule,
+                    color=color,
+                )
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.
@@ -1126,6 +1162,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.dataloader.close()
         if not self.config.training.disable_cuda_graphs:
             cudagraph_teardown()
+        dist_moe_runtime = getattr(self, "dist_moe_runtime", None)
+        if dist_moe_runtime is not None:
+            dist_moe_runtime.close()
+            self.dist_moe_runtime = None
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
