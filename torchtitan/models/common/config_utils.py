@@ -58,16 +58,8 @@ def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
     """Build an initializer for a stacked gate/up linear weight."""
 
     def _init(t: torch.Tensor) -> None:
-        # Initialize through the former interleaved view so a fixed RNG seed
-        # produces the same logical W1/W3 tensors with the same TP/FSDP setup.
-        # The transpose maps Shard(1) on [2, F, D] to the old Shard(0) on
-        # [F, 2, D], preserving DTensor's distributed RNG offsets.
-        gate_up = t.transpose(0, 1).contiguous()
-        gate_init(gate_up[:, 0])
-        up_init(gate_up[:, 1])
-        fused = gate_up.transpose(0, 1).contiguous()
-        with torch.no_grad():
-            t.copy_(fused)
+        gate_init(t[0])
+        up_init(t[1])
 
     return _init
 

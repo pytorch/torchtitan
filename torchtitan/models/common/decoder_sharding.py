@@ -147,20 +147,26 @@ def colwise_config() -> ShardingConfig:
 
 
 def stacked_colwise_config() -> ShardingConfig:
-    """Colwise sharding for each matrix in a StackedLinear."""
-    output_layout = SpmdType(
+    """Shard each ``[F, D]`` matrix in a ``[N, F, D]`` weight over ``F``.
+
+    The input is ``[T, D]`` and the output is ``[T, N, F]``. DP and CP shard
+    tokens while TP shards the per-matrix output features.
+    """
+    input_TD_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    weight_NFD_layout = dense_param_placement(tp=spmd.S(1))
+    bias_NF_layout = dense_param_placement(tp=spmd.S(1))
+    output_TNF_layout = SpmdType(
         {DP: spmd.V, CP: spmd.V, TP: spmd.V},
         partition_spec=spmd.PartitionSpec((DP, CP), None, TP),
     )
-    input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.S(1)),
+            "weight": weight_NFD_layout,
+            "bias": bias_NF_layout,
         },
-        in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": input_layout},
-        out_src_shardings=output_layout,
+        in_src_shardings={"input": input_TD_layout},
+        in_dst_shardings={"input": input_TD_layout},
+        out_src_shardings=output_TNF_layout,
         local_spmd=True,
     )
 

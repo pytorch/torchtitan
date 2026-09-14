@@ -5,8 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from functools import partial
-
 import torch
 import torch.nn.functional as F
 
@@ -92,38 +90,6 @@ def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     torch.testing.assert_close(w13_grad_2HD[0], w1_HD.grad)
     torch.testing.assert_close(w13_grad_2HD[1], w3_HD.grad)
     torch.testing.assert_close(feed_forward.w2.weight.grad, w2_DH.grad)
-
-
-def test_stacked_w13_preserves_logical_initialization():
-    """Changing physical layout does not change seeded W1/W3 values."""
-    init = partial(torch.nn.init.trunc_normal_, mean=0.0, std=0.02)
-    config = FeedForward.Config(
-        w13=StackedLinear.Config(
-            in_features=4,
-            out_features=8,
-            num_linears=2,
-            param_init=fused_gate_up_param_init(
-                {"weight": init},
-                {"weight": init},
-            ),
-        ),
-        w2=Linear.Config(
-            in_features=8,
-            out_features=4,
-            param_init={"weight": init},
-        ),
-    )
-    feed_forward = config.build()
-
-    torch.manual_seed(42)
-    feed_forward.init_states()
-
-    torch.manual_seed(42)
-    old_w13 = torch.empty(16, 4).unflatten(0, (8, 2))
-    init(old_w13[:, 0])
-    init(old_w13[:, 1])
-    torch.testing.assert_close(feed_forward.w13.weight[0], old_w13[:, 0])
-    torch.testing.assert_close(feed_forward.w13.weight[1], old_w13[:, 1])
 
 
 def test_feed_forward_uses_configured_activation():
