@@ -42,6 +42,7 @@ from dist_moe import (
     DistMoeContext,
     DistMoeExecutionOptions,
     DistMoeInputScaledRMSNorm,
+    DistMoePreparedWeight,
     DistMoeVmmConfig,
     DistMoeVmmPrefetch,
     plan_dist_moe_memory,
@@ -68,6 +69,7 @@ __all__ = [
 ]
 
 ActivationSlotPolicy = Literal["auto", "microbatch", "stage_microbatch"]
+_DistMoeWeightOperand = torch.Tensor | DistMoePreparedWeight
 
 
 @dataclass(eq=False)
@@ -294,7 +296,9 @@ class DistMoeRoutedExperts(RoutedExperts):
         """Shard owned parameters without wiring the unused stock dispatcher."""
         Module.parallelize(self, parallel_dims)
 
-    def _dist_moe_weight_operands(self) -> tuple[Any, Any]:
+    def _dist_moe_weight_operands(
+        self,
+    ) -> tuple[_DistMoeWeightOperand, _DistMoeWeightOperand]:
         """Return W13 and W2 operands for the standalone DistMoE call."""
         w13_E2FD = self.w13.weight
         w2_EDF = self.w2.weight
@@ -392,7 +396,9 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
             requires_grad=self.w2.weight.requires_grad,
         )
 
-    def _dist_moe_weight_operands(self) -> tuple[Any, Any]:
+    def _dist_moe_weight_operands(
+        self,
+    ) -> tuple[_DistMoeWeightOperand, _DistMoeWeightOperand]:
         """Return prepared grouped MXFP8 operands for this unshard lifetime."""
         w13_E2FD = self.w13.weight
         w2_EDF = self.w2.weight
