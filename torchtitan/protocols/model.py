@@ -10,27 +10,10 @@ from typing import Any
 
 import torch
 
-from torchtitan.config import Configurable, ParallelismConfig
+from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 from .module import Module
-
-
-class ModelConfigConverter(Configurable):
-    """Base class for converters that transform the model config tree.
-
-    Subclasses implement ``convert()`` to modify configs before model build
-    (e.g. quantization, LoRA).  Converters may return a replacement root
-    config when the transform needs to wrap the model config itself.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
-        pass
-
-    @abstractmethod
-    def convert(self, model_config: Module.Config) -> Module.Config:
-        raise NotImplementedError
 
 
 class BaseModel(Module):

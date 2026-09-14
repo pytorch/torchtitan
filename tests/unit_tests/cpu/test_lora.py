@@ -9,12 +9,10 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from torchtitan.config.transform import Float8LinearConverter
 from torchtitan.config.transform.lora import _get_lora_cls, LoRAConverter
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
-from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.module import Module
 
 
@@ -80,22 +78,6 @@ def test_lora_forward():
     with torch.no_grad():
         output = model(tokens, attention_masks=attention_masks, positions=positions)
     assert output.shape == (num_tokens, vocab_size)
-
-
-def test_validate_converter_order():
-    """Quantization before LoRA is valid; LoRA before quantization is not."""
-    lora_cfg = LoRAConverter.Config(rank=8, alpha=16.0)
-
-    # Valid order: no error
-    validate_converter_order([lora_cfg])
-
-    # Invalid order: quantization after LoRA
-    float8_cfg = Float8LinearConverter.Config(emulate=True)
-    with pytest.raises(ValueError, match="must be applied before"):
-        validate_converter_order([lora_cfg, float8_cfg])
-
-    # Valid order: quantization before LoRA
-    validate_converter_order([float8_cfg, lora_cfg])
 
 
 def test_lora_cls_cache():
