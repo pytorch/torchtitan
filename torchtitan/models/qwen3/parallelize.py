@@ -73,7 +73,7 @@ def parallelize_qwen3(
         edp_mesh=edp_mesh,
         dp_mesh_dims=dp_mesh_dims,
         edp_mesh_dims=edp_mesh_dims,
-        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
+        symm_mem_scope=parallelism.fsdp_symm_mem_scope,
     )
 
     return model

@@ -365,7 +365,7 @@ class TestConfigManager(unittest.TestCase):
             ]
         )
         config.sdc_replayer = SDCReplayer.Config()
-        config.parallelism.enable_fsdp_symm_mem = True
+        config.parallelism.fsdp_symm_mem_scope = "all"
         config.compile.enable_async_tensor_parallel = True
         configs = {
             "symm_mem_async_tp": config,
