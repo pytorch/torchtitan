@@ -47,6 +47,8 @@ from torchtitan.protocols.model_spec import ModelSpec
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
+from .moon_ep_dispatcher import MoonEPTokenDispatcher
+from .moon_ep_experts import MoonEPGroupedExperts
 from .parallelize import parallelize_kimi_k3
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
@@ -262,7 +264,13 @@ def _latent_moe_config(
         ),
         routed_down=_linear(dim, latent_dim),
         routed_experts=RoutedExperts.Config(
-            inner_experts=GroupedExperts.Config(
+            # MoonEP computes the experts over its [E+B] tables, so it needs
+            # the expert module as well as the dispatcher.
+            inner_experts=(
+                MoonEPGroupedExperts.Config
+                if moe_comm_backend == "moonep"
+                else GroupedExperts.Config
+            )(
                 dim=latent_dim,
                 hidden_dim=expert_hidden_dim,
                 num_experts=num_experts,
@@ -274,15 +282,23 @@ def _latent_moe_config(
                 },
             ),
             # core's dispatcher factory: standard / deepep / hybridep per spec,
-            # as deepseek_v3; falls back to local
-            # dispatch when the ep mesh is None.
-            token_dispatcher=make_token_dispatcher_config(
-                num_experts=num_experts,
-                top_k=top_k,
-                comm_backend=moe_comm_backend,
-                # The routed experts consume the LATENT stream, so the
-                # dispatcher buffers size by latent_dim, not model dim.
-                hidden_dim=latent_dim,
+            # as deepseek_v3; falls back to local dispatch when the ep mesh is
+            # None. "moonep" is Kimi K3's own transport and stays in the model
+            # folder, like fla. Either way the routed experts consume the
+            # LATENT stream, so the dispatcher buffers size by latent_dim.
+            token_dispatcher=(
+                MoonEPTokenDispatcher.Config(
+                    num_experts=num_experts,
+                    top_k=top_k,
+                    hidden_dim=latent_dim,
+                )
+                if moe_comm_backend == "moonep"
+                else make_token_dispatcher_config(
+                    num_experts=num_experts,
+                    top_k=top_k,
+                    comm_backend=moe_comm_backend,
+                    hidden_dim=latent_dim,
+                )
             ),
         ),
         routed_norm=_norm(latent_dim),
