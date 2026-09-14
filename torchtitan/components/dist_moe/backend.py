@@ -506,8 +506,24 @@ def _validate_dist_moe_runtime(
     if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 10:
         raise ValueError("DistMoE requires an SM100-or-newer CUDA device")
     policy = modules[0]._dist_moe_config
-    if any(module._dist_moe_config != policy for module in modules[1:]):
-        raise ValueError("All local DistMoE layers must share one runtime policy")
+    setup_policy = (
+        policy.activation_slot_policy,
+        policy.num_activation_slots,
+        policy.prefetch_vmm,
+    )
+    if any(
+        (
+            module._dist_moe_config.activation_slot_policy,
+            module._dist_moe_config.num_activation_slots,
+            module._dist_moe_config.prefetch_vmm,
+        )
+        != setup_policy
+        for module in modules[1:]
+    ):
+        raise ValueError(
+            "All local DistMoE layers must share activation-slot and VMM-prefetch "
+            "policy"
+        )
     return policy
 
 
