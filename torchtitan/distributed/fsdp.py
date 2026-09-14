@@ -19,6 +19,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
+from torchtitan.config import FSDPSymmMemScope
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 logger = logging.getLogger(__name__)
@@ -96,14 +97,17 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
             module.set_gradient_divide_factor(1.0)
 
 
-def enable_fsdp_symm_mem(model: nn.Module) -> None:
-    """
-    Enable symmetric-memory communication optimizations for all FSDP modules.
-    """
+def enable_fsdp_symm_mem(model: nn.Module, scope: FSDPSymmMemScope) -> None:
+    """Enable symmetric-memory communication for the FSDP modules ``scope`` selects."""
+    if scope is None:
+        return
     for module in model.modules():
-        if isinstance(module, FSDPModule):
-            module.set_force_sum_reduction_for_comms(True)
-            module.set_symm_mem_for_comm()
+        if not isinstance(module, FSDPModule):
+            continue
+        if scope == "dense" and getattr(module, "moe_enabled", False):
+            continue
+        module.set_force_sum_reduction_for_comms(True)
+        module.set_symm_mem_for_comm()
 
 
 def get_fsdp_reshard_after_forward_policy(
@@ -184,7 +188,7 @@ def apply_fsdp_to_decoder(
     edp_mesh: DeviceMesh | None = None,
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
-    enable_symm_mem: bool = False,
+    symm_mem_scope: FSDPSymmMemScope = None,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.
@@ -224,8 +228,7 @@ def apply_fsdp_to_decoder(
             avoids silent miscategorization when new mesh axes appear.
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
             used by routed experts.
-        enable_symm_mem (bool): Whether to enable symmetric-memory FSDP
-            communication.
+        symm_mem_scope: Which FSDP modules use symmetric-memory communication.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -374,8 +377,7 @@ def apply_fsdp_to_decoder(
 
     fully_shard(model, **fsdp_config)
 
-    if enable_symm_mem:
-        enable_fsdp_symm_mem(model)
+    enable_fsdp_symm_mem(model, symm_mem_scope)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)
