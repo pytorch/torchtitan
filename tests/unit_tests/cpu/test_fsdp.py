@@ -30,7 +30,7 @@ class _FSDPModule(nn.Module):
 @pytest.mark.parametrize(
     ("scope", "dense_enabled", "sparse_enabled"),
     [
-        ("disabled", False, False),
+        (None, False, False),
         ("all", True, True),
         ("dense", True, False),
     ],

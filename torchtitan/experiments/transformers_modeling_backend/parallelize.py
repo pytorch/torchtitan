@@ -239,7 +239,7 @@ def apply_fsdp(
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
     gradient_divide_factor: int | None = None,
-    symm_mem_scope: FSDPSymmMemScope = "disabled",
+    symm_mem_scope: FSDPSymmMemScope = None,
 ):
     """Apply data parallelism (via FSDP2) to the model.
 

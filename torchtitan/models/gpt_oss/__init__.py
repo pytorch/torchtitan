@@ -11,6 +11,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     CosSinRoPE,
@@ -21,11 +22,7 @@ from torchtitan.models.common import (
     RouterGateLinear,
     TransformerBlock,
 )
-from torchtitan.models.common.attention import (
-    FusedQKVLinear,
-    QKVLinear,
-    VarlenInnerAttention,
-)
+from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
@@ -33,8 +30,6 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.linear import PartialBiasRowwiseLinear
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedExperts, GptOssMoE
@@ -76,7 +71,6 @@ def _make_gptoss_attn_config(
     n_kv_heads: int = 8,
     head_dim: int = 64,
     sliding_window_size: int | None = None,
-    fuse_qkv: bool = True,
     rope: RoPE.Config,
 ) -> Attention.Config:
     """Build a fully-specified GPT-OSS Attention.Config for a single layer.
@@ -99,34 +93,17 @@ def _make_gptoss_attn_config(
         "sinks": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
     }
 
-    if fuse_qkv:
-        qkv = FusedQKVLinear.Config(
-            head_dim=head_dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            wqkv=Linear.Config(
-                in_features=dim,
-                out_features=(n_heads + 2 * n_kv_heads) * head_dim,
-                bias=True,
-                param_init=_depth_init(layer_id),
-            ),
-        )
-    else:
-        qkv = QKVLinear.Config(
-            head_dim=head_dim,
-            wq=Linear.Config(
-                in_features=dim,
-                out_features=n_heads * head_dim,
-                bias=True,
-                param_init=_depth_init(layer_id),
-            ),
-            wkv=Linear.Config(
-                in_features=dim,
-                out_features=n_kv_heads * head_dim,
-                bias=True,
-                param_init=_depth_init(layer_id),
-            ),
-        )
+    qkv = QKVLinear.Config(
+        head_dim=head_dim,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        wqkv=Linear.Config(
+            in_features=dim,
+            out_features=(n_heads + 2 * n_kv_heads) * head_dim,
+            bias=True,
+            param_init=_depth_init(layer_id),
+        ),
+    )
 
     return Attention.Config(
         n_heads=n_heads,
@@ -191,7 +168,6 @@ def _build_gptoss_layers(
     top_k: int,
     load_balance_coeff: float,
     attn_backend: str = "varlen",
-    fuse_qkv: bool = True,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     rope: RoPE.Config,
@@ -208,7 +184,6 @@ def _build_gptoss_layers(
             layer_id=layer_id,
             attn_backend=attn_backend,
             sliding_window_size=128 if layer_id % 2 == 0 else None,
-            fuse_qkv=fuse_qkv,
             rope=rope,
         )
         routed_experts_cfg = _make_gptoss_experts_config(
@@ -269,7 +244,6 @@ def _debugmodel(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_gptoss_layers(
-            fuse_qkv=True,
             dim=dim,
             n_layers=n_layers,
             hidden_dim=hidden_dim,
@@ -315,7 +289,6 @@ def _20b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_gptoss_layers(
-            fuse_qkv=True,
             dim=dim,
             n_layers=n_layers,
             hidden_dim=hidden_dim,
@@ -361,7 +334,6 @@ def _120b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_gptoss_layers(
-            fuse_qkv=True,
             dim=dim,
             n_layers=n_layers,
             hidden_dim=hidden_dim,

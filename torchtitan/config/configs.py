@@ -33,7 +33,7 @@ import torch
 import tyro
 
 
-FSDPSymmMemScope: TypeAlias = Literal["disabled", "all", "dense"]
+FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
 _FSDP_SYMM_MEM_SCOPES = get_args(FSDPSymmMemScope)
 
 
@@ -164,11 +164,12 @@ class ParallelismConfig:
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
 
-    fsdp_symm_mem_scope: Annotated[FSDPSymmMemScope, tyro.conf.Suppress] = "disabled"
+    fsdp_symm_mem_scope: Annotated[FSDPSymmMemScope, tyro.conf.Suppress] = None
     """
-    Which FSDP modules use symmetric-memory communication. "dense" skips any
-    module with routed experts. An MoE transformer block is one FSDP module, so
-    its attention parameters are skipped along with its experts.
+    Which FSDP modules use symmetric-memory communication. None disables it.
+    "dense" skips any module with routed experts. An MoE transformer block is
+    one FSDP module, so its attention parameters are skipped along with its
+    experts.
     """
 
     tensor_parallel_degree: int = 1
@@ -275,7 +276,7 @@ class ParallelismConfig:
                 f"{list(_FSDP_SYMM_MEM_SCOPES)} "
                 f"(got {self.fsdp_symm_mem_scope!r})"
             )
-        if self.fsdp_symm_mem_scope != "disabled" and (
+        if self.fsdp_symm_mem_scope is not None and (
             not torch.cuda.is_available()
             or (
                 torch.version.hip is None

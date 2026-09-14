@@ -84,7 +84,7 @@ def apply_fsdp(
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
     cpu_offload: bool = False,
-    symm_mem_scope: FSDPSymmMemScope = "disabled",
+    symm_mem_scope: FSDPSymmMemScope = None,
     dp_mesh_dims: DataParallelMeshDims | None = None,
 ):
     """
@@ -188,7 +188,7 @@ def parallelize_encoders(
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
-    symm_mem_scope: FSDPSymmMemScope = "disabled",
+    symm_mem_scope: FSDPSymmMemScope = None,
 ):
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],

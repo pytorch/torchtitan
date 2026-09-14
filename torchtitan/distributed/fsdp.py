@@ -99,7 +99,7 @@ def disable_fsdp_gradient_division(model: nn.Module) -> None:
 
 def enable_fsdp_symm_mem(model: nn.Module, scope: FSDPSymmMemScope) -> None:
     """Enable symmetric-memory communication for the FSDP modules ``scope`` selects."""
-    if scope == "disabled":
+    if scope is None:
         return
     for module in model.modules():
         if not isinstance(module, FSDPModule):
@@ -188,7 +188,7 @@ def apply_fsdp_to_decoder(
     edp_mesh: DeviceMesh | None = None,
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
-    symm_mem_scope: FSDPSymmMemScope = "disabled",
+    symm_mem_scope: FSDPSymmMemScope = None,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.

@@ -390,7 +390,7 @@ def apply_fsdp_to_mtp_decoder(
     edp_mesh: DeviceMesh | None = None,
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
-    symm_mem_scope: FSDPSymmMemScope = "disabled",
+    symm_mem_scope: FSDPSymmMemScope = None,
 ) -> None:
     mtp_layer_keys = []
     try:

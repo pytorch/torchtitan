@@ -25,6 +25,11 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.config.transform import (
+    BatchInvariantFlexConverter,
+    LMHeadCastConverter,
+    ModelConfigConverter,
+)
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.experiments.rl.actors.generator import (
     SamplingConfig,
@@ -32,7 +37,6 @@ from torchtitan.experiments.rl.actors.generator import (
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.batch_invariance import BatchInvariantFlexConverter
 from torchtitan.experiments.rl.components.training_sample_builder import (
     TrainingSampleBuilder,
 )
@@ -43,7 +47,6 @@ from torchtitan.experiments.rl.controller import (
 )
 from torchtitan.experiments.rl.examples.alphabet_sort import AlphabetSortRollouter
 from torchtitan.experiments.rl.losses import GRPOLoss
-from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
@@ -57,7 +60,6 @@ from torchtitan.experiments.rl.routing.strategies import (
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.models.qwen3_5 import model_registry as qwen3_5_model_registry
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
@@ -674,7 +676,6 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     config.generator.override = OverrideConfig(
         imports=[
             "torchtitan.overrides.fused_swiglu.fused_swiglu",
-            "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
             (
                 "torchtitan.overrides.moe_token_dispatcher.deepep_override",
                 {"cudagraphable": True},
@@ -855,7 +856,8 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     Same model/parallelism/data as ``rl_grpo_qwen3_30b_a3b_varlen``, but applies
     opt-in overrides (per-actor) to both the trainer and generator:
 
-    * ``fused_swiglu`` fuses the dense and grouped-experts gate+up projections
+    * ``fused_swiglu`` fuses the dense SwiGLU activation; the sibling grouped
+      experts override also fuses its gate/up projections
       into a single weight (one GEMM; fused SiLU-and-mul Triton kernel).
     * ``helion_rope`` applies cos/sin RoPE with a fused Helion kernel (qwen3 uses
       ``CosSinRoPE``, which the override targets).
@@ -870,7 +872,6 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     # independent (they run in different actors).
     perf_imports = [
         "torchtitan.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
         "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
     ]
     config.trainer = dataclasses.replace(
