@@ -98,7 +98,7 @@ class _LinearShardedTensorWithMXFP8Compute(_ShardedFSDPTensor):
             raise ValueError(
                 "MXFP8 requires local matrix out_features divisible by "
                 f"{_MXFP8_BLOCK_SIZE}; got {logical_tensor.shape[-2]}. Adjust "
-                "the StackedLinear out_features or TP degree so quantization "
+                "the Linear out_features or TP degree so quantization "
                 "blocks do not span projection boundaries."
             )
         operands = _quantize_mxfp8_weight(logical_tensor.flatten(0, -2))

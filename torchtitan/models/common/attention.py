@@ -43,7 +43,7 @@ from torch.nn.attention.varlen import (
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common.linear import Linear, StackedLinear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
@@ -728,7 +728,7 @@ class QKVLinear(Module):
         head_dim: int
         n_heads: int
         n_kv_heads: int
-        wqkv: StackedLinear.Config
+        wqkv: Linear.Config
 
     def __init__(self, config: Config):
         super().__init__()

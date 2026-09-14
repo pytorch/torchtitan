@@ -14,7 +14,7 @@ from torchtitan.config.transform import Float8LinearConverter
 from torchtitan.config.transform.lora import _get_lora_cls, LoRAConverter
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear, StackedLinear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.module import Module
@@ -88,7 +88,7 @@ def test_lora_targets_fused_feed_forward_projection():
     """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w13=StackedLinear.Config(
+        w13=Linear.Config(
             in_features=4, out_features=8, num_linears=2, param_init=init
         ),
         w2=Linear.Config(in_features=8, out_features=4, param_init=init),
@@ -139,14 +139,14 @@ def test_lora_targets_fused_feed_forward_projection():
 def test_float8_lora_targets_fused_feed_forward_projection():
     """Quantized w13 uses one LoRA adapter."""
     pytest.importorskip("torchao")
-    from torchtitan.quantization import Float8StackedLinear
+    from torchtitan.quantization import Float8Linear
 
-    if Float8StackedLinear is None:
+    if Float8Linear is None:
         pytest.skip("torchao Float8Linear is unavailable")
 
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w13=StackedLinear.Config(
+        w13=Linear.Config(
             in_features=16, out_features=32, num_linears=2, param_init=init
         ),
         w2=Linear.Config(in_features=32, out_features=16, param_init=init),
@@ -164,7 +164,7 @@ def test_float8_lora_targets_fused_feed_forward_projection():
     feed_forward = config.build()
     feed_forward.init_states()
 
-    assert isinstance(feed_forward.w13, Float8StackedLinear)
+    assert isinstance(feed_forward.w13, Float8Linear)
     assert set(feed_forward.state_dict()) == {
         "w1.weight",
         "w2.weight",

@@ -8,7 +8,7 @@
 
 ``Linear`` uses diamond inheritance (``nn.Linear`` + ``Module``) so that:
 - The module hierarchy stays flat (no extra wrapper layer).
-- All ``nn.Linear`` logic (forward, state_dict, etc.) is reused as-is.
+- Standard ``nn.Linear`` parameter and state-dict behavior is retained.
 - The ``Module`` protocol is satisfied and ``build()`` is inherited
   from ``Configurable.Config``.
 """
@@ -30,48 +30,21 @@ from torchtitan.protocols.module import Module
 
 
 class Linear(nn.Linear, Module):
-    """Configurable nn.Linear."""
+    """Configurable linear with optional stacked output projections.
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        in_features: int
-        out_features: int
-        bias: bool = False
-
-    def __init__(self, config: Config):
-        super().__init__(
-            config.in_features,
-            config.out_features,
-            bias=config.bias,
-        )
-
-
-class StackedLinearBase:
-    """Marker shared by native and torchao-backed stacked linears.
-
-    Quantized implementations inherit directly from their torchao linear class,
-    so inheriting from ``StackedLinear`` would introduce MRO conflicts.
-    Distributed code uses this base to recognize every stacked implementation.
-    """
-
-    weight: nn.Parameter
-    bias: nn.Parameter | None
-
-
-class StackedLinear(StackedLinearBase, Module):
-    """A stack of linear projections evaluated by one GEMM.
-
-    The parameter has shape ``[num_linears, out_features, in_features]``.
-    Forward presents a zero-copy flattened matrix to the GEMM and restores the
-    stack dimension on its result. Keeping each matrix contiguous in parameter
-    storage prevents quantization blocks from spanning projection boundaries.
+    With ``num_linears == 1``, the parameter and output use the standard
+    ``[out_features, in_features]`` and ``[..., out_features]`` shapes. With
+    ``num_linears > 1``, they use ``[num_linears, out_features, in_features]``
+    and ``[..., num_linears, out_features]``. The stacked parameter is flattened
+    without a copy for the GEMM, so each projection remains contiguous for
+    blockwise weight quantization.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         in_features: int
         out_features: int
-        num_linears: int
+        num_linears: int = 1
         bias: bool = False
 
         def __post_init__(self) -> None:
@@ -89,38 +62,54 @@ class StackedLinear(StackedLinearBase, Module):
                 )
 
     def __init__(self, config: Config):
-        super().__init__()
-        self.in_features = config.in_features
+        super().__init__(
+            config.in_features,
+            config.num_linears * config.out_features,
+            bias=config.bias,
+        )
         self.out_features = config.out_features
         self.num_linears = config.num_linears
-        self.weight = nn.Parameter(
-            torch.empty(config.num_linears, config.out_features, config.in_features)
-        )
-        if config.bias:
-            self.bias = nn.Parameter(
-                torch.empty(config.num_linears, config.out_features)
+        if config.num_linears > 1:
+            self.weight = nn.Parameter(
+                self.weight.detach().unflatten(
+                    0, (config.num_linears, config.out_features)
+                ),
+                requires_grad=self.weight.requires_grad,
             )
-        else:
-            self.register_parameter("bias", None)
-        self.reset_parameters()
+        if config.num_linears > 1 and self.bias is not None:
+            self.bias = nn.Parameter(
+                self.bias.detach().unflatten(
+                    0, (config.num_linears, config.out_features)
+                ),
+                requires_grad=self.bias.requires_grad,
+            )
 
     def reset_parameters(self) -> None:
+        if self.weight.ndim == 2:
+            nn.Linear.reset_parameters(self)
+            return
+        # init_states() calls this after meta materialization, when a stacked
+        # weight is already 3D. Flatten first so fan-in remains in_features;
+        # PyTorch's generic 3D fan calculation would incorrectly use
+        # out_features * in_features.
         nn.init.kaiming_uniform_(self.weight.flatten(0, -2), a=math.sqrt(5))
         if self.bias is not None:
-            fan_in = self.in_features
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            bound = 1 / math.sqrt(self.in_features)
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # F.linear expects a 2D [N, K] weight. Flatten every logical output
-        # dimension while preserving the final in_features dimension:
-        # [num_linears, out_features, in_features] ->
-        # [num_linears * out_features, in_features].
+        if self.num_linears == 1:
+            return F.linear(input, self.weight, self.bias)
         weight = self.weight.flatten(0, -2)
         bias = None if self.bias is None else self.bias.flatten()
         output = F.linear(input, weight, bias)
-        # Restore the logical output dimensions on the GEMM result.
         return output.unflatten(-1, self.weight.shape[:-1])
+
+    def extra_repr(self) -> str:
+        result = nn.Linear.extra_repr(self)
+        if self.num_linears > 1:
+            result += f", num_linears={self.num_linears}"
+        return result
 
 
 @spmd.register_local_autograd_function
@@ -188,10 +177,14 @@ class RouterGateLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output_TE = _RouterGateLinearFunction.apply(input, self.weight)
+        weight = self.weight if self.num_linears == 1 else self.weight.flatten(0, -2)
+        output_TE = _RouterGateLinearFunction.apply(input, weight)
         if self.bias is not None:
-            output_TE = output_TE + self.bias.float()
-        return output_TE
+            bias = self.bias if self.num_linears == 1 else self.bias.flatten()
+            output_TE = output_TE + bias.float()
+        if self.num_linears == 1:
+            return output_TE
+        return output_TE.unflatten(-1, self.weight.shape[:-1])
 
 
 class PartialBiasRowwiseLinear(Linear):
@@ -218,13 +211,14 @@ class PartialBiasRowwiseLinear(Linear):
                 dst=spmd.P,
                 expert_mode=True,
             )
-        return F.linear(input, self.weight, bias)
+        if self.num_linears == 1:
+            return F.linear(input, self.weight, bias)
+        output = F.linear(input, self.weight.flatten(0, -2), bias.flatten())
+        return output.unflatten(-1, self.weight.shape[:-1])
 
 
 __all__ = [
     "Linear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
-    "StackedLinear",
-    "StackedLinearBase",
 ]

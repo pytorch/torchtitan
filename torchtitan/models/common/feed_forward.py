@@ -10,7 +10,7 @@ import torch
 import torch_remat as remat
 
 from torchtitan.models.common.activation import ActivationFn, SwiGLU
-from torchtitan.models.common.linear import Linear, StackedLinear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend:
@@ -45,7 +45,7 @@ class FeedForward(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        w13: StackedLinear.Config
+        w13: Linear.Config
         w2: Linear.Config
         activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
 

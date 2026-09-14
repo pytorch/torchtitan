@@ -19,7 +19,7 @@ from functools import partial
 import torch
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import fused_qkv_param_init
-from torchtitan.models.common.linear import StackedLinear
+from torchtitan.models.common.linear import Linear
 
 _DIM = 16
 _N_HEADS = 4
@@ -37,7 +37,7 @@ def _build_qkv_linear(with_bias: bool = False) -> QKVLinear:
         head_dim=_HEAD_DIM,
         n_heads=_N_HEADS,
         n_kv_heads=_N_KV_HEADS,
-        wqkv=StackedLinear.Config(
+        wqkv=Linear.Config(
             in_features=_DIM,
             out_features=_N_KV_HEADS * _HEAD_DIM,
             num_linears=_R_DIM,
@@ -75,7 +75,7 @@ class TestQKVLinearCheckpointInterop(unittest.TestCase):
             head_dim=_HEAD_DIM,
             n_heads=_N_HEADS,
             n_kv_heads=_N_KV_HEADS,
-            wqkv=StackedLinear.Config(
+            wqkv=Linear.Config(
                 in_features=_DIM,
                 out_features=_N_KV_HEADS * _HEAD_DIM,
                 num_linears=_R_DIM,

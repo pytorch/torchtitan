@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.linear import Linear, StackedLinear, StackedLinearBase
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 
@@ -35,41 +35,30 @@ try:
             TorchAOFloat8Linear.__init__(
                 self,
                 config.in_features,
-                config.out_features,
-                bias=config.bias,
-                config=config._torchao_config,
-            )
-
-    class Float8StackedLinear(TorchAOFloat8Linear, StackedLinearBase, Module):
-        """Float8 linear whose parameter retains stacked matrix dimensions."""
-
-        @dataclass(kw_only=True, slots=True)
-        class Config(StackedLinear.Config):
-            _torchao_config: object = None
-
-        def __init__(self, config: Config):
-            TorchAOFloat8Linear.__init__(
-                self,
-                config.in_features,
                 config.num_linears * config.out_features,
                 bias=config.bias,
                 config=config._torchao_config,
             )
             self.out_features = config.out_features
             self.num_linears = config.num_linears
-            self.weight = torch.nn.Parameter(
-                self.weight.detach().reshape(
-                    config.num_linears, config.out_features, config.in_features
-                ),
-                requires_grad=self.weight.requires_grad,
-            )
-            if self.bias is not None:
-                self.bias = torch.nn.Parameter(
-                    self.bias.detach().reshape(config.num_linears, config.out_features),
-                    requires_grad=self.bias.requires_grad,
+            if config.num_linears > 1:
+                self.weight = torch.nn.Parameter(
+                    self.weight.detach().unflatten(
+                        0, (config.num_linears, config.out_features)
+                    ),
+                    requires_grad=self.weight.requires_grad,
                 )
+                if self.bias is not None:
+                    self.bias = torch.nn.Parameter(
+                        self.bias.detach().unflatten(
+                            0, (config.num_linears, config.out_features)
+                        ),
+                        requires_grad=self.bias.requires_grad,
+                    )
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
+            if self.num_linears == 1:
+                return TorchAOFloat8Linear.forward(self, input)
             if torch.is_autocast_enabled():
                 input = input.to(torch.get_autocast_gpu_dtype())
             output = matmul_with_hp_or_float8_args.apply(
@@ -82,9 +71,14 @@ try:
                 output = output + self.bias.flatten().to(output.dtype)
             return output.unflatten(-1, self.weight.shape[:-1])
 
+        def reset_parameters(self) -> None:
+            if self.weight.ndim == 2:
+                TorchAOFloat8Linear.reset_parameters(self)
+            else:
+                Linear.reset_parameters(self)
+
 except ImportError:
     Float8Linear = None
-    Float8StackedLinear = None
 
 
 _float8_experts_cache: dict[type, type] = {}
