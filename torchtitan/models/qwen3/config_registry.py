@@ -16,6 +16,8 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import (
+    Adam,
+    AdamW,
     default_adamw,
     LRSchedulersContainer,
     OptimizersContainer,
@@ -131,28 +133,25 @@ def qwen3_debugmodel_moe_param_groups(
         param_groups=[
             ParamGroupConfig(
                 pattern=r"(?:tok_embeddings|output)\.",
-                optimizer_name="AdamW",
-                optimizer_kwargs={
-                    "lr": 8e-4,
-                    "betas": (0.9, 0.95),
-                    "eps": 1e-8,
-                    "weight_decay": 0.0,
-                },
+                optimizer=AdamW.Config(
+                    lr=8e-4,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
+                    weight_decay=0.0,
+                ),
             ),
             ParamGroupConfig(
                 pattern=r"\.router\.gate\.",
-                optimizer_name="Adam",
-                optimizer_kwargs={"lr": 1e-4, "betas": (0.9, 0.95), "eps": 1e-8},
+                optimizer=Adam.Config(lr=1e-4, betas=(0.9, 0.95), eps=1e-8),
             ),
             ParamGroupConfig(
                 pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs={
-                    "lr": 8e-4,
-                    "betas": (0.9, 0.95),
-                    "eps": 1e-8,
-                    "weight_decay": 0.1,
-                },
+                optimizer=AdamW.Config(
+                    lr=8e-4,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
+                    weight_decay=0.1,
+                ),
             ),
         ],
     )

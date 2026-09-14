@@ -33,7 +33,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from torchtitan.components.checkpointer import ModelWrapper
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.components.optimizer import AdamW, OptimizersContainer, ParamGroupConfig
 from torchtitan.components.optimizer.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
@@ -90,13 +90,12 @@ def _debugmodel_optimizer_config() -> OptimizersContainer.Config:
         param_groups=[
             ParamGroupConfig(
                 pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs={
-                    "lr": 8e-4,
-                    "betas": (0.9, 0.95),
-                    "eps": 1e-8,
-                    "weight_decay": 0.1,
-                },
+                optimizer=AdamW.Config(
+                    lr=8e-4,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
+                    weight_decay=0.1,
+                ),
             )
         ],
     )
