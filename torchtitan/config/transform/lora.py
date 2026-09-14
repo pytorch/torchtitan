@@ -137,6 +137,13 @@ def _get_stacked_lora_cls(parent_cls: type) -> type:
             replicated_weight = ShardingConfig(
                 state_shardings={"weight": dense_param_placement(tp=spmd.R)},
             )
+            # Treat the base [num_linears, out_features, in_features] weight as
+            # one fused [num_linears * out_features, in_features] projection.
+            # Standard LoRA therefore has one shared A [rank, in_features] and
+            # a fused B [num_linears * out_features, rank]. Keep B as a
+            # StackedLinear [num_linears, out_features, rank] so its logical
+            # projection dimension remains explicit and TP can shard
+            # out_features without separating the projections across ranks.
             self.lora_a = Linear.Config(
                 in_features=config.in_features,
                 out_features=config.rank,

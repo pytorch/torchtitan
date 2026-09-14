@@ -288,7 +288,8 @@ def apply_fsdp_to_decoder(
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
         # - When EP = 1: all params use the same FSDP mesh, but experts may
         #   use Shard(1) when FSDP degree > num_experts to avoid padding
-        # Dense blocks (no ``moe_enabled``) fall through to a plain fully_shard.
+        # Dense blocks use the default mesh with only stacked-parameter
+        # placement overrides.
         if getattr(transformer_block, "moe_enabled", False):
             assert hasattr(transformer_block, "moe")
             # Expert weights live on the grouped-GEMM child (inner_experts).
@@ -308,33 +309,17 @@ def apply_fsdp_to_decoder(
             else:
                 expert_shard_placement = Shard(0)
 
-            if (
-                ep_degree == 1
-                and expert_shard_placement == Shard(0)
-                and not stacked_param_placements
-            ):
+            if ep_degree == 1:
+                param_placements = stacked_param_placements.copy()
+                for param in expert_params:
+                    param_placements[param] = expert_shard_placement
                 fully_shard(
                     transformer_block,
                     **fsdp_config,
                     reshard_after_forward=reshard_after_forward,
-                )
-            elif ep_degree == 1:
-                # ep_degree == 1 but need Shard(1) for experts to avoid padding
-                def _experts_shard_placement_fn(
-                    param: nn.Parameter,
-                    _expert_params: set = expert_params,
-                    _expert_placement: Shard = expert_shard_placement,
-                    _stacked: dict[nn.Parameter, Shard] = stacked_param_placements,
-                ) -> Shard | None:
-                    if param in _expert_params:
-                        return _expert_placement
-                    return _stacked.get(param)
-
-                fully_shard(
-                    transformer_block,
-                    **fsdp_config,
-                    reshard_after_forward=reshard_after_forward,
-                    shard_placement_fn=_experts_shard_placement_fn,
+                    # dict.get returns None for parameters that use the default
+                    # Shard(0), matching shard_placement_fn's contract.
+                    shard_placement_fn=param_placements.get,
                 )
             else:
                 # ep_degree > 1: per-param mesh
@@ -383,26 +368,12 @@ def apply_fsdp_to_decoder(
                     shard_placement_fn=_shard_placement_fn,
                 )
         else:
-            if stacked_param_placements:
-
-                def _stacked_shard_placement_fn(
-                    param: nn.Parameter,
-                    _stacked: dict[nn.Parameter, Shard] = stacked_param_placements,
-                ) -> Shard | None:
-                    return _stacked.get(param)
-
-                fully_shard(
-                    transformer_block,
-                    **fsdp_config,
-                    reshard_after_forward=reshard_after_forward,
-                    shard_placement_fn=_stacked_shard_placement_fn,
-                )
-            else:
-                fully_shard(
-                    transformer_block,
-                    **fsdp_config,
-                    reshard_after_forward=reshard_after_forward,
-                )
+            fully_shard(
+                transformer_block,
+                **fsdp_config,
+                reshard_after_forward=reshard_after_forward,
+                shard_placement_fn=stacked_param_placements.get,
+            )
 
     fully_shard(model, **fsdp_config)
 
