@@ -20,6 +20,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.models.common.linear import StructuredLinearBase
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +273,16 @@ def apply_fsdp_to_decoder(
             )
 
     for layer_id, transformer_block in model.layers.items():
+        # StructuredLinear keeps small selector dimensions (for example W1/W3
+        # or Q/K/V) separate from the matrix-row dimension. Shard matrix rows so
+        # every rank retains all selectors and can run the fused projection.
+        structured_param_placements: dict[nn.Parameter, Shard] = {}
+        for module in transformer_block.modules():
+            if not isinstance(module, StructuredLinearBase):
+                continue
+            structured_param_placements[module.weight] = Shard(module.weight.ndim - 2)
+            if module.bias is not None:
+                structured_param_placements[module.bias] = Shard(module.bias.ndim - 1)
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
@@ -297,9 +308,11 @@ def apply_fsdp_to_decoder(
             else:
                 expert_shard_placement = Shard(0)
 
-            # When ep_degree == 1 and no Shard(1) override needed, skip
-            # shard_placement_fn entirely for simplicity
-            if ep_degree == 1 and expert_shard_placement == Shard(0):
+            if (
+                ep_degree == 1
+                and expert_shard_placement == Shard(0)
+                and not structured_param_placements
+            ):
                 fully_shard(
                     transformer_block,
                     **fsdp_config,
@@ -310,10 +323,14 @@ def apply_fsdp_to_decoder(
                 def _experts_shard_placement_fn(
                     param: nn.Parameter,
                     _expert_params: set = expert_params,
+                    _expert_placement: Shard = expert_shard_placement,
+                    _structured: dict[
+                        nn.Parameter, Shard
+                    ] = structured_param_placements,
                 ) -> Shard | None:
                     if param in _expert_params:
-                        return Shard(1)
-                    return None
+                        return _expert_placement
+                    return _structured.get(param)
 
                 fully_shard(
                     transformer_block,
@@ -347,6 +364,9 @@ def apply_fsdp_to_decoder(
                     param: nn.Parameter,
                     _expert_params: set = expert_params,
                     _expert_placement: Shard = expert_shard_placement,
+                    _structured: dict[
+                        nn.Parameter, Shard
+                    ] = structured_param_placements,
                     _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
                     _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
                 ) -> ShardPlacementResult:
@@ -356,7 +376,8 @@ def apply_fsdp_to_decoder(
                         )
                     else:
                         return ShardPlacementResult(
-                            placement=Shard(0), mesh_info=_dp_mesh_info
+                            placement=_structured.get(param, Shard(0)),
+                            mesh_info=_dp_mesh_info,
                         )
 
                 fully_shard(
@@ -366,11 +387,28 @@ def apply_fsdp_to_decoder(
                     shard_placement_fn=_shard_placement_fn,
                 )
         else:
-            fully_shard(
-                transformer_block,
-                **fsdp_config,
-                reshard_after_forward=reshard_after_forward,
-            )
+            if structured_param_placements:
+
+                def _structured_shard_placement_fn(
+                    param: nn.Parameter,
+                    _structured: dict[
+                        nn.Parameter, Shard
+                    ] = structured_param_placements,
+                ) -> Shard | None:
+                    return _structured.get(param)
+
+                fully_shard(
+                    transformer_block,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                    shard_placement_fn=_structured_shard_placement_fn,
+                )
+            else:
+                fully_shard(
+                    transformer_block,
+                    **fsdp_config,
+                    reshard_after_forward=reshard_after_forward,
+                )
 
     fully_shard(model, **fsdp_config)
 

@@ -10,7 +10,7 @@ import torch
 from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, StructuredLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.overrides.fused_swiglu import fused_grouped_experts
 from torchtitan.protocols.sharding import ShardingConfig
@@ -21,10 +21,12 @@ def test_state_dict_layouts_include_split_feed_forward_weights():
     colwise = dense_param_placement(tp=spmd.S(0))
     rowwise = dense_param_placement(tp=spmd.S(1))
     config = FeedForward.Config(
-        w13=Linear.Config(
+        w13=StructuredLinear.Config(
             in_features=16,
-            out_features=64,
-            sharding_config=ShardingConfig(state_shardings={"weight": colwise}),
+            output_shape=(2, 32),
+            sharding_config=ShardingConfig(
+                state_shardings={"weight": dense_param_placement(tp=spmd.S(1))}
+            ),
         ),
         w2=Linear.Config(
             in_features=32,

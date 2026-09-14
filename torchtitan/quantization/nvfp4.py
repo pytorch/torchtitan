@@ -26,7 +26,11 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    Linear,
+    StructuredLinear,
+    StructuredLinearBase,
+)
 from torchtitan.protocols.module import Module
 
 
@@ -233,8 +237,133 @@ try:
                 sign_vector=self.rht_sign_vector,
             )
 
+    class NVFP4StructuredLinear(TorchAONVFP4Linear, StructuredLinearBase, Module):
+        """NVFP4 linear whose parameter retains structured output dimensions."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(StructuredLinear.Config):
+            def __post_init__(self) -> None:
+                StructuredLinear.Config.__post_init__(self)
+                for name, value in (
+                    ("in_features", self.in_features),
+                    ("matrix out_features", self.output_shape[-1]),
+                ):
+                    if value % _NVFP4_BLOCK:
+                        raise ValueError(
+                            f"NVFP4 requires {name} divisible by {_NVFP4_BLOCK}; "
+                            f"got {name}={value}. NVFP4 cannot quantize this "
+                            "StructuredLinear; exclude it from the converter fqns."
+                        )
+
+            def build(self, **kwargs):
+                instance = StructuredLinear.Config.build(self, **kwargs)
+                if instance._sharding_config is not None:
+                    sc = instance._sharding_config
+                    input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+                    instance._sharding_config = replace(
+                        sc,
+                        state_shardings={
+                            **sc.state_shardings,
+                            "_sr_seed": SpmdType(
+                                {
+                                    MeshAxisName.DP: spmd.V,
+                                    MeshAxisName.CP: spmd.V,
+                                    TP: spmd.V,
+                                }
+                            ),
+                        },
+                        in_src_shardings={"x": input_layout},
+                        in_dst_shardings={"x": input_layout},
+                        local_spmd=True,
+                    )
+                return instance
+
+        def __init__(self, config: Config):
+            TorchAONVFP4Linear.__init__(
+                self,
+                config.in_features,
+                config.out_features,
+                bias=config.bias,
+            )
+            self.output_shape = config.output_shape
+            self.weight = torch.nn.Parameter(
+                self.weight.detach().reshape(*config.output_shape, config.in_features),
+                requires_grad=self.weight.requires_grad,
+            )
+            if self.bias is not None:
+                self.bias = torch.nn.Parameter(
+                    self.bias.detach().reshape(*config.output_shape),
+                    requires_grad=self.bias.requires_grad,
+                )
+            self.register_buffer("_sr_seed", None, persistent=False)
+            self.register_buffer("_rht_sign_vector", None, persistent=False)
+            self._rht_sign_vector_tuple = None
+
+        def _local_rht_sign_vector(self) -> torch.Tensor:
+            sign_vector = self._rht_sign_vector
+            if sign_vector is not None and sign_vector.device.type != "meta":
+                sign_vector = sign_vector.reshape(-1)
+            return sign_vector
+
+        def _refresh_rht_sign_vector_tuple(self) -> None:
+            sign_vector = self._local_rht_sign_vector()
+            self._rht_sign_vector_tuple = (
+                None if sign_vector is None else _rht_sign_vector_to_tuple(sign_vector)
+            )
+
+        def _load_from_state_dict(self, *args, **kwargs):
+            super()._load_from_state_dict(*args, **kwargs)
+            self._refresh_rht_sign_vector_tuple()
+
+        @property
+        def rht_sign_vector(self) -> tuple[int, ...]:
+            if self._rht_sign_vector_tuple is None:
+                self._refresh_rht_sign_vector_tuple()
+            if self._rht_sign_vector_tuple is None:
+                raise RuntimeError("rht_sign_vector is not materialized")
+            return self._rht_sign_vector_tuple
+
+        def _init_self_buffers(
+            self, *, buffer_device: torch.device | None = None
+        ) -> None:
+            dev = (
+                buffer_device
+                if buffer_device is not None
+                else cast(torch.Tensor, self.weight).device
+            )
+            self._sr_seed = torch.randint(
+                -9_223_372_036_854_775_808,
+                9_223_372_036_854_775_807,
+                (1,),
+                dtype=torch.int64,
+                device=dev,
+            )
+            self._rht_sign_vector = _make_rht_sign_vector(
+                _HARDCODED_SIGN_VECTOR, device=dev
+            )
+            self._refresh_rht_sign_vector_tuple()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            local_output_shape = self.weight.shape[:-1]
+            if local_output_shape[-1] % _NVFP4_BLOCK:
+                raise ValueError(
+                    "NVFP4 requires local matrix out_features divisible by "
+                    f"{_NVFP4_BLOCK}; got {local_output_shape[-1]}. Adjust the "
+                    "StructuredLinear output shape or TP degree so quantization "
+                    "blocks do not span projection boundaries."
+                )
+            output = nvfp4_linear(
+                x,
+                self.weight.flatten(0, -2),
+                None if self.bias is None else self.bias.flatten(),
+                sr_seed=self._sr_seed,
+                sign_vector=self.rht_sign_vector,
+            )
+            return output.unflatten(-1, local_output_shape)
+
 except ImportError:
     NVFP4Linear = None
+    NVFP4StructuredLinear = None
 
 
 def nvfp4_bf16_tail_fqns(num_layers: int, bf16_tail_fraction: float) -> list[str]:

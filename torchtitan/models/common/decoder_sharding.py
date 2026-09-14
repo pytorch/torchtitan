@@ -146,6 +146,43 @@ def colwise_config() -> ShardingConfig:
     )
 
 
+def structured_colwise_config(
+    *,
+    num_output_dims: int,
+    tp_output_dim: int,
+) -> ShardingConfig:
+    """Colwise sharding for a StructuredLinear output.
+
+    ``tp_output_dim`` indexes the module's ``output_shape``. The input has one
+    leading token dimension, so the corresponding output tensor dimension is
+    offset by one in the partition spec.
+    """
+    if not 0 <= tp_output_dim < num_output_dims:
+        raise ValueError(
+            f"tp_output_dim must be in [0, {num_output_dims}), got " f"{tp_output_dim}"
+        )
+    output_partition_spec: list[str | tuple[str, ...] | None] = [None] * (
+        num_output_dims + 1
+    )
+    output_partition_spec[0] = (DP, CP)
+    output_partition_spec[tp_output_dim + 1] = TP
+    output_layout = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        partition_spec=spmd.PartitionSpec(*output_partition_spec),
+    )
+    input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(tp_output_dim)),
+            "bias": dense_param_placement(tp=spmd.S(tp_output_dim)),
+        },
+        in_src_shardings={"input": input_layout},
+        in_dst_shardings={"input": input_layout},
+        out_src_shardings=output_layout,
+        local_spmd=True,
+    )
+
+
 def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     """
     RowwiseParallel: weight S(1), bias I (no-op if bias absent).
@@ -252,7 +289,13 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
-    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
+    qkv_sharding = structured_colwise_config(
+        num_output_dims=2,
+        tp_output_dim=1,
+    )
+    if dist_gemm:
+        qkv_sharding = ShardingConfig(state_shardings=qkv_sharding.state_shardings)
+    attention_cfg.qkv_linear.wqkv.sharding_config = qkv_sharding
 
     wo_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
@@ -326,7 +369,13 @@ def set_dense_ffn_sharding(
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         )
     )
-    feed_forward_cfg.w13.sharding_config = colwise_config()
+    w13_sharding = structured_colwise_config(
+        num_output_dims=2,
+        tp_output_dim=1,
+    )
+    if dist_gemm:
+        w13_sharding = ShardingConfig(state_shardings=w13_sharding.state_shardings)
+    feed_forward_cfg.w13.sharding_config = w13_sharding
     w2_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
         w2_config = ShardingConfig(state_shardings=w2_config.state_shardings)

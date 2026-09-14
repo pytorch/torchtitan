@@ -13,6 +13,7 @@
   from ``Configurable.Config``.
 """
 
+import math
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -43,6 +44,75 @@ class Linear(nn.Linear, Module):
             config.out_features,
             bias=config.bias,
         )
+
+
+class StructuredLinearBase:
+    """Marker for projections whose weight has explicit output dimensions."""
+
+    weight: nn.Parameter
+    bias: nn.Parameter | None
+
+
+class StructuredLinear(StructuredLinearBase, Module):
+    """One linear projection with explicit output structure.
+
+    The parameter stores a batch of output matrices as
+    ``[*output_shape, in_features]``. Forward presents a zero-copy flattened
+    matrix to the GEMM and restores ``output_shape`` on its result. Keeping the
+    semantic output dimensions in parameter storage lets parallelism shard one
+    of those dimensions without interleaving independent projections.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        in_features: int
+        output_shape: tuple[int, ...]
+        bias: bool = False
+
+        def __post_init__(self) -> None:
+            if self.in_features <= 0:
+                raise ValueError(
+                    f"in_features must be positive, got {self.in_features}"
+                )
+            if not self.output_shape or any(size <= 0 for size in self.output_shape):
+                raise ValueError(
+                    f"output_shape must contain positive dimensions, got "
+                    f"{self.output_shape}"
+                )
+
+        @property
+        def out_features(self) -> int:
+            return math.prod(self.output_shape)
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.in_features = config.in_features
+        self.output_shape = config.output_shape
+        self.out_features = math.prod(config.output_shape)
+        self.weight = nn.Parameter(
+            torch.empty(*config.output_shape, config.in_features)
+        )
+        if config.bias:
+            self.bias = nn.Parameter(torch.empty(*config.output_shape))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.weight.flatten(0, -2), a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in = self.in_features
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def _linear(self, input: torch.Tensor) -> torch.Tensor:
+        weight = self.weight.flatten(0, -2)
+        bias = None if self.bias is None else self.bias.flatten()
+        return F.linear(input, weight, bias)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = self._linear(input)
+        return output.unflatten(-1, self.weight.shape[:-1])
 
 
 @spmd.register_local_autograd_function
@@ -147,4 +217,6 @@ __all__ = [
     "Linear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
+    "StructuredLinear",
+    "StructuredLinearBase",
 ]
