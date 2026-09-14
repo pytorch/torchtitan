@@ -25,6 +25,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.models.common.activation import Sigmoid
 
 from torchtitan.models.common.aux_loss import (
     _zero_aux_losses,
@@ -208,7 +209,12 @@ class TestMicrobatchWiseLoadBalanceLossConfig(_AuxLossTestCase):
 
         moe_cfg = make_moe_config(
             num_experts=4,
-            router=make_router_config(dim=8, num_experts=4, gate_param_init={}),
+            router=make_router_config(
+                dim=8,
+                num_experts=4,
+                gate_param_init={},
+                score_func=Sigmoid.Config(),
+            ),
             routed_experts=make_routed_experts_config(
                 dim=8,
                 hidden_dim=16,

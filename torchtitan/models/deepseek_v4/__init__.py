@@ -23,6 +23,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    SqrtSoftplus,
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -341,7 +342,7 @@ def _make_v4_moe_config(
                 param_init=_depth_init(layer_id),
             ),
             top_k=top_k,
-            score_func="sqrtsoftplus",
+            score_func=SqrtSoftplus.Config(),
             route_scale=route_scale,
             route_norm=route_norm,
             vocab_size=vocab_size,

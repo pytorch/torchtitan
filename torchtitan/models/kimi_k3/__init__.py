@@ -19,6 +19,7 @@ from torchtitan.models.common import (
     FeedForward,
     Linear,
     RouterGateLinear,
+    Sigmoid,
     SiTUGLU,
 )
 from torchtitan.models.common.config_utils import (
@@ -251,7 +252,7 @@ def _latent_moe_config(
                 bias=False,
                 param_init=_LINEAR_INIT,
             ),
-            score_func="sigmoid",
+            score_func=Sigmoid.Config(),
             route_norm=True,
             route_scale=1.0,
         ),

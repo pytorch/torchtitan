@@ -18,6 +18,7 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.models.common.activation import UnaryActivationFn
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     GQAttention,
@@ -333,9 +334,10 @@ def make_router_config(
     dim: int,
     num_experts: int,
     gate_param_init: dict[str, Callable],
+    score_func: UnaryActivationFn.Config,
     top_k: int = 1,
-    score_func: Literal["sigmoid", "softmax", "sqrtsoftplus"] = "sigmoid",
     route_norm: bool = False,
+    route_norm_epsilon: float = 1e-20,
     route_scale: float = 1.0,
     bias: bool = False,
 ) -> TokenChoiceTopKRouter.Config:
@@ -351,6 +353,7 @@ def make_router_config(
         top_k=top_k,
         score_func=score_func,
         route_norm=route_norm,
+        route_norm_epsilon=route_norm_epsilon,
         route_scale=route_scale,
     )
 

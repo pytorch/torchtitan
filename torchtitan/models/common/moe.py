@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
 
 import spmd_types as spmd
 
@@ -22,7 +21,11 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_size,
     spmd_sparse_mesh,
 )
-from torchtitan.models.common.activation import ActivationFn, SwiGLU
+from torchtitan.models.common.activation import (
+    BinaryActivationFn,
+    SwiGLU,
+    UnaryActivationFn,
+)
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import RouterGateLinear
@@ -50,7 +53,7 @@ class GroupedExperts(Module):
         dim: int
         hidden_dim: int
         num_experts: int
-        activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
+        activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -186,9 +189,10 @@ class TokenChoiceTopKRouter(Module):
     class Config(Module.Config):
         num_experts: int
         gate: RouterGateLinear.Config
+        score_func: UnaryActivationFn.Config
         top_k: int = 1
-        score_func: Literal["softmax", "sigmoid", "sqrtsoftplus"] = "sigmoid"
         route_norm: bool = False
+        route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0
         aux_loss: AuxLoss.Config | None = None
         _debug_force_load_balance: bool = False
@@ -198,8 +202,9 @@ class TokenChoiceTopKRouter(Module):
         self.gate = config.gate.build()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
-        self.score_func = config.score_func
+        self.score_func = config.score_func.build()
         self.route_norm = config.route_norm
+        self.route_norm_epsilon = config.route_norm_epsilon
         self.route_scale = config.route_scale
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
         self._debug_force_load_balance = config._debug_force_load_balance
@@ -252,18 +257,8 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
-        scores_TE = self.gate(x_TD)
-
-        # By default, sigmoid or softmax is performed in float32 to avoid loss explosion.
-        # RouterGateLinear returns scores_TE in FP32.
-        if self.score_func == "sigmoid":
-            scores_TE = torch.sigmoid(scores_TE)
-        elif self.score_func == "softmax":
-            scores_TE = F.softmax(scores_TE, dim=-1)
-        elif self.score_func == "sqrtsoftplus":
-            scores_TE = F.softplus(scores_TE).sqrt()
-        else:
-            raise NotImplementedError(f"Unknown score function {self.score_func}")
+        # RouterGateLinear returns FP32, so configured scoring runs in FP32.
+        scores_TE = self.score_func(self.gate(x_TD))
 
         if self._debug_force_load_balance:
             topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
@@ -283,8 +278,10 @@ class TokenChoiceTopKRouter(Module):
             topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
-            denominator = topk_scores_TK.sum(dim=-1, keepdim=True) + 1e-20
-            topk_scores_TK = topk_scores_TK / denominator
+            denominator_T1 = (
+                topk_scores_TK.sum(dim=-1, keepdim=True) + self.route_norm_epsilon
+            )
+            topk_scores_TK = topk_scores_TK / denominator_T1
         topk_scores_TK = topk_scores_TK * self.route_scale
 
         # Build a one-hot boolean routing map (T, E) marking the experts each
