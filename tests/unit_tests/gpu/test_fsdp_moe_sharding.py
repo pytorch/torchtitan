@@ -212,11 +212,9 @@ class TestApplyFsdpStackedLinearSharding(DTensorTestBase):
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
 
         sharded_config = model_registry("debugmodel").model
-        sharded_config.layers[0].feed_forward.w13.param_init = (
-            fused_gate_up_param_init(
-                {"weight": lambda tensor: torch.nn.init.constant_(tensor, 1)},
-                {"weight": lambda tensor: torch.nn.init.constant_(tensor, 3)},
-            )
+        sharded_config.layers[0].feed_forward.w13.param_init = fused_gate_up_param_init(
+            {"weight": lambda tensor: torch.nn.init.constant_(tensor, 1)},
+            {"weight": lambda tensor: torch.nn.init.constant_(tensor, 3)},
         )
         set_llama3_sharding_config(sharded_config, enable_sp=True)
         with torch.device("meta"):
