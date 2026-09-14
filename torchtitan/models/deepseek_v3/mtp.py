@@ -40,6 +40,7 @@ def roll_mtp_sequence(
     shift: int,
     fill_value: int,
     positions: torch.Tensor | None = None,
+    padding_mask: torch.Tensor | None = None,
     return_valid_mask: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Left-roll an MTP sequence while preserving packed-document boundaries.
@@ -60,6 +61,8 @@ def roll_mtp_sequence(
             ``positions[i + shift] == positions[i] + shift``.
             This prevents MTP inputs or labels from crossing packed-document
             boundaries.
+        padding_mask: Optional padding mask with shape ``[T]``. A shifted
+            source position marked as padding is filled and reported invalid.
         fill_value: Value used for invalid positions. Use token id ``0`` for
             shifted input tokens and ``IGNORE_INDEX`` for shifted labels.
         return_valid_mask: If true, also return a boolean mask marking positions
@@ -85,6 +88,13 @@ def roll_mtp_sequence(
     if positions is None:
         rolled[: seq_len - shift] = source
         valid_mask[: seq_len - shift] = True
+        if padding_mask is not None:
+            valid_mask[: seq_len - shift] &= ~padding_mask[shift:seq_len]
+            rolled[: seq_len - shift] = torch.where(
+                valid_mask[: seq_len - shift],
+                source,
+                rolled[: seq_len - shift],
+            )
         if return_valid_mask:
             return rolled, valid_mask
         return rolled
@@ -94,6 +104,8 @@ def roll_mtp_sequence(
             f"MTP positions need at least {seq_len} tokens, got {positions.shape[0]}."
         )
     valid_tokens = positions[shift:seq_len] == positions[: seq_len - shift] + shift
+    if padding_mask is not None:
+        valid_tokens &= ~padding_mask[shift:seq_len]
     # valid_tokens follows positions placement, while valid_mask intentionally
     # follows sequence placement for the following where.
     with spmd.no_typecheck():
@@ -150,17 +162,24 @@ class MTPTransformerBlock(TransformerBlock):
         mtp_input_valid_mask: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
-        mtp_input_valid_mask = mtp_input_valid_mask.unsqueeze(-1).to(
+        mtp_padding_mask_T = ~mtp_input_valid_mask
+        if padding_mask is not None:
+            mtp_padding_mask_T = mtp_padding_mask_T | padding_mask
+        prev_embed = prev_embed * mtp_input_valid_mask.unsqueeze(-1).to(
             dtype=prev_embed.dtype
         )
-        prev_embed = prev_embed * mtp_input_valid_mask
         h = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
         h = h + self.attention(self.attention_norm(h), attention_masks, positions)
         if self.moe_enabled:
-            h = h + self.moe(self.ffn_norm(h))
+            h = h + self.moe(
+                self.ffn_norm(h),
+                padding_mask_T=mtp_padding_mask_T,
+            )
         else:
             h = h + self.feed_forward(self.ffn_norm(h))
         return self.mtp_norm(h)
@@ -244,6 +263,7 @@ class MTPDecoder(Decoder):
         tokens = batch["input"]
         labels = batch["labels"]
         positions = batch.get("positions")
+        padding_mask = batch.get("padding_mask")
         if self.mtp_layers is not None and positions is None:
             raise ValueError("MTP input preprocessing requires positions.")
 
@@ -258,6 +278,7 @@ class MTPDecoder(Decoder):
                 tokens,
                 shift=depth,
                 positions=positions,
+                padding_mask=padding_mask,
                 fill_value=0,
                 return_valid_mask=True,
             )
@@ -265,6 +286,7 @@ class MTPDecoder(Decoder):
                 labels,
                 shift=depth,
                 positions=positions,
+                padding_mask=padding_mask,
                 fill_value=IGNORE_INDEX,
                 return_valid_mask=False,
             )
@@ -275,7 +297,6 @@ class MTPDecoder(Decoder):
             input_sharding[f"mtp_labels_{depth}"] = input_sharding["labels"]
             input_sharding[f"mtp_input_valid_mask_{depth}"] = input_sharding["input"]
 
-        padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
@@ -322,11 +343,18 @@ class MTPDecoder(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         if self.mtp_layers is None:
             if not isinstance(tokens, torch.Tensor):
                 raise ValueError("A decoder without MTP expects one token tensor.")
-            return super().forward(tokens, positions, attention_masks)
+            return super().forward(
+                tokens,
+                positions,
+                attention_masks,
+                padding_mask=padding_mask,
+            )
         if self.tok_embeddings is None:
             raise ValueError("MTP decoder forward requires token embeddings.")
         if not isinstance(tokens, tuple) or len(tokens) != len(self.mtp_layers) + 1:
@@ -345,7 +373,7 @@ class MTPDecoder(Decoder):
         # hidden state because MTP consumes the last decoder-layer output.
         h = self.tok_embeddings(main_tokens)
         for layer in self.layers.values():
-            h = layer(h, attention_masks, positions)
+            h = layer(h, attention_masks, positions, padding_mask=padding_mask)
 
         prev_depth_hidden = h
         h = self.norm(h) if self.norm is not None else h
@@ -364,6 +392,7 @@ class MTPDecoder(Decoder):
                 mtp_input_valid_mask,
                 attention_masks,
                 positions,
+                padding_mask=padding_mask,
             )
             mtp_outputs.append(prev_depth_hidden)
 
