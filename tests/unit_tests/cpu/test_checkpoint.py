@@ -38,9 +38,9 @@ from torchtitan.components.checkpointer.dcp import (
     AsyncMode,
     CheckpointManager,
 )
-from torchtitan.components.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.config import Function
 from torchtitan.observability import structured_logger as sl
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
 
 class FakeOptimizersContainer:
@@ -1629,7 +1629,7 @@ class TestModelWrapper(unittest.TestCase):
     def test_hook_tensor_storage_stable_and_refreshed(self):
         class HookedModule(nn.Module):
             # Slice a non-leading dim so .contiguous() allocates new storage
-            # disconnected from the parameter, mirroring FusedSwiGLU's split.
+            # disconnected from the parameter, mirroring FeedForward's split.
             def __init__(self):
                 super().__init__()
                 self.w = nn.Parameter(torch.zeros(4, 2, 3))

@@ -19,6 +19,8 @@ Usage:
 """
 
 import argparse
+
+import logging
 import os
 import subprocess
 import tempfile
@@ -26,7 +28,10 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from torchtitan.tools.logging import logger
+from torchtitan.observability.logging import init_logger
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -172,6 +177,7 @@ def run_precompile_tests(args):
 
 
 def main():
+    init_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(

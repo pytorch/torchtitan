@@ -9,6 +9,8 @@ import torchtitan_recipes.tests.models as recipes
 
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
+from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan.models.qwen3.config_registry import qwen3_debugmodel_moe_param_groups
 
 from tests.integration_tests import OverrideDefinitions
 
@@ -29,6 +31,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
             ),
+            loss_compare_seed_config=llama3_debugmodel,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_region_ac_fsdp2_tp2_cp2],
@@ -38,6 +41,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
             ),
+            loss_compare_seed_config=llama3_debugmodel,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2],
@@ -81,7 +85,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/real_pg/deepseek_v3_cp_pp_a10g.txt"
             ),
-            seed_config=deepseek_v3_debugmodel,
+            loss_compare_seed_config=deepseek_v3_debugmodel,
             use_real_pg=True,
         ),
         OverrideDefinitions(
@@ -122,6 +126,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/qwen3_a10g.txt"
             ),
+            loss_compare_seed_config=qwen3_debugmodel_moe_param_groups,
         ),
         OverrideDefinitions(
             configs=[
@@ -141,14 +146,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             # configs are tuned for NVIDIA H100; skip on ROCm where it is
             # unvalidated (see torchtitan/overrides/helion_rope.py).
             skip_rocm_test=True,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.qwen3_debugmodel_non_fused_qkv_fsdp2_tp2_cp2],
-            # Reverse test: fused QKV is the debugmodel default, so exercise the
-            # separate wq/wk/wv projection path under FSDP+TP+CP.
-            test_descr="Qwen3 non-fused QKV FSDP+TP+CP",
-            test_name="qwen3_non_fused_qkv_fsdp+tp+cp",
-            ngpu=8,
         ),
         # Integration Test Cases for Qwen3.5
         OverrideDefinitions(
@@ -196,7 +193,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
             golden_numerics_path="tests/assets/losses/real_pg/gpt_oss_pp_a10g.txt",
-            seed_config=gpt_oss_debugmodel_flex,
+            loss_compare_seed_config=gpt_oss_debugmodel_flex,
             use_real_pg=True,
         ),
         OverrideDefinitions(

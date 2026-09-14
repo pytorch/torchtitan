@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import _stateful_to_state_dict
 from torch.distributed.checkpoint.stateful import Stateful
@@ -47,7 +48,6 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
 from .base import (
@@ -59,6 +59,9 @@ from .base import (
     OPTIMIZER,
     purge_thread,
 )
+
+logger = logging.getLogger(__name__)
+
 
 DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT = 43001
 _DEFAULT_BARRIER_INIT_TIMEOUT_SEC = 60
@@ -504,12 +507,16 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             hf_storage_config = storage_config or LocalFileSystemStorageConfig(
                 use_direct_io=False
             )
-            # The backend invokes the callback after all ranks finish writing
-            # (past the write barrier) and before the atomic rename of the
+
+            # The backend invokes the callback after each rank finishes writing
+            # but before the write barrier and the atomic rename of the
             # temp dir to its final path, passing the directory the shards
             # were actually written to. Consolidation repacks the per-rank
             # shards into HF-layout files in the checkpoint directory.
-            pre_finalize_callback = lambda staged, _event_logger: (
+            def pre_finalize_callback(staged: str, _event_logger) -> None:  # noqa: F811
+                # Need all ranks to finish writing before any rank starts consolidating
+                if dist.is_initialized():
+                    dist.barrier()
                 consolidate_hf_safetensors_checkpoint(
                     staged,
                     output_dir=checkpoint_id,
@@ -517,7 +524,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     fqn_to_index_mapping=fqn_to_index_mapping,
                     storage_config=hf_storage_config,
                 )
-            )
+
         manager_config = _default_backend_config(
             _sync_save_config(),
             storage_config=storage_config,

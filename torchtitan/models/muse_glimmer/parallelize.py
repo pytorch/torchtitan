@@ -8,6 +8,8 @@
 # various training techniques (e.g. activation checkpointing and compile) to the
 # Muse Glimmer model.
 
+import logging
+
 from torchtitan.config import (
     CompileConfig,
     ParallelismConfig,
@@ -22,9 +24,11 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_vision_encoder,
     resolve_fsdp_mesh,
 )
-from torchtitan.tools.logging import logger
 
 from .model import MuseGlimmerModel
+
+
+logger = logging.getLogger(__name__)
 
 
 def parallelize_muse_glimmer(
@@ -38,11 +42,6 @@ def parallelize_muse_glimmer(
     dump_folder: str,
     skip_dp: bool = False,
 ):
-    if parallelism.spmd_backend != "spmd_types":
-        raise NotImplementedError(
-            "Muse Glimmer only supports spmd_backend='spmd_types'; "
-            f"got '{parallelism.spmd_backend}'."
-        )
     # When the model owns the vision stack (multimodal flavor), the encoder +
     # adapter are submodules: TP is applied by ``model.parallelize`` (driven by
     # the sharding configs set in update_from_config), and AC/compile/FSDP are

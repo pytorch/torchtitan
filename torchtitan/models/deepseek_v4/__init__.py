@@ -12,17 +12,20 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     FeedForward,
     Linear,
+    MoE,
     RMSNorm,
     RoPE,
     RouterGateLinear,
 )
 from torchtitan.models.common.config_utils import (
+    fused_gate_up_param_init,
     make_ffn_config,
     make_routed_experts_config,
 )
@@ -30,8 +33,6 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.deepseek_v3.parallelize import (
     parallelize_deepseekv3 as parallelize_deepseek_v4,
 )
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .attention import (
@@ -43,7 +44,7 @@ from .attention import (
 from .compressor import Compressor, Indexer
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
-from .moe import DeepSeekV4MoE, DeepSeekV4Router
+from .moe import DeepSeekV4Router
 from .mtp import MTPBlock
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
@@ -329,7 +330,7 @@ def _make_v4_moe_config(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
 ):
-    return DeepSeekV4MoE.Config(
+    return MoE.Config(
         num_experts=num_experts,
         router=DeepSeekV4Router.Config(
             num_experts=num_experts,
@@ -548,15 +549,19 @@ def _build_mtp_layers(
         layer_id = n_main_layers + depth
         block_cfg = _make_mtp_inner_block(inner_cfg, rope)
         if block_cfg.moe is not None:
-            block_cfg.moe.router.gate.param_init = _depth_init(layer_id)
-            block_cfg.moe.router.layer_id = layer_id
+            router_cfg = block_cfg.moe.router
+            assert isinstance(router_cfg, DeepSeekV4Router.Config)
+            router_cfg.gate.param_init = _depth_init(layer_id)
+            router_cfg.layer_id = layer_id
             block_cfg.moe.routed_experts.inner_experts.param_init = _depth_experts_init(
                 layer_id
             )
             if block_cfg.moe.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
                 block_cfg.moe.shared_experts.w2.param_init = depth_init
-                block_cfg.moe.shared_experts.w3.param_init = depth_init
+                block_cfg.moe.shared_experts.w13.param_init = fused_gate_up_param_init(
+                    _LINEAR_INIT, depth_init
+                )
         mtp_layers.append(
             MTPBlock.Config(
                 attention=block_cfg.attention,

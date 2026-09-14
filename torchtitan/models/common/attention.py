@@ -21,7 +21,6 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 from torch.distributed.tensor import DTensor, Replicate
-from torch.distributed.tensor.experimental import local_map
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -43,7 +42,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.compile import maybe_regional_inductor
-from torchtitan.distributed.utils import get_spmd_backend, is_in_batch_invariant_mode
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -52,9 +51,7 @@ from torchtitan.tools.utils import round_up
 
 
 __all__ = [
-    "BaseQKVLinear",
     "FlexInnerAttention",
-    "FusedQKVLinear",
     "GQAttention",
     "InnerAttention",
     "QKVLinear",
@@ -113,14 +110,13 @@ def local_head_split(
     dp_shard_dim: int = 0,
 ) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
-    use_spmd = get_spmd_backend() == "spmd_types" and spmd.is_type_checking()
     input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     with spmd.local():
-        if use_spmd:
+        if spmd.is_type_checking():
             spmd.assert_type(t, input_type)
         out = t.view(*t.shape[:-1], -1, head_dim)
-        if use_spmd:
+        if spmd.is_type_checking():
             spmd.assert_type(out, output_type)
     return out
 
@@ -321,7 +317,7 @@ class FlexInnerAttention(InnerAttention):
                 return_aux=return_aux,
                 kernel_options=kernel_options,
             )
-        if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+        if spmd.is_type_checking():
             q_local = spmd.get_local_type(q)
             q_ps = spmd.get_partition_spec(q)
             spmd.assert_type(out, q_local, q_ps)
@@ -690,7 +686,7 @@ def create_varlen_metadata_for_document(
         else:
             max_seqlen = 0
 
-    if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+    if spmd.is_type_checking():
         # Packed document boundaries are rank-local ragged metadata, so they
         # vary across DP ranks even when construction initially infers R.
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
@@ -712,76 +708,7 @@ class BaseAttention(Module):
             assert self.n_heads > 0, "n_heads must be > 0"
 
 
-class BaseQKVLinear(Module):
-    """Base class for Q/K/V projection strategies.
-
-    Subclasses implement different projection approaches (separate or fused)
-    while providing a uniform interface to :class:`GQAttention`.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        head_dim: int
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.head_dim = config.head_dim
-
-    def forward(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Project input into Q, K, V tensors.
-
-        Returns:
-            xq and xk have shape ``[T, H, K]``; xv has shape ``[T, H, V]``.
-        """
-        raise NotImplementedError
-
-
-class QKVLinear(BaseQKVLinear):
-    """Three separate linear projections for Q, K, V."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(BaseQKVLinear.Config):
-        wq: Linear.Config
-        wkv: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.wq = config.wq.build()
-        self.wk = config.wkv.build()
-        self.wv = config.wkv.build()
-
-    def forward(
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_tokens = x.shape[0]
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-        # Use -1 instead of n_heads (or n_kv_heads) to infer the
-        # actual local heads from sizes as TP may have sharded them.
-
-        def local_qkv_head_split(x):
-            # Drop into local region, we can't propagate S(1) -> qkv head unflatten.
-            # TODO(pianpwk): this should be doable once spmd_types tracks sharding evenness.
-            with spmd.local():
-                x = x.view(num_tokens, -1, self.head_dim)
-                if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
-                    spmd.assert_type(
-                        x,
-                        spmd.V,
-                        spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                    )
-            return x
-
-        xq, xk, xv = (
-            local_qkv_head_split(xq),
-            local_qkv_head_split(xk),
-            local_qkv_head_split(xv),
-        )
-        return xq, xk, xv
-
-
-class FusedQKVLinear(BaseQKVLinear):
+class QKVLinear(Module):
     """Single fused linear projection, split along R dimension.
 
     Uses a single linear layer and splits the output along the R dimension,
@@ -790,19 +717,20 @@ class FusedQKVLinear(BaseQKVLinear):
 
     Compatible with ColwiseParallel on the ``wqkv`` linear layer.
 
-    Checkpoints in the stock ``QKVLinear`` layout (``wq.weight`` / ``wk.weight`` /
-    ``wv.weight``) via state_dict hooks, so checkpoints interoperate with the
-    non-fused module and the HF adapter.
+    Checkpoints expose logical ``wq.weight`` / ``wk.weight`` / ``wv.weight``
+    keys via state_dict hooks so they interoperate with external formats.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseQKVLinear.Config):
+    class Config(Module.Config):
+        head_dim: int
         n_heads: int
         n_kv_heads: int
         wqkv: Linear.Config
 
     def __init__(self, config: Config):
-        super().__init__(config)
+        super().__init__()
+        self.head_dim = config.head_dim
         if config.n_heads % config.n_kv_heads != 0:
             raise ValueError(
                 f"n_heads ({config.n_heads}) must be divisible by "
@@ -823,7 +751,7 @@ class FusedQKVLinear(BaseQKVLinear):
         )
         * 3
     )
-    def forward(  # pyrefly: ignore[bad-override]
+    def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_tokens = x.shape[0]
@@ -833,43 +761,23 @@ class FusedQKVLinear(BaseQKVLinear):
         qkv = self.wqkv(x)
         with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
             qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
-            if get_spmd_backend() == "spmd_types" and spmd.is_type_checking():
+            if spmd.is_type_checking():
                 spmd.assert_type(
                     qkv,
                     spmd.V,
                     spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
                 )
 
-        hpk, hd = self.heads_per_kv, self.head_dim
-
-        def _split(t):
-            local_num_tokens = t.shape[0]
-            xq, xk, xv = torch.split(t, [hpk, 1, 1], dim=-2)
-            # split leaves xk/xv as strided views into the fused buffer; vLLM
-            # attention/KV-cache kernels read raw memory assuming a contiguous
-            # head-major layout, so materialize all three contiguously here.
-            return (
-                xq.reshape(local_num_tokens, -1, hd).contiguous(),
-                xk.reshape(local_num_tokens, -1, hd).contiguous(),
-                xv.reshape(local_num_tokens, -1, hd).contiguous(),
-            )
-
-        if isinstance(qkv, DTensor):
-            # TEMPORARY: run the split on local tensors so its backward (cat)
-            # does not mix DTensor and plain grads under CP+PP. The asymmetric
-            # q vs k/v paths (RoPE on q/k; CP all-gathers k/v) otherwise feed
-            # cat() inconsistent grad types in PP's backward metadata inference.
-            # q/k/v reuse qkv's placements (symmetric at the split: TP shards the
-            # head axis, CP shards tokens). TODO: remove once the partial_dtensor
-            # backend is gone.
-            _split = local_map(
-                _split,
-                out_placements=(qkv.placements,) * 3,
-                in_placements=(qkv.placements,),
-                in_grad_placements=(qkv.placements,),
-                device_mesh=qkv.device_mesh,
-            )
-        return _split(qkv)
+        local_num_tokens = qkv.shape[0]
+        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
+        # split leaves xk/xv as strided views into the fused buffer; vLLM
+        # attention/KV-cache kernels read raw memory assuming a contiguous
+        # head-major layout, so materialize all three contiguously here.
+        return (
+            xq.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+        )
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
@@ -930,11 +838,7 @@ class FusedQKVLinear(BaseQKVLinear):
 
 
 class GQAttention(BaseAttention):
-    """Grouped-Query Attention with pluggable Q/K/V projection.
-
-    The QKV projection strategy is determined by the ``qkv_linear`` config field:
-    use :class:`QKVLinear` for three independent projections, or
-    :class:`FusedQKVLinear` for a single fused projection.
+    """Grouped-Query Attention with a fused Q/K/V projection.
 
     ``rope=None`` selects NoPE (no positional encoding) for this layer: q/k go to
     the inner attention unrotated, and positional information reaches the layer
@@ -946,7 +850,7 @@ class GQAttention(BaseAttention):
     class Config(BaseAttention.Config):
         n_heads: int
         dim: int
-        qkv_linear: BaseQKVLinear.Config
+        qkv_linear: QKVLinear.Config
         wo: Linear.Config
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
@@ -1009,16 +913,18 @@ class GQAttention(BaseAttention):
             self.remat_region_name("qkv"),
             recompute=self.remat_should_recompute("qkv"),
         )(x_TD)
-        remat.recompute_needs_tensor(xq_THK, xk_THK, xv_THV)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
+            remat.recompute_needs_tensor(xq_THK)
             xq_THK = self.q_norm(xq_THK)
+            remat.recompute_needs_tensor(xk_THK)
             xk_THK = self.k_norm(xk_THK)
 
         # Apply rotary embeddings
         if self.rope is not None:
+            remat.recompute_needs_tensor(xq_THK, xk_THK)
             xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
         out_THV = remat.region(
