@@ -42,6 +42,8 @@ class FluxTrainer(Trainer):
         inference: Inference = field(default_factory=Inference)
 
     def __init__(self, config: Config):
+        if config.training.enable_optimizer_cuda_graph:
+            raise ValueError("Optimizer CUDA graphs are not supported with FLUX.")
         super().__init__(config)
 
         # Flux samples diffusion noise and timesteps during each model step, so
@@ -283,7 +285,7 @@ class FluxTrainer(Trainer):
     def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         self.optimizers.zero_grad()
         # Save the current step learning rate for logging
-        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+        lr = self.lr_schedulers.get_host_lrs_per_scheduler()[0][0]
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
