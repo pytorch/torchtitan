@@ -10,6 +10,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
+from threading import local
 from typing import Annotated, cast
 
 import torch
@@ -21,6 +22,7 @@ from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
+from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.checkpoint import (
     CheckpointPolicy,
     create_selective_checkpoint_contexts,
@@ -32,6 +34,34 @@ from torchtitan.protocols.module import Module
 
 
 logger = logging.getLogger(__name__)
+
+
+class _SpmdMeshRecomputeStateHook:
+    """Restore the forward's SPMD mesh while torch_remat replays a region.
+
+    ``set_current_spmd_mesh`` is scoped, so each restore closes the context
+    installed by the previous restore before activating the requested mesh.
+    torch_remat's final restore therefore also removes the replay-only context.
+    """
+
+    def __init__(self) -> None:
+        self._thread_state = local()
+
+    def snapshot(self) -> DeviceMesh | None:
+        return current_spmd_mesh()
+
+    def restore(self, mesh: DeviceMesh | None) -> None:
+        active_context = getattr(self._thread_state, "active_context", None)
+        if active_context is not None:
+            active_context.__exit__(None, None, None)
+            self._thread_state.active_context = None
+
+        if current_spmd_mesh() is mesh:
+            return
+
+        active_context = set_current_spmd_mesh(mesh)
+        active_context.__enter__()
+        self._thread_state.active_context = active_context
 
 
 def _get_default_save_ops() -> set:
@@ -345,28 +375,12 @@ class RegionAC(ActivationCheckpointing):
     ) -> nn.Module:
         config = cast("RegionAC.Config", self.config)
         checkpoint_region_name = base_fqn or type(module).__name__
-        forward = module.forward
-        forward_spmd_mesh = None
-
-        def forward_with_spmd_mesh(*args, **kwargs):
-            # torch_remat may replay the forward outside the caller's
-            # set_current_spmd_mesh context. Capture the original mesh and
-            # restore it only for such replays.
-            nonlocal forward_spmd_mesh
-            active_mesh = current_spmd_mesh()
-            if active_mesh is not None:
-                forward_spmd_mesh = active_mesh
-                return forward(*args, **kwargs)
-            if forward_spmd_mesh is None:
-                return forward(*args, **kwargs)
-            with set_current_spmd_mesh(forward_spmd_mesh):
-                return forward(*args, **kwargs)
-
         checkpointed_forward = remat.checkpoint(
             region_name=checkpoint_region_name,
             determinism_check=config.determinism_check,
             preserve_rng_state=False,
-        )(forward_with_spmd_mesh)
+            recompute_state_hooks=(_SpmdMeshRecomputeStateHook(),),
+        )(module.forward)
         module.forward = checkpointed_forward
         return module
 
