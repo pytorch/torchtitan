@@ -39,7 +39,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.moe import MicrobatchWiseLoadBalanceLoss
 
 _COEFF = 0.1
-_METRIC_KEY = ("batch", "microbatch_wise_load_balance_loss")
+_METRIC_KEY = ("dp", "microbatch_wise_load_balance_loss")
 
 
 def _clear_aux_loss_registry():

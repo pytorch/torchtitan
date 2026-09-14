@@ -100,7 +100,7 @@ def _muse_glimmer_mm_dataloader(
     return GrainDataLoader.Config(
         dataset=dataset,
         collator=MultiModalCollator.Config(
-            max_images_per_batch=8,
+            max_images_per_microbatch=8,
             patch_size=processor.patch_size,
             temporal_patch_size=processor.temporal_patch_size,
             spatial_merge_size=processor.spatial_merge_size,

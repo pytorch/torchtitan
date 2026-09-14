@@ -183,9 +183,10 @@ class TestCheckpointManager(unittest.TestCase):
 
     def test_trainer_uses_checkpoint_interface_with_concrete_default(self):
         from torchtitan.trainer import Trainer
+        from torchtitan.training_engine import TrainingEngine
 
         self.assertIs(
-            Trainer.Config.__annotations__["checkpoint"],
+            TrainingEngine.Config.__annotations__["checkpoint"],
             BaseCheckpointManager.Config,
         )
         checkpoint_field = next(
