@@ -37,6 +37,10 @@ def test_trainer_has_thin_actor_adapter() -> None:
     assert issubclass(TrainingMicrobatch, CoreTrainingMicrobatch)
 
 
+def test_rl_trainer_defaults_to_eager_execution() -> None:
+    assert Trainer.Config().training.disable_cuda_graphs
+
+
 def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> None:
     with pytest.raises(ValueError, match="TorchStore"):
         Trainer.Config(parallelism=ParallelismConfig(pipeline_parallel_degree=2))

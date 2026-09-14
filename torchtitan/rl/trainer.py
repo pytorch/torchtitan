@@ -20,6 +20,7 @@ from torchtitan.config import (
     CompileConfig,
     Configurable,
     TORCH_DTYPE_MAP,
+    TrainingConfig,
 )
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
@@ -59,6 +60,14 @@ class Trainer(Configurable):
     class Config(TrainingEngine.Config):
         """Trainer configuration for optimizer, training, and parallelism."""
 
+        training: TrainingConfig = field(
+            default_factory=lambda: TrainingConfig(disable_cuda_graphs=True)
+        )
+        """RL defaults to eager execution to preserve established numerics.
+
+        Set ``disable_cuda_graphs=False`` to use the shared engine's CUDA graph
+        execution path.
+        """
         loss: BaseLoss.Config = field(default_factory=GRPOLoss.Config)
         dump_folder: str = ""
         """Folder for checkpoints, profiling traces, and debug artifacts."""
