@@ -22,6 +22,7 @@ from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
+    UlyssesCPVarlenInnerAttention,
 )
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
@@ -399,6 +400,20 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     return apply_transforms(
         config,
         [ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention)],
+    )
+
+
+def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
+    """Llama 3 with varlen Ulysses CP."""
+    config = llama3_debugmodel_varlen_attn()
+    # Packed varlen metadata lacks SPMD annotations.
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.context_parallel_degree = 2
+    # Ulysses does not support token reordering.
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
     )
 
 
