@@ -20,7 +20,6 @@ from torch.distributed.tensor import DTensor
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
-    FusedQKVLinear,
     GQAttention,
     QKVLinear,
     VarlenInnerAttention,
@@ -53,6 +52,17 @@ from torchtitan.protocols.module import Module
 
 
 DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
+
+
+def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
+    """Build an initializer for an interleaved 2D gate/up linear weight."""
+
+    def _init(t: torch.Tensor) -> None:
+        gate_up = t.unflatten(0, (-1, 2))
+        gate_init(gate_up[:, 0])
+        up_init(gate_up[:, 1])
+
+    return _init
 
 
 def decoder_vocab_size(model_spec: ModelSpec) -> int:
@@ -106,42 +116,38 @@ def get_attention_config(
         raise ValueError(f"Unknown backend: {backend}")
 
 
-def _fused_qkv_param_init(
+def fused_qkv_param_init(
     base_param_init: dict[str, Callable],
     *,
     n_heads: int,
     n_kv_heads: int,
     head_dim: int,
 ) -> dict[str, Callable]:
-    """Init for the fused ``wqkv`` that is bit-identical to the stock separate
-    ``wq``/``wk``/``wv`` and independent of the sharding degree.
+    """Initialize fused ``wqkv`` from logical ``wq``/``wk``/``wv`` draws.
 
-    The non-fused module initializes ``wq``/``wk``/``wv`` as three separate
-    contiguous parameters. This reproduces those exact draws: it initializes q,
-    k, v as three contiguous tensors of the stock-weight shapes (in
-    ``QKVLinear``'s ``wq``/``wk``/``wv`` build order), then assembles them into
-    the fused ``(n_kv_heads, R, head_dim, dim)`` layout (``R = heads_per_kv + 2``)
-    -- the same concatenation ``_merge_qkv_on_load`` uses -- and copies into the
-    buffer.
+    Q, K, and V are initialized as separate contiguous tensors, then packed into
+    the fused ``(n_kv_heads, R, head_dim, dim)`` layout, where
+    ``R = heads_per_kv + 2``. This preserves logical initialization order and
+    matches the packing used when loading separate checkpoint tensors.
 
     Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) param --
     e.g. a ``Shard(0)`` DTensor for the colwise wqkv. ``t.new_empty(...)``
     returns ``Replicate`` DTensors, so each ``base_init`` runs on the full tensor
     and draws the same values on every rank (the weights do not depend on the
     TP/FSDP degree). ``cat`` of ``Replicate`` stays ``Replicate``, and the final
-    ``copy_`` scatters it into the sharded ``t`` (each rank keeps its shard). So
-    the path is "init replicated, then shard," which both matches the non-fused
-    module and keeps RNG independent of the parallelism.
+    ``copy_`` scatters it into the sharded ``t`` (each rank keeps its shard).
+    This "init replicated, then shard" path keeps RNG independent of the
+    parallelism.
     """
     heads_per_kv = n_heads // n_kv_heads
 
     def _make_init(base_init: Callable) -> Callable:
         # ``tail`` is the per-row shape: () for bias, (in_features,) for weight.
-        # Building q/k/v with the exact stock shapes and drawing them in
-        # wq/wk/wv order keeps the RNG sequence identical to the non-fused module.
+        # Building q/k/v with their logical shapes preserves their independent
+        # initialization order before packing them into wqkv.
         def _init(t):
             tail = t.shape[1:]
-            # If t is a sharded DTensor, new_empty (with the full stock shape)
+            # If t is a sharded DTensor, new_empty (with the full logical shape)
             # returns Replicate DTensors, so base_init runs replicated and draws
             # the same values on every rank (parallelism-agnostic RNG).
             q = t.new_empty(n_heads * head_dim, *tail)
@@ -187,6 +193,18 @@ def _fused_qkv_param_init(
     return out
 
 
+def fused_gate_up_param_init(
+    gate_param_init: dict[str, Callable],
+    up_param_init: dict[str, Callable],
+) -> dict[str, Callable] | None:
+    """Initialize the logical gate and up slices of a fused ``w13`` weight."""
+    gate_init = gate_param_init.get("weight")
+    up_init = up_param_init.get("weight")
+    if gate_init is None or up_init is None:
+        return None
+    return {"weight": _make_fused_linear_init(gate_init, up_init)}
+
+
 def make_gqa_config(
     *,
     dim: int,
@@ -197,7 +215,6 @@ def make_gqa_config(
     rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
-    fuse_qkv: bool = False,
     qk_norm: RMSNorm.Config | None = None,
     tp_gemm_backend: TpGemmBackend = "default",
 ) -> GQAttention.Config:
@@ -211,9 +228,8 @@ def make_gqa_config(
     side of an ordinary GEMM. ``"dist_gemm"`` folds each into its adjacent GEMM
     over symmetric memory.
 
-    ``"dist_gemm"`` raises here unless ``fuse_qkv=True`` -- the all-gather feeds a
-    single wqkv GEMM, so there is no separate wq/wk/wv schedule. It also needs CUDA
-    and the spmd_types backend; those are rejected by
+    ``"dist_gemm"`` folds the input all-gather into the wqkv GEMM. It also needs
+    CUDA and the spmd_types backend; those are rejected by
     ``validate_dist_gemm_preconditions`` at sharding time, which is the first point
     that sees the parallelism settings.
     """
@@ -223,49 +239,26 @@ def make_gqa_config(
 
     # The backend picks the classes; everything below builds the same shapes into
     # whichever was chosen.
-    fused_qkv_cls, wo_cls = FusedQKVLinear, Linear
+    qkv_cls, wo_cls = QKVLinear, Linear
     if tp_gemm_backend == "dist_gemm":
-        if not fuse_qkv:
-            raise ValueError(
-                "tp_gemm_backend='dist_gemm' requires fuse_qkv=True: the all-gather "
-                "feeds a single wqkv GEMM, so there is no separate wq/wk/wv "
-                "schedule to fall back on."
-            )
-        fused_qkv_cls = AllGatherFusedQKVLinear
+        qkv_cls = AllGatherFusedQKVLinear
         wo_cls = RowParallelLinear
 
-    if fuse_qkv:
-        qkv = fused_qkv_cls.Config(
-            head_dim=per_head_dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv,
-            wqkv=Linear.Config(
-                in_features=dim,
-                out_features=(n_heads + 2 * n_kv) * per_head_dim,
-                # Per-slice init so the fused wqkv is bit-identical to the stock
-                # separate wq/wk/wv (see _fused_qkv_param_init).
-                param_init=_fused_qkv_param_init(
-                    wqkv_param_init,
-                    n_heads=n_heads,
-                    n_kv_heads=n_kv,
-                    head_dim=per_head_dim,
-                ),
+    qkv = qkv_cls.Config(
+        head_dim=per_head_dim,
+        n_heads=n_heads,
+        n_kv_heads=n_kv,
+        wqkv=Linear.Config(
+            in_features=dim,
+            out_features=(n_heads + 2 * n_kv) * per_head_dim,
+            param_init=fused_qkv_param_init(
+                wqkv_param_init,
+                n_heads=n_heads,
+                n_kv_heads=n_kv,
+                head_dim=per_head_dim,
             ),
-        )
-    else:
-        qkv = QKVLinear.Config(
-            head_dim=per_head_dim,
-            wq=Linear.Config(
-                in_features=dim,
-                out_features=n_heads * per_head_dim,
-                param_init=wqkv_param_init,
-            ),
-            wkv=Linear.Config(
-                in_features=dim,
-                out_features=n_kv * per_head_dim,
-                param_init=wqkv_param_init,
-            ),
-        )
+        ),
+    )
 
     return GQAttention.Config(
         n_heads=n_heads,
@@ -295,19 +288,18 @@ def make_ffn_config(
     """Build a fully-specified FeedForward.Config.
 
     ``tp_gemm_backend="dist_gemm"`` overlaps the TP collectives with the GEMMs by
-    folding them in: one all-gather feeds w1 and w3, and w2 reduce-scatters. A bias
-    on w1/w3 is rejected by the config. See make_gqa_config.
+    folding them in: one all-gather feeds w13, and w2 reduce-scatters. See
+    make_gqa_config.
     """
     ffn_cls = DistGEMMFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
     return ffn_cls.Config(
-        w1=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w1_param_init
+        w13=Linear.Config(
+            in_features=dim,
+            out_features=2 * hidden_dim,
+            param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
         w2=Linear.Config(
             in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init
-        ),
-        w3=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w2w3_param_init
         ),
     )
 
