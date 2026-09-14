@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
 from torchtitan.config.configs import ParallelismConfig
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "MeshAxisName",
+    "DistributedTopology",
     "ParallelDims",
     "unfold_dp_axis",
     "unfold_dp_axes",
@@ -51,6 +53,25 @@ class MeshAxisName(StrEnum):
     EFSDP = "efsdp"
 
 
+@dataclass(frozen=True)
+class DistributedTopology:
+    """Distributed world and real process groups supplied by initialization.
+
+    Args:
+        world_size: Logical world size used to construct model meshes.
+        real_axis_groups: Real process groups for named axes in an otherwise
+            fake logical world.
+    """
+
+    world_size: int
+    real_axis_groups: tuple[tuple[MeshAxisName, dist.ProcessGroup], ...] = ()
+
+    def __post_init__(self) -> None:
+        axes = [axis for axis, _ in self.real_axis_groups]
+        if len(axes) != len(set(axes)):
+            raise ValueError("Distributed topology contains a duplicate real axis")
+
+
 def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
     """Expand logical ``dp`` into concrete dense storage mesh axes."""
     axis_name = MeshAxisName(axis)
@@ -75,6 +96,7 @@ class ParallelDims:
     pp: int
     ep: int
     world_size: int
+    _real_axis_groups: tuple[tuple[MeshAxisName, dist.ProcessGroup], ...] = ()
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse the
     # same object instead of re-slicing a submesh on every lookup.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -83,8 +105,11 @@ class ParallelDims:
 
     @classmethod
     def from_config(
-        cls, parallelism_config: ParallelismConfig, world_size: int
+        cls,
+        parallelism_config: ParallelismConfig,
+        topology: DistributedTopology,
     ) -> ParallelDims:
+        """Construct parallel dimensions from config and initialized topology."""
         return cls(
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
             dp_shard=parallelism_config.data_parallel_shard_degree,
@@ -92,7 +117,8 @@ class ParallelDims:
             tp=parallelism_config.tensor_parallel_degree,
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
-            world_size=world_size,
+            world_size=topology.world_size,
+            _real_axis_groups=topology.real_axis_groups,
         )
 
     def __post_init__(self):
@@ -249,8 +275,29 @@ class ParallelDims:
             self._global_meshes["spmd_sparse_for_fwdbwd"] = full_sparse_mesh[
                 "dp_replicate", "efsdp", "ep"
             ]
+        pp_mesh = dataloading_mesh["pp"]
+        pp_group = next(
+            (
+                group
+                for axis, group in self._real_axis_groups
+                if axis == MeshAxisName.PP
+            ),
+            None,
+        )
+        if pp_group is not None:
+            if dist.get_world_size(pp_group) != self.pp:
+                raise ValueError(
+                    "The real PP process group size must match the configured PP "
+                    f"degree: {dist.get_world_size(pp_group)} != {self.pp}"
+                )
+            pp_mesh = DeviceMesh.from_group(
+                pp_group,
+                device_type,
+                mesh_dim_names=(MeshAxisName.PP.value,),
+            )
+
         self._single_axis_meshes = {
-            "pp": dataloading_mesh["pp"],
+            "pp": pp_mesh,
             "batch": dataloading_mesh["batch"],
             "loss": loss_mesh,
             "dp_replicate": full_dense_mesh_for_fsdp["dp_replicate"],
