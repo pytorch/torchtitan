@@ -10,9 +10,9 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
+    AsyncAllGatherLinear,
     AsyncAllGatherQKVLinear,
     AsyncLinearReduceScatter,
-    DistGEMMFeedForward,
     validate_async_tp_preconditions,
 )
 from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
@@ -229,9 +229,13 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     common_gqa = attention_cfg._owner is GQAttention
-    if isinstance(
-        attention_cfg.qkv_linear, AsyncAllGatherQKVLinear.Config
-    ) or isinstance(attention_cfg.wo, AsyncLinearReduceScatter.Config):
+    async_qkv = isinstance(attention_cfg.qkv_linear, AsyncAllGatherQKVLinear.Config)
+    async_wo = isinstance(attention_cfg.wo, AsyncLinearReduceScatter.Config)
+    if async_qkv != async_wo:
+        raise ValueError(
+            "Async tensor parallelism must configure both qkv and wo projections"
+        )
+    if async_qkv:
         validate_async_tp_preconditions(enable_sp=enable_sp)
 
     if common_gqa:
@@ -264,10 +268,22 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         # redistribution here makes it part of the qkv module boundary.
         attention_cfg.qkv_linear.sharding_config = ShardingConfig(
             in_src_shardings={"x": attn_x_layout},
-            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+            in_dst_shardings=(
+                None
+                if async_qkv
+                else {"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))}
+            ),
         )
     attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
-    attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+    wo_sharding = rowwise_config(output_sp=enable_sp)
+    attention_cfg.wo.sharding_config = (
+        ShardingConfig(
+            state_shardings=wo_sharding.state_shardings,
+            out_src_shardings=wo_sharding.out_dst_shardings,
+        )
+        if async_wo
+        else wo_sharding
+    )
 
 
 def set_gqa_inner_attention_local_spmd(inner_attention_cfg) -> None:
@@ -311,16 +327,40 @@ def set_dense_ffn_sharding(
     a no-op redistribute when placements already agree.
     """
     tensor_parallel = isinstance(feed_forward_cfg, TensorParallelFeedForward.Config)
-    dist_gemm = isinstance(feed_forward_cfg, DistGEMMFeedForward.Config)
-    if dist_gemm:
+    async_w13 = isinstance(feed_forward_cfg.w13, AsyncAllGatherLinear.Config)
+    async_w2 = isinstance(feed_forward_cfg.w2, AsyncLinearReduceScatter.Config)
+    if async_w13 != async_w2:
+        raise ValueError(
+            "Async tensor parallelism must configure both w13 and w2 projections"
+        )
+    if async_w13:
         validate_async_tp_preconditions(enable_sp=enable_sp)
     if tensor_parallel:
-        # TP-aware implementations own the collectives inside their w13 and w2
+        # The projection modules own the collectives inside their existing
         # remat regions. This wrapper only validates the external FFN contract.
-        feed_forward_cfg.enable_sequence_parallel = enable_sp
         feed_forward_cfg.sharding_config = ShardingConfig(
             in_src_shardings={"x": attn_x_layout},
             out_src_shardings=attn_x_layout,
+        )
+        w13_sharding = colwise_config()
+        feed_forward_cfg.w13.sharding_config = ShardingConfig(
+            state_shardings=w13_sharding.state_shardings,
+            in_src_shardings={"input": attn_x_layout},
+            in_dst_shardings=(
+                None
+                if async_w13
+                else {"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))}
+            ),
+            out_src_shardings=w13_sharding.out_src_shardings,
+        )
+        w2_sharding = rowwise_config(output_sp=enable_sp)
+        feed_forward_cfg.w2.sharding_config = (
+            ShardingConfig(
+                state_shardings=w2_sharding.state_shardings,
+                out_src_shardings=w2_sharding.out_dst_shardings,
+            )
+            if async_w2
+            else w2_sharding
         )
         return
 

@@ -73,13 +73,10 @@ wo or w2 region:
     output reduce-scatter or all-reduce
 ```
 
-For attention, each projection leaf owns its redistribution through its
-`ShardingConfig`, so the generic module-forward wrapper runs inside the remat
-region. For dense FFNs, `TensorParallelTransform` selects an FFN
-whose `w13` and `w2` projection boundaries perform the corresponding
-redistributions. Those boundaries call the configured projection after the
-input redistribution and before the output redistribution, so converters such
-as LoRA and quantization remain inside the same remat region.
+Each projection owns its redistribution through its `ShardingConfig`, so the
+generic module-forward wrapper runs inside the remat region. For dense FFNs,
+`TensorParallelTransform` selects `w13` and `w2` projection roles while keeping
+the `FeedForward` computation unchanged.
 
 `AsyncTensorParallelTransform` selects symmetric-memory implementations that
 overlap the same communication and GEMM. The logical remat region names and
@@ -97,7 +94,7 @@ If the consumer is not inside such a region, call
 
 ```python
 gate_up = remat.region(
-    self._project_w13,
+    self.w13,
     self.remat_region_name("w13"),
     recompute=self.remat_should_recompute("w13"),
 )(x)

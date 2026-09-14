@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
@@ -19,11 +19,9 @@ from torchtitan.distributed.linear import (
     AsyncAllGatherLinear as AsyncAllGatherLinearFunction,
     AsyncLinearReduceScatter as AsyncLinearReduceScatterFunction,
 )
-from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.models.common.attention import AllGatherQKVLinear
-from torchtitan.models.common.linear import Linear, LinearReduceScatter
-from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
+from torchtitan.models.common.attention import QKVLinear
+from torchtitan.models.common.linear import AllGatherLinear, Linear, LinearReduceScatter
 
 
 logger = logging.getLogger(__name__)
@@ -78,35 +76,45 @@ def validate_async_tp_preconditions(*, enable_sp: bool) -> None:
         )
 
 
-class AsyncAllGatherQKVLinear(AllGatherQKVLinear):
+class AsyncAllGatherLinear(AllGatherLinear):
+    """Overlap an input all-gather with a column-parallel GEMM."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(AllGatherLinear.Config):
+        pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if type(self) is not AsyncAllGatherLinear:
+            raise RuntimeError(
+                "AsyncAllGatherLinear does not support converted linear modules"
+            )
+        tp_group = _tp_group_from_context()
+        if tp_group is None:
+            _warn_once_no_tp_overlap()
+            return super().forward(input)
+        return AsyncAllGatherLinearFunction.apply(
+            input,
+            self.weight,
+            self.bias,
+            tp_group,
+            tp_group.group_name,
+        )
+
+
+class AsyncAllGatherQKVLinear(QKVLinear):
     """Overlap the input all-gather with a fused QKV projection."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(AllGatherQKVLinear.Config):
+    class Config(QKVLinear.Config):
         pass
-
-    def _uses_async_projection(self) -> bool:
-        # Converters replace wqkv with a subclass whose forward may add work,
-        # such as LoRA adapters. Fall back to the synchronous module boundary
-        # so the converted forward is not bypassed by the fused kernel.
-        return type(self) is AsyncAllGatherQKVLinear and type(self.wqkv) is Linear
-
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
-        if self._uses_async_projection() and self._sharding_config is not None:
-            # The async projection performs its input all-gather internally.
-            # Remove the generic redistribution before Module.parallelize()
-            # installs the module-forward wrapper.
-            self._sharding_config = replace(
-                self._sharding_config,
-                in_dst_shardings=None,
-            )
-        super().parallelize(parallel_dims)
 
     def forward(  # pyrefly: ignore[bad-override]
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if not self._uses_async_projection():
-            return super().forward(x)
+        if type(self) is not AsyncAllGatherQKVLinear or type(self.wqkv) is not Linear:
+            raise RuntimeError(
+                "AsyncAllGatherQKVLinear does not support converted QKV projections"
+            )
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
@@ -136,23 +144,11 @@ class AsyncLinearReduceScatter(LinearReduceScatter):
     class Config(LinearReduceScatter.Config):
         pass
 
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
-        if type(self) is AsyncLinearReduceScatter and self._sharding_config is not None:
-            out_dst = self._sharding_config.out_dst_shardings
-            if out_dst is not None:
-                # The async projection performs its output reduction internally.
-                # Declare that final placement as the direct forward output so
-                # Module.parallelize() does not install another redistribution.
-                self._sharding_config = replace(
-                    self._sharding_config,
-                    out_src_shardings=out_dst,
-                    out_dst_shardings=None,
-                )
-        super().parallelize(parallel_dims)
-
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if type(self) is not AsyncLinearReduceScatter:
-            return super().forward(input)
+            raise RuntimeError(
+                "AsyncLinearReduceScatter does not support converted linear modules"
+            )
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
@@ -166,50 +162,9 @@ class AsyncLinearReduceScatter(LinearReduceScatter):
         )
 
 
-class DistGEMMFeedForward(TensorParallelFeedForward):
-    """Tensor-parallel FFN that overlaps each collective with its GEMM."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(TensorParallelFeedForward.Config):
-        pass
-
-    def _project_w13(self, x: torch.Tensor) -> torch.Tensor:
-        # A converter may replace w13 with a subclass whose forward adds work.
-        # Use the synchronous TP boundary rather than bypassing that forward.
-        if type(self.w13) is not Linear:
-            return super()._project_w13(x)
-        tp_group = _tp_group_from_context()
-        if tp_group is None:
-            _warn_once_no_tp_overlap()
-            return super()._project_w13(x)
-        return AsyncAllGatherLinearFunction.apply(
-            x,
-            self.w13.weight,
-            self.w13.bias,
-            tp_group,
-            tp_group.group_name,
-        )
-
-    def _project_w2(self, x: torch.Tensor) -> torch.Tensor:
-        # Keep converter-defined w2 behavior inside the synchronous boundary.
-        if type(self.w2) is not Linear:
-            return super()._project_w2(x)
-        tp_group = _tp_group_from_context()
-        if tp_group is None:
-            _warn_once_no_tp_overlap()
-            return super()._project_w2(x)
-        return AsyncLinearReduceScatterFunction.apply(
-            x,
-            self.w2.weight,
-            self.w2.bias,
-            tp_group,
-            tp_group.group_name,
-        )
-
-
 __all__ = [
+    "AsyncAllGatherLinear",
     "AsyncAllGatherQKVLinear",
     "AsyncLinearReduceScatter",
-    "DistGEMMFeedForward",
     "validate_async_tp_preconditions",
 ]

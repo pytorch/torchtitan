@@ -45,6 +45,18 @@ class Linear(nn.Linear, Module):
         )
 
 
+class AllGatherLinear(Linear):
+    """Column-parallel linear with an input all-gather boundary.
+
+    The computation is inherited from ``Linear``. Sharding setup places the
+    input redistribution on this module's forward wrapper.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+
 class LinearReduceScatter(Linear):
     """Row-parallel linear with an output reduction boundary.
 
@@ -159,6 +171,7 @@ class PartialBiasRowwiseLinear(Linear):
 
 
 __all__ = [
+    "AllGatherLinear",
     "Linear",
     "LinearReduceScatter",
     "PartialBiasRowwiseLinear",
