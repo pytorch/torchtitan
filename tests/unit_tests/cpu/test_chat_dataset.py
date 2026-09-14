@@ -302,7 +302,7 @@ class TestChatDatasetPrefixValidation(unittest.TestCase):
         original_encode = processor._tokenizer.encode
         call_count = 0
 
-        # _tokenize_sample encodes twice: call 1 is the full conversation,
+        # The template path encodes twice: call 1 is the full conversation,
         # call 2 is the prompt. Perturbing call 2 breaks the prefix.
         def mismatched_encode(*args, **kwargs):
             nonlocal call_count
@@ -330,6 +330,17 @@ class TestMultiTurnChatProcessor(unittest.TestCase):
             messages_fn=lambda _: self.messages,
             renderer=RenderersLibraryConfig(renderers_config=Qwen3RendererConfig()),
         )
+
+    def test_eos_is_only_required_without_renderer(self):
+        context = _runtime(256)
+        expected = self.config.build(context=context)({}, np.random.default_rng(0))
+        context.tokenizer.eos_id = None
+        actual = self.config.build(context=context)({}, np.random.default_rng(0))
+        np.testing.assert_array_equal(actual.input_ids, expected.input_ids)
+        np.testing.assert_array_equal(actual.labels, expected.labels)
+
+        with self.assertRaisesRegex(ValueError, "valid EOS token"):
+            ChatProcessor.Config(messages_fn=_process_sample).build(context=context)
 
     def test_assistant_masks_follow_rendered_history(self):
         context = _runtime(256)
