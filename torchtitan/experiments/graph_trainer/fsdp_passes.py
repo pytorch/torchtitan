@@ -27,7 +27,12 @@ from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch._inductor.fx_passes.bucketing import (
     BucketMode,
     is_all_gather_into_tensor as is_all_gather,
+    is_all_reduce_tensor,
+    is_reduce_scatter_tensor,
     is_wait_tensor,
+    merge_all_gather_bucket,
+    merge_all_reduce_bucket,
+    merge_reduce_scatter_bucket,
 )
 
 try:
@@ -344,6 +349,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         module_stack_fn: Callable[[fx.Node], list[tuple[str, type[Any]]]],
         bucket_mode: BucketMode | None = None,
         fsdp_param_module_order: dict[str, int] | None = None,
+        should_bucket_collective: Callable[[fx.Node], bool] | None = None,
     ) -> None:
         super().__init__(
             gm,
@@ -354,9 +360,16 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         )
         self._is_backward_fn = is_backward_fn
         effective_bucket_mode = self.bucketer.bucket_mode
+        collective_info = self.collective_info
+        if should_bucket_collective is not None:
+            collective_info = {
+                node: info
+                for node, info in collective_info.items()
+                if should_bucket_collective(node)
+            }
         self.bucketer = FSDPParamOrderBucketer(
             graph=self.graph,
-            collective_info=self.collective_info,
+            collective_info=collective_info,
             scheduled=OrderedSet(self.graph.nodes),
             bucket_mode=effective_bucket_mode,
             fsdp_param_module_order=fsdp_param_module_order,
@@ -560,6 +573,9 @@ def joint_transformer_block_bucketing_reordering_pass(
     insert_overlap_deps: bool = False,
     bucket_mode: BucketMode | None = None,
     fsdp_param_module_order: dict[str, int] | None = None,
+    bucket_all_gathers: bool = True,
+    bucket_reduce_scatters: bool = True,
+    bucket_all_reduces: bool = True,
 ) -> torch.fx.GraphModule:
     """Run joint-graph manual bucketing and reordering.
 
@@ -583,6 +599,9 @@ def joint_transformer_block_bucketing_reordering_pass(
             defaults to ``"custom_ops"`` via the parent class.
         fsdp_param_module_order: module order derived from traced parameter
             FQNs, used to pack FSDP buckets like Eager FSDP2.
+        bucket_all_gathers: whether to bucket all-gather collectives.
+        bucket_reduce_scatters: whether to bucket reduce-scatter collectives.
+        bucket_all_reduces: whether to bucket all-reduce collectives.
     """
 
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
@@ -590,6 +609,15 @@ def joint_transformer_block_bucketing_reordering_pass(
         if not fqn:
             return []
         return [(fqn, torch.nn.Module)]
+
+    def _should_bucket_collective(node: fx.Node) -> bool:
+        if is_all_gather(node):
+            return bucket_all_gathers
+        if is_reduce_scatter_tensor(node):
+            return bucket_reduce_scatters
+        if is_all_reduce_tensor(node):
+            return bucket_all_reduces
+        return False
 
     scheduler = JointManualOverlapScheduler(
         gm,
@@ -599,10 +627,56 @@ def joint_transformer_block_bucketing_reordering_pass(
         module_stack_fn=_stack_fn,
         bucket_mode=bucket_mode,
         fsdp_param_module_order=fsdp_param_module_order,
+        should_bucket_collective=_should_bucket_collective,
     )
     overlapped_gm = scheduler.run()
     overlapped_gm.recompile()
     return overlapped_gm
+
+
+def merge_all_all_gathers(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Merge all compatible all-gathers into one collective."""
+    all_gathers = [node for node in gm.graph.nodes if is_all_gather(node)]
+    if len(all_gathers) > 1:
+        merge_all_gather_bucket(gm.graph, all_gathers, mode="custom_ops")
+    _stable_topological_sort(gm.graph, {})
+    gm.recompile()
+    return gm
+
+
+def merge_all_reduce_scatters(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Merge all compatible reduce-scatters into one collective."""
+    reduce_scatters = [
+        node for node in gm.graph.nodes if is_reduce_scatter_tensor(node)
+    ]
+    if len(reduce_scatters) > 1:
+        merge_reduce_scatter_bucket(
+            gm.graph,
+            reduce_scatters,
+            mode="custom_ops",
+        )
+    _stable_topological_sort(gm.graph, {})
+    gm.recompile()
+    return gm
+
+
+def merge_all_all_reduces(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Merge all compatible all-reduces into one collective."""
+    all_reduces = [node for node in gm.graph.nodes if is_all_reduce_tensor(node)]
+    if len(all_reduces) > 1:
+        merge_all_reduce_bucket(gm.graph, all_reduces)
+    _stable_topological_sort(gm.graph, {})
+    gm.recompile()
+    return gm
 
 
 # --- EP-aware FSDP dense-region scheduling ---

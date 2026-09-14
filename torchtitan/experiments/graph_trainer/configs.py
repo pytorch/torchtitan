@@ -81,21 +81,57 @@ class GraphTrainerCompileConfig(CompileConfig):
     enable_passes: bool = True
     """When False, skip optional graph passes (both default and user-configured).
 
-    GraphPP still runs mandatory pre-partition normalization passes because its
-    partitioning contracts depend on canonical graph structure.
+    GraphPP still runs mandatory pre-partition or pre-extraction normalization
+    passes because its partitioning and extraction contracts depend on
+    canonical graph structure.
     """
 
-    enable_inplace_graph_gradient_accumulation: bool = False
-    """Accumulate SPMD AOT gradients in-place into trainer-owned buffers.
+    fsdp_param_unshard_mode: Literal[
+        "auto", "in_graph", "extracted_in_schedule_stage"
+    ] = "auto"
+    """Choose where FSDP parameter all-gathers run.
 
-    This makes gradient accumulation CUDA-graph safe by avoiding clones of
-    replay-owned gradient outputs.
+    - ``auto``
+        - PP=1 without gradient accumulation: all-gathers inside
+          ``FULL_FORWARD_BACKWARD``
+        - PP=1 with gradient accumulation: explicit ``UNSHARD``
+        - PP>1: explicit ``UNSHARD``
+    - ``in_graph``
+        - PP=1: all-gathers inside ``FULL_FORWARD_BACKWARD``
+        - PP>1: error
+        - Keep all-gathers inside ``FULL_FORWARD_BACKWARD`` to be able to
+          immediately deallocate them after their last use and get lower peak
+          memory
+    - ``extracted_in_schedule_stage``
+        - PP=1 and PP>1: explicit ``UNSHARD``
+        - Commonly used for gradient accumulation and PP to run ``UNSHARD``
+          once at the first microbatch. This is achieved by extracting
+          ``UNSHARD`` (all-gathers) into a schedule stage and running it once
+          in GraphRuntime
+    """
 
-    TODO: Add support for:
-        GraphPP
-        precompile
-        parameter aliases
-        custom pass pipelines.
+    fsdp_gradient_sync_mode: Literal[
+        "auto", "in_graph", "deferred_as_schedule_stage"
+    ] = "auto"
+    """Choose where FSDP gradient reduction runs.
+
+    - ``auto``
+        - PP=1 without gradient accumulation: reduction inside
+          ``FULL_FORWARD_BACKWARD``
+        - PP=1 with gradient accumulation: explicit ``REDUCE_GRAD``
+        - PP>1: explicit ``REDUCE_GRAD``
+    - ``in_graph``
+        - PP=1: gradient reduction inside ``FULL_FORWARD_BACKWARD``
+        - PP>1: error
+        - Keep reduce-scatters inside ``FULL_FORWARD_BACKWARD`` to be able to
+          immediately deallocate them after their last use and get lower peak
+          memory
+    - ``deferred_as_schedule_stage``
+        - PP=1 and PP>1: explicit ``REDUCE_GRAD``
+        - Commonly used for gradient accumulation and PP to run
+          ``REDUCE_GRAD`` once at the last microbatch. This is achieved by
+          extracting ``REDUCE_GRAD`` (reduce-scatters) into a schedule stage
+          and running it once in GraphRuntime
     """
 
     disable_passes: list[str] = field(default_factory=list)
