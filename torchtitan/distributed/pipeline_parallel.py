@@ -105,7 +105,6 @@ def pipeline_llm(
         device,
         module_names_per_stage,
         get_mesh=get_mesh_cb,
-        pass_pipeline_metadata=True,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -325,11 +324,13 @@ def _build_pipeline_schedule(
         return loss
 
     if looped_schedule:
+        lookahead = parallelism.pipeline_parallel_unshard_lookahead
         schedule_kwargs: dict[str, Any] = {
-            "defer_pp_recv": parallelism.pipeline_parallel_defer_recv,
-            "reuse_recv_buffers": parallelism.pipeline_parallel_reuse_recv_buffers,
-            "max_active_stages": parallelism.pipeline_parallel_max_active_stages,
-            "unshard_lookahead": parallelism.pipeline_parallel_unshard_lookahead,
+            "reuse_recv_buffers": True,
+            "max_active_stages": (
+                parallelism.pipeline_parallel_max_param_unsharded_stages or len(stages)
+            ),
+            "unshard_lookahead": "default" if lookahead == "full" else lookahead,
         }
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
@@ -340,10 +341,10 @@ def _build_pipeline_schedule(
             **schedule_kwargs,
         )
     else:
-        if parallelism.pipeline_parallel_unshard_lookahead != "default":
+        if isinstance(parallelism.pipeline_parallel_unshard_lookahead, tuple):
             raise ValueError(
-                "pipeline_parallel_unshard_lookahead is supported only by "
-                "multi-stage pipeline schedules"
+                "Per-rank pipeline_parallel_unshard_lookahead is supported "
+                "only by multi-stage pipeline schedules"
             )
         schedule = schedule_class(
             stages[0],
@@ -593,7 +594,6 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
-    pass_pipeline_metadata: bool = False,
 ) -> tuple[list[PipelineStage], list[nn.Module]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -618,8 +618,6 @@ def _pipeline_module_split(
                                - "norm" for the final normalization layer
                                - "lm_head" for the output projection layer
         get_mesh: Callback used to reconstruct DTensor inputs after PP receives.
-        pass_pipeline_metadata: Pass canonical stage and microbatch indices to
-            every executed stage forward.
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -650,7 +648,6 @@ def _pipeline_module_split(
             device,
             group=pp_mesh.get_group("pp"),
             get_mesh=get_mesh,
-            pass_pipeline_metadata=pass_pipeline_metadata,
         )
         logger.info(
             f"PP rank {pp_rank} is building stage_idx {stage_idx} "
