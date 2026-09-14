@@ -48,8 +48,11 @@ class Linear(nn.Linear, Module):
 class AllGatherLinear(Linear):
     """Column-parallel linear with an input all-gather boundary.
 
-    The synchronous implementation is inherited from ``Linear``. Its
-    ``ShardingConfig`` makes ``Module.parallelize`` install the all-gather.
+    The subclass keeps ``Linear`` computation unchanged. Its distinct config
+    type lets sharding setup attach the input all-gather to this module and lets
+    transforms replace only projections with this communication role. The
+    resulting ``ShardingConfig`` makes ``Module.parallelize`` install the
+    synchronous all-gather.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -60,8 +63,11 @@ class AllGatherLinear(Linear):
 class LinearReduceScatter(Linear):
     """Row-parallel linear with an output reduction boundary.
 
-    The synchronous implementation is inherited from ``Linear``. Its
-    ``ShardingConfig`` installs a reduce-scatter for SP or all-reduce otherwise.
+    The subclass keeps ``Linear`` computation unchanged. Its distinct config
+    type lets sharding setup attach the output reduction to this module and lets
+    transforms replace only projections with this communication role. The
+    resulting ``ShardingConfig`` installs a reduce-scatter for SP or an
+    all-reduce otherwise.
     """
 
     @dataclass(kw_only=True, slots=True)
