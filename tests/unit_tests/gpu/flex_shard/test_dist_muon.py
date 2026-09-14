@@ -269,12 +269,12 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         )
         device = torch.device(self.device_type, self.rank)
         value = (
-            torch.arange(num_experts * 5 * 3, device=device)
-            .reshape(num_experts, 5, 3)
+            torch.arange(num_experts * 2 * 5 * 3, device=device)
+            .reshape(num_experts, 2, 5, 3)
             .float()
             .div_(13)
         )
-        storage_placements = (Shard(1), Shard(0))
+        storage_placements = (Shard(2), Shard(0))
         parameter = torch.nn.Parameter(
             distribute_tensor(value.clone(), mesh, storage_placements)
         )

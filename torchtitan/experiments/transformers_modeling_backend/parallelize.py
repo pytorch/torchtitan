@@ -311,7 +311,7 @@ def apply_fsdp(
             w13_params = set(routed_experts.w13.parameters())
             w2_params = set(routed_experts.w2.parameters())
             expert_params = w13_params | w2_params
-            num_experts = routed_experts.num_experts
+            num_experts = routed_experts.w13.group_size
 
             efsdp_ep_size = dp_mod_ep_mesh["efsdp"].size() * ep_degree
             shard_expert_dim = efsdp_ep_size <= num_experts
