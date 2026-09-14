@@ -10,9 +10,9 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
-    Float8GroupedExpertsConverter,
+    Float8GroupedLinearConverter,
     Float8LinearConverter,
-    MXFP8GroupedExpertsConverter,
+    MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
 )
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
@@ -124,7 +124,7 @@ def deepseek_v3_debugmodel_mxfp8(
             deepseek_v3_mxfp8_linear_converter_config(
                 model_compile_enabled=model_compile_enabled,
             ),
-            MXFP8GroupedExpertsConverter.Config(
+            MXFP8GroupedLinearConverter.Config(
                 model_compile_enabled=model_compile_enabled,
                 pad_multiple=128,
             ),
@@ -252,7 +252,7 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
                 filter_fqns=["lm_head", "router.gate"],
                 model_compile_enabled=model_compile_enabled,
             ),
-            Float8GroupedExpertsConverter.Config(
+            Float8GroupedLinearConverter.Config(
                 model_compile_enabled=model_compile_enabled
             ),
         ],

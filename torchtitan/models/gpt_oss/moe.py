@@ -14,8 +14,9 @@ import torch
 from torch import nn
 
 from torchtitan.distributed.spmd_types import spmd_mesh_size
-from torchtitan.models.common.moe import GroupedExperts, MoE
-from torchtitan.protocols.module import Module
+from torchtitan.models.common.activation import ActivationFn
+from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.moe import MoE
 
 
 class ScaleBiasForward(torch.autograd.Function):
@@ -61,105 +62,110 @@ class ScaleBiasForward(torch.autograd.Function):
 
 def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
     x_glu, x_linear = x[..., ::2], x[..., 1::2]
+    return _swiglu_components(x_glu, x_linear, alpha=alpha, limit=limit)
+
+
+def _swiglu_components(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    *,
+    alpha: float = 1.702,
+    limit: float = 7.0,
+) -> torch.Tensor:
+    """Apply GPT-OSS SwiGLU to already separated gate and up projections."""
     # Clamp the input values
-    x_glu = x_glu.clamp(min=None, max=limit)
-    x_linear = x_linear.clamp(min=-limit, max=limit)
-    out_glu = x_glu * torch.sigmoid(alpha * x_glu)
+    gate = gate.clamp(min=None, max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    out_glu = gate * torch.sigmoid(alpha * gate)
     # Note we add an extra bias of 1 to the linear layer
-    return torch.addcmul(out_glu, out_glu, x_linear)
+    return torch.addcmul(out_glu, out_glu, up)
 
 
-class GptOssGroupedExperts(GroupedExperts):
+class GptOssSwiGLU(ActivationFn):
+    """GPT-OSS clamped SwiGLU activation."""
+
     @dataclass(kw_only=True, slots=True)
-    class Config(GroupedExperts.Config):
+    class Config(ActivationFn.Config):
         swiglu_limit: float = 7.0
 
     def __init__(self, config: Config):
-        Module.__init__(self)
-        dim = config.dim
-        hidden_dim = config.hidden_dim
-        num_experts = config.num_experts
-        self.num_experts = num_experts
         self.swiglu_limit = config.swiglu_limit
 
-        self.mlp1_weight_EGD = nn.Parameter(
-            torch.empty((num_experts, hidden_dim * 2, dim))
-        )  # (num_experts, out_dim, in_dim)
-        self.mlp1_bias_EG = nn.Parameter(torch.empty((num_experts, hidden_dim * 2)))
-        self.mlp2_weight_EDF = nn.Parameter(
-            torch.empty((num_experts, dim, hidden_dim))
-        )  # (num_experts, out_dim, in_dim)
-        self.mlp2_bias_ED = nn.Parameter(torch.empty((num_experts, dim)))
-
-    def forward(
+    def __call__(
         self,
-        x_RD: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
+        gate_RF: torch.Tensor,
+        up_RF: torch.Tensor,
+        **kwargs,
     ) -> torch.Tensor:
-        """Raw expert computation without dispatch/combine.
+        del kwargs
+        return _swiglu_components(gate_RF, up_RF, limit=self.swiglu_limit)
 
-        Shape suffixes here describe logical grouped-mm inputs, not physical
-        sharding. Under EP, E may be a local shard of experts; under TP,
-        expert weights shard hidden dimensions instead; under SP, R may be a
-        local token shard. Keep logical capital suffixes here to avoid encoding
-        a specific parallel layout in these local tensor names.
-        """
-        tp_degree = spmd_mesh_size("tp")
 
-        if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
-            spmd.mutate_type(
-                num_tokens_per_expert_E,
-                src=spmd.P,
-                dst={"dp": spmd.V, "cp": spmd.V},
-            )
+class GptOssGroupedLinear(GroupedLinear):
+    """Grouped linear with GPT-OSS per-expert bias."""
 
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-        # Pad num_tokens_per_expert_E with tail slack so that repeat_interleave
-        # with output_size=x_RD.shape[0] directly produces a static-shaped output,
-        # avoiding the D2H sync that repeat_interleave incurs without output_size.
-        tail_slack = (
-            (x_RD.shape[0] - offsets_E[-1])
-            .unsqueeze(0)
-            .to(num_tokens_per_expert_E.dtype)
+    @dataclass(kw_only=True, slots=True)
+    class Config(GroupedLinear.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.bias = nn.Parameter(torch.empty(config.group_size, *self.output_shape))
+
+    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
+        output_RO = super().forward(input_RI, offsets_E)
+        bias_RO = self._expand_grouped_bias(
+            self.bias.flatten(1), offsets_E, output_RO.shape[0]
+        ).reshape_as(output_RO)
+        return self._add_grouped_bias(output_RO, bias_RO)
+
+    @staticmethod
+    def _expand_grouped_bias(
+        bias_EO: torch.Tensor,
+        offsets_E: torch.Tensor,
+        output_rows: int,
+    ) -> torch.Tensor:
+        """Expand expert bias across routed rows and zero-valued tail padding."""
+        counts_E = torch.diff(torch.cat((offsets_E.new_zeros(1), offsets_E)))
+        tail_count = (output_rows - offsets_E[-1]).unsqueeze(0).to(counts_E.dtype)
+        padded_bias = torch.cat((bias_EO, bias_EO.new_zeros(1, bias_EO.shape[-1])))
+        return padded_bias.repeat_interleave(
+            torch.cat((counts_E, tail_count)).long(),
+            dim=0,
+            output_size=output_rows,
         )
-        # shape (E+1,): E expert counts + 1 tail slack for padding
-        num_tokens_per_expert_long = torch.cat(
-            [num_tokens_per_expert_E, tail_slack]
-        ).long()
 
-        # G = gate+up dimension (2*F)
-        h_RG = self._grouped_mm(
-            A=x_RD.bfloat16(),
-            weight_EOI=self.mlp1_weight_EGD,
-            offs=offsets_E,
-        )
+    def _add_grouped_bias(
+        self,
+        output_RO: torch.Tensor,
+        bias_RO: torch.Tensor,
+    ) -> torch.Tensor:
+        return output_RO + bias_RO.to(output_RO.dtype)
 
-        b1 = torch.cat(
-            [
-                self.mlp1_bias_EG,
-                self.mlp1_bias_EG.new_zeros(1, self.mlp1_bias_EG.shape[-1]),
-            ]
-        )
-        b1_RG = b1.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
-        )
-        h_RG = h_RG + b1_RG.to(h_RG.dtype)
 
-        h_RF = swiglu(h_RG, limit=self.swiglu_limit)
-        h_RD = self._grouped_mm(A=h_RF, weight_EOI=self.mlp2_weight_EDF, offs=offsets_E)
+class GptOssDownGroupedLinear(GptOssGroupedLinear):
+    """GPT-OSS grouped down projection with TP-aware forward bias."""
 
-        # Apply custom autograd function to scale bias in forward but not in backward
-        b2 = torch.cat(
-            [
-                self.mlp2_bias_ED,
-                self.mlp2_bias_ED.new_zeros(1, self.mlp2_bias_ED.shape[-1]),
-            ]
-        )
-        b2_RD = b2.repeat_interleave(
-            num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
-        )
-        b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree, h_RD.dtype)
-        return h_RD + b2_RD
+    @dataclass(kw_only=True, slots=True)
+    class Config(GptOssGroupedLinear.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.tp_degree = 1
+
+    def parallelize(self, parallel_dims) -> None:
+        """Record the TP degree used to scale the local forward bias."""
+        self.tp_degree = parallel_dims.tp
+        super().parallelize(parallel_dims)
+
+    def _add_grouped_bias(
+        self,
+        output_RO: torch.Tensor,
+        bias_RO: torch.Tensor,
+    ) -> torch.Tensor:
+        bias_RO = ScaleBiasForward.apply(bias_RO, self.tp_degree, output_RO.dtype)
+        return output_RO + bias_RO
 
 
 class GptOssMoE(MoE):

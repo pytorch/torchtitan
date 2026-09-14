@@ -332,13 +332,13 @@ override can never silently affect what another matches.
 
 This same rule answers the parent/child question directly. Say override A
 targets a parent Config (e.g. `MoE.Config`) and override B targets a Config
-nested inside it (e.g. `GroupedExperts.Config`):
+nested inside it (e.g. `SwiGLU.Config`):
 
 - **Disjoint subtrees** (A on `...layers.0.moe`, B on
-  `...layers.1.moe.routed_experts.inner_experts`) — the claimed nodes are
+  `...layers.1.moe.routed_experts.activation_fn`) — the claimed nodes are
   unrelated, so both apply.
 - **Overlapping** (A on `...layers.0.moe`, B on
-  `...layers.0.moe.routed_experts.inner_experts`) — B's node is inside A's, the
+  `...layers.0.moe.routed_experts.activation_fn`) — B's node is inside A's, the
   ancestor case above, so we **error**.
 
 We error rather than pick one of the two plausible behaviors implicitly:
@@ -381,7 +381,7 @@ machinery.
 | Override Target | Conflicts with a converter? | Notes |
 |-----------------|------------------------------|-------|
 | RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
-| GroupedExperts.Config | Possibly | `Float8GroupedExpertsConverter` rewrites this |
+| GroupedLinear.Config | Possibly | grouped-linear quantization converters rewrite this |
 | Linear.Config | Yes | Float8/LoRA replace these |
 
 Where a converter already rewrote a node, target that node by location with
