@@ -7,13 +7,14 @@
 """CPU checks for the MoonEP unit.
 
 MoonEP itself needs NVLink hardware and its package; nothing here touches
-either. The wiring is driven end to end through ``moonep_fake``: two ranks as
+either. The wiring is driven end to end through ``kimi_k3_moonep_fake``: two ranks as
 threads, the fake Buffer's collectives as barriers, a test-chosen duplication
 map so prefetch slots and slot-grad reduction are exercised. The reference is
 the dense per-token computation with every expert's fp32 weights.
 """
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,7 +26,10 @@ from torchtitan.models.kimi_k3.moon_ep_dispatcher import (
     _import_moonep,
     MoonEPTokenDispatcher,
 )
-from torchtitan.models.kimi_k3.moon_ep_experts import MoonEPGroupedExperts
+from torchtitan.models.kimi_k3.moon_ep_experts import (
+    check_moonep_mesh,
+    MoonEPGroupedExperts,
+)
 
 from tests.unit_tests.cpu.kimi_k3_moonep_fake import FakeMoonEPWorld, grouped_mm_loop
 
@@ -144,9 +148,7 @@ def _run_rank(rank, world, params, inputs, results):
 
 def test_moonep_unit_matches_dense_reference_with_duplicated_experts(monkeypatch):
     # The expert GEMMs run on CPU here; torch._grouped_mm is CUDA only.
-    monkeypatch.setattr(
-        "torchtitan.models.kimi_k3.moon_ep_experts._grouped_mm", grouped_mm_loop
-    )
+    monkeypatch.setattr(MoonEPGroupedExperts, "_grouped_mm", grouped_mm_loop)
     torch.manual_seed(1)
     params = {
         "w1": torch.randn(E, F, D) * 0.2,
@@ -201,3 +203,23 @@ def test_moonep_unit_matches_dense_reference_with_duplicated_experts(monkeypatch
         # Includes the rows that other ranks computed in their prefetch slots
         # and reduced back home.
         torch.testing.assert_close(got, p_ref[name].grad, atol=5e-2, rtol=5e-2)
+
+
+def _dims(*, dp_shard, cp=1, tp=1, ep, dp_replicate=False):
+    return SimpleNamespace(
+        dp_replicate_enabled=dp_replicate, dp_shard=dp_shard, cp=cp, tp=tp, ep=ep
+    )
+
+
+def test_moonep_mesh_requires_efsdp_of_one():
+    check_moonep_mesh(_dims(dp_shard=2, ep=2))
+    check_moonep_mesh(_dims(dp_shard=1, cp=2, ep=2))
+    for dims in (
+        _dims(dp_shard=2, cp=2, ep=2),
+        _dims(dp_shard=2, tp=2, ep=2),
+        _dims(dp_shard=4, ep=2),
+    ):
+        with pytest.raises(NotImplementedError, match="efsdp == 1"):
+            check_moonep_mesh(dims)
+    with pytest.raises(NotImplementedError, match="dp_replicate"):
+        check_moonep_mesh(_dims(dp_shard=2, ep=2, dp_replicate=True))

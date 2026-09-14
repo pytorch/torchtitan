@@ -293,9 +293,10 @@ class FakeTableBackend:
 
 
 def grouped_mm_loop(
-    A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor
-) -> torch.Tensor:
-    """CPU stand-in for ``torch._grouped_mm``: one matmul per row of ``B_t``."""
+    self, *, A: torch.Tensor, weight_EOI: torch.Tensor, offs: torch.Tensor
+):
+    """CPU stand-in for ``GroupedExperts._grouped_mm``: one matmul per row."""
+    B_t = weight_EOI.transpose(-2, -1)
     out = A.new_zeros(A.shape[0], B_t.shape[-1])
     start = 0
     for g, end in enumerate(offs.tolist()):

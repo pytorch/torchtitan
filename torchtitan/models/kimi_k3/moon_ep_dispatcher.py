@@ -4,34 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""MoonEP token dispatch for the K3 MoE (report sec 5.2.1).
+"""MoonEP token dispatch for the Kimi K3 latent MoE.
 
-MoonshotAI released the transport as MoonEP
-(https://github.com/MoonshotAI/MoonEP, package ``moonep``). This file is the
-dispatch/combine half of an integration, written against ``moonep/api.py``:
-
-* ``Buffer(S, H, K, E, num_ep_ranks, num_sms, token_padding, B, group)``
-  preallocates once per EP group. ``S`` is a STATIC shape -- every dispatch
-  input is exactly ``[S, H]`` bf16 -- so it is derived from the training config
-  (tokens per micro-batch per rank after CP/TP), not treated as a bound.
-* ``buffer.dispatch(hidden_sh, route_weights_sk, topk_experts_sk,
-  tokens_per_expert)`` returns ``(hidden_nvsh, route_weights_nvs, cu_seqlens,
-  plan)``: tokens in VM-group order over ``E + B`` rows (the ``E`` experts plus
-  ``B`` prefetch slots), ``cu_seqlens[E + B]`` the padded end offset per row.
-* The kernels do NOT carry autograd. The README gives the backward as a
-  recipe -- dispatch's backward is ``combine(plan, grad)``, combine's backward
-  is ``dispatch(grad, plan=plan)`` -- and the two ``autograd.Function``s below
-  implement exactly that. Routing weights are applied on the torchtitan side,
-  in autograd, so the router's gradient takes the same path it takes with the
-  standard dispatcher; MoonEP's own combine-side weighting is not used.
-
-The expert side -- the ``[E+B]`` weight tables, ``prefetch_weight`` before
-the grouped GEMM and ``reduce_grad`` in the backward -- is
-``moon_ep_experts.MoonEPGroupedExperts``; the MoE's parallelize attaches it
-to this dispatcher, and it reads the plan of the dispatch in flight through
-``current_plan``. The whole unit is exercised on CPU through the in-process
-double in ``tests/moonep_fake.py``; what remains for NVLink hardware is the
-table allocation over MoonEP's VMM primitives and the kernels themselves.
+``MoonEPTokenDispatcher`` routes tokens through MoonEP's persistent ``Buffer``
+(https://github.com/MoonshotAI/MoonEP); the expert side that consumes its
+plan is ``moon_ep_experts.MoonEPGroupedExperts``.
 """
 
 from __future__ import annotations
@@ -59,7 +36,7 @@ def _import_moonep():
     AttributeError deep in dispatch.
     """
     try:
-        import moonep  # type: ignore[import-not-found]
+        import moonep  # pyrefly: ignore [missing-import]
     except ImportError as err:
         raise ImportError(
             "MoonEP is not installed. It is an optional dependency, like "
@@ -71,11 +48,10 @@ def _import_moonep():
 
 
 class _MoonEPDispatch(torch.autograd.Function):
-    """``buffer.dispatch`` with the README's backward: a combine of the grads.
+    """``buffer.dispatch``; its backward is a combine of the grads.
 
-    Routing weights ride along as a second output so their gradient can be
-    gathered back to ``[S, K]`` -- ``combine`` does that when handed
-    ``route_weights_nvs`` -- which is what keeps the router trainable.
+    Routing weights ride along as a second output so their gradient reaches
+    the router.
     """
 
     @staticmethod
@@ -95,32 +71,28 @@ class _MoonEPDispatch(torch.autograd.Function):
     @staticmethod
     # pyrefly: ignore [bad-override]
     def backward(ctx, grad_hidden_nvsh, grad_weights_nvs, _grad_cu):
-        buffer, plan = ctx.buffer, ctx.plan
-        grad_x_SH = None
-        if grad_hidden_nvsh is not None:
-            grad_x_SH, _, _ = buffer.combine(
-                plan=plan, hidden_nvsh=grad_hidden_nvsh.to(torch.bfloat16)
+        if grad_hidden_nvsh is None and grad_weights_nvs is None:
+            return None, None, None, None, None, None
+        if grad_hidden_nvsh is None:
+            grad_hidden_nvsh = torch.zeros(
+                ctx.shape_nvsh, dtype=torch.bfloat16, device=grad_weights_nvs.device
             )
-        grad_weights_SK = None
-        if grad_weights_nvs is not None:
-            # combine gathers per-token weights back to [S, K]; the hidden
-            # operand is required by the signature, its result is discarded.
-            _, grad_weights_SK, _ = buffer.combine(
-                plan=plan,
-                hidden_nvsh=grad_hidden_nvsh.new_zeros(ctx.shape_nvsh)
-                if grad_hidden_nvsh is not None
-                else torch.zeros(
-                    ctx.shape_nvsh,
-                    dtype=torch.bfloat16,
-                    device=grad_weights_nvs.device,
-                ),
-                route_weights_nvs=grad_weights_nvs.to(torch.float32),
-            )
+        # One combine sums each token's K hidden-grad copies and, when handed
+        # the weight grads, gathers them back to [S, K].
+        grad_x_SH, grad_weights_SK, _ = ctx.buffer.combine(
+            plan=ctx.plan,
+            hidden_nvsh=grad_hidden_nvsh.to(torch.bfloat16).contiguous(),
+            route_weights_nvs=(
+                None
+                if grad_weights_nvs is None
+                else grad_weights_nvs.to(torch.float32).contiguous()
+            ),
+        )
         return None, None, grad_x_SH, grad_weights_SK, None, None
 
 
 class _MoonEPCombine(torch.autograd.Function):
-    """``buffer.combine`` with the README's backward: a re-dispatch on the plan."""
+    """``buffer.combine``; its backward is a re-dispatch on the same plan."""
 
     @staticmethod
     # pyrefly: ignore [bad-override]
@@ -149,11 +121,10 @@ class MoonEPDispatchMetadata:
 
 
 class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
-    """Balanced EP dispatch (report sec 5.2.1), through MoonEP's kernels.
+    """Balanced EP dispatch through MoonEP's kernels.
 
-    Slots into the same place as ``AllToAllTokenDispatcher``. EP=1 falls back
-    to local dispatch exactly as the standard dispatcher does, so a flavor
-    carrying this config still runs unsharded.
+    With no EP mesh it falls back to local dispatch, so a flavor carrying this
+    config still runs unsharded.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -170,8 +141,8 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         ``update_ep_token_dispatcher_config``; never a guess."""
 
         num_prefetch_slots: int | None = None
-        """MoonEP's ``B``; None is its default, ``E // num_ep_ranks``, which
-        training requires."""
+        """MoonEP's ``B``; None is ``E // num_ep_ranks``, which training
+        requires. The experts read it at attach."""
 
         num_sms: int = 32
         """SMs MoonEP's kernels may occupy (its default)."""
@@ -200,19 +171,9 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
             raise RuntimeError("MoonEP experts ran before a dispatch in this step.")
         return self._current
 
-    def wire_meshes(self, *, ep_mesh) -> None:
-        # Unlike MinimalAsyncEP this does not REQUIRE an EP mesh: with EP off
-        # the local fallback below runs and MoonEP is never imported.
-        super().wire_meshes(ep_mesh=ep_mesh)
-
     def init_buffer(self) -> None:
-        """Allocate MoonEP's persistent buffer on the EP group.
-
-        Collective: every rank has to reach it the same number of times in
-        the same order, so once, from ``wire_meshes``, never per step. The
-        expert side (``MoonEPGroupedExperts``) is attached by the MoE's
-        parallelize and reads the plan back through ``current_plan``.
-        """
+        """Allocate MoonEP's persistent buffer on the EP group, once, from
+        ``wire_meshes`` (a collective)."""
         if self.ep_mesh is None:
             return
         if self.hidden_dim is None or self.num_max_tokens_per_rank is None:
@@ -254,11 +215,8 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         """Route the padded local tokens through MoonEP's planner.
 
         Returns ``(routed_input_RD, num_tokens_per_row, metadata)``: the
-        received tokens in VM-group order and the token count of each of the
-        ``E + B`` rows (from ``cu_seqlens``), which is what a MoonEP-aware
-        grouped GEMM consumes. It is NOT the standard dispatcher's per-local-
-        expert count; ``init_buffer`` keeps ``RoutedExperts`` from reaching
-        this path until an expert-side unit that reads it exists.
+        received tokens in MoonEP's row order and the token count of each of
+        the ``E + B`` rows, which ``MoonEPGroupedExperts`` consumes.
         """
         if self.ep_mesh is None:
             return LocalTokenDispatcher.dispatch(

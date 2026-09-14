@@ -4,40 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The expert side of MoonEP (report sec 5.2.1): experts computed over a
-weight table that spans every rank, not only the local shard.
+"""MoonEP's expert side for the Kimi K3 latent MoE.
 
-MoonEP balances by duplicating hot experts onto other ranks for one step.
-That is only possible if the grouped GEMM can address ANY expert by row, so
-each projection is one table of ``E + B`` rows: rows ``[0, E)`` are every
-rank's experts (``E/R`` per rank, each chunk physically the home rank's
-memory mapped over NVLink), rows ``[E, E+B)`` are local prefetch slots that
-``buffer.prefetch_weight`` fills with the experts this rank was handed.
-``cu_seqlens[E+B]`` from dispatch says how many received tokens each row
-serves, which is exactly the ``offs`` argument the grouped GEMM takes.
-
-What lives where:
-
-* master parameters stay what torchtitan gave them (fp32, EP-sharded
-  DTensors, optimizer-owned). The tables are the bf16 compute copy, refreshed
-  from the local rows before every prefetch -- the same copy FSDP's mixed
-  precision makes, only into NVLink-mapped memory.
-* gradients come back as ``[E+B]`` tables: the local rows become the local
-  parameters' grads, the slot rows go to this rank's reduce buffer, and
-  ``buffer.reduce_grad`` pulls every rank's slot grads for OUR experts back
-  into our rows. Duplicated-expert grads therefore never touch the framework's
-  own gradient reduction.
-* the backward recomputes the expert forward (as activation checkpointing
-  does) so the grouped GEMM's own backward produces the table grads.
-
-Supported mesh, first version: experts are not FSDP-sharded beyond EP, i.e.
-``efsdp == 1`` and no ``dp_replicate``; anything else raises at parallelize.
-
-The table allocation is the one piece that needs MoonEP's VMM primitives
-(``moonep.buffer.create_nvl_dist_tensor`` and the slot pages that must follow
-the ``E`` rows contiguously); ``MoonEPTableBackend`` is that seam, and the
-tests drive the whole unit through an in-process double of it and of
-``Buffer``.
+``MoonEPGroupedExperts`` computes the routed experts over tables of ``E + B``
+rows per projection (every expert, then ``B`` prefetch slots), and
+``MoonEPTableBackendNVLink`` moves slot weights in and slot gradients home
+over MoonEP's NVLink primitives.
 """
 
 from __future__ import annotations
@@ -67,8 +39,8 @@ class MoonEPTableBackend(Protocol):
     def alloc_weight_table(
         self, name: str, rows: int, in_dim: int, out_dim: int
     ) -> torch.Tensor:
-        """bf16 ``[rows, in, out]``: the first ``E`` rows NVLink-mapped so a
-        remote ``prefetch_weight`` can read them, the slot rows local."""
+        """bf16 ``[rows, in, out]``: rows ``[0, E)`` the experts, ``[E, E+B)``
+        the prefetch slots."""
         ...
 
     def alloc_grad_table(
@@ -88,15 +60,6 @@ class MoonEPTableBackend(Protocol):
     ) -> None:
         """Add every rank's slot grads for this rank's experts into its rows."""
         ...
-
-
-def _grouped_mm(A: torch.Tensor, B_t: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
-    """``torch._grouped_mm`` over MoonEP's ``[row, in, out]`` tables.
-
-    ``offs`` are cumulative end offsets, one per row of ``B_t``, so an empty
-    row contributes nothing and a padded row multiplies zeros.
-    """
-    return torch._grouped_mm(A, B_t, offs=offs)
 
 
 def _ep_coords(ep_mesh) -> tuple[int, int]:
@@ -168,12 +131,10 @@ class MoonEPGroupedExperts(GroupedExperts):
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedExperts.Config):
-        num_prefetch_slots: int | None = None
-        """MoonEP's ``B``; None is ``E // ep_size``, which training requires."""
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self._config_prefetch_slots = config.num_prefetch_slots
         self._dispatcher = None
         self._backend: MoonEPTableBackend | None = None
         self._tables: dict[str, torch.Tensor] = {}
@@ -183,9 +144,8 @@ class MoonEPGroupedExperts(GroupedExperts):
 
     # -- wiring --------------------------------------------------------------
     def attach(self, dispatcher, backend: MoonEPTableBackend, ep_mesh) -> None:
-        """Bind the dispatcher whose plan this module consumes, the table
-        allocator, and the EP coordinates. Called from the MoE's parallelize;
-        the tests call it directly with their doubles."""
+        """Bind the dispatcher whose plan and slot count this module uses and
+        allocate the tables; called from the MoE's parallelize."""
         rank, size = _ep_coords(ep_mesh)
         if self.num_experts % size != 0:
             raise ValueError(
@@ -194,11 +154,8 @@ class MoonEPGroupedExperts(GroupedExperts):
             )
         local = self.num_experts // size
         self._local_rows = (rank * local, (rank + 1) * local)
-        self.num_prefetch_slots = (
-            local
-            if self._config_prefetch_slots is None
-            else self._config_prefetch_slots
-        )
+        slots = dispatcher.num_prefetch_slots
+        self.num_prefetch_slots = local if slots is None else slots
         self._dispatcher = dispatcher
         self._backend = backend
         backend.configure(
@@ -225,11 +182,18 @@ class MoonEPGroupedExperts(GroupedExperts):
             self._tables["down"][lo:hi].copy_(w2_l.transpose(-2, -1).to(torch.bfloat16))
 
     def _compute(self, x_RD, tables, cu_seqlens) -> torch.Tensor:
+        # Tables are [row, in, out]; the grouped-mm seam takes [row, out, in].
         x_b = x_RD.to(torch.bfloat16)
-        gate_RF = _grouped_mm(x_b, tables["gate"], cu_seqlens)
-        up_RF = _grouped_mm(x_b, tables["up"], cu_seqlens)
+        gate_RF = self._grouped_mm(
+            A=x_b, weight_EOI=tables["gate"].transpose(-2, -1), offs=cu_seqlens
+        )
+        up_RF = self._grouped_mm(
+            A=x_b, weight_EOI=tables["up"].transpose(-2, -1), offs=cu_seqlens
+        )
         h_RF = self.activation_fn(gate_RF, up_RF)
-        return _grouped_mm(h_RF, tables["down"], cu_seqlens)
+        return self._grouped_mm(
+            A=h_RF, weight_EOI=tables["down"].transpose(-2, -1), offs=cu_seqlens
+        )
 
     # -- forward -------------------------------------------------------------
     def forward(
@@ -250,35 +214,39 @@ class MoonEPGroupedExperts(GroupedExperts):
 
 
 def check_moonep_mesh(parallel_dims) -> None:
-    """The first version keeps expert params whole per EP rank."""
+    """The first version keeps expert parameters whole per EP rank."""
     if parallel_dims.dp_replicate_enabled:
         raise NotImplementedError(
             "moe_comm_backend='moonep' with dp_replicate is not supported yet: "
             "duplicated-expert grads are reduced by MoonEP, not by the "
             "framework, and the replicate reduction is not wired around that."
         )
-    if parallel_dims.dp_shard != parallel_dims.ep:
+    dp_shard, cp, tp, ep = (
+        parallel_dims.dp_shard,
+        parallel_dims.cp,
+        parallel_dims.tp,
+        parallel_dims.ep,
+    )
+    if dp_shard * cp * tp != ep:
         raise NotImplementedError(
-            "moe_comm_backend='moonep' needs data_parallel_shard_degree == "
-            "expert_parallel_degree (efsdp == 1): MoonEP maps each rank's whole "
-            "expert chunk over NVLink, which an FSDP-sharded expert cannot offer."
+            "moe_comm_backend='moonep' needs efsdp == 1, i.e. "
+            "data_parallel_shard_degree * context_parallel_degree * "
+            f"tensor_parallel_degree == expert_parallel_degree (got {dp_shard} * "
+            f"{cp} * {tp} vs {ep}): MoonEP maps each rank's whole expert chunk "
+            "over NVLink, which an FSDP-sharded expert cannot offer."
         )
 
 
 class MoonEPTableBackendNVLink:
-    """The hardware table backend, over ``moonep.buffer``'s public primitives.
+    """The table backend over ``moonep.buffer``'s public primitives.
 
-    MoonEP's fused ``prefetch_weight`` / ``reduce_grad`` want each projection as
-    one contiguous VMM range of ``E + B`` rows with the expert chunks
-    remote-mapped in place, which ``moonep.buffer`` does not hand out. This
-    backend keeps MoonEP's row convention in an ordinary local table and does
-    the two cross-rank moves itself with ``create_nvl_single_owner_tensor`` (the
-    primitive MoonEP's own e2e test uses): every rank owns an NVLink-mapped copy
-    of its expert chunk (bf16) and of its slot grads (fp32) and maps every other
-    rank's. ``plan.experts_to_copy`` ([R, B] int32, the global expert id in rank
-    r's slot b, negative when empty) says what moves where. A barrier on the EP
-    group orders the writes before the remote reads: two per MoE layer per step
-    until the fused kernels can take the composite range.
+    The tables are ordinary local tensors. Every rank owns an NVLink-mapped copy
+    of its expert chunk (bf16) and of its slot grads (fp32), made with
+    ``create_nvl_single_owner_tensor``, and maps every other rank's;
+    ``plan.experts_to_copy`` ([R, B] int32, the global expert id in rank r's
+    slot b, negative when empty) says what moves where. Per MoE layer per step
+    this costs three barriers on the EP group (one in ``prefetch``, two in
+    ``reduce_grad``) and two host reads of ``experts_to_copy``.
     """
 
     def __init__(self, ep_mesh):
