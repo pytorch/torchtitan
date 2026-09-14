@@ -12,6 +12,8 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
+from torchtitan.components.data.types import TrainingMicrobatch
+
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cudagraph import cudagraph_teardown, CUDAGraphWrapper
 from torchtitan.experiments.graph_trainer.common_utils import (
@@ -144,7 +146,7 @@ class GraphTrainer(Trainer):
 
         validate_memory_policy_config(self.config.compile)
 
-        _maybe_apply_numa_binding(self.device.index, self.device.type)
+        _maybe_apply_numa_binding(self.engine.device.index, self.engine.device.type)
 
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
@@ -153,7 +155,7 @@ class GraphTrainer(Trainer):
         self._graph_gradient_state: GraphGradientState | None = None
         self._validate_inplace_graph_gradient_accumulation_config()
         if self.config.compile.enable_inplace_graph_gradient_accumulation:
-            self._ensure_graph_gradient_state(self.model_parts[0])
+            self._ensure_graph_gradient_state(self.engine.model_parts[0])
 
         if self.config.compile.memory_policy == "sac_and_offload":
             from torch._functorch._activation_offloading.offload_ops import (
@@ -168,43 +170,61 @@ class GraphTrainer(Trainer):
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
-    def forward_backward_step(
+    def _forward_backward_microbatch(
         self,
         *,
-        input_dict: dict[str, Any] | list[dict[str, Any]],
+        microbatch_group: list[TrainingMicrobatch],
         global_valid_tokens: torch.Tensor,
+        accumulation_index: int = 0,
+        num_accumulation_steps: int = 1,
     ) -> torch.Tensor:
-        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
-            return super().forward_backward_step(
-                input_dict=input_dict,
+        if (
+            self.engine.parallel_dims.pp_enabled
+            or self.config.compile.mode != "aot_fx_trace"
+        ):
+            return super()._forward_backward_microbatch(
+                microbatch_group=microbatch_group,
                 global_valid_tokens=global_valid_tokens,
+                accumulation_index=accumulation_index,
+                num_accumulation_steps=num_accumulation_steps,
             )
 
-        assert isinstance(input_dict, dict)
-        assert len(self.model_parts) == 1
-        model = self.model_parts[0]
+        def compute_forward_backward() -> torch.Tensor:
+            assert len(microbatch_group) == 1
+            microbatch = microbatch_group[0]
+            assert len(self.engine.model_parts) == 1
+            model = self.engine.model_parts[0]
 
-        with sl.log_trace_span("preprocess_inputs"):
-            inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
-                input_dict,
-                parallel_dims=self.parallel_dims,
-                parallelism=self.config.parallelism,
+            with sl.log_trace_span("preprocess_inputs"):
+                inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
+                    microbatch.to_input_dict(self.engine.device, non_blocking=True),
+                    parallel_dims=self.engine.parallel_dims,
+                    parallelism=self.config.parallelism,
+                )
+                # MTP returns one labels tensor per prediction; index 0 contains
+                # the complete main-model labels used for token accounting.
+                self.engine.ntokens_seen += (
+                    self.config.training.num_tokens_per_microbatch_per_dp_rank
+                    // self.engine.parallel_dims.cp
+                )
+            # remove_duplicate=False to preserve duplicate parameter entries
+            # from weight tying (e.g. shared embedding/output weights).
+            params = self._get_trainable_parameters(model)
+            return self._make_fx_forward_backward_microbatch(
+                model,
+                inputs,
+                labels,
+                global_valid_tokens,
+                params,
+                extra_kwargs,
             )
-            # MTP returns one labels tensor per prediction; index 0 contains
-            # the complete main-model labels used for token accounting.
-            self.ntokens_seen += (
-                labels[0].numel() if isinstance(labels, tuple) else labels.numel()
-            )
-        # remove_duplicate=False to preserve duplicate parameter entries
-        # from weight tying (e.g. shared embedding/output weights).
-        params = self._get_trainable_parameters(model)
-        return self._make_fx_forward_backward_step(
-            model,
-            inputs,
-            labels,
-            global_valid_tokens,
-            params,
-            extra_kwargs,
+
+        return self.engine.forward_backward_microbatch(
+            microbatch_group=microbatch_group,
+            global_valid_tokens=global_valid_tokens,
+            accumulation_index=accumulation_index,
+            num_accumulation_steps=num_accumulation_steps,
+            compute_forward_backward=compute_forward_backward,
         )
 
     def _load_precompiled_fx_trace(
@@ -233,9 +253,9 @@ class GraphTrainer(Trainer):
             )
 
         config_fingerprint = compute_config_fingerprint(
-            model, compile_config, self.parallel_dims
+            model, compile_config, self.engine.parallel_dims
         )
-        precompile_meshes = get_spmd_precompile_meshes(self.parallel_dims)
+        precompile_meshes = get_spmd_precompile_meshes(self.engine.parallel_dims)
 
         self._traced_step = precompile_fx_trace_load(
             storage,
@@ -248,7 +268,7 @@ class GraphTrainer(Trainer):
             ),
         )
 
-    def _make_fx_forward_backward_step(
+    def _make_fx_forward_backward_microbatch(
         self,
         model: nn.Module,
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
@@ -270,11 +290,11 @@ class GraphTrainer(Trainer):
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(
                     model,
-                    self.loss_fn,
+                    self.engine.loss_fn,
                     accumulate_gradients=gradient_state is not None,
                 )
                 trace_context = dist_utils.get_spmd_context(
-                    parallel_dims=self.parallel_dims,
+                    parallel_dims=self.engine.parallel_dims,
                     spmd_typechecking=False,
                 )
                 with trace_context(), log_timer("minimal_fx_tracer"):
@@ -302,7 +322,7 @@ class GraphTrainer(Trainer):
                 passes = pipeline_fn(
                     self._traced_step,
                     self.config,
-                    parallel_dims=self.parallel_dims,
+                    parallel_dims=self.engine.parallel_dims,
                 )
             else:
                 passes = construct_mandatory_graph_passes()
@@ -321,7 +341,9 @@ class GraphTrainer(Trainer):
                     get_spmd_precompile_meshes,
                 )
 
-                runtime_meshes = tuple(get_spmd_precompile_meshes(self.parallel_dims))
+                runtime_meshes = tuple(
+                    get_spmd_precompile_meshes(self.engine.parallel_dims)
+                )
             self._graph_runner = GraphRunner(
                 self._traced_step,
                 module=model,
@@ -330,7 +352,7 @@ class GraphTrainer(Trainer):
                 ),
                 runtime_meshes=runtime_meshes,
             )
-        with self.train_context():
+        with self.engine.train_context():
             outputs = self._graph_runner(
                 inputs,
                 labels,
@@ -363,7 +385,7 @@ class GraphTrainer(Trainer):
         if self._graph_gradient_state is None:
             self._graph_gradient_state = GraphGradientState.create(
                 model,
-                self.optimizers,
+                self.engine.optimizers,
             )
         return self._graph_gradient_state
 
@@ -391,12 +413,12 @@ class GraphTrainer(Trainer):
                 "GraphTrainer in-graph gradient accumulation requires "
                 "compile.mode='aot_fx_trace'"
             )
-        if self.parallel_dims.pp_enabled:
+        if self.engine.parallel_dims.pp_enabled:
             raise ValueError(
                 "GraphTrainer in-graph gradient accumulation does not yet "
                 "support pipeline parallelism"
             )
-        if len(self.model_parts) != 1:
+        if len(self.engine.model_parts) != 1:
             raise ValueError(
                 "GraphTrainer in-graph gradient accumulation requires one model"
             )

@@ -12,56 +12,114 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torchtitan.components.data.types import (
+    TokenizedTrainingMicrobatch,
+    TrainingMicrobatch,
+)
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
+from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import Trainer, TrainingEngine
 
 
-def _batch() -> dict[str, Any]:
-    """One batch produced by ``Trainer.batch_generator``.
+def _batch() -> TokenizedTrainingMicrobatch:
+    """One microbatch produced by ``Trainer.microbatch_generator``.
 
-    Built fresh per call because ``train_step`` pops ``num_valid_tokens`` out of
-    the dict it is handed.
+    Built fresh per call because tests may mutate its model-facing dictionary.
     """
-    return {
-        "input": torch.ones(1),
-        "labels": torch.ones(1, dtype=torch.long),
-        "num_valid_tokens": 1,
-    }
+    return TokenizedTrainingMicrobatch(
+        input=torch.ones(1),
+        labels=torch.ones(1, dtype=torch.long),
+        positions=torch.zeros(1, dtype=torch.long),
+        padding_mask=torch.zeros(1, dtype=torch.bool),
+        num_valid_tokens=1,
+    )
 
 
-def _bind_pp_forward_backward_body(trainer: Trainer) -> None:
-    trainer.fwd_bwd_fn = lambda *args: Trainer._pp_forward_backward_body(trainer, *args)
+class _DictTrainingMicrobatch(TrainingMicrobatch):
+    def __init__(self, input_dict: dict[str, Any]) -> None:
+        self._input_dict = input_dict
+        self.labels = input_dict["labels"]
+        self.num_valid_tokens = self.labels.numel()
+
+    def as_input_dict(self) -> dict[str, Any]:
+        return dict(self._input_dict)
 
 
-def test_batch_generator_preserves_labels_in_input_dict() -> None:
+def _dict_microbatch(input_dict: dict[str, Any]) -> TrainingMicrobatch:
+    return _DictTrainingMicrobatch(input_dict)
+
+
+def _bind_pp_forward_backward_body(trainer: TrainingEngine) -> None:
+    trainer.fwd_bwd_fn = lambda *args: TrainingEngine._pp_forward_backward_body(
+        trainer, *args
+    )
+
+
+def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
+    if not hasattr(trainer, "_num_optimizer_steps_since_cuda_graph_init"):
+        trainer._num_optimizer_steps_since_cuda_graph_init = 0
+    if not hasattr(trainer, "prepare_step"):
+        trainer.prepare_step = lambda global_valid_tokens, *, step: (
+            TrainingEngine.prepare_step(trainer, global_valid_tokens, step=step)
+        )
+    if not hasattr(trainer, "optimizer_step"):
+        trainer.optimizer_step = lambda: TrainingEngine.optimizer_step(trainer)
+
+    compute_forward_backward = trainer.forward_backward_microbatch
+
+    def forward_backward_microbatch(**kwargs):
+        return TrainingEngine.forward_backward_microbatch(
+            trainer,
+            **kwargs,
+            compute_forward_backward=lambda: compute_forward_backward(**kwargs),
+        )
+
+    return SimpleNamespace(
+        engine=trainer,
+        config=trainer.config,
+        gradient_accumulation_steps=trainer.gradient_accumulation_steps,
+        num_pp_microbatches=trainer.num_pp_microbatches,
+        metrics_processor=trainer.metrics_processor,
+        _forward_backward_microbatch=forward_backward_microbatch,
+    )
+
+
+def test_microbatch_generator_preserves_labels() -> None:
     labels = torch.ones(1, dtype=torch.long)
-    input_dict = {
-        "input": torch.ones(1),
-        "labels": labels,
-        "num_valid_tokens": torch.tensor(1),
-    }
+    microbatch = TokenizedTrainingMicrobatch(
+        input=torch.ones(1),
+        labels=labels,
+        positions=torch.zeros(1, dtype=torch.long),
+        padding_mask=torch.zeros(1, dtype=torch.bool),
+        num_valid_tokens=1,
+    )
     trainer = cast(
         Trainer,
         SimpleNamespace(
+            config=SimpleNamespace(
+                training=SimpleNamespace(
+                    num_tokens_per_microbatch_per_dp_rank=1,
+                )
+            ),
             metrics_processor=SimpleNamespace(
                 ntokens_since_last_log=0,
                 data_loading_times=[],
-            )
+            ),
         ),
     )
 
-    output = next(Trainer.batch_generator(trainer, [input_dict]))
+    output = next(Trainer.microbatch_generator(trainer, [microbatch]))
 
-    assert output is input_dict
-    assert output["labels"] is labels
+    assert output is microbatch
+    assert output.labels is labels
     assert trainer.metrics_processor.ntokens_since_last_log == 1
 
 
-def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
+def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage():
     sentinel = torch.full((1,), -1.0)
     trainer = cast(
-        Trainer,
+        TrainingEngine,
         SimpleNamespace(
             pp_has_first_stage=False,
             pp_has_last_stage=False,
@@ -76,30 +134,41 @@ def test_pp_forward_backward_step_returns_sentinel_without_last_stage():
                     )
                 )
             ],
-            parallel_dims=SimpleNamespace(pp_enabled=True),
-            dataloader=SimpleNamespace(max_num_documents=None),
+            parallel_dims=SimpleNamespace(
+                pp_enabled=True, cp=1, dp_replicate_enabled=False
+            ),
+            max_num_documents=None,
+            preprocess_inputs_kwargs={},
             config=SimpleNamespace(
                 parallelism="PARA",
                 dataloader=SimpleNamespace(max_num_documents=None),
-                training=SimpleNamespace(max_context_length=2048),
+                training=SimpleNamespace(
+                    disable_cuda_graphs=True,
+                    max_context_length=2048,
+                    num_tokens_per_microbatch_per_dp_rank=1,
+                ),
             ),
             ntokens_seen=0,
             device=torch.device("cpu"),
+            sdc_replayer=None,
+            step=0,
             _pp_loss_sentinel_on_non_last_stage=sentinel,
         ),
     )
     _bind_pp_forward_backward_body(trainer)
 
-    loss = Trainer.forward_backward_step(
+    loss = TrainingEngine.forward_backward_microbatch(
         trainer,
-        input_dict=[{"input": torch.ones(1), "labels": torch.ones(1)}],
+        microbatch_group=[
+            _dict_microbatch({"input": torch.ones(1), "labels": torch.ones(1)})
+        ],
         global_valid_tokens=torch.tensor(1),
     )
 
-    assert loss is sentinel
+    torch.testing.assert_close(loss, sentinel)
 
 
-def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
+def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs() -> None:
     activation_refs: list[weakref.ReferenceType[torch.Tensor]] = []
     loss_refs: list[weakref.ReferenceType[torch.Tensor]] = []
     loss_containers: list[list[torch.Tensor]] = []
@@ -118,7 +187,7 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
             kwargs["losses"].append(loss)
 
     trainer = cast(
-        Trainer,
+        TrainingEngine,
         SimpleNamespace(
             pp_has_first_stage=True,
             pp_has_last_stage=True,
@@ -133,23 +202,32 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
                     )
                 )
             ],
-            parallel_dims=SimpleNamespace(pp_enabled=True),
-            dataloader=SimpleNamespace(max_num_documents=None),
+            parallel_dims=SimpleNamespace(
+                pp_enabled=True, cp=1, dp_replicate_enabled=False
+            ),
+            max_num_documents=None,
+            preprocess_inputs_kwargs={},
             config=SimpleNamespace(
                 parallelism="PARA",
-                training=SimpleNamespace(max_context_length=2048),
+                training=SimpleNamespace(
+                    disable_cuda_graphs=True,
+                    max_context_length=2048,
+                    num_tokens_per_microbatch_per_dp_rank=1,
+                ),
             ),
             ntokens_seen=0,
             device=torch.device("cpu"),
+            sdc_replayer=None,
+            step=0,
         ),
     )
     _bind_pp_forward_backward_body(trainer)
 
-    reporting_loss = Trainer.forward_backward_step(
+    reporting_loss = TrainingEngine.forward_backward_microbatch(
         trainer,
-        input_dict=[
-            {"input": torch.ones(1), "labels": torch.ones(1)},
-            {"input": torch.ones(1), "labels": torch.ones(1)},
+        microbatch_group=[
+            _dict_microbatch({"input": torch.ones(1), "labels": torch.ones(1)}),
+            _dict_microbatch({"input": torch.ones(1), "labels": torch.ones(1)}),
         ],
         global_valid_tokens=torch.tensor(2),
     )
@@ -163,7 +241,7 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
     assert all(reference() is None for reference in activation_refs)
 
 
-def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
+def test_pp_forward_backward_microbatch_prepares_structured_inputs() -> None:
     fwd_bwd_fn = MagicMock(return_value=torch.tensor(0.0))
 
     class _FakeModel:
@@ -175,36 +253,50 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
             )
 
     trainer = cast(
-        Trainer,
+        TrainingEngine,
         SimpleNamespace(
             pp_has_first_stage=True,
             pp_has_last_stage=True,
             model_parts=[_FakeModel()],
-            parallel_dims=SimpleNamespace(pp_enabled=True),
-            dataloader=SimpleNamespace(max_num_documents=4),
+            parallel_dims=SimpleNamespace(
+                pp_enabled=True, cp=1, dp_replicate_enabled=False
+            ),
+            max_num_documents=4,
+            preprocess_inputs_kwargs={},
             config=SimpleNamespace(
                 parallelism="PARA",
-                training=SimpleNamespace(max_context_length=2048),
+                training=SimpleNamespace(
+                    disable_cuda_graphs=True,
+                    max_context_length=2048,
+                    num_tokens_per_microbatch_per_dp_rank=1,
+                ),
             ),
             ntokens_seen=0,
+            device=torch.device("cpu"),
             fwd_bwd_fn=fwd_bwd_fn,
+            sdc_replayer=None,
+            step=0,
         ),
     )
     global_valid_tokens = torch.tensor(2)
 
-    result = Trainer.forward_backward_step(
+    result = TrainingEngine.forward_backward_microbatch(
         trainer,
-        input_dict=[
-            {
-                "input": torch.tensor(1),
-                "positions": torch.tensor(10),
-                "labels": torch.tensor([3]),
-            },
-            {
-                "input": torch.tensor(2),
-                "positions": torch.tensor(20),
-                "labels": torch.tensor([4]),
-            },
+        microbatch_group=[
+            _dict_microbatch(
+                {
+                    "input": torch.tensor(1),
+                    "positions": torch.tensor(10),
+                    "labels": torch.tensor([3]),
+                }
+            ),
+            _dict_microbatch(
+                {
+                    "input": torch.tensor(2),
+                    "positions": torch.tensor(20),
+                    "labels": torch.tensor([4]),
+                }
+            ),
         ],
         global_valid_tokens=global_valid_tokens,
     )
@@ -221,7 +313,7 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
     assert trainer.ntokens_seen == 2
 
 
-def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
+def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple():
     captured: dict[str, Any] = {}
 
     class _FakeModel:
@@ -229,29 +321,37 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
             captured["preprocess_kwargs"] = kw
             return ("INPUTS", torch.ones(7), {"positions": 1})
 
-    def fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs):
+    def fwd_bwd_fn(inputs, labels, global_valid_tokens, extra_kwargs, loss_kwargs):
         captured["fwd_bwd_args"] = (inputs, labels, extra_kwargs)
-        return torch.tensor(0.0)
+        assert loss_kwargs == {}
+        return torch.tensor(0.0, requires_grad=True)
 
     fake = SimpleNamespace(
         model_parts=[_FakeModel()],
-        dataloader=SimpleNamespace(max_num_documents=4),
-        parallel_dims=SimpleNamespace(pp_enabled=False),
+        max_num_documents=4,
+        parallel_dims=SimpleNamespace(
+            pp_enabled=False, cp=1, dp_replicate_enabled=False
+        ),
         config=SimpleNamespace(
             parallelism="PARA",
             dataloader=SimpleNamespace(max_num_documents=4),
             training=SimpleNamespace(
                 disable_cuda_graphs=True,
                 max_context_length=2048,
+                num_tokens_per_microbatch_per_dp_rank=7,
             ),
         ),
+        preprocess_inputs_kwargs={"processor": "VALUE"},
         ntokens_seen=100,
+        device=torch.device("cpu"),
         fwd_bwd_fn=fwd_bwd_fn,
+        sdc_replayer=None,
+        step=0,
     )
 
-    Trainer.forward_backward_step(
+    detached_loss = TrainingEngine.forward_backward_microbatch(
         fake,  # pyrefly: ignore[bad-argument-type]
-        input_dict={"input": 0, "labels": torch.zeros(1)},
+        microbatch_group=[_dict_microbatch({"input": 0, "labels": torch.zeros(1)})],
         global_valid_tokens=torch.tensor(1),
     )
 
@@ -259,20 +359,33 @@ def test_forward_backward_step_accumulates_tokens_and_forwards_triple():
     assert inputs == "INPUTS"
     assert extra == {"positions": 1}
     assert labels.numel() == 7
-    assert fake.ntokens_seen == 107  # labels.numel() (7) folded in
+    assert fake.ntokens_seen == 107
+    assert not detached_loss.requires_grad
+    assert fake.loss_is_finite.item() == 1
     assert captured["preprocess_kwargs"] == {
         "parallel_dims": fake.parallel_dims,
         "parallelism": "PARA",
         "max_num_documents": 4,
         "max_context_length": 2048,
+        "processor": "VALUE",
     }
 
 
 def test_cuda_graph_wrapper_returns_graph_owned_output():
     class PassthroughCUDAGraphWrapper:
-        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
+        def __init__(
+            self,
+            fn,
+            example_inputs,
+            *,
+            num_warmup_iterations=1,
+            optimizer_steps_completed=None,
+            num_warmup_steps=0,
+        ):
             self.fn = fn
             assert num_warmup_iterations == 2
+            assert optimizer_steps_completed is None
+            assert num_warmup_steps == 2
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -315,9 +428,19 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
 
 def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
     class PassthroughCUDAGraphWrapper:
-        def __init__(self, fn, example_inputs, *, num_warmup_iterations=1):
+        def __init__(
+            self,
+            fn,
+            example_inputs,
+            *,
+            num_warmup_iterations=1,
+            optimizer_steps_completed=None,
+            num_warmup_steps=0,
+        ):
             self.fn = fn
             assert num_warmup_iterations == 2
+            assert optimizer_steps_completed is None
+            assert num_warmup_steps == 2
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -355,7 +478,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     graph_loss = torch.tensor(0.0)
     loss_values = iter((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
 
-    def forward_backward_step(**kwargs):
+    def forward_backward_microbatch(**kwargs):
         graph_loss.fill_(next(loss_values))
         return graph_loss
 
@@ -364,7 +487,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         log=MagicMock(),
     )
     trainer = cast(
-        Trainer,
+        TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
                 training=SimpleNamespace(
@@ -382,18 +505,21 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
                 pp_enabled=False,
                 dp_cp_enabled=False,
                 ep_enabled=False,
+                dp_replicate_enabled=False,
                 get_optional_mesh=lambda name: None,
             ),
             gradient_accumulation_steps=3,
             num_pp_microbatches=1,
             device=torch.device("cpu"),
-            forward_backward_step=forward_backward_step,
+            forward_backward_microbatch=forward_backward_microbatch,
             sdc_replayer=None,
             model_parts=[],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
             step=1,
             ntokens_seen=3,
+            gc_handler=SimpleNamespace(run=MagicMock()),
+            _deferred_cuda_graph_options=None,
         ),
     )
     data_iterator = iter([_batch() for _ in range(3)])
@@ -402,7 +528,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         "torchtitan.trainer.dist_utils.clip_grad_norm_",
         return_value=torch.tensor(4.0),
     ):
-        Trainer.train_step(trainer, data_iterator)
+        Trainer.train_step(_training_loop(trainer), data_iterator)
 
     metrics_processor.log.assert_called_once_with(
         1,
@@ -419,61 +545,58 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         return_value=torch.tensor(4.0),
     ):
         Trainer.train_step(
-            trainer,
+            _training_loop(trainer),
             data_iterator=iter([_batch() for _ in range(3)]),
         )
 
     metrics_processor.log.assert_not_called()
 
 
-def test_train_step_replay_checks_only_first_forward_backward():
-    forward_backward_step = MagicMock(return_value=torch.tensor(1.0))
+def test_trainer_replay_checks_only_first_forward_backward():
+    forward_backward_microbatch = MagicMock(return_value=torch.tensor(1.0))
     replayer = SimpleNamespace(
-        run_fwd_bwd=MagicMock(side_effect=lambda execute, **kwargs: execute()),
+        run_fwd_bwd=MagicMock(side_effect=lambda fn, **kwargs: fn()),
     )
-    trainer = cast(
-        Trainer,
+    engine = cast(
+        TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                training=SimpleNamespace(disable_cuda_graphs=True, max_norm=1.0),
+                training=SimpleNamespace(
+                    disable_cuda_graphs=True,
+                    num_tokens_per_microbatch_per_dp_rank=1,
+                )
             ),
-            optimizers=MagicMock(),
-            lr_schedulers=SimpleNamespace(get_metrics=lambda: {}, step=MagicMock()),
+            gc_handler=SimpleNamespace(run=MagicMock()),
+            optimizers=SimpleNamespace(zero_grad=MagicMock()),
+            lr_schedulers=SimpleNamespace(get_metrics=MagicMock(return_value={})),
+            optimizer_step=MagicMock(return_value=torch.tensor(1.0)),
             parallel_dims=SimpleNamespace(
                 dp_enabled=False,
                 pp_enabled=False,
                 dp_cp_enabled=False,
-                ep_enabled=False,
-                get_optional_mesh=lambda name: None,
+                dp_replicate_enabled=False,
             ),
+            device=torch.device("cpu"),
             gradient_accumulation_steps=2,
             num_pp_microbatches=1,
-            device=torch.device("cpu"),
-            forward_backward_step=forward_backward_step,
-            sdc_replayer=replayer,
-            model_parts=[],
-            checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
+            forward_backward_microbatch=forward_backward_microbatch,
+            sdc_replayer=replayer,
             step=1,
-            ntokens_seen=0,
         ),
     )
 
-    with patch(
-        "torchtitan.trainer.dist_utils.clip_grad_norm_",
-        return_value=torch.tensor(1.0),
-    ):
-        Trainer.train_step(
-            trainer,
-            iter([_batch() for _ in range(2)]),
-        )
+    Trainer.train_step(
+        _training_loop(engine),
+        iter([_batch(), _batch()]),
+    )
 
     replayer.run_fwd_bwd.assert_called_once()
     assert replayer.run_fwd_bwd.call_args.kwargs == {"step": 1}
-    assert forward_backward_step.call_count == 2
+    assert forward_backward_microbatch.call_count == 2
 
 
-def test_replay_failure_happens_before_optimizer():
+def test_replay_failure_propagates_from_trainer():
     mismatch = SDCReplayMismatch(
         step=1,
         local_step=1,
@@ -481,57 +604,67 @@ def test_replay_failure_happens_before_optimizer():
         rank=0,
         signature_mismatch="loss",
     )
-    optimizers = MagicMock()
-    trainer = cast(
-        Trainer,
+    engine = cast(
+        TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                training=SimpleNamespace(disable_cuda_graphs=True, max_norm=1.0),
+                training=SimpleNamespace(
+                    disable_cuda_graphs=True,
+                    num_tokens_per_microbatch_per_dp_rank=1,
+                )
             ),
-            optimizers=optimizers,
-            lr_schedulers=SimpleNamespace(get_metrics=lambda: {}, step=MagicMock()),
+            gc_handler=SimpleNamespace(run=MagicMock()),
+            optimizers=SimpleNamespace(zero_grad=MagicMock()),
+            lr_schedulers=SimpleNamespace(get_metrics=MagicMock(return_value={})),
             parallel_dims=SimpleNamespace(
                 dp_enabled=False,
                 pp_enabled=False,
-                dp_cp_enabled=False,
-                ep_enabled=False,
-                get_optional_mesh=lambda name: None,
+                dp_replicate_enabled=False,
             ),
+            device=torch.device("cpu"),
             gradient_accumulation_steps=1,
             num_pp_microbatches=1,
-            device=torch.device("cpu"),
-            forward_backward_step=MagicMock(),
-            sdc_replayer=SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch)),
-            model_parts=[],
-            checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
+            forward_backward_microbatch=MagicMock(return_value=torch.tensor(1.0)),
+            sdc_replayer=SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch)),
             step=1,
-            ntokens_seen=0,
         ),
     )
 
     with pytest.raises(SDCReplayMismatch):
-        Trainer.train_step(
-            trainer,
-            iter([_batch()]),
-        )
-
-    optimizers.step.assert_not_called()
+        Trainer.train_step(_training_loop(engine), iter([_batch()]))
 
 
 def test_loading_checkpoint_rearms_replay_schedule():
     replayer = SimpleNamespace(reset_schedule=MagicMock())
-    trainer = cast(Trainer, SimpleNamespace(sdc_replayer=replayer))
+    trainer = cast(TrainingEngine, SimpleNamespace(sdc_replayer=replayer))
 
-    Trainer.load_state_dict(trainer, {"step": 12, "ntokens_seen": 34})
+    TrainingEngine.load_state_dict(trainer, {"step": 12, "ntokens_seen": 34})
 
     assert trainer.step == 12
     assert trainer.ntokens_seen == 34
     replayer.reset_schedule.assert_called_once_with()
 
-    disabled = cast(Trainer, SimpleNamespace(sdc_replayer=None))
-    Trainer.load_state_dict(disabled, {"step": 1, "ntokens_seen": 2})
+    disabled = cast(TrainingEngine, SimpleNamespace(sdc_replayer=None))
+    TrainingEngine.load_state_dict(disabled, {"step": 1, "ntokens_seen": 2})
     assert disabled.step == 1
+
+
+def test_compute_training_performance_metrics():
+    metrics = compute_training_performance_metrics(
+        num_tokens=20,
+        elapsed_time=2.0,
+        non_data_parallel_size=2,
+        num_flops_per_token=200,
+        gpu_peak_flops=1000,
+        has_quantization=False,
+    )
+
+    assert metrics == {
+        "tokens_per_second": 5.0,
+        "tflops": 1e-9,
+        "mfu_percent": 100.0,
+    }
 
 
 @pytest.mark.parametrize(
@@ -587,7 +720,7 @@ def _run_train_step_recording_all_reduce(
 ) -> list[bool]:
     part = _RecordingFSDPPart()
     trainer = cast(
-        Trainer,
+        TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
                 training=SimpleNamespace(
@@ -608,13 +741,15 @@ def _run_train_step_recording_all_reduce(
             gradient_accumulation_steps=gradient_accumulation_steps,
             num_pp_microbatches=1,
             device=torch.device("cpu"),
-            forward_backward_step=MagicMock(return_value=torch.tensor(1.0)),
+            forward_backward_microbatch=MagicMock(return_value=torch.tensor(1.0)),
             sdc_replayer=None,
             model_parts=[part],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
             step=1,
             ntokens_seen=0,
+            gc_handler=SimpleNamespace(run=MagicMock()),
+            _deferred_cuda_graph_options=None,
         ),
     )
     with patch(
@@ -622,7 +757,7 @@ def _run_train_step_recording_all_reduce(
         return_value=torch.tensor(1.0),
     ):
         Trainer.train_step(
-            trainer,
+            _training_loop(trainer),
             iter([_batch() for _ in range(gradient_accumulation_steps)]),
         )
     return part.requires_all_reduce_calls

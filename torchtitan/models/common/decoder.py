@@ -305,12 +305,14 @@ class Decoder(BaseModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
     ]:
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
+        del kwargs
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions", None)
         padding_mask = batch.pop("padding_mask", None)

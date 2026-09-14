@@ -78,7 +78,7 @@ def _kimi_multimodal_dataloader(
     return GrainDataLoader.Config(
         dataset=replace(dataset, processor=processor),
         collator=MultiModalCollator.Config(
-            max_images_per_batch=128,
+            max_images_per_microbatch=128,
             patch_size=processor.patch_size,
             temporal_patch_size=processor.temporal_patch_size,
             spatial_merge_size=processor.spatial_merge_size,

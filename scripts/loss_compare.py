@@ -548,7 +548,7 @@ def create_seed_checkpoint(
         seed_cmd = (
             f"MODULE='{module}' CONFIG='{config}' "
             f"./run_train.sh --dump_folder={job_dump_folder} "
-            f"--checkpoint.create_seed_checkpoint "
+            f"--create-seed-checkpoint "
             f"--checkpoint.enable --checkpoint.last_save_model_only "
             f"{FIXED_OPTIONS} {SEED_PARALLELISM_OPTIONS}"
         )

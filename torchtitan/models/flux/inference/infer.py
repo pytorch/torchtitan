@@ -39,7 +39,7 @@ def inference(config: FluxTrainer.Config):
     # Distribute prompts across processes using round-robin assignment
     prompts = original_prompts[global_rank::world_size]
 
-    trainer.checkpointer.load(step=config.checkpoint.load_step)
+    trainer.engine.checkpointer.load(step=config.checkpoint.load_step)
 
     # Build tokenizers from the config
     tokenizer = config.tokenizer.build()
@@ -61,7 +61,7 @@ def inference(config: FluxTrainer.Config):
 
         for i in range(0, len(prompts), bs):
             images = generate_image(
-                device=trainer.device,
+                device=trainer.engine.device,
                 dtype=trainer._dtype,
                 img_height=16 * (img_size // 16),
                 img_width=16 * (img_size // 16),
@@ -69,7 +69,7 @@ def inference(config: FluxTrainer.Config):
                 denoising_steps=config.inference.sampling.denoising_steps,
                 classifier_free_guidance_scale=config.inference.sampling.classifier_free_guidance_scale,
                 # pyrefly: ignore [bad-argument-type]
-                model=trainer.model_parts[0],
+                model=trainer.engine.model_parts[0],
                 prompt=prompts[i : i + bs],
                 autoencoder=trainer.autoencoder,
                 tokenizer=tokenizer,

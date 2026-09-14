@@ -22,7 +22,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import Trainer, TrainingEngine
 
 
 @contextmanager
@@ -77,16 +77,21 @@ def build_minimal_trainer(
 ) -> Trainer:
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
-    trainer.model_parts = [model]
-    trainer.loss_fn = CrossEntropyLoss.Config().build()
-    trainer.parallel_dims = parallel_dims
-    trainer.train_context = get_spmd_context(parallel_dims=parallel_dims)
-    trainer.fwd_bwd_fn = trainer._forward_backward_body
-    trainer.model_config = model_config
-    trainer.device = torch.device("cuda")
+    trainer.engine = engine = object.__new__(TrainingEngine)
+    engine.model_parts = [model]
+    engine.loss_fn = CrossEntropyLoss.Config().build()
+    engine.parallel_dims = parallel_dims
+    engine.train_context = get_spmd_context(parallel_dims=parallel_dims)
+    engine.fwd_bwd_fn = engine._forward_backward_body
+    engine.model_config = model_config
+    engine.device = torch.device("cuda")
+    engine.preprocess_inputs_kwargs = {}
     trainer.tokenizer = tokenizer
     trainer.dataloader = SimpleNamespace(max_num_documents=None)
-    trainer.ntokens_seen = 0
+    engine.max_num_documents = None
+    engine.ntokens_seen = 0
+    engine.step = 0
+    engine.sdc_replayer = None
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
@@ -139,5 +144,7 @@ def build_minimal_trainer(
             training=TrainingConfig(),
             parallelism=SimpleNamespace(),
         )
+
+    engine.config = trainer.config
 
     return trainer

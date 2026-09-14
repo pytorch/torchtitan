@@ -207,6 +207,10 @@ class CUDAGraphWrapper:
         tensor_input_indices: Indices of inputs that should be copied before
             replay. When omitted, these are inferred from ``example_inputs``.
         num_warmup_iterations: Number of eager invocations before capture.
+        optimizer_steps_completed: Optional counter used to make warmup depend
+            on completed optimizer steps instead of invocation count.
+        num_warmup_steps: Number of optimizer steps required when
+            ``optimizer_steps_completed`` is provided.
 
     Raises:
         ValueError: If ``num_warmup_iterations`` is negative.
@@ -221,9 +225,18 @@ class CUDAGraphWrapper:
         tensor_input_indices: Sequence[int] | None = None,
         *,
         num_warmup_iterations: int = 1,
+        optimizer_steps_completed: Callable[[], int] | None = None,
+        num_warmup_steps: int = 0,
     ):
         if num_warmup_iterations < 0:
             raise ValueError("num_warmup_iterations must be non-negative")
+        if num_warmup_steps < 0:
+            raise ValueError("num_warmup_steps must be non-negative")
+        if optimizer_steps_completed is not None and num_warmup_iterations != 0:
+            raise ValueError(
+                "num_warmup_iterations must be zero when optimizer-step "
+                "warmup is used"
+            )
         self._fn = fn
         self._num_inputs = len(example_inputs)
         self._static_input_indices = set(static_input_indices or ())
@@ -258,6 +271,12 @@ class CUDAGraphWrapper:
         }
         self._graph: torch.cuda.CUDAGraph | None = None
         self._warmup_remaining = num_warmup_iterations
+        self._optimizer_steps_completed = optimizer_steps_completed
+        self._capture_after_optimizer_step = (
+            optimizer_steps_completed() + num_warmup_steps
+            if optimizer_steps_completed is not None
+            else None
+        )
         self._args: tuple | None = None
         self._output: Any = None
         self._should_check_address = should_check_address
@@ -315,8 +334,13 @@ class CUDAGraphWrapper:
     def __call__(self, *args):
         self._validate_inputs(args)
 
-        if self._warmup_remaining > 0:
-            self._warmup_remaining -= 1
+        optimizer_warmup_active = (
+            self._optimizer_steps_completed is not None
+            and self._capture_after_optimizer_step is not None
+            and self._optimizer_steps_completed() < self._capture_after_optimizer_step
+        )
+        if self._warmup_remaining > 0 or optimizer_warmup_active:
+            self._warmup_remaining = max(0, self._warmup_remaining - 1)
             current_stream = torch.cuda.current_stream()
             _manager.stream.wait_stream(current_stream)
             with torch.cuda.stream(_manager.stream):
@@ -361,10 +385,11 @@ class CUDAGraphWrapper:
 def wrap_with_cuda_graph(
     fn: Callable[..., torch.Tensor],
     *,
-    gradient_accumulation_steps: int,
-    sdc_num_steps: int,
-    sdc_num_replays: int,
+    gradient_accumulation_steps: int | None = None,
+    sdc_num_steps: int = 0,
+    sdc_num_replays: int = 0,
     num_warmup_steps: int = 2,
+    optimizer_steps_completed: Callable[[], int] | None = None,
 ) -> Callable[..., torch.Tensor]:
     """Decorate a structured callable with CUDA graph capture and replay.
 
@@ -379,9 +404,14 @@ def wrap_with_cuda_graph(
     Args:
         fn: Callable to capture.
         gradient_accumulation_steps: Forward-backward calls per optimizer step.
+            Required for invocation-count warmup and unused when
+            ``optimizer_steps_completed`` is provided.
         sdc_num_steps: Initial optimizer steps checked by SDC, or -1 for all.
         sdc_num_replays: Additional calls for each SDC-checked optimizer step.
         num_warmup_steps: Number of eager optimizer steps before capture.
+        optimizer_steps_completed: Optional completed-step counter. When
+            provided, warmup follows optimizer steps directly instead of
+            estimating them from forward/backward invocation counts.
     """
 
     if not (
@@ -395,16 +425,24 @@ def wrap_with_cuda_graph(
         )
         return fn
 
-    # SDC checks only the first accumulation group of each checked step.
-    num_checked_steps = (
-        num_warmup_steps
-        if sdc_num_steps == -1
-        else min(num_warmup_steps, sdc_num_steps)
-    )
-    num_warmup_iterations = (
-        num_warmup_steps * gradient_accumulation_steps
-        + num_checked_steps * sdc_num_replays
-    )
+    if optimizer_steps_completed is None:
+        if gradient_accumulation_steps is None:
+            raise ValueError(
+                "gradient_accumulation_steps is required for invocation-count "
+                "CUDA graph warmup"
+            )
+        # SDC checks only the first accumulation group of each checked step.
+        num_checked_steps = (
+            num_warmup_steps
+            if sdc_num_steps == -1
+            else min(num_warmup_steps, sdc_num_steps)
+        )
+        num_warmup_iterations = (
+            num_warmup_steps * gradient_accumulation_steps
+            + num_checked_steps * sdc_num_replays
+        )
+    else:
+        num_warmup_iterations = 0
 
     # Every wrapper is registered to the manager in this module and persists
     # until cudagraph_teardown is called.
@@ -427,6 +465,8 @@ def wrap_with_cuda_graph(
                 flat_fn,
                 flat_inputs,
                 num_warmup_iterations=num_warmup_iterations,
+                optimizer_steps_completed=optimizer_steps_completed,
+                num_warmup_steps=num_warmup_steps,
             )
         else:
             assert input_spec is not None

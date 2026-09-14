@@ -20,7 +20,7 @@ from torchtitan.models.deepseek_v3.config_registry import (
 from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
 from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import Trainer, TrainingEngine
 
 
 class TestConfigManager(unittest.TestCase):
@@ -300,12 +300,26 @@ class TestConfigManager(unittest.TestCase):
         config.sdc_replayer = SDCReplayer.Config()
 
         with pytest.raises(ValueError, match="debug.deterministic=True"):
-            config._validate_sdc_replay()
+            TrainingEngine.Config.__post_init__(config)
 
         config.debug.deterministic = True
         config.debug.deterministic_warn_only = True
         with pytest.raises(ValueError, match="deterministic_warn_only=False"):
-            config._validate_sdc_replay()
+            TrainingEngine.Config.__post_init__(config)
+
+    def test_microbatch_tokens_must_match_activation_sharding(self):
+        config = TrainingEngine.Config()
+        config.training = TrainingConfig(num_tokens_per_microbatch_per_dp_rank=10)
+        config.parallelism = ParallelismConfig(
+            tensor_parallel_degree=4,
+            enable_sequence_parallel=True,
+        )
+
+        with pytest.raises(ValueError, match="pipeline microbatch"):
+            config.__post_init__()
+
+        config.training.num_tokens_per_microbatch_per_dp_rank = 16
+        config.__post_init__()
 
     def test_sdc_replay_is_off_the_cli(self):
         hints = typing.get_type_hints(Trainer.Config, include_extras=True)
@@ -322,7 +336,7 @@ class TestConfigManager(unittest.TestCase):
             ]
         )
         config.sdc_replayer = SDCReplayer.Config(num_steps=3, num_replays=2)
-        config._validate_sdc_replay()
+        TrainingEngine.Config.__post_init__(config)
 
     def test_sdc_replay_rejects_multiple_replays_with_cuda_graphs(self):
         config = ConfigManager().parse_args(
@@ -337,7 +351,7 @@ class TestConfigManager(unittest.TestCase):
         config.sdc_replayer = SDCReplayer.Config(num_replays=2)
 
         with pytest.raises(ValueError, match="at most one replay"):
-            config._validate_sdc_replay()
+            TrainingEngine.Config.__post_init__(config)
 
     def test_sdc_replay_allows_multiple_replays_without_cuda_graphs(self):
         config = ConfigManager().parse_args(
@@ -352,7 +366,7 @@ class TestConfigManager(unittest.TestCase):
         )
         config.sdc_replayer = SDCReplayer.Config(num_replays=2)
 
-        config._validate_sdc_replay()
+        TrainingEngine.Config.__post_init__(config)
 
     def test_sdc_replay_accepts_execution_modes(self):
         config = ConfigManager().parse_args(
@@ -378,7 +392,7 @@ class TestConfigManager(unittest.TestCase):
             with self.subTest(config=name):
                 config.debug.deterministic = True
                 config.sdc_replayer = SDCReplayer.Config()
-                config._validate_sdc_replay()
+                TrainingEngine.Config.__post_init__(config)
 
     def test_cuda_graphs_reject_blocking_hybridep(self):
         from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher

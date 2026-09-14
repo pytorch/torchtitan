@@ -8,15 +8,16 @@ import json
 import logging
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any, cast
+from typing import cast
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import DataloaderExhaustedError
+from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import apply_overrides, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
@@ -31,13 +32,13 @@ from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.tools import utils
-from torchtitan.trainer import Trainer
+from torchtitan.trainer import Trainer, TrainingEngine
 
 
 logger = logging.getLogger(__name__)
 
 
-class FaultTolerantTrainer(Trainer):
+class FaultTolerantTrainer(TrainingEngine):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
@@ -67,13 +68,13 @@ class FaultTolerantTrainer(Trainer):
         config.maybe_log()
 
         if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
-            batch_degree, batch_rank = batch_mesh.size(), batch_mesh.get_local_rank()
+            dp_mesh = parallel_dims.get_mesh("dp")
+            dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
-            batch_degree, batch_rank = 1, 0
+            dp_degree, dp_rank = 1, 0
 
         # FT addition: adjust dp info via ft_manager
-        batch_degree, batch_rank = self.ft_manager.get_dp_info(batch_degree, batch_rank)
+        dp_degree, dp_rank = self.ft_manager.get_dp_info(dp_degree, dp_rank)
 
         # take control of garbage collection to avoid stragglers
         self.gc_handler = utils.GarbageCollection(
@@ -100,14 +101,17 @@ class FaultTolerantTrainer(Trainer):
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
         )
         # build dataloader
-        num_tokens_per_batch = config.training.num_tokens_per_microbatch_per_dp_rank
+        num_tokens_per_microbatch = (
+            config.training.num_tokens_per_microbatch_per_dp_rank
+        )
         self.dataloader = config.dataloader.build(
-            dp_world_size=batch_degree,
-            dp_rank=batch_rank,
+            dp_world_size=dp_degree,
+            dp_rank=dp_rank,
             tokenizer=self.tokenizer,
             max_context_length=config.training.max_context_length,
-            num_tokens_per_batch=num_tokens_per_batch,
+            num_tokens_per_microbatch=num_tokens_per_microbatch,
         )
+        self.max_num_documents = self.dataloader.max_num_documents
 
         # build model (using meta init)
         model_config = model_spec.model
@@ -162,7 +166,7 @@ class FaultTolerantTrainer(Trainer):
 
         # Move the sharded model to CPU/GPU and initialize its states.
         buffer_device: torch.device | None
-        if config.checkpoint.create_seed_checkpoint:
+        if config.create_seed_checkpoint:
             init_device = "cpu"
             buffer_device = None
         elif config.training.enable_cpu_offload:
@@ -183,16 +187,16 @@ class FaultTolerantTrainer(Trainer):
         )
         num_tokens_per_train_step = config.training.num_tokens_per_train_step
         if num_tokens_per_train_step < 0:
-            num_tokens_per_train_step = num_tokens_per_dp_rank * batch_degree
-        if num_tokens_per_train_step % (num_tokens_per_dp_rank * batch_degree) != 0:
+            num_tokens_per_train_step = num_tokens_per_dp_rank * dp_degree
+        if num_tokens_per_train_step % (num_tokens_per_dp_rank * dp_degree) != 0:
             raise ValueError(
                 "training.num_tokens_per_train_step "
                 f"({num_tokens_per_train_step}) must be divisible by the number "
                 "of tokens processed globally in one gradient accumulation "
-                f"iteration ({num_tokens_per_dp_rank * batch_degree})."
+                f"iteration ({num_tokens_per_dp_rank * dp_degree})."
             )
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
-            num_tokens_per_dp_rank * batch_degree
+            num_tokens_per_dp_rank * dp_degree
         )
 
         # apply parallelisms and initialization
@@ -370,15 +374,15 @@ class FaultTolerantTrainer(Trainer):
             self.validator = config.validator.build(
                 parallelism=config.parallelism,
                 job_config=config,
-                dp_world_size=batch_degree,
-                dp_rank=batch_rank,
+                dp_world_size=dp_degree,
+                dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=self.loss_fn,
                 validation_context=self.train_context,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.max_context_length,
-                num_tokens_per_batch=num_tokens_per_batch,
+                num_tokens_per_microbatch=num_tokens_per_microbatch,
                 pp_schedule=pp_schedule,
                 pp_has_first_stage=pp_has_first_stage,
                 pp_has_last_stage=pp_has_last_stage,
@@ -449,7 +453,26 @@ class FaultTolerantTrainer(Trainer):
 
         return ParallelDims.from_config(config.parallelism, world_size)
 
-    def train_step(self, data_iterator: Iterator[dict[str, Any]]):
+    def microbatch_generator(
+        self, data_iterable: Iterable[TrainingMicrobatch]
+    ) -> Iterator[TrainingMicrobatch]:
+        data_iterator = iter(data_iterable)
+        while True:
+            data_load_start = time.perf_counter()
+            try:
+                microbatch = next(data_iterator)
+            except StopIteration as ex:
+                raise DataloaderExhaustedError() from ex
+            ntokens_microbatch = (
+                self.config.training.num_tokens_per_microbatch_per_dp_rank
+            )
+            self.metrics_processor.ntokens_since_last_log += ntokens_microbatch
+            self.metrics_processor.data_loading_times.append(
+                time.perf_counter() - data_load_start
+            )
+            yield microbatch
+
+    def train_step(self, data_iterator: Iterator[TrainingMicrobatch]):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
@@ -458,25 +481,25 @@ class FaultTolerantTrainer(Trainer):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = self.parallel_dims
-        # All groups form one optimizer step; each group feeds one fwd-bwd call.
-        microbatch_groups: list[list[dict[str, Any]]] = []
+        # All groups form one optimizer step. Each microbatch group forms one
+        # complete PP step, or one local forward/backward when PP is disabled.
+        microbatch_groups: list[list[TrainingMicrobatch]] = []
         local_valid_tokens = torch.tensor(0, dtype=torch.int64)
         for _ in range(self.gradient_accumulation_steps):
-            microbatches = []
+            microbatch_group = []
             for _ in range(self.num_pp_microbatches):
-                input_dict = next(data_iterator)
-                # Popped so the batch reaching the model holds only its kwargs.
-                local_valid_tokens += input_dict.pop("num_valid_tokens")
-                microbatches.append(input_dict)
-            microbatch_groups.append(microbatches)
+                microbatch = next(data_iterator)
+                local_valid_tokens += microbatch.num_valid_tokens
+                microbatch_group.append(microbatch)
+            microbatch_groups.append(microbatch_group)
 
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
         global_valid_tokens = local_valid_tokens.to(self.device)
         if parallel_dims.dp_enabled:
-            batch_mesh = parallel_dims.get_mesh("batch")
+            dp_mesh = parallel_dims.get_mesh("dp")
             global_valid_tokens = dist_utils.dist_sum_tensor(
-                global_valid_tokens, batch_mesh
+                global_valid_tokens, dp_mesh
             )
 
         # Auxiliary losses normalize by the same per-step token count as the
@@ -484,43 +507,20 @@ class FaultTolerantTrainer(Trainer):
         AuxLoss.set_step_denominator(global_valid_tokens)
 
         accumulated_loss: torch.Tensor | None = None
-        for fwd_bwd_index, microbatches in enumerate(microbatch_groups):
-            input_dict_mbs = []
-            for input_dict in microbatches:
-                for key, value in input_dict.items():
-                    if isinstance(value, torch.Tensor):
-                        input_dict[key] = value.to(self.device)
-                input_dict_mbs.append(input_dict)
-
-            if parallel_dims.pp_enabled:
-                fwd_bwd_input_dict = input_dict_mbs
-            else:
-                assert len(input_dict_mbs) == 1
-                fwd_bwd_input_dict = input_dict_mbs[0]
-
-            def fwd_bwd() -> torch.Tensor:
-                return self.forward_backward_step(
-                    input_dict=fwd_bwd_input_dict,
-                    global_valid_tokens=global_valid_tokens,
-                )
-
-            if self.sdc_replayer is not None and fwd_bwd_index == 0:
-                # Only the step's first gradient-accumulation group is
-                # replay-checked; under PP one group is a complete pipeline
-                # schedule. Later groups exercise the same compute and
-                # communication paths, so checking them too would only add
-                # overhead.
-                loss = self.sdc_replayer.run_fwd_bwd(fwd_bwd, step=self.step)
-            else:
-                loss = fwd_bwd()
+        for fwd_bwd_index, microbatch_group in enumerate(microbatch_groups):
+            detached_loss = self.forward_backward_microbatch(
+                microbatch_group=microbatch_group,
+                global_valid_tokens=global_valid_tokens,
+                accumulation_index=fwd_bwd_index,
+                num_accumulation_steps=self.gradient_accumulation_steps,
+            )
             if should_log:
-                loss = loss.detach()
                 if accumulated_loss is None:
                     # Take ownership before the next replay overwrites the
                     # graph-owned output. Later losses accumulate in place.
-                    accumulated_loss = loss.clone()
+                    accumulated_loss = detached_loss.clone()
                 else:
-                    accumulated_loss.add_(loss)
+                    accumulated_loss.add_(detached_loss)
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
@@ -619,7 +619,7 @@ class FaultTolerantTrainer(Trainer):
                 ),
             ),
         ):
-            data_iterator = self.batch_generator(self.dataloader)
+            data_iterator = self.microbatch_generator(self.dataloader)
             while self.should_continue_training():
                 self.step += 1
                 self.gc_handler.run(self.step)
@@ -655,3 +655,13 @@ class FaultTolerantTrainer(Trainer):
             time.sleep(2)
 
         logger.info("Training completed")
+
+    def should_continue_training(self) -> bool:
+        return self.step < self.config.training.steps
+
+    def close(self) -> None:
+        if self.dataloader:
+            self.dataloader.close()
+        super().close()
+        if self.metrics_processor:
+            self.metrics_processor.close()

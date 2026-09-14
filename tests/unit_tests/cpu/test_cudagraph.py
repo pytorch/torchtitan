@@ -99,6 +99,56 @@ def test_cuda_graph_warmup_covers_two_optimizer_steps(
         assert graph.replay.call_count == 2
 
 
+def test_cuda_graph_warmup_uses_completed_optimizer_steps() -> None:
+    graph = MagicMock()
+    fn = MagicMock(side_effect=lambda value: value)
+    num_optimizer_steps_completed = 0
+
+    def optimizer_steps_completed() -> int:
+        return num_optimizer_steps_completed
+
+    with (
+        patch("torchtitan.distributed.cudagraph.utils.device_type", "cuda"),
+        patch("torch.cuda.is_available", return_value=True),
+        patch.object(torch.version, "hip", None),
+        patch.object(_manager, "maybe_initialize"),
+        patch.object(_manager, "register"),
+        patch.object(_manager, "_graph_pool", object()),
+        patch.object(_manager, "_stream", MagicMock()),
+        patch("torch.cuda.current_stream", return_value=MagicMock()),
+        patch("torch.cuda.stream", return_value=nullcontext()),
+        patch("torch.cuda.CUDAGraph", return_value=graph) as graph_constructor,
+        patch("torch.cuda.graph", return_value=nullcontext()),
+        patch(
+            "torchtitan.distributed.cudagraph.get_kernel_annotations",
+            return_value={},
+        ),
+    ):
+        run = wrap_with_cuda_graph(
+            fn,
+            gradient_accumulation_steps=1,
+            sdc_num_steps=0,
+            sdc_num_replays=0,
+            num_warmup_steps=2,
+            optimizer_steps_completed=optimizer_steps_completed,
+        )
+        value = torch.tensor(1.0)
+
+        # A variable number of microbatches cannot exhaust a step-based warmup.
+        for _ in range(5):
+            run(value)
+        graph_constructor.assert_not_called()
+
+        num_optimizer_steps_completed = 1
+        run(value)
+        graph_constructor.assert_not_called()
+
+        num_optimizer_steps_completed = 2
+        run(value)
+        graph_constructor.assert_called_once()
+        graph.replay.assert_called_once()
+
+
 def test_tensor_input_indices_control_replay_copies() -> None:
     static_input = torch.tensor(1)
     excluded_input = torch.tensor(2)

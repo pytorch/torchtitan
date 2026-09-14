@@ -26,7 +26,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "activation_checkpoint.save_regions",
         "activation_checkpoint.visualize_memory_budget_pareto",
         "checkpoint.async_mode",
-        "checkpoint.create_seed_checkpoint",
+        "create_seed_checkpoint",
         "checkpoint.enable",
         "checkpoint.enable_first_step_checkpoint",
         "checkpoint.exclude_from_loading",
@@ -62,7 +62,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "dataloader.img_size",
         "dataloader.infinite",
         "dataloader.load_dataset_kwargs",
-        "dataloader.max_images_per_batch",
+        "dataloader.max_images_per_microbatch",
         "dataloader.max_patches",
         "dataloader.max_patches_per_side",
         "dataloader.max_pixels",
@@ -201,7 +201,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "validator.dataloader.img_size",
         "validator.dataloader.infinite",
         "validator.dataloader.load_dataset_kwargs",
-        "validator.dataloader.max_images_per_batch",
+        "validator.dataloader.max_images_per_microbatch",
         "validator.dataloader.max_patches",
         "validator.dataloader.max_patches_per_side",
         "validator.dataloader.max_pixels",
@@ -293,13 +293,13 @@ def _subclasses(config_cls: type) -> set[type]:
     """``config_cls`` and every imported subclass of it defined in core.
 
     ``__subclasses__`` sees whatever the process has imported, so an
-    experiment's config subclass would otherwise appear in the snapshot for
-    any test run that happened to import it first. The freeze covers core, and
-    ``torchtitan/experiments`` sets its own rules.
+    application-specific config subclass would otherwise appear in the
+    snapshot for any test run that happened to import it first. The freeze
+    covers the dataset-driven training loop, not experiments or RL.
     """
     found = {config_cls}
     for sub in config_cls.__subclasses__():
-        if sub.__module__.startswith("torchtitan.experiments."):
+        if sub.__module__.startswith(("torchtitan.experiments.", "torchtitan.rl.")):
             continue
         found |= _subclasses(sub)
     return found

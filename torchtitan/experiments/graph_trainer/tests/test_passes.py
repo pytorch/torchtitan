@@ -26,6 +26,7 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
@@ -2176,10 +2177,18 @@ class TestBucketingPrefetchOrder(FSDPTest):
         )
         global_valid_tokens = torch.tensor(num_tokens, dtype=torch.float, device="cuda")
 
-        # One forward_backward_step triggers _make_fx_forward_backward_step
+        # One forward/backward microbatch triggers the graph-specific implementation.
         # which traces the model and applies all graph passes.
-        trainer.forward_backward_step(
-            input_dict={"input": inputs, "positions": positions, "labels": labels},
+        trainer._forward_backward_microbatch(
+            microbatch_group=[
+                TokenizedTrainingMicrobatch(
+                    input=inputs,
+                    positions=positions,
+                    labels=labels,
+                    padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                    num_valid_tokens=labels.numel(),
+                )
+            ],
             global_valid_tokens=global_valid_tokens,
         )
 

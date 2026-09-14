@@ -129,7 +129,7 @@ def _run_case(work: str) -> None:
         _torchrun(
             1,
             config,
-            "--checkpoint.enable --checkpoint.create_seed_checkpoint "
+            "--checkpoint.enable --create-seed-checkpoint "
             "--parallelism.data_parallel_shard_degree 1 "
             "--parallelism.tensor_parallel_degree 1 "
             "--parallelism.pipeline_parallel_degree 1 "

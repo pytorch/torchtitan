@@ -182,10 +182,10 @@ class TestCheckpointManager(unittest.TestCase):
                 subprocess.run([sys.executable, "-c", statement], check=True)
 
     def test_trainer_uses_checkpoint_interface_with_concrete_default(self):
-        from torchtitan.trainer import Trainer
+        from torchtitan.trainer import Trainer, TrainingEngine
 
         self.assertIs(
-            Trainer.Config.__annotations__["checkpoint"],
+            TrainingEngine.Config.__annotations__["checkpoint"],
             BaseCheckpointManager.Config,
         )
         checkpoint_field = next(

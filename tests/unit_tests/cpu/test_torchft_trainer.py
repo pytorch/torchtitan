@@ -51,7 +51,11 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     monkeypatch.setattr(ft.utils, "get_local_device", lambda: torch.device("cpu"))
     monkeypatch.setattr(ft.utils, "device_module", torch.cpu)
     monkeypatch.setattr(ft.utils, "GarbageCollection", lambda **kwargs: None)
-    monkeypatch.setattr(type(config.dataloader), "build", lambda self, **kwargs: None)
+    monkeypatch.setattr(
+        type(config.dataloader),
+        "build",
+        lambda self, **kwargs: SimpleNamespace(max_num_documents=None),
+    )
     monkeypatch.setattr(type(config.model_spec.model), "build", build_model)
 
     with pytest.raises(ModelBuildReachedError):

@@ -13,6 +13,7 @@ import torch.nn as nn
 from torch.optim import swap_in_optimizer_params_and_state
 from torch.testing._internal.common_fsdp import FSDPTest
 
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -194,7 +195,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 compile_inductor_compilation="full",
                 parallel_dims=parallel_dims,
             )
-            trainer.optimizers = OptimizersContainer(
+            trainer.engine.optimizers = OptimizersContainer(
                 OptimizersContainer.Config(
                     param_groups=[
                         ParamGroupConfig(
@@ -250,7 +251,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                     valid_tokens = torch.tensor(
                         labels.numel(), device="cuda", dtype=torch.float
                     )
-                    loss = trainer._make_fx_forward_backward_step(
+                    loss = trainer._make_fx_forward_backward_microbatch(
                         model,
                         inputs,
                         labels,
@@ -284,11 +285,11 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                         gradient_input_indices.issubset(wrapper._static_input_indices)
                     )
 
-                trainer.optimizers.step()
+                trainer.engine.optimizers.step()
                 first_params = [
                     param.detach().cpu().clone() for param in model.parameters()
                 ]
-                trainer.optimizers.zero_grad(set_to_none=True)
+                trainer.engine.optimizers.zero_grad(set_to_none=True)
 
                 if use_inplace_accumulation:
                     for param in model.parameters():
@@ -301,7 +302,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                     self.assertEqual(
                         tuple(grad.data_ptr() for grad in grad_buffers), grad_ptrs
                     )
-                trainer.optimizers.step()
+                trainer.engine.optimizers.step()
                 second_params = [
                     param.detach().cpu().clone() for param in model.parameters()
                 ]
@@ -2621,34 +2622,38 @@ class TestTraceContextParallel(FSDPTest):
                 num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
                 tokens = torch.randint(
                     0,
-                    trainer.model_config.vocab_size,
+                    trainer.engine.model_config.vocab_size,
                     (num_tokens,),
-                    device=trainer.device,
+                    device=trainer.engine.device,
                 )
                 labels = torch.randint(
                     0,
-                    trainer.model_config.vocab_size,
+                    trainer.engine.model_config.vocab_size,
                     (num_tokens,),
-                    device=trainer.device,
+                    device=trainer.engine.device,
                 )
                 # The dataloader always supplies per-document positions, which
                 # drive RoPE (SDPA itself is maskless and uses is_causal).
                 positions = (
                     torch.arange(
                         num_tokens,
-                        device=trainer.device,
+                        device=trainer.engine.device,
                         dtype=torch.int32,
                     )
                     % config.training.max_context_length
                 )
-                trainer.forward_backward_step(
-                    input_dict={
-                        "input": tokens,
-                        "positions": positions,
-                        "labels": labels,
-                    },
+                trainer._forward_backward_microbatch(
+                    microbatch_group=[
+                        TokenizedTrainingMicrobatch(
+                            input=tokens,
+                            positions=positions,
+                            labels=labels,
+                            padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                            num_valid_tokens=labels.numel(),
+                        )
+                    ],
                     global_valid_tokens=torch.tensor(
-                        labels.numel(), device=trainer.device
+                        labels.numel(), device=trainer.engine.device
                     ),
                 )
                 assert trainer._traced_step is not None
@@ -2676,12 +2681,14 @@ class TestTraceContextParallel(FSDPTest):
                         all_gather_pg_names_before_sdpa.append(node.args[2])
 
                 cp_pg_name = (
-                    trainer.parallel_dims.get_mesh("cp").get_group().group_name
-                    if trainer.parallel_dims.cp_enabled
+                    trainer.engine.parallel_dims.get_mesh("cp").get_group().group_name
+                    if trainer.engine.parallel_dims.cp_enabled
                     else None
                 )
                 fsdp_pg_name = (
-                    get_simple_fsdp_mesh(trainer.parallel_dims).get_group().group_name
+                    get_simple_fsdp_mesh(trainer.engine.parallel_dims)
+                    .get_group()
+                    .group_name
                 )
                 code = trainer._traced_step.gm.graph.python_code("self").src
                 trainer.close()

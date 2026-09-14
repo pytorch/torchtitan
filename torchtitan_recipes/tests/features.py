@@ -51,14 +51,14 @@ class SDCReplayMismatchTrainer(Trainer):
         super().__init__(config)
         self._num_forward_backward_calls = 0
 
-    def forward_backward_step(
+    def _forward_backward_microbatch(
         self,
         *,
-        input_dict: dict[str, Any] | list[dict[str, Any]],
+        batch: dict[str, Any] | list[dict[str, Any]],
         global_valid_tokens: torch.Tensor,
     ) -> torch.Tensor:
-        loss = super().forward_backward_step(
-            input_dict=input_dict,
+        loss = super()._forward_backward_microbatch(
+            batch=batch,
             global_valid_tokens=global_valid_tokens,
         )
         self._num_forward_backward_calls += 1
@@ -66,7 +66,7 @@ class SDCReplayMismatchTrainer(Trainer):
             return loss
 
         with torch.no_grad():
-            for model_part in self.model_parts:
+            for model_part in self.engine.model_parts:
                 for parameter in model_part.parameters():
                     if parameter.grad is None:
                         continue
@@ -92,8 +92,8 @@ class SDCReplayMismatchTrainer(Trainer):
             assert error.rank == 0
             assert error.signature_mismatch is not None
             assert error.signature_mismatch.startswith("gradient:0:")
-            assert self.sdc_replayer is not None
-            assert self.sdc_replayer.steps_since_reset == 0
+            assert self.engine.sdc_replayer is not None
+            assert self.engine.sdc_replayer.steps_since_reset == 0
             logger.info("Detected expected %s", error)
             return
         raise AssertionError("Expected SDC replay to detect the injected mismatch.")
@@ -549,6 +549,6 @@ def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
     config.checkpoint.enable = True
-    config.checkpoint.create_seed_checkpoint = True
+    config.create_seed_checkpoint = True
     config.training.disable_cuda_graphs = True
     return config
