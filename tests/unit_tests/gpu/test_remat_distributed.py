@@ -336,9 +336,13 @@ class TestDistributedRematRegions(DTensorTestBase):
                 "nccl:all_to_all",
             ),
         ):
-            with self.subTest(
-                inner_attention=inner_attention_type.__name__
-            ), _use_spmd_types(mesh):
+            with (
+                self.subTest(inner_attention=inner_attention_type.__name__),
+                # Match TorchTitan's runtime invariant: the SPMD mesh is
+                # thread-local, so backward and remat replay run on this thread.
+                torch.autograd.set_multithreading_enabled(False),
+                _use_spmd_types(mesh),
+            ):
                 torch.manual_seed(42)
 
                 def build_model():
