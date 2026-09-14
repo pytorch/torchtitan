@@ -19,6 +19,7 @@ import torch.nn.functional as F
 
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.tools import utils
 
 # PyTorch's default ignore index for cross-entropy loss
 logger = logging.getLogger(__name__)
@@ -200,12 +201,17 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         )
 
         grad_update = out_of_range.to(log_probs.dtype) - 1.0
-        # An elementwise one-hot avoids aten.index_put_ and aten.scatter_, which XPU graph capture rejects even with static shapes.
-        col_idx = torch.arange(
-            ctx.local_vocab_size, device=local_labels.device
-        ).unsqueeze(0)
-        one_hot = (col_idx == local_labels.unsqueeze(-1)).to(log_probs.dtype)
-        grad_input = one_hot * grad_update.unsqueeze(-1)
+        if utils.device_type == "xpu":
+            # An elementwise one-hot avoids aten.index_put_ and aten.scatter_, which XPU graph capture rejects even with static shapes.
+            col_idx = torch.arange(
+                ctx.local_vocab_size, device=local_labels.device
+            ).unsqueeze(0)
+            one_hot = (col_idx == local_labels.unsqueeze(-1)).to(log_probs.dtype)
+            grad_input = one_hot * grad_update.unsqueeze(-1)
+        else:
+            grad_input = torch.zeros_like(log_probs)
+            row_idx = torch.arange(local_labels.shape[0], device=local_labels.device)
+            grad_input[row_idx, local_labels] = grad_update
 
         # reduction="none" gives a per-token ``[T]`` upstream grad; unsqueeze to
         # ``[T, 1]`` to broadcast over the local vocab. "sum" gives the scalar
