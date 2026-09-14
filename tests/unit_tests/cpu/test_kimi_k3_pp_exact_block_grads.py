@@ -4,11 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import unittest
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.pipelining.schedules import ScheduleInterleaved1F1B
-from torch.testing._internal.common_utils import run_tests
+from torch.distributed.pipelining.stage import _PipelineStageBase
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -26,19 +28,26 @@ NUM_BLOCKS = NUM_LAYERS // LAYERS_PER_BLOCK
 HEAD, READOUT, INPUT = NUM_LAYERS, NUM_LAYERS + 1, NUM_LAYERS + 2
 DIM = NUM_LAYERS + 3
 TOKENS, MICROBATCHES, STEPS = 1, 4, 3
-# Layers per stage: pp4 x vp4 with the head alone on the last stage, and two layers per stage.
+# Layers per stage on 4 ranks: pp4 x vp4 with the head alone on the last stage, two
+# layers per stage, and uneven stages that each open a block after their first layer.
 SPLITS = {
-    16: [[0], [1, 2]] + [[s + 1] for s in range(2, 15)] + [[]],
-    8: [[2 * s, 2 * s + 1] for s in range(8)],
+    "pp4 x vp4, head alone": [[0], [1, 2]] + [[s + 1] for s in range(2, 15)] + [[]],
+    "pp4 x vp2": [[2 * s, 2 * s + 1] for s in range(8)],
+    "pp4 x vp2, blocks open inside stages": [
+        [0, 1],
+        [2, 3, 4],
+        [5],
+        [6, 7, 8, 9],
+        [10],
+        [11, 12, 13],
+        [14],
+        [15],
+    ],
 }
 
 
 class _ExactStage(nn.Module):
-    """A stage of a Kimi K3-shaped model whose block gradients are small integers.
-
-    Layer ``l`` reads channel ``l`` of block ``b`` twice with weight ``b + 1`` and the head
-    reads channel ``HEAD``, so every sum of block-gradient contributions is exact in any dtype.
-    """
+    """A Kimi K3-shaped pipeline stage whose block gradients are small integers."""
 
     def __init__(
         self, layers: list[int], *, first: bool, last: bool, dtype: torch.dtype
@@ -140,11 +149,9 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
     """With integer block gradients the rank cache, the whole-stack transport and a
     single device agree bitwise at every step, in bf16 and fp32."""
 
-    device_type = "cpu"
-
     @property
-    def backend(self) -> str:
-        return "gloo"
+    def device_type(self) -> str:
+        return "cpu"
 
     @property
     def world_size(self) -> int:
@@ -161,8 +168,12 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
             AttnResPipelineStage(module, s, num_stages, torch.device("cpu"))
             for module, s in zip(modules, mine, strict=True)
         ]
+        schedule_stages: list[_PipelineStageBase] = list(stages)
         schedule = ScheduleInterleaved1F1B(
-            stages, n_microbatches=MICROBATCHES, loss_fn=_loss, scale_grads=False
+            schedule_stages,
+            n_microbatches=MICROBATCHES,
+            loss_fn=_loss,
+            scale_grads=False,
         )
         layout = infer_block_layout_tables_from_stages(
             stages,
@@ -182,8 +193,10 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
         def step(inputs, targets):
             losses: list[torch.Tensor] = []
             args = (inputs,) if 0 in mine else ()
-            kwargs = {"target": targets, "losses": losses} if last in mine else {}
-            schedule.step(*args, **kwargs)
+            if last in mine:
+                schedule.step(*args, target=targets, losses=losses)
+            else:
+                schedule.step(*args)
             return [loss.detach() for loss in losses]
 
         sent = sum(len(layout.delta_to_send(s)) for s in range(num_stages))
@@ -192,8 +205,8 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
     @with_comms
     def test_rank_cache_matches_whole_stack_and_single_device(self):
         for dtype in (torch.bfloat16, torch.float32):
-            for num_stages, split in SPLITS.items():
-                with self.subTest(dtype=dtype, num_stages=num_stages):
+            for name, split in SPLITS.items():
+                with self.subTest(dtype=dtype, split=name):
                     reference = _run_single_device(split, dtype)
                     cached, cached_sent = self._run_pipeline(split, dtype, cache=True)
                     naive, naive_sent = self._run_pipeline(split, dtype, cache=False)
@@ -203,11 +216,17 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
                         for grads, losses in (cached[step], naive[step]):
                             for block, grad in grads.items():
                                 expected = _expected_block_grad(block, dtype)
-                                torch.testing.assert_close(grad, ref_grads[block], rtol=0, atol=0)
-                                torch.testing.assert_close(grad, expected, rtol=0, atol=0)
+                                torch.testing.assert_close(
+                                    grad, ref_grads[block], rtol=0, atol=0
+                                )
+                                torch.testing.assert_close(
+                                    grad, expected, rtol=0, atol=0
+                                )
                             if losses:
-                                torch.testing.assert_close(losses, ref_losses, rtol=0, atol=0)
+                                torch.testing.assert_close(
+                                    losses, ref_losses, rtol=0, atol=0
+                                )
 
 
 if __name__ == "__main__":
-    run_tests()
+    unittest.main()
