@@ -6,6 +6,7 @@
 
 from .activation import ActivationFn, SiTUGLU, SwiGLU
 from .attention import (
+    AllGatherQKVLinear,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
@@ -24,7 +25,13 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
-from .linear import Linear, PartialBiasRowwiseLinear, RouterGateLinear
+from .linear import (
+    AllGatherLinear,
+    Linear,
+    LinearReduceScatter,
+    PartialBiasRowwiseLinear,
+    RouterGateLinear,
+)
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .nn_modules import (
     Conv1d,
@@ -39,6 +46,8 @@ from .nn_modules import (
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "AllGatherQKVLinear",
+    "AllGatherLinear",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
@@ -63,6 +72,7 @@ __all__ = [
     "InnerAttention",
     "LayerNorm",
     "Linear",
+    "LinearReduceScatter",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "PartialBiasRowwiseLinear",
