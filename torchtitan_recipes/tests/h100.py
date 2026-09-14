@@ -9,7 +9,7 @@
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
-    TensorParallelFeedForwardTransform,
+    TensorParallelTransform,
 )
 
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
@@ -29,7 +29,7 @@ def llama3_debugmodel_tp2_asynctp_compile() -> Trainer.Config:
     config.compile.enable = True
     config.parallelism.tensor_parallel_degree = 2
     config.compile.enable_async_tensor_parallel = True
-    return apply_transforms(config, [TensorParallelFeedForwardTransform()])
+    return apply_transforms(config, [TensorParallelTransform()])
 
 
 def llama3_debugmodel_dist_gemm_tp2() -> Trainer.Config:

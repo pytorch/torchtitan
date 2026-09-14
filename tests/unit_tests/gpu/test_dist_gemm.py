@@ -35,11 +35,11 @@ from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     convert_config_type,
     LoRAConverter,
-    TensorParallelFeedForwardTransform,
+    TensorParallelTransform,
     transform_model_config_,
 )
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.common.attention import AllGatherQKVLinear
+from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_dense_ffn_sharding,
@@ -50,7 +50,7 @@ from torchtitan.models.common.dist_gemm import (
     AsyncLinearReduceScatter,
     DistGEMMFeedForward,
 )
-from torchtitan.models.common.linear import Linear, LinearReduceScatter
+from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
@@ -65,10 +65,10 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
         return model_registry("debugmodel").model
 
-    def test_default_keeps_plain_feed_forward_linears(self):
+    def test_default_keeps_plain_projections(self):
         for layer in self._model_config().layers:
-            self.assertIs(type(layer.attention.qkv_linear), AllGatherQKVLinear.Config)
-            self.assertIs(type(layer.attention.wo), LinearReduceScatter.Config)
+            self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
+            self.assertIs(type(layer.attention.wo), Linear.Config)
             self.assertIs(type(layer.feed_forward.w13), Linear.Config)
             self.assertIs(type(layer.feed_forward.w2), Linear.Config)
 
@@ -149,16 +149,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
         self.assertIsNone(async_layer.feed_forward.sharding_config.in_dst_shardings)
         self.assertIsNotNone(async_layer.feed_forward.sharding_config.out_src_shardings)
-        self.assertIsNone(
-            async_layer.feed_forward.w2.sharding_config.out_src_shardings
-        )
-        self.assertIsNone(
-            async_layer.feed_forward.w2.sharding_config.out_dst_shardings
-        )
+        self.assertIsNone(async_layer.feed_forward.w2.sharding_config.out_src_shardings)
+        self.assertIsNone(async_layer.feed_forward.w2.sharding_config.out_dst_shardings)
 
     def test_projection_boundaries_survive_lora_config_wrappers(self):
         """The transformed FFN boundary encloses LoRA projection work."""
-        model = TensorParallelFeedForwardTransform().transform(self._model_config())
+        model = TensorParallelTransform().transform(self._model_config())
         model = LoRAConverter.Config().build().convert(model)
         layer = model.layers[0]
         set_gqa_attention_sharding(layer.attention, enable_sp=True)
