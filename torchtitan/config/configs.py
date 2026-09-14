@@ -27,10 +27,9 @@ The command-line surface is frozen either way, so annotate a new field with
 """
 
 from dataclasses import dataclass, field
-from typing import Annotated, Literal
+from typing import Literal
 
 import torch
-import tyro
 
 
 @dataclass(kw_only=True, slots=True)
@@ -231,26 +230,23 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
-    pipeline_parallel_defer_recv: Annotated[bool, tyro.conf.Suppress] = False
-    """Place pipeline receives immediately before their first consumer."""
+    pipeline_parallel_max_param_unsharded_stages: int | None = None
+    """Maximum local pipeline stages whose parameters may remain unsharded.
 
-    pipeline_parallel_reuse_recv_buffers: Annotated[bool, tyro.conf.Suppress] = False
-    """Reuse schedule-planned receive buffers across non-overlapping actions."""
+    By default, all local stages may remain unsharded to maximize communication
+    overlap. Set a smaller value to reduce peak parameter memory at the cost of
+    potentially exposing additional FSDP all-gather communication.
+    """
 
-    pipeline_parallel_per_direction_p2p: Annotated[bool, tyro.conf.Suppress] = False
-    """Use one process group per directed physical-rank PP edge."""
-
-    pipeline_parallel_max_active_stages: Annotated[int, tyro.conf.Suppress] = 3
-    """Maximum FSDP stages kept unsharded by a looped pipeline schedule."""
-
-    pipeline_parallel_unshard_lookahead: Annotated[
-        Literal["default", "auto"] | tuple[int, ...], tyro.conf.Suppress
-    ] = "default"
+    pipeline_parallel_unshard_lookahead: Literal["auto", "full"] | tuple[
+        int, ...
+    ] = "auto"
     """FSDP prefetch distance for a looped pipeline schedule.
 
-    ``"default"`` prefetches the full residency window. ``"auto"`` selects
-    PyTorch's rank-aware policy. A tuple provides one explicit distance per
-    pipeline group rank.
+    ``"auto"`` uses a rank-aware distance bounded by
+    ``pipeline_parallel_max_param_unsharded_stages``. ``"full"`` prefetches
+    the full residency window. A tuple provides one explicit distance per
+    pipeline rank for schedules that benefit from asymmetric prefetch.
     """
 
     context_parallel_degree: int = 1
@@ -286,27 +282,34 @@ class ParallelismConfig:
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
             )
-        if self.pipeline_parallel_max_active_stages < 1:
-            raise ValueError("pipeline_parallel_max_active_stages must be positive")
+        if (
+            self.pipeline_parallel_max_param_unsharded_stages is not None
+            and self.pipeline_parallel_max_param_unsharded_stages < 1
+        ):
+            raise ValueError(
+                "pipeline_parallel_max_param_unsharded_stages must be positive"
+            )
         lookahead = self.pipeline_parallel_unshard_lookahead
         if isinstance(lookahead, str):
-            valid_lookahead = lookahead in {"default", "auto"}
+            valid_lookahead = lookahead in {"auto", "full"}
         elif isinstance(lookahead, tuple):
             valid_lookahead = len(lookahead) == self.pipeline_parallel_degree and all(
-                not isinstance(value, bool)
-                and isinstance(value, int)
-                and 1 <= value <= self.pipeline_parallel_max_active_stages
+                not isinstance(value, bool) and isinstance(value, int) and value >= 1
                 for value in lookahead
             )
+            max_unsharded = self.pipeline_parallel_max_param_unsharded_stages
+            if valid_lookahead and max_unsharded is not None:
+                valid_lookahead = all(value <= max_unsharded for value in lookahead)
         else:
             valid_lookahead = False
         if not valid_lookahead:
             raise ValueError(
-                "pipeline_parallel_unshard_lookahead must be 'default', 'auto', "
-                "or a tuple with one integer per pipeline rank within "
-                "[1, pipeline_parallel_max_active_stages="
-                f"{self.pipeline_parallel_max_active_stages}], got {lookahead!r} "
-                f"for pipeline degree {self.pipeline_parallel_degree}"
+                "pipeline_parallel_unshard_lookahead must be 'auto', 'full', "
+                "or a tuple with one positive integer per pipeline rank. "
+                "Tuple values may not exceed "
+                "pipeline_parallel_max_param_unsharded_stages when that limit "
+                f"is set; got {lookahead!r} for pipeline degree "
+                f"{self.pipeline_parallel_degree}"
             )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
@@ -398,9 +401,8 @@ class CommConfig:
     Options:
     - "default": Normal distributed training with real communication
     - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
-    - "real_pp_fake_spmd_backend": Testing-only mode with one physical process
-      per PP rank. PP uses a real device process group while all other axes use
-      a larger fake logical world selected through ``NGPU``.
+    - "real_pp_fake_spmd_backend": Real pipeline communication with fake SPMD
+      communication. The physical world size must equal the PP degree.
     """
 
 
