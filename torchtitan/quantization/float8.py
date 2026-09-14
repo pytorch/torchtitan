@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.protocols.module import Module
 
 
@@ -39,21 +39,21 @@ except ImportError:
     Float8Linear = None
 
 
-_float8_experts_cache: dict[type, type] = {}
+_float8_grouped_linear_cache: dict[type, type] = {}
 
 
-def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
+def _get_float8_grouped_linear_cls(parent_cls: type[GroupedLinear]) -> type:
     """Get or create a Float8-quantized subclass of *parent_cls*.
 
-    Works for any ``GroupedExperts`` subclass (e.g. gpt-oss variants).
+    Works for any ``GroupedLinear`` subclass (e.g. GPT-OSS projections).
     The returned class has a proper ``_owner`` set by ``__init_subclass__``.
     """
-    if parent_cls in _float8_experts_cache:
-        return _float8_experts_cache[parent_cls]
+    if parent_cls in _float8_grouped_linear_cache:
+        return _float8_grouped_linear_cache[parent_cls]
 
     parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
 
-    class Float8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+    class Float8GroupedLinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             pass
@@ -64,19 +64,19 @@ def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
 
             self._float8_op_config = Float8TrainingOpConfig()
 
-        def _grouped_mm(self, *, A, weight_EOI, offs):
+        def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
             from torchao.prototype.moe_training.utils import (
                 _quantize_then_scaled_grouped_mm,
             )
 
             return _quantize_then_scaled_grouped_mm(
-                A,
+                input_RI,
                 weight_EOI.bfloat16().transpose(-2, -1),
                 config=self._float8_op_config,
-                offs=offs,
+                offs=offsets_E,
             )
 
-    Float8GroupedExperts.__name__ = f"Float8{parent_cls.__name__}"
-    Float8GroupedExperts.__qualname__ = f"Float8{parent_cls.__name__}"
-    _float8_experts_cache[parent_cls] = Float8GroupedExperts
-    return Float8GroupedExperts
+    Float8GroupedLinear.__name__ = f"Float8{parent_cls.__name__}"
+    Float8GroupedLinear.__qualname__ = f"Float8{parent_cls.__name__}"
+    _float8_grouped_linear_cache[parent_cls] = Float8GroupedLinear
+    return Float8GroupedLinear

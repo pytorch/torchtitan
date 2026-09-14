@@ -5,17 +5,29 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
 
-from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
 )
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import GroupedLinear
+
+
+class _RecordingGroupedLinear(GroupedLinear):
+    recorded_weight: torch.Tensor
+
+    def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
+        self.recorded_weight = weight_EOI
+        return super()._grouped_mm(
+            input_RI=input_RI,
+            weight_EOI=weight_EOI,
+            offsets_E=offsets_E,
+        )
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -42,67 +54,114 @@ class _FixedRouter(nn.Module):
             num_tokens, self.top_k, dtype=torch.int64, device=x_TD.device
         )
         routing_map_TE = torch.zeros(
-            num_tokens, self.num_experts, dtype=torch.bool, device=x_TD.device
+            num_tokens,
+            self.num_experts,
+            dtype=torch.bool,
+            device=x_TD.device,
         ).scatter_(-1, topk_expert_ids_TK, True)
         return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
 
 
 class TestMoE(unittest.TestCase):
-    def test_grouped_experts_use_configured_activation(self):
-        activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
-        experts = GroupedExperts.Config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-            activation_fn=activation_fn,
-        ).build()
-        gate_RF = torch.randn(3, 8)
-        up_RF = torch.randn(3, 8)
-
-        expected_RF = activation_fn.build()(gate_RF, up_RF)
-        actual_RF = experts.activation_fn(gate_RF, up_RF)
-        torch.testing.assert_close(actual_RF, expected_RF)
-
-    def test_grouped_experts_use_fused_gate_up_parameter(self):
-        experts = GroupedExperts.Config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-        ).build()
-
-        self.assertEqual(
-            {name for name, _ in experts.named_parameters(recurse=False)},
-            {"w13_E2FD", "w2_EDF"},
+    def test_grouped_linear_structured_output(self):
+        grouped = _RecordingGroupedLinear(
+            GroupedLinear.Config(
+                group_size=2,
+                in_features=8,
+                out_features=(2, 8),
+            )
         )
-        self.assertEqual(tuple(experts.w13_E2FD.shape), (2, 2, 8, 4))
-        weight_EOI = experts.w13_E2FD.flatten(1, 2)
-        self.assertEqual(tuple(weight_EOI.shape), (2, 16, 4))
-        self.assertEqual(
-            weight_EOI.untyped_storage().data_ptr(),
-            experts.w13_E2FD.untyped_storage().data_ptr(),
-        )
-
-    def test_grouped_experts_checkpoint_uses_logical_projection_keys(self):
-        source = GroupedExperts.Config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-        ).build()
         with torch.no_grad():
-            source.w13_E2FD.copy_(torch.randn_like(source.w13_E2FD))
-            source.w2_EDF.copy_(torch.randn_like(source.w2_EDF))
+            identity = torch.eye(8)
+            grouped.weight[0].copy_(torch.stack((identity, identity)))
+            grouped.weight[1].copy_(torch.stack((2 * identity, 2 * identity)))
 
-        state_dict = source.state_dict()
-        self.assertEqual(set(state_dict), {"w1_EFD", "w2_EDF", "w3_EFD"})
+        input = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)
+        output = grouped(
+            input,
+            torch.tensor([2, 3], dtype=torch.int32),
+        )
 
-        target = GroupedExperts.Config(
+        self.assertEqual(output.shape, (3, 2, 8))
+        self.assertEqual(grouped.recorded_weight.shape, (2, 16, 8))
+        self.assertEqual(
+            grouped.recorded_weight.untyped_storage().data_ptr(),
+            grouped.weight.untyped_storage().data_ptr(),
+        )
+        torch.testing.assert_close(
+            output,
+            torch.stack((input, input), dim=1)
+            * input.new_tensor([1, 1, 2]).reshape(-1, 1, 1),
+        )
+
+    def test_grouped_linear_uses_local_weight_shape(self):
+        """Local expert and feature shards determine the runtime output shape."""
+        grouped = GroupedLinear.Config(
+            group_size=2,
+            in_features=8,
+            out_features=(2, 8),
+        ).build()
+        identity_OI = torch.eye(8, dtype=torch.bfloat16)[:4]
+        grouped.weight = nn.Parameter(
+            torch.stack((identity_OI, 2 * identity_OI)).unsqueeze(0)
+        )
+
+        input_RI = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)
+        output_R2O = grouped(
+            input_RI,
+            torch.tensor([3], dtype=torch.int32),
+        )
+
+        self.assertEqual(output_R2O.shape, (3, 2, 4))
+        torch.testing.assert_close(
+            output_R2O,
+            torch.stack((input_RI[:, :4], 2 * input_RI[:, :4]), dim=1),
+        )
+
+    def test_routed_experts_own_structured_linears(self):
+        init = {
+            "w1_EFD": nn.init.zeros_,
+            "w2_EDF": nn.init.zeros_,
+            "w3_EFD": nn.init.ones_,
+        }
+        config = make_routed_experts_config(
             dim=4,
             hidden_dim=8,
             num_experts=2,
-        ).build()
-        target.load_state_dict(state_dict)
-        torch.testing.assert_close(target.w13_E2FD, source.w13_E2FD)
-        torch.testing.assert_close(target.w2_EDF, source.w2_EDF)
+            top_k=1,
+            param_init=init,
+            comm_backend="standard",
+        )
+        routed_experts = config.build()
+
+        self.assertEqual(routed_experts.w13.weight.shape, (2, 2, 8, 4))
+        self.assertEqual(routed_experts.w2.weight.shape, (2, 4, 8))
+        self.assertEqual(set(routed_experts.state_dict()), {"w13.weight", "w2.weight"})
+
+    def test_routed_expert_config_validates_projection_contract(self):
+        config = make_routed_experts_config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=2,
+            top_k=1,
+            param_init={
+                "w1_EFD": nn.init.zeros_,
+                "w2_EDF": nn.init.zeros_,
+                "w3_EFD": nn.init.ones_,
+            },
+            comm_backend="standard",
+        )
+
+        with self.assertRaisesRegex(ValueError, "same number of experts"):
+            replace(
+                config,
+                w2=replace(config.w2, group_size=3),
+            )
+        with self.assertRaisesRegex(ValueError, "gate and up projections"):
+            replace(
+                config,
+                w13=replace(config.w13, out_features=8),
+            )
 
     def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
         num_experts = 2
@@ -121,7 +180,11 @@ class TestMoE(unittest.TestCase):
                 hidden_dim=8,
                 num_experts=num_experts,
                 top_k=top_k,
-                param_init={},
+                param_init={
+                    "w1_EFD": nn.init.zeros_,
+                    "w2_EDF": nn.init.zeros_,
+                    "w3_EFD": nn.init.ones_,
+                },
                 comm_backend="standard",
             ),
         ).build()
