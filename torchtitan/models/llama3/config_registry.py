@@ -19,6 +19,8 @@ from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
+    apply_transforms,
+    AsyncTensorParallelTransform,
     Float8LinearConverter,
     MXFP8LinearConverter,
     NVFP4LinearConverter,
@@ -130,8 +132,9 @@ def llama3_debugmodel_dist_gemm(
     The fused modules take and return plain local tensors.
     """
     config = llama3_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry(
-        "debugmodel", seq_len=seq_len, tp_gemm_backend="dist_gemm"
+    config = apply_transforms(
+        config,
+        [AsyncTensorParallelTransform()],
     )
     return config
 

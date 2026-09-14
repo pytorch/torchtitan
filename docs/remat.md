@@ -58,6 +58,31 @@ to a qualified name such as `attention.qkv` and select whether it is saved or
 recomputed. Without an enclosing `remat.checkpoint`, `remat.region` does not
 change execution.
 
+## Tensor-parallel communication boundaries
+
+The common `GQAttention` and `FeedForward` projection regions own their TP
+communication boundaries:
+
+```text
+qkv or w13 region:
+    input all-gather or placement conversion
+    projection GEMM
+
+wo or w2 region:
+    projection GEMM
+    output reduce-scatter or all-reduce
+```
+
+Under `spmd_types`, the common attention and feed-forward implementations issue
+these redistributions explicitly around their projection modules. This keeps
+the complete operation inside the surrounding remat region and works for
+projection implementations installed by converters such as LoRA or
+quantization.
+
+`AsyncTensorParallelTransform` replaces these synchronous projections with
+symmetric-memory implementations that overlap the same communication and
+GEMM. The logical remat region names and save policy remain unchanged.
+
 ## Declaring recomputation dependencies
 
 During the original forward, `torch_remat` determines whether an output from a
