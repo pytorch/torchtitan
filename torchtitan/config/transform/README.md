@@ -20,16 +20,16 @@ config = apply_transforms(
 )
 ```
 
-Tensor-parallel feed-forward implementations use the same pattern:
+Tensor-parallel attention and feed-forward implementations use the same pattern:
 
 ```python
 config.parallelism.tensor_parallel_degree = 8
-config = apply_transforms(config, [TensorParallelFeedForwardTransform()])
+config = apply_transforms(config, [TensorParallelTransform()])
 ```
 
-The transformed feed-forward owns its input and output collectives. Pass
-``feed_forward=DistGEMMFeedForward`` to overlap those collectives with the
-adjacent GEMMs.
+The transform selects communication-aware QKV, attention-output, and dense FFN
+implementations. Pass ``feed_forward=DistGEMMFeedForward`` to overlap the FFN
+collectives with the adjacent GEMMs.
 
 `apply_transforms` deep-copies the trainer config. It orders and applies the
 transforms, then validates the result. It returns the changed copy. The input

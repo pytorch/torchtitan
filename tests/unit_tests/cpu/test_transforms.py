@@ -15,14 +15,19 @@ from torchtitan.config.transform import (
     ContextParallelTransform,
     convert_config_type,
     ModelConfigTransform,
-    TensorParallelFeedForwardTransform,
+    TensorParallelTransform,
     transform_model_config_,
 )
 
-from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention import (
+    AllGatherQKVLinear,
+    FlexInnerAttention,
+    QKVLinear,
+)
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import Linear, LinearReduceScatter
 from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
 from torchtitan.protocols.module import Module
 
@@ -208,7 +213,7 @@ class TestContextParallelTransform(unittest.TestCase):
             ContextParallelTransform(inner_attention=FlexInnerAttention)
 
 
-class TestTensorParallelFeedForwardTransform(unittest.TestCase):
+class TestTensorParallelTransform(unittest.TestCase):
     @staticmethod
     def _config():
         from torchtitan.models.llama3.config_registry import llama3_debugmodel
@@ -217,11 +222,13 @@ class TestTensorParallelFeedForwardTransform(unittest.TestCase):
         config.parallelism.tensor_parallel_degree = 2
         return config
 
-    def test_replaces_dense_block_feed_forwards(self):
+    def test_replaces_common_attention_and_dense_block_feed_forwards(self):
         config = self._config()
-        result = apply_transforms(config, [TensorParallelFeedForwardTransform()])
+        result = apply_transforms(config, [TensorParallelTransform()])
 
         for layer in result.model_spec.model.layers:
+            self.assertIsInstance(layer.attention.qkv_linear, AllGatherQKVLinear.Config)
+            self.assertIsInstance(layer.attention.wo, LinearReduceScatter.Config)
             self.assertIsInstance(layer.feed_forward, TensorParallelFeedForward.Config)
             self.assertIsNotNone(layer.feed_forward.w13.sharding_config)
             assert layer.feed_forward.w2.sharding_config is not None
@@ -230,17 +237,18 @@ class TestTensorParallelFeedForwardTransform(unittest.TestCase):
             )
             self.assertIsNone(layer.feed_forward.w2.sharding_config.out_dst_shardings)
         for layer in config.model_spec.model.layers:
+            self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
+            self.assertIs(type(layer.attention.wo), Linear.Config)
             self.assertNotIsInstance(
                 layer.feed_forward, TensorParallelFeedForward.Config
             )
 
-    def test_selects_dist_gemm_without_replacing_attention(self):
+    def test_selects_dist_gemm_with_synchronous_attention(self):
         config = self._config()
-        original_qkv_type = type(config.model_spec.model.layers[0].attention.qkv_linear)
         result = apply_transforms(
             config,
             [
-                TensorParallelFeedForwardTransform(
+                TensorParallelTransform(
                     feed_forward=DistGEMMFeedForward,
                 )
             ],
@@ -248,7 +256,8 @@ class TestTensorParallelFeedForwardTransform(unittest.TestCase):
 
         for layer in result.model_spec.model.layers:
             self.assertIsInstance(layer.feed_forward, DistGEMMFeedForward.Config)
-            self.assertIs(type(layer.attention.qkv_linear), original_qkv_type)
+            self.assertIsInstance(layer.attention.qkv_linear, AllGatherQKVLinear.Config)
+            self.assertIsInstance(layer.attention.wo, LinearReduceScatter.Config)
             assert layer.feed_forward.w2.sharding_config is not None
             self.assertIsNone(layer.feed_forward.w2.sharding_config.out_src_shardings)
 
@@ -259,7 +268,7 @@ class TestTensorParallelFeedForwardTransform(unittest.TestCase):
             shared_experts=copy.deepcopy(source),
         )
 
-        transformed = TensorParallelFeedForwardTransform().transform(model)
+        transformed = TensorParallelTransform().transform(model)
 
         self.assertIsInstance(
             transformed.feed_forward, TensorParallelFeedForward.Config
@@ -270,7 +279,7 @@ class TestTensorParallelFeedForwardTransform(unittest.TestCase):
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
         config = self._config()
-        result = apply_transforms(config, [TensorParallelFeedForwardTransform()])
+        result = apply_transforms(config, [TensorParallelTransform()])
         model = result.model_spec.model
         set_llama3_sharding_config(model, enable_sp=True)
         feed_forward = model.layers[0].feed_forward
@@ -287,7 +296,7 @@ class TestTensorParallelFeedForwardTransform(unittest.TestCase):
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
         config = self._config()
-        result = apply_transforms(config, [TensorParallelFeedForwardTransform()])
+        result = apply_transforms(config, [TensorParallelTransform()])
         model = result.model_spec.model
         set_llama3_sharding_config(model, enable_sp=False)
 
@@ -297,7 +306,7 @@ class TestTensorParallelFeedForwardTransform(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, "must inherit TensorParallelFeedForward"
         ):
-            TensorParallelFeedForwardTransform(feed_forward=FeedForward)
+            TensorParallelTransform(feed_forward=FeedForward)
 
 
 if __name__ == "__main__":

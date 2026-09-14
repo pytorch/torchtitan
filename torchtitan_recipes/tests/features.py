@@ -18,7 +18,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
-    TensorParallelFeedForwardTransform,
+    TensorParallelTransform,
 )
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -156,7 +156,7 @@ def llama3_debugmodel_tp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.tensor_parallel_degree = 2
-    return apply_transforms(config, [TensorParallelFeedForwardTransform()])
+    return apply_transforms(config, [TensorParallelTransform()])
 
 
 def llama3_debugmodel_ce_loss_tp2() -> Trainer.Config:
@@ -164,7 +164,7 @@ def llama3_debugmodel_ce_loss_tp2() -> Trainer.Config:
     # Non-chunked CE loss does not pass SPMD type checking yet.
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.tensor_parallel_degree = 2
-    return apply_transforms(config, [TensorParallelFeedForwardTransform()])
+    return apply_transforms(config, [TensorParallelTransform()])
 
 
 def llama3_debugmodel_tp2_no_sp() -> Trainer.Config:
@@ -176,7 +176,7 @@ def llama3_debugmodel_tp2_no_sp() -> Trainer.Config:
 def llama3_debugmodel_tp2_compile() -> Trainer.Config:
     config = llama3_debugmodel_compile()
     config.parallelism.tensor_parallel_degree = 2
-    return apply_transforms(config, [TensorParallelFeedForwardTransform()])
+    return apply_transforms(config, [TensorParallelTransform()])
 
 
 def llama3_debugmodel_tp2_asynctp_compile_spmd_types() -> Trainer.Config:

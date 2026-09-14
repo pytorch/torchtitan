@@ -19,18 +19,14 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import (
-    AllGatherQKVLinear,
     FlexInnerAttention,
     GQAttention,
+    QKVLinear,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import (
-    Linear,
-    LinearReduceScatter,
-    RouterGateLinear,
-)
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
@@ -212,14 +208,13 @@ def make_gqa_config(
     ``rope=None`` builds a NoPE layer (no positional encoding); see
     :class:`GQAttention`.
 
-    TP communication is owned by the projection leaves. A model-config transform
-    may replace their synchronous implementations with async variants.
+    A model-config transform selects tensor-parallel projection implementations.
     """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
     rope = dataclasses.replace(rope) if rope is not None else None
 
-    qkv = AllGatherQKVLinear.Config(
+    qkv = QKVLinear.Config(
         head_dim=per_head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv,
@@ -241,7 +236,7 @@ def make_gqa_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=LinearReduceScatter.Config(
+        wo=Linear.Config(
             in_features=n_heads * per_head_dim,
             out_features=dim,
             param_init=wo_param_init,

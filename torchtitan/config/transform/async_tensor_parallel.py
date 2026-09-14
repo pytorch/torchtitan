@@ -8,18 +8,15 @@
 
 from dataclasses import dataclass
 
-from torchtitan.models.common.attention import AllGatherQKVLinear
-
 from torchtitan.models.common.dist_gemm import (
     AsyncAllGatherQKVLinear,
     AsyncLinearReduceScatter,
     DistGEMMFeedForward,
 )
-from torchtitan.models.common.linear import LinearReduceScatter
 from torchtitan.protocols.module import Module
 
-from .base import convert_config_type, ModelConfigTransform
-from .tensor_parallel import TensorParallelFeedForwardTransform
+from .base import ModelConfigTransform
+from .tensor_parallel import TensorParallelTransform
 
 __all__ = ["AsyncTensorParallelTransform"]
 
@@ -29,25 +26,8 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
     """Select async attention projections and the dist-GEMM dense FFN."""
 
     def transform(self, model: Module.Config) -> Module.Config:
-        TensorParallelFeedForwardTransform(feed_forward=DistGEMMFeedForward).transform(
-            model
-        )
-        for source, replacement in (
-            (AllGatherQKVLinear, AsyncAllGatherQKVLinear),
-            (LinearReduceScatter, AsyncLinearReduceScatter),
-        ):
-            for _, config, parent, attr in list(
-                model.traverse(source.Config, recurse=True)
-            ):
-                if config._owner is not source:
-                    continue
-                assert isinstance(config, Module.Config)
-                assert parent is not None
-                converted = convert_config_type(config, replacement)
-                if isinstance(parent, list):
-                    assert isinstance(attr, int)
-                    parent[attr] = converted
-                else:
-                    assert isinstance(attr, str)
-                    setattr(parent, attr, converted)
-        return model
+        return TensorParallelTransform(
+            qkv_linear=AsyncAllGatherQKVLinear,
+            output_linear=AsyncLinearReduceScatter,
+            feed_forward=DistGEMMFeedForward,
+        ).transform(model)
