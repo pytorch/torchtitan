@@ -26,3 +26,50 @@ def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
     config = llama3_debugmodel_mxfp8()
     config.parallelism.data_parallel_shard_degree = 2
     return config
+
+
+def deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
+    from torchtitan.models.deepseek_v3.config_registry import (
+        deepseek_v3_debugmodel_dist_moe_bf16,
+    )
+
+    config = deepseek_v3_debugmodel_dist_moe_bf16(
+        seq_len=128,
+        max_routing_imbalance_factor=2.0,
+    )
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.training.steps = 4
+    config.checkpoint.enable = False
+    return config
+
+
+def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
+    from torchtitan.models.deepseek_v3.config_registry import (
+        deepseek_v3_debugmodel_dist_moe_mxfp8,
+    )
+
+    config = deepseek_v3_debugmodel_dist_moe_mxfp8(
+        seq_len=128,
+        max_routing_imbalance_factor=2.0,
+    )
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.training.steps = 4
+    config.checkpoint.enable = False
+    return config
+
+
+def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
+    """Exercise host-backed VMM scratch preallocation with MXFP8 DistMoE."""
+    from torchtitan.components.dist_moe import DistMoeRoutedExperts
+
+    config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
+    assert config.model_spec is not None
+    experts = list(config.model_spec.model.traverse(DistMoeRoutedExperts.Config))
+    assert experts, "the VMM integration recipe requires routed experts"
+    for _, expert, _, _ in experts:
+        assert isinstance(expert, DistMoeRoutedExperts.Config)
+        expert.vmm_host_scratch_imbalance_factor = 4.0
+        expert.prefetch_vmm = True
+    return config

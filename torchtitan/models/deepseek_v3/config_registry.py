@@ -4,14 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Literal
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
+    apply_transforms,
+    DistMoeTransform,
     Float8GroupedLinearConverter,
     Float8LinearConverter,
+    ModelConfigTransform,
+    MXFP8DistMoeTransform,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
 )
@@ -23,13 +29,14 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 
 
 def deepseek_v3_mxfp8_linear_converter_config(
-    *, model_compile_enabled: bool
+    *, model_compile_enabled: bool, include_lm_head: bool = False
 ) -> MXFP8LinearConverter.Config:
     """Build the dense MXFP8 policy shared by eager and GraphTrainer configs.
 
@@ -41,15 +48,55 @@ def deepseek_v3_mxfp8_linear_converter_config(
     Checkpointing changes when the selected representation is recreated and how
     long it remains live.
     """
+    fqns = ["attention", "shared_experts", "feed_forward"]
+    if include_lm_head:
+        fqns.append("lm_head")
     return MXFP8LinearConverter.Config(
         model_compile_enabled=model_compile_enabled,
-        fqns=["attention", "shared_experts", "feed_forward"],
+        fqns=fqns,
         linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.wkv_b",
             "feed_forward.w2",
             "shared_experts.w2",
         ],
     )
+
+
+def _enable_dist_moe(
+    config: Trainer.Config,
+    *,
+    flavor: str,
+    seq_len: int | None,
+    dtype: Literal["bf16", "mxfp8"],
+    max_routing_imbalance_factor: float,
+) -> Trainer.Config:
+    """Replace routed experts while preserving the base training recipe."""
+    model_compile_enabled = (
+        config.compile.enable and "model" in config.compile.components
+    )
+    converters: list[ModelConfigConverter.Config] = []
+    if dtype == "mxfp8":
+        converters.append(
+            deepseek_v3_mxfp8_linear_converter_config(
+                model_compile_enabled=model_compile_enabled,
+                include_lm_head=True,
+            )
+        )
+    config.model_spec = model_registry(
+        flavor,
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=converters,
+    )
+    config.dataloader.max_num_documents = 512
+    transforms: list[ModelConfigTransform] = [
+        DistMoeTransform(
+            max_routing_imbalance_factor=max_routing_imbalance_factor,
+        )
+    ]
+    if dtype == "mxfp8":
+        transforms.append(MXFP8DistMoeTransform(fast_math=True))
+    return apply_transforms(config, transforms)
 
 
 def deepseek_v3_debugmodel(
@@ -133,6 +180,36 @@ def deepseek_v3_debugmodel_mxfp8(
     return config
 
 
+def deepseek_v3_debugmodel_dist_moe_bf16(
+    seq_len: int | None = None,
+    *,
+    max_routing_imbalance_factor: float = 1.0,
+) -> Trainer.Config:
+    """Build the debug DSV3 recipe with BF16 Dist-MoE experts."""
+    return _enable_dist_moe(
+        deepseek_v3_debugmodel(seq_len=seq_len),
+        flavor="debugmodel",
+        seq_len=seq_len,
+        dtype="bf16",
+        max_routing_imbalance_factor=max_routing_imbalance_factor,
+    )
+
+
+def deepseek_v3_debugmodel_dist_moe_mxfp8(
+    seq_len: int | None = None,
+    *,
+    max_routing_imbalance_factor: float = 1.0,
+) -> Trainer.Config:
+    """Build the debug DSV3 recipe with MXFP8 Dist-MoE experts and linears."""
+    return _enable_dist_moe(
+        deepseek_v3_debugmodel(seq_len=seq_len),
+        flavor="debugmodel",
+        seq_len=seq_len,
+        dtype="mxfp8",
+        max_routing_imbalance_factor=max_routing_imbalance_factor,
+    )
+
+
 def deepseek_v3_debugmodel_hybridep(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
@@ -192,6 +269,28 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
     )
     config.training.disable_cuda_graphs = False
     return config
+
+
+def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
+    """Build the DSV3 16B recipe with BF16 Dist-MoE experts."""
+    return _enable_dist_moe(
+        deepseek_v3_16b(seq_len=seq_len),
+        flavor="16B",
+        seq_len=seq_len,
+        dtype="bf16",
+        max_routing_imbalance_factor=4.0,
+    )
+
+
+def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config:
+    """Build the DSV3 16B recipe with MXFP8 Dist-MoE experts and linears."""
+    return _enable_dist_moe(
+        deepseek_v3_16b(seq_len=seq_len),
+        flavor="16B",
+        seq_len=seq_len,
+        dtype="mxfp8",
+        max_routing_imbalance_factor=4.0,
+    )
 
 
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
@@ -258,3 +357,25 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
         ],
     )
     return config
+
+
+def deepseek_v3_671b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
+    """Build the DSV3 671B recipe with BF16 Dist-MoE experts."""
+    return _enable_dist_moe(
+        deepseek_v3_671b(seq_len=seq_len),
+        flavor="671B",
+        seq_len=seq_len,
+        dtype="bf16",
+        max_routing_imbalance_factor=4.0,
+    )
+
+
+def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config:
+    """Build the DSV3 671B recipe with MXFP8 Dist-MoE experts and linears."""
+    return _enable_dist_moe(
+        deepseek_v3_671b(seq_len=seq_len),
+        flavor="671B",
+        seq_len=seq_len,
+        dtype="mxfp8",
+        max_routing_imbalance_factor=4.0,
+    )
