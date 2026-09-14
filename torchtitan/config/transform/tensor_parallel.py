@@ -16,7 +16,11 @@ from torchtitan.models.common.attention import (
     QKVLinear,
 )
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
-from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
+from torchtitan.models.common.dist_gemm import (
+    AsyncAllGatherQKVLinear,
+    AsyncLinearReduceScatter,
+    DistGEMMFeedForward,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear, LinearReduceScatter
 from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
@@ -27,7 +31,7 @@ from .base import convert_config_type, ModelConfigTransform
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["TensorParallelTransform"]
+__all__ = ["AsyncTensorParallelTransform", "TensorParallelTransform"]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -125,3 +129,15 @@ class TensorParallelTransform(ModelConfigTransform):
                 setattr(parent, attr, replacement)
             num_replaced += 1
         return model, num_replaced
+
+
+@dataclass(kw_only=True, slots=True)
+class AsyncTensorParallelTransform(ModelConfigTransform):
+    """Select async attention projections and the dist-GEMM dense FFN."""
+
+    def transform(self, model: Module.Config) -> Module.Config:
+        return TensorParallelTransform(
+            qkv_linear=AsyncAllGatherQKVLinear,
+            output_linear=AsyncLinearReduceScatter,
+            feed_forward=DistGEMMFeedForward,
+        ).transform(model)
