@@ -26,7 +26,7 @@ from torchao.prototype.mx_formats.kernels import (
     triton_mx_block_rearrange,
 )
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, StackedLinear
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
@@ -36,7 +36,11 @@ from .tensor import (
 )
 
 
-__all__ = ["InputActivationFormatForBackward", "MXFP8Linear"]
+__all__ = [
+    "InputActivationFormatForBackward",
+    "MXFP8Linear",
+    "MXFP8StackedLinear",
+]
 
 # Activation and gradient quantization takes a scaling mode; the 32x32 weight
 # cast hardcodes RCEIL. Pin the two to match, so both operands of a GEMM round
@@ -299,6 +303,36 @@ class _MXFP8LinearFunction(torch.autograd.Function):
 spmd.register_local_autograd_function(_MXFP8LinearFunction)
 
 
+def _mxfp8_linear(
+    input: torch.Tensor,
+    weight_NK: torch.Tensor,
+    bias_N: torch.Tensor | None,
+    input_activation_format_for_backward: InputActivationFormatForBackward,
+) -> torch.Tensor:
+    if isinstance(weight_NK, _UnshardedFSDPTensor):
+        operands = weight_NK.operands
+    else:
+        # Without a data-parallel unshard lifecycle, build operands for this
+        # invocation. The wrapper remains the autograd input so gradients reach
+        # the parameter.
+        with torch.no_grad():
+            operands = _quantize_mxfp8_weight(
+                weight_NK._tensor
+                if isinstance(weight_NK, _LinearShardedTensorWithMXFP8Compute)
+                else weight_NK
+            )
+    return _MXFP8LinearFunction.apply(
+        input,
+        weight_NK,
+        operands.weight_qdata_fprop_KN,
+        operands.weight_scale_fprop_swizzled,
+        operands.weight_qdata_dgrad_NK,
+        operands.weight_scale_dgrad_swizzled,
+        bias_N,
+        input_activation_format_for_backward,
+    )
+
+
 class MXFP8Linear(Linear):
     """Linear using 1D activations and cached 32x32 weight quantization."""
 
@@ -356,36 +390,67 @@ class MXFP8Linear(Linear):
         # _UnshardedFSDPTensor holding the quantized operands, so the weight
         # arrives here already quantized and the type identifies which state we
         # are in.
-        if isinstance(weight_NK, _UnshardedFSDPTensor):
-            operands = weight_NK.operands
-        else:
-            # No data parallel implementation owns this weight's lifecycle, so
-            # it still holds high-precision storage and the operands are built
-            # per invocation. Eager FSDP2 always installs an unsharded tensor, but
-            # GraphTrainer under the spmd_types backend does not: its runtime
-            # hands forward a plain annotated local tensor, so the wrapper
-            # SimpleFSDP's parametrization built never reaches here. Quantize
-            # the storage rather than the wrapper, which the kernels cannot
-            # consume; ``weight_NK`` itself stays wrapped so autograd returns
-            # the gradient to the parameter.
-            with torch.no_grad():
-                operands = _quantize_mxfp8_weight(
-                    weight_NK._tensor
-                    if isinstance(weight_NK, _LinearShardedTensorWithMXFP8Compute)
-                    else weight_NK
-                )
-            # Nothing caches this across calls, so a frozen weight is
-            # requantized on every forward. Training pays that anyway, since
-            # the weight changes each optimizer step; inference does not.
-            # TODO(anijain2305): key the operands on the parameter's
-            # version counter so a frozen weight is quantized once.
-        return _MXFP8LinearFunction.apply(
+        return _mxfp8_linear(
             input,
             weight_NK,
-            operands.weight_qdata_fprop_KN,
-            operands.weight_scale_fprop_swizzled,
-            operands.weight_qdata_dgrad_NK,
-            operands.weight_scale_dgrad_swizzled,
             self.bias,
             self.input_activation_format_for_backward,
         )
+
+
+class MXFP8StackedLinear(StackedLinear):
+    """MXFP8 linear whose parameter retains stacked matrix dimensions."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(StackedLinear.Config):
+        input_activation_format_for_backward: InputActivationFormatForBackward = "bf16"
+
+        def __post_init__(self) -> None:
+            StackedLinear.Config.__post_init__(self)
+            if (
+                self.input_activation_format_for_backward
+                not in _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD
+            ):
+                raise ValueError(
+                    "MXFP8 input_activation_format_for_backward must be one of "
+                    f"{_INPUT_ACTIVATION_FORMATS_FOR_BACKWARD}; got "
+                    f"{self.input_activation_format_for_backward!r}."
+                )
+            for name, value in (
+                ("in_features", self.in_features),
+                ("out_features", self.out_features),
+            ):
+                if value % _MXFP8_BLOCK_SIZE:
+                    raise ValueError(
+                        f"MXFP8 requires {name} divisible by {_MXFP8_BLOCK_SIZE}; "
+                        f"got {name}={value}."
+                    )
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.input_activation_format_for_backward = (
+            config.input_activation_format_for_backward
+        )
+        self.weight = nn.Parameter(
+            _LinearShardedTensorWithMXFP8Compute(self.weight.data),
+            requires_grad=self.weight.requires_grad,
+        )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        local_out_features = self.weight.shape[-2]
+        if local_out_features % _MXFP8_BLOCK_SIZE:
+            raise ValueError(
+                "MXFP8 requires local out_features divisible by "
+                f"{_MXFP8_BLOCK_SIZE}; got {local_out_features}. Adjust the "
+                "StackedLinear out_features or TP degree so quantization "
+                "blocks do not span projection boundaries."
+            )
+        weight_NK = self.weight.flatten(0, -2)
+        bias_N = None if self.bias is None else self.bias.flatten()
+        output = _mxfp8_linear(
+            input,
+            weight_NK,
+            bias_N,
+            self.input_activation_format_for_backward,
+        )
+        return output.unflatten(-1, self.weight.shape[:-1])

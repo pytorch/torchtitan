@@ -13,6 +13,7 @@
   from ``Configurable.Config``.
 """
 
+import math
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -43,6 +44,76 @@ class Linear(nn.Linear, Module):
             config.out_features,
             bias=config.bias,
         )
+
+
+class StackedLinearBase:
+    """Marker for projections whose weight contains stacked matrices."""
+
+    weight: nn.Parameter
+    bias: nn.Parameter | None
+
+
+class StackedLinear(StackedLinearBase, Module):
+    """A stack of linear projections evaluated by one GEMM.
+
+    The parameter has shape ``[num_linears, out_features, in_features]``.
+    Forward presents a zero-copy flattened matrix to the GEMM and restores the
+    stack dimension on its result. Keeping each matrix contiguous in parameter
+    storage prevents quantization blocks from spanning projection boundaries.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        in_features: int
+        out_features: int
+        num_linears: int
+        bias: bool = False
+
+        def __post_init__(self) -> None:
+            if self.in_features <= 0:
+                raise ValueError(
+                    f"in_features must be positive, got {self.in_features}"
+                )
+            if self.out_features <= 0:
+                raise ValueError(
+                    f"out_features must be positive, got {self.out_features}"
+                )
+            if self.num_linears <= 0:
+                raise ValueError(
+                    f"num_linears must be positive, got {self.num_linears}"
+                )
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.in_features = config.in_features
+        self.out_features = config.out_features
+        self.num_linears = config.num_linears
+        self.weight = nn.Parameter(
+            torch.empty(config.num_linears, config.out_features, config.in_features)
+        )
+        if config.bias:
+            self.bias = nn.Parameter(
+                torch.empty(config.num_linears, config.out_features)
+            )
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.weight.flatten(0, -2), a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in = self.in_features
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def _linear(self, input: torch.Tensor) -> torch.Tensor:
+        weight = self.weight.flatten(0, -2)
+        bias = None if self.bias is None else self.bias.flatten()
+        return F.linear(input, weight, bias)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = self._linear(input)
+        return output.unflatten(-1, self.weight.shape[:-1])
 
 
 @spmd.register_local_autograd_function
@@ -147,4 +218,6 @@ __all__ = [
     "Linear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
+    "StackedLinear",
+    "StackedLinearBase",
 ]

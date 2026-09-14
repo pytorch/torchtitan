@@ -24,7 +24,7 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
-from .linear import Linear, PartialBiasRowwiseLinear, RouterGateLinear
+from .linear import Linear, PartialBiasRowwiseLinear, RouterGateLinear, StackedLinear
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .nn_modules import (
     Conv1d,
@@ -69,6 +69,7 @@ __all__ = [
     "RMSNorm",
     "RoPE",
     "RouterGateLinear",
+    "StackedLinear",
     "ScaledDotProductInnerAttention",
     "SiLU",
     "ActivationFn",

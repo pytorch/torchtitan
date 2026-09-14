@@ -15,6 +15,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
+    stacked_colwise_config,
 )
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -129,16 +130,7 @@ def _shared_expert_colwise_config() -> ShardingConfig:
     Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
     to Replicate for the column-sharded matmul; output is Shard(1) on features.
     """
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(0)),
-            "bias": dense_param_placement(tp=spmd.S(0)),
-        },
-        in_src_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
-        in_dst_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
-        out_src_shardings=dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0)),
-        out_dst_shardings=dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0)),
-    )
+    return stacked_colwise_config()
 
 
 def _shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:

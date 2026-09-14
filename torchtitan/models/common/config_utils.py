@@ -31,7 +31,7 @@ from torchtitan.models.common.dist_gemm import (
     RowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import Linear, RouterGateLinear, StackedLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
@@ -55,12 +55,19 @@ DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
 
 
 def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
-    """Build an initializer for an interleaved 2D gate/up linear weight."""
+    """Build an initializer for a stacked gate/up linear weight."""
 
     def _init(t: torch.Tensor) -> None:
-        gate_up = t.unflatten(0, (-1, 2))
+        # Initialize through the former interleaved view so a fixed RNG seed
+        # produces the same logical W1/W3 tensors with the same TP/FSDP setup.
+        # The transpose maps Shard(1) on [2, F, D] to the old Shard(0) on
+        # [F, 2, D], preserving DTensor's distributed RNG offsets.
+        gate_up = t.transpose(0, 1).contiguous()
         gate_init(gate_up[:, 0])
         up_init(gate_up[:, 1])
+        fused = gate_up.transpose(0, 1).contiguous()
+        with torch.no_grad():
+            t.copy_(fused)
 
     return _init
 
@@ -293,9 +300,10 @@ def make_ffn_config(
     """
     ffn_cls = DistGEMMFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
     return ffn_cls.Config(
-        w13=Linear.Config(
+        w13=StackedLinear.Config(
             in_features=dim,
-            out_features=2 * hidden_dim,
+            out_features=hidden_dim,
+            num_linears=2,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
         w2=Linear.Config(
