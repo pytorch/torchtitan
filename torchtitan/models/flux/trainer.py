@@ -143,7 +143,7 @@ class FluxTrainer(Trainer):
             )
             yield input_dict
 
-    def forward_backward_step(
+    def _forward_backward_step(
         self,
         *,
         input_dict: dict[str, Any] | list[dict[str, Any]],
@@ -156,7 +156,8 @@ class FluxTrainer(Trainer):
             input_dict: Dictionary containing model inputs and labels.
             global_valid_tokens: Optional tensor tracking the total number of
                 valid tokens across all processes.
-                This field is a placeholder for now as we rescale the loss within forward_backward_step for FLUX.
+                This field is a placeholder because FLUX rescales the loss in
+                this method.
 
         Returns:
             torch.Tensor: The computed loss value for this training step
@@ -293,7 +294,7 @@ class FluxTrainer(Trainer):
 
         input_dict = next(data_iterator)
 
-        loss = self.forward_backward_step(input_dict=input_dict)
+        loss = self._forward_backward_step(input_dict=input_dict)
 
         grad_norm = dist_utils.clip_grad_norm_(
             [p for m in self.model_parts for p in m.parameters()],
