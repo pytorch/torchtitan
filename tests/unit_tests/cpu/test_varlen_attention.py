@@ -70,6 +70,7 @@ class TestPackedVarlenMetadata(unittest.TestCase):
             max_num_documents=2,
             max_context_length=4,
         )
+
         torch.testing.assert_close(
             metadata.cu_seq_q,
             torch.tensor([0, 2, 4, 8, 8], dtype=torch.int32),
