@@ -53,9 +53,6 @@ class Module(nn.Module, Configurable):
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
 
-    def close(self) -> None:
-        """Release resources owned directly by this module, if any."""
-
     def remat_region_name(self, local_name: str) -> str:
         """Return a region's configured qualified name or its local name."""
         if self._remat_module_fqn:
