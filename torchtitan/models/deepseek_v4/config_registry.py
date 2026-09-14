@@ -815,3 +815,28 @@ def deepseek_v4_flash_8k_ep4_blk32_profile(
         profiler_active=2,
     )
     return config
+
+
+def deepseek_v4_flash_8k_ep4_blk32_batch2(
+    seq_len: int | None = 8192,
+) -> Trainer.Config:
+    """F26. The best config (EP=4 + block_size 32) at 2x microbatch.
+
+    Batch has never actually been measured on flash: the two earlier attempts
+    were built on the EP=16 base before EP=4 won, and neither reached step 1.
+    4x (job 330) hit the 3 h wall clock and 2x (job 341) was cancelled after
+    30 min of silence, so both are non-results rather than verdicts.
+
+    Memory is not the constraint. The best config peaks at 76.58 GiB of the
+    ~276.5 GiB card, leaving ~200 GiB, and under FullAC the *stored* activation
+    term is small by construction -- doubling the microbatch should cost tens of
+    GiB, not hundreds.
+
+    The real cost is startup: a new microbatch shape re-benchmarks every flex
+    kernel, ~18 s x 64 blocks = ~19 min before step 1, on top of normal init.
+    Run this with a wall clock well past 3 h so that cost cannot be mistaken
+    for a hang again.
+    """
+    config = _flash_8k_ep_blk(4, 32, seq_len)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    return config
