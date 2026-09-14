@@ -185,12 +185,8 @@ class TestApplyFsdpStackedLinearSharding(DTensorTestBase):
         model.load_state_dict(state_dict)
 
     @with_comms
-    def test_tp_fsdp_initialization_matches_previous_w13_layout(self):
-        """TP+FSDP preserves seeded logical W13 initialization."""
-        from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
-
-        from torchtitan.models.common import Linear
-        from torchtitan.models.common.decoder_sharding import colwise_config
+    def test_tp_fsdp_initializes_gate_and_up_separately(self):
+        from torchtitan.models.common.config_utils import fused_gate_up_param_init
         from torchtitan.models.llama3 import model_registry
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
@@ -206,39 +202,13 @@ class TestApplyFsdpStackedLinearSharding(DTensorTestBase):
         parallel_dims.build_mesh()
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
 
-        def old_w13_init(tensor):
-            gate_up = tensor.unflatten(0, (-1, 2))
-            torch.nn.init.trunc_normal_(gate_up[:, 0], std=0.02)
-            torch.nn.init.trunc_normal_(gate_up[:, 1], std=0.02 / 2**0.5)
-
-        old_w13_config = Linear.Config(
-            in_features=256,
-            out_features=1536,
-            param_init={"weight": old_w13_init},
-            sharding_config=colwise_config(),
-        )
-        with torch.device("meta"):
-            old_w13 = old_w13_config.build()
-        old_w13.parallelize(parallel_dims)
-        fully_shard(
-            old_w13,
-            mesh=dp_mesh,
-            mp_policy=MixedPrecisionPolicy(
-                param_dtype=torch.bfloat16, reduce_dtype=torch.float32
-            ),
-            dp_mesh_dims=dp_mesh_dims,
-        )
-        old_w13.to_empty(device=self.device_type)
-        torch.manual_seed(42)
-        old_w13.init_states()
-        expected_w13 = (
-            old_w13.weight.full_tensor()
-            .unflatten(0, (768, 2))
-            .transpose(0, 1)
-            .contiguous()
-        )
-
         sharded_config = model_registry("debugmodel").model
+        sharded_config.layers[0].feed_forward.w13.param_init = (
+            fused_gate_up_param_init(
+                {"weight": lambda tensor: torch.nn.init.constant_(tensor, 1)},
+                {"weight": lambda tensor: torch.nn.init.constant_(tensor, 3)},
+            )
+        )
         set_llama3_sharding_config(sharded_config, enable_sp=True)
         with torch.device("meta"):
             sharded = sharded_config.build()
@@ -252,11 +222,11 @@ class TestApplyFsdpStackedLinearSharding(DTensorTestBase):
             dp_mesh_dims=dp_mesh_dims,
         )
         sharded.to_empty(device=self.device_type)
-        torch.manual_seed(42)
         sharded.layers["0"].feed_forward.w13.init_states()
 
         actual_w13 = sharded.layers["0"].feed_forward.w13.weight.full_tensor()
-        torch.testing.assert_close(actual_w13, expected_w13, rtol=0, atol=0)
+        torch.testing.assert_close(actual_w13[0], torch.ones_like(actual_w13[0]))
+        torch.testing.assert_close(actual_w13[1], 3 * torch.ones_like(actual_w13[1]))
 
         state_dict = sharded.state_dict()
         self.assertEqual(
