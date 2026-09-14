@@ -36,6 +36,15 @@ else:
     has_torchft = False
 
 
+def _set_fsdp_all_reduce_hook(
+    module: FSDPModule,
+    hook: Callable[[torch.Tensor], None],
+) -> None:
+    param_groups = module._get_fsdp_state()._fsdp_param_groups
+    for param_group in param_groups:
+        param_group._all_reduce_hook = hook
+
+
 class TorchFTManager(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -151,7 +160,7 @@ class TorchFTManager(Configurable):
 
             def apply_set_all_reduce_hook(m):
                 if isinstance(m, FSDPModule):
-                    m.set_all_reduce_hook(all_reduce_hook)
+                    _set_fsdp_all_reduce_hook(m, all_reduce_hook)
 
             for model_part in model_parts:
                 model_part.apply(apply_set_all_reduce_hook)
