@@ -69,8 +69,8 @@ def build_dist_muon(
     target tensor dimension 0 with ``block_size=R``; the leading dimension
     must be nonzero and divisible by ``R``. Each consecutive ``R`` rows forms
     one independent ``[R, C]`` matrix for local Muon compute. A native
-    batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
-    complete matrices. A single 2D matrix without ``BlockShard`` uses
+    batch-first ``[..., R, C]`` parameter uses ``Shard(0)`` to distribute
+    complete outer batches. A single 2D matrix without ``BlockShard`` uses
     whole-matrix compute such as ``Owned``.
     """
     return DistMuon(
@@ -213,10 +213,10 @@ def _initialize_dist_muon(
         else:
             compute_view_key = ("matrix_batch", compute_view.matrix_rows)
             global_compute_shape = compute_view.matrix_batch_shape(global_storage_shape)
-        if len(global_compute_shape) not in (2, 3):
+        if len(global_compute_shape) < 2:
             raise ValueError(
                 f"Muon parameter {fqn!r} compute shape "
-                f"{tuple(global_compute_shape)} must be 2D or batch-first 3D"
+                f"{tuple(global_compute_shape)} must contain matrix dimensions"
             )
         prepared_compute_layouts[fqn] = _PreparedParameterComputeLayout(
             compute_view_key=compute_view_key,
@@ -1044,7 +1044,7 @@ def _estimate_muon_compute_cost(
     matrix_shape: torch.Size,
     ns_steps: int,
 ) -> int:
-    rows, columns = matrix_shape
+    rows, columns = matrix_shape[-2:]
     short_dim, long_dim = sorted((rows, columns))
     # Each NS step has two s^2 * l matmuls and one s^3 matmul.
     return ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
@@ -1393,7 +1393,7 @@ def _is_supported_orthogonal_dim0_shard_redistribution(
     target_compute_sharding: _AxisComputeSharding | None,
     preserved_storage_placement: object,
 ) -> bool:
-    if compute_view is not None or ndim != 3:
+    if compute_view is not None or ndim < 3:
         return False
     if (
         type(source_storage_placement) is not Shard
@@ -1405,7 +1405,7 @@ def _is_supported_orthogonal_dim0_shard_redistribution(
     storage_dim = _normalize_dim(source_storage_placement.dim, ndim)
     compute_dim = _normalize_dim(target_compute_sharding.dim, ndim)
     preserved_dim = _normalize_dim(preserved_storage_placement.dim, ndim)
-    return storage_dim == 1 and compute_dim == preserved_dim == 0
+    return storage_dim == ndim - 2 and compute_dim == preserved_dim == 0
 
 
 def _resolve_storage_to_compute_transition(
@@ -1418,7 +1418,7 @@ def _resolve_storage_to_compute_transition(
     """Validate one storage layout and resolve its concrete compute transition."""
     local = param.to_local()
     if (
-        len(global_compute_shape) not in (2, 3)
+        len(global_compute_shape) < 2
         or torch.is_complex(param)
         or param.ndim < 2
         or not local.is_contiguous()
@@ -1608,7 +1608,7 @@ def _resolve_storage_to_compute_transition(
                     target_dim = _normalize_dim(target_compute_shard.dim, param.ndim)
                     preserved_dim = _normalize_dim(placement.dim, param.ndim)
                     if (
-                        storage_dim == 1
+                        storage_dim == param.ndim - 2
                         and target_dim == preserved_dim == 0
                         and type(redistribution_compute_sharding) is Shard
                         and redistribution_storage_mesh_axis < storage_mesh_axis
@@ -1706,11 +1706,11 @@ def _resolve_storage_to_compute_transition(
                 "use Owned() for one matrix or "
                 "BlockShard(dim=0, block_size=R) for row-concatenated matrices"
             )
-        if len(global_compute_shape) != 3 or any(
+        if len(global_compute_shape) < 3 or any(
             shard_dim != 0 for shard_dim in compute_shard_dims
         ):
             raise ValueError(
-                f"Muon sharded compute for parameter {fqn!r} requires a 3D "
+                f"Muon sharded compute for parameter {fqn!r} requires a "
                 "batch-first tensor sharded only on tensor dimension 0"
             )
         compute_sharding = Shard(0)
