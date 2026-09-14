@@ -23,13 +23,9 @@ from torchtitan.models.common import (
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
-    make_token_dispatcher_config,
+    make_routed_experts_config,
 )
-from torchtitan.models.common.moe import (
-    GroupedExperts,
-    RoutedExperts,
-    TokenChoiceTopKRouter,
-)
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
@@ -257,29 +253,20 @@ def _latent_moe_config(
             route_scale=1.0,
         ),
         routed_down=_linear(dim, latent_dim),
-        routed_experts=RoutedExperts.Config(
-            inner_experts=GroupedExperts.Config(
+        routed_experts=replace(
+            make_routed_experts_config(
                 dim=latent_dim,
                 hidden_dim=expert_hidden_dim,
                 num_experts=num_experts,
-                activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
+                top_k=top_k,
                 param_init={
                     "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
                     "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
                     "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
                 },
-            ),
-            # core's dispatcher factory: standard / deepep / hybridep per spec,
-            # as deepseek_v3; falls back to local
-            # dispatch when the ep mesh is None.
-            token_dispatcher=make_token_dispatcher_config(
-                num_experts=num_experts,
-                top_k=top_k,
                 comm_backend=moe_comm_backend,
-                # The routed experts consume the LATENT stream, so the
-                # dispatcher buffers size by latent_dim, not model dim.
-                hidden_dim=latent_dim,
             ),
+            activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
         ),
         routed_norm=_norm(latent_dim),
         routed_up=_linear(latent_dim, dim),

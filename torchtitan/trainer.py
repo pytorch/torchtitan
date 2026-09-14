@@ -17,13 +17,9 @@ from typing import Annotated, Any, cast
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
+import torch.distributed.config as dist_config
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.pipelining.schedules import (
-    _PipelineScheduleRuntime,
-    get_schedule_class,
-    PipelineScheduleMulti,
-)
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
@@ -189,18 +185,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "validation because validation reinitializes the shared "
                     "pipeline schedule. Disable validation or CUDA graphs."
                 )
-
-            if pp_enabled:
-                pp_schedule_class = (
-                    _PipelineScheduleRuntime
-                    if self.parallelism.pipeline_parallel_schedule_csv
-                    else get_schedule_class(self.parallelism.pipeline_parallel_schedule)
-                )
-                if issubclass(pp_schedule_class, PipelineScheduleMulti):
-                    raise ValueError(
-                        "CUDA graphs do not support looped pipeline schedules yet. "
-                        "Use a single-stage pipeline schedule or disable CUDA graphs."
-                    )
 
             if self.dataloader.max_num_documents is None:
                 for fqn, _, _, _ in self.model_spec.model.traverse(
@@ -714,13 +698,16 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:
         config = self.config
-        world_size = dist_utils.init_distributed(
+        dist_config.pipeline_per_direction_p2p = (
+            config.parallelism.pipeline_parallel_degree > 1
+        )
+        topology = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=config.dump_folder,
+            pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
-
-        return ParallelDims.from_config(config.parallelism, world_size)
+        return ParallelDims.from_config(config.parallelism, topology)
 
     def batch_generator(
         self, data_iterable: Iterable[TrainerBatch]

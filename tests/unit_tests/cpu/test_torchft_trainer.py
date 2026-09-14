@@ -14,7 +14,7 @@ import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import override
 from torchtitan.config.transform import LoRAConverter
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import DistributedTopology, ParallelDims
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import model_registry
 
@@ -35,7 +35,10 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
 
     def init_distributed(trainer):
         trainer.ft_manager = config.fault_tolerance.build()
-        return ParallelDims.from_config(config.parallelism, world_size=1)
+        return ParallelDims.from_config(
+            config.parallelism,
+            DistributedTopology(world_size=1),
+        )
 
     class ModelBuildReachedError(Exception):
         """Stop FT initialization at the model-build boundary."""
