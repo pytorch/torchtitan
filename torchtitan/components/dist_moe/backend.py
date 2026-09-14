@@ -20,7 +20,10 @@ from torch.distributed.pipelining.schedules import (
 )
 from torch.utils.hooks import RemovableHandle
 
+from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.module import Module
 from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor
 from torchtitan.quantization.mxfp8.dist_moe import (
@@ -54,35 +57,56 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "DistMoeRuntime",
     "DistMoeRoutedExperts",
     "MXFP8DistMoeRoutedExperts",
-    "setup_dist_moe",
+    "prepare_dist_moe_runtime",
 ]
 
 ActivationSlotPolicy = Literal["auto", "microbatch", "stage_microbatch"]
 
 
 @dataclass(eq=False)
-class _DistMoeRuntime:
-    """One context shared by all local Dist-MoE layers."""
+class DistMoeRuntime:
+    """Own the context shared by every DistMoE layer on one rank.
+
+    The trainer owns this object because its memory plan depends on the complete
+    local layer set and finalized distributed schedule. Modules only retain a
+    reference used by ``forward``.
+
+    Args:
+        config: Fully resolved configuration for the standalone DistMoE runtime.
+        group: Expert-parallel process group used by dispatch and combine.
+        device: CUDA device on which the context will be created.
+        prefetch: Optional host-backed VMM mapping prepared before model-state
+            initialization.
+        slots: Immutable mapping from ``(stage, microbatch)`` to activation slot
+            and local layer depth. Empty when pipeline parallelism is disabled.
+    """
 
     config: DistMoeConfig
     group: dist.ProcessGroup
+    device: torch.device
     prefetch: DistMoeVmmPrefetch | None
     slots: dict[tuple[int, int], tuple[int, int]] = field(default_factory=dict)
     context: DistMoeContext | None = None
     _selected: tuple[int, int] | None = None
     _pipeline_hooks: list[RemovableHandle] = field(default_factory=list)
 
-    def initialize(self, device: torch.device) -> None:
-        """Create the annex context once after module buffers are materialized."""
+    def initialize(self) -> None:
+        """Create the shared context after model parameters and buffers exist.
+
+        A prepared VMM mapping is consumed at most once. If context creation
+        fails, the mapping is closed before the exception is propagated.
+        Repeated successful calls are no-ops.
+        """
         if self.context is None:
             prefetch = self.prefetch
             try:
                 self.context = create_context(
                     group=self.group,
                     config=self.config,
-                    device=device,
+                    device=self.device,
                     prefetched_vmm=prefetch,
                 )
             finally:
@@ -90,30 +114,30 @@ class _DistMoeRuntime:
                 if self.context is None and prefetch is not None:
                     prefetch.close()
 
-    def select(self, stage_index: int, microbatch_index: int) -> None:
-        """Select the immutable slot and stage depth for one pipeline action."""
-        key = (stage_index, microbatch_index)
-        if key == self._selected:
-            return
-        try:
-            slot, depth = self.slots[key]
-        except KeyError as error:
-            raise ValueError(
-                "Dist-MoE has no activation slot for pipeline invocation " f"{key}"
-            ) from error
-        context = self.context
-        if context is None:
-            raise RuntimeError("Dist-MoE context is not initialized")
-        context.select_activation_slot(slot, depth)
-        self._selected = key
-
-    def select_from_stage_forward(
+    def select_pipeline_slot(
         self,
         module: torch.nn.Module,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
     ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
-        """Select one slot and consume pipeline-only forward metadata."""
+        """Select a precomputed PP activation slot before a stage forward.
+
+        Args:
+            module: Stage-root module invoking this forward pre-hook. It is not
+                otherwise inspected.
+            args: Positional stage-forward arguments, returned unchanged.
+            kwargs: Stage-forward keyword arguments containing the canonical
+                pipeline stage and microbatch indices.
+
+        Returns:
+            Updated arguments with the pipeline-only metadata removed, or
+            ``None`` when no metadata was supplied.
+
+        Raises:
+            RuntimeError: If metadata is incomplete or the context has not been
+                initialized.
+            ValueError: If no immutable slot was planned for the invocation.
+        """
         del module
         stage_index = kwargs.get("pipeline_stage_index")
         microbatch_index = kwargs.get("pipeline_microbatch_index")
@@ -123,14 +147,26 @@ class _DistMoeRuntime:
             raise RuntimeError(
                 "Dist-MoE pipeline forwards require integer stage and microbatch IDs"
             )
-        self.select(stage_index, microbatch_index)
+        key = (stage_index, microbatch_index)
+        if key != self._selected:
+            try:
+                slot, depth = self.slots[key]
+            except KeyError as error:
+                raise ValueError(
+                    f"Dist-MoE has no activation slot for pipeline invocation {key}"
+                ) from error
+            context = self.context
+            if context is None:
+                raise RuntimeError("Dist-MoE context is not initialized")
+            context.select_activation_slot(slot, depth)
+            self._selected = key
         model_kwargs = dict(kwargs)
         del model_kwargs["pipeline_stage_index"]
         del model_kwargs["pipeline_microbatch_index"]
         return args, model_kwargs
 
     def close(self) -> None:
-        """Release context-owned symmetric and VMM storage."""
+        """Idempotently remove PP hooks and release all runtime-owned storage."""
         for hook in self._pipeline_hooks:
             hook.remove()
         self._pipeline_hooks.clear()
@@ -142,14 +178,20 @@ class _DistMoeRuntime:
         if context is not None:
             context.close()
             self.context = None
+        self._selected = None
 
 
-class _DistMoeRoutedExperts(RoutedExperts):
-    """Common module contract for DistMoE compute variants."""
+class DistMoeRoutedExperts(RoutedExperts):
+    """BF16 experts whose backend owns dispatch, compute, and combine.
+
+    Construction materializes only the W13/W2 parameters and optional
+    postprocess module represented by the common routed-expert config. DistMoE
+    supplies the activation and dispatcher behavior at execution time.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(RoutedExperts.Config):
-        """Configure shared DistMoE execution and memory policy.
+        """Configure BF16 DistMoE execution, memory, and kernel policy.
 
         Args:
             max_routing_imbalance_factor: Maximum receive-row capacity relative
@@ -164,6 +206,7 @@ class _DistMoeRoutedExperts(RoutedExperts):
             num_sms: Optional number of SMs assigned to DistMoE kernels.
             wgrad_dtype: Weight-gradient output dtype.
             inplace_wgrad_accum: Accumulate WGRAD into parameter gradients.
+            kernel_config: Optional named BF16 CuTe kernel schedule.
         """
 
         max_routing_imbalance_factor: float = 1.0
@@ -175,9 +218,34 @@ class _DistMoeRoutedExperts(RoutedExperts):
         num_sms: int | None = None
         wgrad_dtype: Literal["bfloat16", "float32"] = "bfloat16"
         inplace_wgrad_accum: bool = False
+        kernel_config: str | None = None
 
         def __post_init__(self) -> None:
+            """Validate module structure and values before construction."""
             RoutedExperts.Config.__post_init__(self)
+            if (
+                type(self.w13) is not GroupedLinear.Config
+                or type(self.w2) is not GroupedLinear.Config
+                or type(self.activation_fn) is not SwiGLU.Config
+            ):
+                raise TypeError(
+                    "DistMoE requires the stock grouped-linear projections and "
+                    "SwiGLU"
+                )
+            if not isinstance(self.token_dispatcher, AllToAllTokenDispatcher.Config):
+                raise ValueError(
+                    "DistMoE owns expert communication and requires the standard "
+                    "all-to-all routed-expert config"
+                )
+            postprocess = self.expert_output_postprocess
+            owner = None if postprocess is None else postprocess._owner
+            if postprocess is not None and not callable(
+                getattr(owner, "to_dist_moe_postprocess", None)
+            ):
+                raise TypeError(
+                    f"{type(postprocess).__qualname__} cannot run inside DistMoE; "
+                    "its module must define to_dist_moe_postprocess()"
+                )
             if self.max_routing_imbalance_factor <= 0:
                 raise ValueError("max_routing_imbalance_factor must be positive")
             if self.num_activation_slots is not None and self.num_activation_slots <= 0:
@@ -216,18 +284,18 @@ class _DistMoeRoutedExperts(RoutedExperts):
         self.num_experts = config.w13.group_size
         self.top_k = config.token_dispatcher.top_k
         self._dist_moe_config = config
-        self._runtime: _DistMoeRuntime | None = None
+        self._runtime: DistMoeRuntime | None = None
 
     def parallelize(self, parallel_dims: ParallelDims) -> None:
         """Shard owned parameters without wiring the unused stock dispatcher."""
         Module.parallelize(self, parallel_dims)
 
-    def _weights(self) -> tuple[Any, Any]:
-        """Return the operands consumed by the configured DistMoE backend."""
+    def _dist_moe_weight_arguments(self) -> tuple[Any, Any]:
+        """Return W13 and W2 arguments for the standalone DistMoE call."""
         return self.w13.weight.flatten(1, 2), self.w2.weight
 
-    def _postprocess(self) -> DistMoeInputScaledRMSNorm | None:
-        """Translate the owned postprocess module to an annex descriptor."""
+    def _build_dist_moe_postprocess(self) -> DistMoeInputScaledRMSNorm | None:
+        """Translate the current postprocess parameters to a kernel descriptor."""
         module = self.expert_output_postprocess
         if module is None:
             return None
@@ -243,17 +311,6 @@ class _DistMoeRoutedExperts(RoutedExperts):
                 "to_dist_moe_postprocess() must return DistMoeInputScaledRMSNorm"
             )
         return postprocess
-
-    def _init_self_buffers(
-        self,
-        *,
-        buffer_device: torch.device | None = None,
-    ) -> None:
-        if self._runtime is None:
-            if self.w13.weight.device.type == "cpu" and buffer_device is None:
-                return
-            raise RuntimeError("DistMoE runtime was not configured")
-        self._runtime.initialize(buffer_device or self.w13.weight.device)
 
     def forward(
         self,
@@ -278,13 +335,13 @@ class _DistMoeRoutedExperts(RoutedExperts):
         runtime = self._runtime
         if runtime is None or runtime.context is None:
             raise RuntimeError("DistMoE context is not initialized")
-        w13, w2 = self._weights()
+        w13, w2 = self._dist_moe_weight_arguments()
         options = DistMoeExecutionOptions(
             inplace_wgrad_accum=self._dist_moe_config.inplace_wgrad_accum,
             wgrad_parameter_owners=(self.w13.weight, self.w2.weight)
             if self._dist_moe_config.inplace_wgrad_accum
             else None,
-            experts_output_postprocess=self._postprocess(),
+            experts_output_postprocess=self._build_dist_moe_postprocess(),
         )
         return run_dist_moe(
             x_TD.contiguous(),
@@ -296,25 +353,13 @@ class _DistMoeRoutedExperts(RoutedExperts):
             options=options,
         )
 
-    def close(self) -> None:
-        """Release the shared DistMoE runtime idempotently."""
-        runtime, self._runtime = self._runtime, None
-        if runtime is not None:
-            runtime.close()
-
-
-class DistMoeRoutedExperts(_DistMoeRoutedExperts):
-    """BF16 routed experts whose backend owns dispatch, compute, and combine."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(_DistMoeRoutedExperts.Config):
-        """Configure BF16 DistMoE kernels in addition to shared runtime policy."""
-
-        kernel_config: str | None = None
-
 
 class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
-    """MXFP8 DistMoE routed experts with FSDP-managed prepared weights."""
+    """MXFP8 DistMoE routed experts with FSDP-managed prepared weights.
+
+    Construction wraps W13 and W2 in TorchTitan's shared prepared-weight
+    lifecycle so each FSDP unshard produces the layouts consumed by DistMoE.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(DistMoeRoutedExperts.Config):
@@ -325,6 +370,7 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
         kernel_config: DistMoeBlockScaledKernelConfig | None = None
 
         def __post_init__(self) -> None:
+            """Validate the selected asynchronous block-scaled pipeline."""
             DistMoeRoutedExperts.Config.__post_init__(self)
             if self.pipeline not in ("staged", "mega"):
                 raise ValueError("Unsupported MXFP8 DistMoE pipeline")
@@ -340,7 +386,7 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
             requires_grad=self.w2.weight.requires_grad,
         )
 
-    def _weights(self) -> tuple[Any, Any]:
+    def _dist_moe_weight_arguments(self) -> tuple[Any, Any]:
         """Return prepared grouped MXFP8 operands for this unshard lifetime."""
         w13 = self.w13.weight
         w2 = self.w2.weight
@@ -357,14 +403,25 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
         return w13_arg, w2_arg
 
 
-def _annex_config(
-    module: _DistMoeRoutedExperts,
+def _build_dist_moe_runtime_config(
+    module: DistMoeRoutedExperts,
     *,
     max_num_tokens: int,
     num_moe_layers: int,
     num_activation_slots: int,
-):
-    """Translate one TorchTitan backend policy to the annex configuration."""
+) -> DistMoeConfig:
+    """Resolve one module policy into a standalone DistMoE configuration.
+
+    Args:
+        module: Local routed-expert module supplying shapes and kernel policy.
+        max_num_tokens: Maximum local input rows for one microbatch.
+        num_moe_layers: Number of layers represented by each activation slot.
+        num_activation_slots: Number of simultaneously live activation slots.
+
+    Returns:
+        A fully resolved configuration suitable for memory planning and context
+        creation.
+    """
     policy = module._dist_moe_config
     is_mxfp8 = isinstance(module, MXFP8DistMoeRoutedExperts)
     if is_mxfp8:
@@ -407,34 +464,57 @@ def _annex_config(
     )
 
 
-def _pipeline_stage_modules(
-    schedule: PipelineScheduleMulti,
-    model_parts: list[torch.nn.Module],
-) -> dict[int, list[_DistMoeRoutedExperts]]:
-    """Map each local logical stage to its Dist-MoE modules."""
-    stages = schedule._stages
-    if len(stages) != len(model_parts):
-        raise RuntimeError("pipeline schedule and model parts disagree")
-    result: dict[int, list[_DistMoeRoutedExperts]] = {}
-    for stage, part in zip(stages, model_parts, strict=True):
-        modules = [
-            module
-            for module in part.modules()
-            if isinstance(module, _DistMoeRoutedExperts)
-        ]
-        if modules:
-            result[stage.stage_index] = modules
-    return result
+@dataclass(frozen=True, slots=True)
+class _PipelineActivationPlan:
+    """Describe immutable PP activation ownership for the local rank."""
+
+    granularity: Literal["microbatch", "stage_microbatch"]
+    num_slots: int
+    layer_depth: int
+    assignments: dict[tuple[int, int], tuple[int, int]]
+    stage_indices: tuple[int, ...]
 
 
-def _pipeline_slots(
+def _plan_pipeline_activation_slots(
     schedule: PipelineScheduleMulti,
     *,
     pp_rank: int,
-    stage_modules: dict[int, list[_DistMoeRoutedExperts]],
-    policy: _DistMoeRoutedExperts.Config,
-) -> tuple[int, int, dict[tuple[int, int], tuple[int, int]], str]:
-    """Choose and materialize the configured pipeline activation-slot plan."""
+    model_parts: list[torch.nn.Module],
+    policy: DistMoeRoutedExperts.Config,
+) -> _PipelineActivationPlan:
+    """Choose the smallest configured schedule-derived PP activation plan.
+
+    Args:
+        schedule: Final multi-stage schedule whose resource lifetimes are
+            analyzed.
+        pp_rank: Physical pipeline rank represented by this process.
+        model_parts: Local stage modules in the same order as schedule stages.
+        policy: Shared activation-slot policy for local DistMoE modules.
+
+    Returns:
+        The selected slot granularity, allocation dimensions, immutable
+        stage/microbatch assignments, and participating stage indices.
+
+    Raises:
+        RuntimeError: If schedule stages and local model parts disagree or no
+            local pipeline stage contains DistMoE.
+    """
+    stages = schedule._stages
+    if len(stages) != len(model_parts):
+        raise RuntimeError("pipeline schedule and model parts disagree")
+    stage_modules = {
+        stage.stage_index: modules
+        for stage, part in zip(stages, model_parts, strict=True)
+        if (
+            modules := [
+                module
+                for module in part.modules()
+                if isinstance(module, DistMoeRoutedExperts)
+            ]
+        )
+    }
+    if not stage_modules:
+        raise RuntimeError("no local pipeline stage contains DistMoE")
     candidates = (
         ("microbatch", "stage_microbatch")
         if policy.activation_slot_policy == "auto"
@@ -467,46 +547,63 @@ def _pipeline_slots(
         for stage_index in stage_indices
         for microbatch_index in range(liveness.num_microbatches)
     }
-    return num_slots, depth, assignments, granularity
-
-
-@dataclass(frozen=True, slots=True)
-class _DistMoeSetup:
-    """Validated local context plan, ready to bind to model modules."""
-
-    config: DistMoeConfig
-    group: dist.ProcessGroup
-    modules: tuple[_DistMoeRoutedExperts, ...]
-    stage_modules: dict[int, list[_DistMoeRoutedExperts]]
-    assignments: dict[tuple[int, int], tuple[int, int]]
-    granularity: str
-    num_slots: int
-    layer_depth: int
-
-
-def _collect_dist_moe_modules(
-    model_parts: list[torch.nn.Module],
-) -> tuple[_DistMoeRoutedExperts, ...]:
-    """Return each DistMoE module once, preserving model traversal order."""
-    modules = (
-        module
-        for part in model_parts
-        for module in part.modules()
-        if isinstance(module, _DistMoeRoutedExperts)
+    return _PipelineActivationPlan(
+        granularity=granularity,
+        num_slots=num_slots,
+        layer_depth=depth,
+        assignments=assignments,
+        stage_indices=stage_indices,
     )
-    return tuple(dict.fromkeys(modules))
 
 
-def _validate_dist_moe_runtime(
-    modules: tuple[_DistMoeRoutedExperts, ...],
+def prepare_dist_moe_runtime(
     *,
+    config: Trainer.Config,
+    model_parts: list[torch.nn.Module],
+    parallel_dims: ParallelDims,
     device: torch.device,
-) -> _DistMoeRoutedExperts.Config:
-    """Validate properties that are known only after model construction."""
+    pp_schedule: object | None,
+) -> DistMoeRuntime | None:
+    """Prepare and attach one shared DistMoE runtime for the local rank.
+
+    This function runs after model parallelization and schedule construction but
+    before parameter materialization. It resolves the complete rank-local memory
+    plan, optionally starts VMM preparation, attaches the shared runtime to every
+    local DistMoE module, and installs PP slot-selection hooks. The trainer must
+    call :meth:`DistMoeRuntime.initialize` after model-state initialization and
+    :meth:`DistMoeRuntime.close` during teardown.
+
+    Args:
+        config: Final trainer configuration.
+        model_parts: Local model or pipeline-stage modules.
+        parallel_dims: Final distributed mesh dimensions.
+        device: CUDA device on which DistMoE will execute.
+        pp_schedule: Final pipeline schedule, or ``None`` without PP.
+
+    Returns:
+        The trainer-owned runtime, or ``None`` when the rank has no DistMoE
+        modules or is creating a seed checkpoint.
+
+    Raises:
+        RuntimeError: If required EP or PP topology is unavailable.
+        ValueError: If hardware, token shapes, or local module policies are
+            incompatible with one shared runtime.
+    """
+    modules = tuple(
+        dict.fromkeys(
+            module
+            for part in model_parts
+            for module in part.modules()
+            if isinstance(module, DistMoeRoutedExperts)
+        )
+    )
+    if not modules or config.checkpoint.create_seed_checkpoint:
+        return None
     if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 10:
         raise ValueError("DistMoE requires an SM100-or-newer CUDA device")
+
     policy = modules[0]._dist_moe_config
-    setup_policy = (
+    shared_policy = (
         policy.activation_slot_policy,
         policy.num_activation_slots,
         policy.prefetch_vmm,
@@ -517,165 +614,116 @@ def _validate_dist_moe_runtime(
             module._dist_moe_config.num_activation_slots,
             module._dist_moe_config.prefetch_vmm,
         )
-        != setup_policy
+        != shared_policy
         for module in modules[1:]
     ):
         raise ValueError(
             "All local DistMoE layers must share activation-slot and VMM-prefetch "
             "policy"
         )
-    return policy
 
-
-def _plan_dist_moe_setup(
-    *,
-    config: Trainer.Config,
-    modules: tuple[_DistMoeRoutedExperts, ...],
-    model_parts: list[torch.nn.Module],
-    parallel_dims: ParallelDims,
-    pp_schedule: object | None,
-    policy: _DistMoeRoutedExperts.Config,
-) -> _DistMoeSetup:
-    """Resolve topology, capacity, and schedule-derived activation ownership."""
     ep_mesh = parallel_dims.get_optional_mesh("ep", include_singleton_axes=True)
     if ep_mesh is None:
         raise RuntimeError("DistMoE requires an expert-parallel mesh")
     group = ep_mesh.get_group()
-
     local_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
     token_shards = parallel_dims.cp * parallel_dims.tp
     if local_tokens % token_shards:
         raise ValueError("DistMoE input tokens must divide evenly across CP and SP")
     max_num_tokens = local_tokens // token_shards
 
+    pipeline_plan: _PipelineActivationPlan | None = None
     num_slots = policy.num_activation_slots or 1
     layer_depth = len(modules)
     assignments: dict[tuple[int, int], tuple[int, int]] = {}
-    stage_modules: dict[int, list[_DistMoeRoutedExperts]] = {}
-    granularity = "none"
     if parallel_dims.pp_enabled:
         if not isinstance(pp_schedule, PipelineScheduleMulti):
             raise ValueError(
                 "DistMoE pipeline activation planning requires a multi-stage schedule"
             )
         pp_mesh = parallel_dims.get_optional_mesh("pp", include_singleton_axes=True)
-        assert pp_mesh is not None
-        stage_modules = _pipeline_stage_modules(pp_schedule, model_parts)
-        num_slots, layer_depth, assignments, granularity = _pipeline_slots(
+        if pp_mesh is None:
+            raise RuntimeError("pipeline parallelism requires a PP mesh")
+        pipeline_plan = _plan_pipeline_activation_slots(
             pp_schedule,
             pp_rank=pp_mesh.get_local_rank(),
-            stage_modules=stage_modules,
+            model_parts=model_parts,
             policy=policy,
         )
+        num_slots = pipeline_plan.num_slots
+        layer_depth = pipeline_plan.layer_depth
+        assignments = pipeline_plan.assignments
 
-    annex_config = _annex_config(
+    runtime_config = _build_dist_moe_runtime_config(
         modules[0],
         max_num_tokens=max_num_tokens,
         num_moe_layers=layer_depth,
         num_activation_slots=num_slots,
     )
     if any(
-        _annex_config(
+        _build_dist_moe_runtime_config(
             module,
             max_num_tokens=max_num_tokens,
             num_moe_layers=layer_depth,
             num_activation_slots=num_slots,
         )
-        != annex_config
+        != runtime_config
         for module in modules[1:]
     ):
-        raise ValueError("All local DistMoE layers must resolve one annex config")
-    return _DistMoeSetup(
-        config=annex_config,
-        group=group,
-        modules=modules,
-        stage_modules=stage_modules,
-        assignments=assignments,
-        granularity=granularity,
-        num_slots=num_slots,
-        layer_depth=layer_depth,
-    )
+        raise ValueError("All local DistMoE layers must resolve one runtime config")
 
-
-def _bind_dist_moe_setup(
-    setup: _DistMoeSetup,
-    *,
-    model_parts: list[torch.nn.Module],
-    pp_schedule: object | None,
-    device: torch.device,
-) -> None:
-    """Allocate one shared runtime and bind its static pipeline metadata hooks."""
+    ep_size = dist.get_world_size(group)
     memory_plan = plan_dist_moe_memory(
-        setup.config,
-        ep_size=dist.get_world_size(setup.group),
+        runtime_config,
+        ep_size=ep_size,
         device=device,
     )
-    policy = setup.modules[0]._dist_moe_config
-    prefetch = (
-        prefetch_dist_moe_vmm(
-            config=setup.config,
-            ep_size=dist.get_world_size(setup.group),
-            device=device,
-        )
-        if memory_plan.uses_host_scratch and policy.prefetch_vmm
-        else None
-    )
-    runtime = _DistMoeRuntime(
-        setup.config,
-        setup.group,
-        prefetch,
-        setup.assignments,
-    )
-    for module in setup.modules:
-        module._runtime = runtime
-
-    if setup.assignments:
-        assert isinstance(pp_schedule, PipelineScheduleMulti)
-        for stage, part in zip(pp_schedule._stages, model_parts, strict=True):
-            if stage.stage_index not in setup.stage_modules:
-                continue
-            stage.pass_pipeline_metadata = True
-            runtime._pipeline_hooks.append(
-                part.register_forward_pre_hook(
-                    runtime.select_from_stage_forward,
-                    with_kwargs=True,
-                )
+    prefetch = None
+    runtime = None
+    try:
+        if memory_plan.uses_host_scratch and policy.prefetch_vmm:
+            prefetch = prefetch_dist_moe_vmm(
+                config=runtime_config,
+                ep_size=ep_size,
+                device=device,
             )
+        runtime = DistMoeRuntime(
+            config=runtime_config,
+            group=group,
+            device=device,
+            prefetch=prefetch,
+            slots=assignments,
+        )
+        for module in modules:
+            module._runtime = runtime
+
+        if pipeline_plan is not None:
+            assert isinstance(pp_schedule, PipelineScheduleMulti)
+            for stage, part in zip(pp_schedule._stages, model_parts, strict=True):
+                if stage.stage_index not in pipeline_plan.stage_indices:
+                    continue
+                stage.pass_pipeline_metadata = True
+                runtime._pipeline_hooks.append(
+                    part.register_forward_pre_hook(
+                        runtime.select_pipeline_slot,
+                        with_kwargs=True,
+                    )
+                )
+    except Exception:
+        if runtime is not None:
+            runtime.close()
+            for module in modules:
+                module._runtime = None
+        elif prefetch is not None:
+            prefetch.close()
+        raise
 
     logger.info("%s", memory_plan.explain())
-    if setup.assignments:
+    if pipeline_plan is not None:
         logger.info(
             "DistMoE pipeline activation slots: policy=%s slots=%d depth=%d",
-            setup.granularity,
-            setup.num_slots,
-            setup.layer_depth,
+            pipeline_plan.granularity,
+            pipeline_plan.num_slots,
+            pipeline_plan.layer_depth,
         )
-
-
-def setup_dist_moe(
-    *,
-    config: Trainer.Config,
-    model_parts: list[torch.nn.Module],
-    parallel_dims: ParallelDims,
-    device: torch.device,
-    pp_schedule: object | None,
-) -> None:
-    """Collect, validate, plan, and bind one local DistMoE context."""
-    modules = _collect_dist_moe_modules(model_parts)
-    if not modules or config.checkpoint.create_seed_checkpoint:
-        return
-    policy = _validate_dist_moe_runtime(modules, device=device)
-    setup = _plan_dist_moe_setup(
-        config=config,
-        modules=modules,
-        model_parts=model_parts,
-        parallel_dims=parallel_dims,
-        pp_schedule=pp_schedule,
-        policy=policy,
-    )
-    _bind_dist_moe_setup(
-        setup,
-        model_parts=model_parts,
-        pp_schedule=pp_schedule,
-        device=device,
-    )
+    return runtime
