@@ -17,7 +17,6 @@ from torchtitan.components.dist_moe import (
     DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
 )
-from torchtitan.components.dist_moe.backend import _DistMoeRuntime
 from torchtitan.config.transform import DistMoeTransform, MXFP8DistMoeTransform
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.moe import RoutedExperts
