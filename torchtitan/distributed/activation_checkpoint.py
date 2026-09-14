@@ -45,12 +45,18 @@ class _SpmdMeshRecomputeStateHook:
     """
 
     def __init__(self) -> None:
+        # Recompute may run on an autograd worker thread. Keep the context
+        # installed by restore() on that thread so concurrent threads cannot
+        # close or replace each other's SPMD mesh contexts.
         self._thread_state = local()
 
     def snapshot(self) -> DeviceMesh | None:
         return current_spmd_mesh()
 
     def restore(self, mesh: DeviceMesh | None) -> None:
+        # set_current_spmd_mesh() pushes onto both TorchTitan's and spmd_types'
+        # thread-local stacks. Keep its context entered throughout replay, then
+        # close it before torch_remat restores the next absolute snapshot.
         active_context = getattr(self._thread_state, "active_context", None)
         if active_context is not None:
             active_context.__exit__(None, None, None)
