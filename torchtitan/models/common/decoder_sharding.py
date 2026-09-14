@@ -146,6 +146,25 @@ def colwise_config() -> ShardingConfig:
     )
 
 
+def stacked_colwise_config() -> ShardingConfig:
+    """Colwise sharding for each matrix in a StackedLinear."""
+    output_layout = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        partition_spec=spmd.PartitionSpec((DP, CP), None, TP),
+    )
+    input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.S(1)),
+        },
+        in_src_shardings={"input": input_layout},
+        in_dst_shardings={"input": input_layout},
+        out_src_shardings=output_layout,
+        local_spmd=True,
+    )
+
+
 def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     """
     RowwiseParallel: weight S(1), bias I (no-op if bias absent).
@@ -326,7 +345,10 @@ def set_dense_ffn_sharding(
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         )
     )
-    feed_forward_cfg.w13.sharding_config = colwise_config()
+    w13_sharding = stacked_colwise_config()
+    if dist_gemm:
+        w13_sharding = ShardingConfig(state_shardings=w13_sharding.state_shardings)
+    feed_forward_cfg.w13.sharding_config = w13_sharding
     w2_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
         w2_config = ShardingConfig(state_shardings=w2_config.state_shardings)

@@ -27,10 +27,18 @@ from torchtitan.config.transform import (
 from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, StackedLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
-from torchtitan.quantization import Float8Linear, MXFP8Linear, NVFP4Linear
+from torchtitan.protocols.module import Module
+from torchtitan.quantization import (
+    Float8Linear,
+    Float8StackedLinear,
+    MXFP8Linear,
+    MXFP8StackedLinear,
+    NVFP4Linear,
+    NVFP4StackedLinear,
+)
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
 from torchtitan.quantization.utils import has_quantization
@@ -47,6 +55,8 @@ def test_no_float8_by_default():
     if Float8Linear is not None:
         for _fqn, lc, _parent, _attr in model_config.traverse(Linear.Config):
             assert not isinstance(lc, Float8Linear.Config)
+        for _fqn, lc, _parent, _attr in model_config.traverse(StackedLinear.Config):
+            assert not isinstance(lc, Float8StackedLinear.Config)
 
 
 def _router_config_for_quantization(dim: int):
@@ -105,7 +115,9 @@ def test_float8_applied_by_model_registry():
     assert len(converted) > 0
     lora_converted = {
         fqn
-        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
+        for fqn, lc, _parent, _attr in model_config.traverse(
+            Module.Config, recurse=True
+        )
         if hasattr(lc, "rank") and hasattr(lc, "alpha")
     }
     assert lora_converted == {
@@ -370,7 +382,9 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     model_config = config.model_spec.model
     model = model_config.build()
     model.init_states()
-    assert isinstance(model.get_submodule("layers.0.feed_forward.w13"), NVFP4Linear)
+    assert isinstance(
+        model.get_submodule("layers.0.feed_forward.w13"), NVFP4StackedLinear
+    )
 
     sd = model.state_dict()
     # Both NVFP4 runtime buffers are non-persistent, so neither the RHT vector
@@ -495,6 +509,18 @@ def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
             out_features=128,
             input_activation_format_for_backward="missing",
         )
+    with pytest.raises(ValueError, match="out_features divisible by 32"):
+        MXFP8StackedLinear.Config(
+            in_features=128,
+            out_features=127,
+            num_linears=2,
+        )
+
+    local_stacked_weight = _LinearShardedTensorWithMXFP8Compute(
+        torch.empty(3, 16, 128, dtype=torch.bfloat16)
+    )
+    with pytest.raises(ValueError, match="local matrix out_features divisible by 32"):
+        local_stacked_weight._build_operands(local_stacked_weight._tensor)
 
     for sharding_config in (colwise_config(), rowwise_config()):
         linear = MXFP8Linear.Config(
@@ -544,12 +570,12 @@ def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
     )
     converted = converter.convert(
         FeedForward.Config(
-            w13=Linear.Config(in_features=128, out_features=256),
+            w13=StackedLinear.Config(in_features=128, out_features=128, num_linears=2),
             w2=Linear.Config(in_features=128, out_features=128),
         )
     )
 
-    assert isinstance(converted.w13, MXFP8Linear.Config)
+    assert isinstance(converted.w13, MXFP8StackedLinear.Config)
     assert isinstance(converted.w2, MXFP8Linear.Config)
     assert converted.w13.input_activation_format_for_backward == "bf16"
     assert converted.w2.input_activation_format_for_backward == "mxfp8"
@@ -564,7 +590,7 @@ def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
         )
     )
     model_config = FeedForward.Config(
-        w13=Linear.Config(in_features=128, out_features=256),
+        w13=StackedLinear.Config(in_features=128, out_features=128, num_linears=2),
         w2=Linear.Config(in_features=128, out_features=128),
     )
 
@@ -634,6 +660,14 @@ def test_builtin_mxfp8_configs_assign_input_activation_format_for_backward(
         fqn: config.input_activation_format_for_backward
         for fqn, config, _parent, _attr in model_config.traverse(MXFP8Linear.Config)
     }
+    assignments.update(
+        {
+            fqn: config.input_activation_format_for_backward
+            for fqn, config, _parent, _attr in model_config.traverse(
+                MXFP8StackedLinear.Config
+            )
+        }
+    )
 
     assert assignments
     assert "bf16" in assignments.values()

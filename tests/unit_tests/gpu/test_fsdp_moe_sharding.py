@@ -14,7 +14,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.models.common.linear import StackedLinearBase
 from torchtitan.models.qwen3.model import Qwen3Model
 
 
@@ -138,6 +140,132 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         self.assertEqual(_get_expert_shard_dim(model), 1)
+
+
+class TestApplyFsdpStackedLinearSharding(DTensorTestBase):
+    """FSDP shards stacked projections on their matrix-row dimension."""
+
+    @property
+    def world_size(self):
+        return 4
+
+    @with_comms
+    def test_w13_shards_dim_one(self):
+        from torchtitan.models.llama3 import model_registry
+
+        model = model_registry("debugmodel").model.build().to(self.device_type)
+        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+        )
+
+        stacked_fqns = set()
+        for fqn, module in model.named_modules():
+            if not isinstance(module, StackedLinearBase):
+                continue
+            stacked_fqns.add(fqn.rsplit(".", 1)[-1])
+            shard_dims = {
+                placement.dim
+                for placement in module.weight.placements
+                if isinstance(placement, Shard)
+            }
+            self.assertEqual(shard_dims, {1})
+
+        self.assertEqual(stacked_fqns, {"w13"})
+        state_dict = model.state_dict()
+        self.assertNotIn("layers.0.feed_forward.w13.weight", state_dict)
+        self.assertEqual(
+            state_dict["layers.0.feed_forward.w1.weight"].shape,
+            (768, 256),
+        )
+        model.load_state_dict(state_dict)
+
+    @with_comms
+    def test_tp_fsdp_initialization_matches_previous_w13_layout(self):
+        """TP+FSDP preserves seeded logical W13 initialization."""
+        from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+
+        from torchtitan.models.common import Linear
+        from torchtitan.models.common.decoder_sharding import colwise_config
+        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3.sharding import set_llama3_sharding_config
+
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=2,
+            cp=1,
+            tp=2,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+        )
+        parallel_dims.build_mesh()
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+
+        def old_w13_init(tensor):
+            gate_up = tensor.unflatten(0, (-1, 2))
+            torch.nn.init.trunc_normal_(gate_up[:, 0], std=0.02)
+            torch.nn.init.trunc_normal_(gate_up[:, 1], std=0.02 / 2**0.5)
+
+        old_w13_config = Linear.Config(
+            in_features=256,
+            out_features=1536,
+            param_init={"weight": old_w13_init},
+            sharding_config=colwise_config(),
+        )
+        with torch.device("meta"):
+            old_w13 = old_w13_config.build()
+        old_w13.parallelize(parallel_dims)
+        fully_shard(
+            old_w13,
+            mesh=dp_mesh,
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+            ),
+            dp_mesh_dims=dp_mesh_dims,
+        )
+        old_w13.to_empty(device=self.device_type)
+        torch.manual_seed(42)
+        old_w13.init_states()
+        expected_w13 = (
+            old_w13.weight.full_tensor()
+            .unflatten(0, (768, 2))
+            .transpose(0, 1)
+            .contiguous()
+        )
+
+        sharded_config = model_registry("debugmodel").model
+        set_llama3_sharding_config(sharded_config, enable_sp=True)
+        with torch.device("meta"):
+            sharded = sharded_config.build()
+        sharded.parallelize(parallel_dims)
+        apply_fsdp_to_decoder(
+            sharded,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            dp_mesh_dims=dp_mesh_dims,
+        )
+        sharded.to_empty(device=self.device_type)
+        torch.manual_seed(42)
+        sharded.layers["0"].feed_forward.w13.init_states()
+
+        actual_w13 = sharded.layers["0"].feed_forward.w13.weight.full_tensor()
+        torch.testing.assert_close(actual_w13, expected_w13, rtol=0, atol=0)
+
+        state_dict = sharded.state_dict()
+        self.assertEqual(
+            state_dict["layers.0.feed_forward.w1.weight"].shape, (768, 256)
+        )
+        self.assertEqual(
+            state_dict["layers.0.feed_forward.w3.weight"].shape, (768, 256)
+        )
+        sharded.load_state_dict(state_dict)
 
 
 if __name__ == "__main__":

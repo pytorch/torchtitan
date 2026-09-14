@@ -188,18 +188,20 @@ class DistGEMMFeedForward(FeedForward):
             _warn_once_no_tp_overlap()
             return super().forward(x)
 
-        gate_up_TF = remat.region(
+        gate_up_T2F = remat.region(
             AllGatherLinear.apply,
             self.remat_region_name("w13"),
             recompute=self.remat_should_recompute("w13"),
         )(
             x,
-            self.w13.weight,
-            self.w13.bias,
+            self.w13.weight.flatten(0, -2),
+            None if self.w13.bias is None else self.w13.bias.flatten(),
             tp_group,
             tp_group.group_name,
+        ).unflatten(
+            -1, self.w13.weight.shape[:-1]
         )
-        gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
+        gate_TF, up_TF = gate_up_T2F.unbind(-2)
         # Elementwise on feature-sharded activations: no collective.
         remat.recompute_needs_tensor(gate_TF, up_TF)
         h_TF = self.activation_fn(gate_TF, up_TF)
