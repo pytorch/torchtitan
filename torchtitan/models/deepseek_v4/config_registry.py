@@ -748,3 +748,36 @@ def deepseek_v4_flash_8k_ep16_blk32_batch2(
     config = deepseek_v4_flash_8k_ep16_blk32(seq_len)
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     return config
+
+
+def _flash_8k_ep_blk(
+    ep: int, block_size: int = 32, seq_len: int | None = 8192
+) -> Trainer.Config:
+    """EP degree x block_size, the two levers that compose multiplicatively."""
+    config = _flash_8k_ep(ep, seq_len)
+    for layer in config.model_spec.model.layers:
+        inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.block_size = block_size
+    return config
+
+
+def deepseek_v4_flash_8k_ep8_blk32(seq_len: int | None = 8192) -> Trainer.Config:
+    """F24. EP=8 + block_size 32 -- fills in the composed EP curve.
+
+    Composed: EP=16 24.74, EP=4 25.45. On the block_size 128 base EP=8 sat
+    between them (21.84 vs 21.39 and 22.04), so this checks the curve is
+    monotone in the 4..16 range rather than bumpy.
+    """
+    return _flash_8k_ep_blk(8, 32, seq_len)
+
+
+def deepseek_v4_flash_8k_ep2_blk32(seq_len: int | None = 8192) -> Trainer.Config:
+    """F25. EP=2 + block_size 32 -- is EP=4 the floor or just the lowest tested?
+
+    EP=1 was clearly bad (20.80, and 128.98 GiB because every rank then holds
+    all 256 routed experts for FSDP to all-gather). EP=2 is the untested rung
+    between that collapse and the EP=4 lead, so it decides whether 4 is a real
+    optimum or simply the edge of the sweep.
+    """
+    return _flash_8k_ep_blk(2, 32, seq_len)
