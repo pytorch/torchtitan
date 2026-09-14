@@ -781,3 +781,37 @@ def deepseek_v4_flash_8k_ep2_blk32(seq_len: int | None = 8192) -> Trainer.Config
     optimum or simply the edge of the sweep.
     """
     return _flash_8k_ep_blk(2, 32, seq_len)
+
+
+def deepseek_v4_flash_8k_ep4_blk32_profile(
+    seq_len: int | None = 8192,
+) -> Trainer.Config:
+    """The 8k round's WINNER, profiled. Companion to the Pro profile pair.
+
+    Identical to `deepseek_v4_flash_8k_ep4_blk32` -- EP=4, FlexAttention
+    `block_size` 32, bf16, FullAC, `disable_cuda_graphs` -- with the torch
+    profiler turned on for two steps. Measured 25.45 TFLOP/s per GPU without
+    profiling (30 steps, mean over steps 15+, peak 76.58 GiB), which is
+    +39.1 % over the 8k reference and the best of the round.
+
+    Why this config and not the 4096 baseline: `pro` already has a
+    before/after profile pair, and the open question for `flash` is not "what
+    did the optimization round change" but "what is the remaining 25.45
+    TFLOP/s made of". At 27.7 % of HBM and with attention still on 32x32
+    Triton tiles, the kernel breakdown is the only thing that says whether the
+    next lever is attention, MoE dispatch, or something not yet suspected.
+
+    `profiler_warmup=3, profiler_active=2` matches
+    `deepseek_v4_pro_64xgb300_baseline_profile` so the two traces are directly
+    comparable: past compile and autotune, small enough to open. Profiling
+    distorts step time, so numbers from inside a profiled run are not
+    throughput datapoints -- the kernel breakdown is the product.
+    """
+    config = deepseek_v4_flash_8k_ep4_blk32(seq_len=seq_len)
+    config.profiler = Profiler.Config(
+        enable_profiling=True,
+        profile_freq=10,
+        profiler_warmup=3,
+        profiler_active=2,
+    )
+    return config
