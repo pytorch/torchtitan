@@ -11,6 +11,8 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
+
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
@@ -19,7 +21,11 @@ from torchtitan.models.common import (
     PartialBiasRowwiseLinear,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
-from torchtitan.models.common.config_utils import get_attention_config, make_ffn_config
+from torchtitan.models.common.config_utils import (
+    fused_qkv_param_init,
+    get_attention_config,
+    make_ffn_config,
+)
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
@@ -27,8 +33,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import (
@@ -161,15 +165,17 @@ def _build_muse_glimmer_attention(
         dim=dim,
         qkv_linear=QKVLinear.Config(
             head_dim=head_dim,
-            wq=Linear.Config(
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+            wqkv=Linear.Config(
                 in_features=dim,
-                out_features=n_heads * head_dim,
-                param_init=_LINEAR_INIT,
-            ),
-            wkv=Linear.Config(
-                in_features=dim,
-                out_features=n_kv_heads * head_dim,
-                param_init=_LINEAR_INIT,
+                out_features=(n_heads + 2 * n_kv_heads) * head_dim,
+                param_init=fused_qkv_param_init(
+                    _LINEAR_INIT,
+                    n_heads=n_heads,
+                    n_kv_heads=n_kv_heads,
+                    head_dim=head_dim,
+                ),
             ),
         ),
         wo=Linear.Config(
