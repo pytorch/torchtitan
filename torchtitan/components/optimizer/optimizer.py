@@ -121,7 +121,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - 'fused_opt_states_bf16': Like 'fused', but initialize Adam/AdamW
           momentum and variance in bfloat16 via a step pre-hook so the fused
           CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
-          Only supported for Adam/AdamW. See docs/bf16_optimizer_states.md.
+          Only supported for Adam/AdamW. See
+          torchtitan/components/optimizer/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
