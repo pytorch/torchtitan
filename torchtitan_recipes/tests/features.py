@@ -268,6 +268,15 @@ def llama3_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_fsdp2_pp2_deferred_reduce_grad_wait() -> Trainer.Config:
+    config = llama3_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.pipeline_parallel_defer_reduce_grad_wait = True
+    # Looped pipeline schedules do not support CUDA graphs yet.
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def llama3_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
     config.training.enable_optimizer_cuda_graph = True

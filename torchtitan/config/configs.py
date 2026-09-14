@@ -243,6 +243,14 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
+    pipeline_parallel_defer_reduce_grad_wait: Annotated[
+        bool, tyro.conf.Suppress
+    ] = False
+    """
+    Allow FSDP gradient reduction to overlap the next local pipeline stage's
+    backward computation. Requires a multi-stage pipeline schedule.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
