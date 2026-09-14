@@ -93,6 +93,9 @@ class AsyncAllGatherQKVLinear(AllGatherQKVLinear):
 
     def parallelize(self, parallel_dims: ParallelDims) -> None:
         if self._uses_async_projection() and self._sharding_config is not None:
+            # The async projection performs its input all-gather internally.
+            # Remove the generic redistribution before Module.parallelize()
+            # installs the module-forward wrapper.
             self._sharding_config = replace(
                 self._sharding_config,
                 in_dst_shardings=None,
@@ -137,6 +140,9 @@ class AsyncLinearReduceScatter(LinearReduceScatter):
         if type(self) is AsyncLinearReduceScatter and self._sharding_config is not None:
             out_dst = self._sharding_config.out_dst_shardings
             if out_dst is not None:
+                # The async projection performs its output reduction internally.
+                # Declare that final placement as the direct forward output so
+                # Module.parallelize() does not install another redistribution.
                 self._sharding_config = replace(
                     self._sharding_config,
                     out_src_shardings=out_dst,
