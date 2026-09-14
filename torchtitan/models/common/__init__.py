@@ -4,12 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from .activation import ActivationFn, SiTUGLU, SwiGLU
 from .attention import (
-    BaseQKVLinear,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
-    FusedQKVLinear,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
@@ -25,7 +24,7 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
-from .linear import Linear, RouterGateLinear, ScaledBiasRowwiseLinear
+from .linear import CastLinear, Linear, PartialBiasRowwiseLinear, RouterGateLinear
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .nn_modules import (
     Conv1d,
@@ -43,6 +42,7 @@ __all__ = [
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
+    "CastLinear",
     "CosSinRoPE",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
@@ -51,8 +51,7 @@ __all__ = [
     "FeedForward",
     "SigmoidGatedFeedForward",
     "FlexInnerAttention",
-    "BaseQKVLinear",
-    "FusedQKVLinear",
+    "QKVLinear",
     "GELU",
     "get_causal_mask_mod",
     "get_document_mask_mod",
@@ -67,13 +66,15 @@ __all__ = [
     "Linear",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
-    "QKVLinear",
+    "PartialBiasRowwiseLinear",
     "RMSNorm",
     "RoPE",
     "RouterGateLinear",
-    "ScaledBiasRowwiseLinear",
     "ScaledDotProductInnerAttention",
     "SiLU",
+    "ActivationFn",
+    "SiTUGLU",
+    "SwiGLU",
     "TransformerBlock",
     "VarlenInnerAttention",
     "VarlenMetadata",

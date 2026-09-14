@@ -13,14 +13,15 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     register_moe_load_balancing_hook,
 )
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
+    PartialBiasRowwiseLinear,
     RMSNorm,
-    ScaledBiasRowwiseLinear,
     TransformerBlock,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -31,8 +32,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.deepseek_v3 import build_mla_moe_layers
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import KimiK25Model
@@ -109,10 +108,10 @@ def _vl_linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _scaled_bias_rowwise_linear(
+def _partial_bias_rowwise_linear(
     in_features: int, out_features: int
-) -> ScaledBiasRowwiseLinear.Config:
-    return ScaledBiasRowwiseLinear.Config(
+) -> PartialBiasRowwiseLinear.Config:
+    return PartialBiasRowwiseLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -154,11 +153,11 @@ def _vision_encoder_config(
             wq=_vl_linear(dim, dim),
             wk=_vl_linear(dim, dim),
             wv=_vl_linear(dim, dim),
-            proj=_scaled_bias_rowwise_linear(dim, dim),
+            proj=_partial_bias_rowwise_linear(dim, dim),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(dim, ffn_dim),
-            fc2=_scaled_bias_rowwise_linear(ffn_dim, dim),
+            fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
         ),
     )
 
@@ -184,7 +183,7 @@ def _vision_encoder_config(
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
             linear_1=_vl_linear(merged_dim, merged_dim),
-            linear_2=_scaled_bias_rowwise_linear(merged_dim, text_hidden_size),
+            linear_2=_partial_bias_rowwise_linear(merged_dim, text_hidden_size),
         ),
     )
 
@@ -326,8 +325,6 @@ def _moonlight_16b_a3b_config(
         num_shared_experts=2,
         router_top_k=6,
         router_score_func="sigmoid",
-        router_num_expert_groups=None,
-        router_num_limited_groups=None,
         router_route_scale=2.446,
         router_route_norm=True,
         attn_backend=attn_backend,
@@ -451,8 +448,6 @@ def _kimi_k2_5(
         num_shared_experts=num_shared_experts,
         router_top_k=8,
         router_score_func="sigmoid",
-        router_num_expert_groups=None,
-        router_num_limited_groups=None,
         router_route_scale=2.827,
         router_route_norm=True,
         attn_backend=attn_backend,

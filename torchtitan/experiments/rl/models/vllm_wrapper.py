@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import (
     apply_overrides,
@@ -40,7 +40,8 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
-from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.attention import QKVLinear
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -321,9 +322,7 @@ class VLLMModelWrapper(Module):
             pp=training_parallelism.pipeline_parallel_degree,
             ep=training_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
-            spmd_backend=training_parallelism.spmd_backend,
         )
-        dist_utils.set_spmd_backend(training_parallelism.spmd_backend)
         self.spmd_context = dist_utils.get_spmd_context(
             parallel_dims=self.parallel_dims,
             spmd_typechecking=False,
@@ -356,7 +355,7 @@ class VLLMModelWrapper(Module):
             )
         )
 
-        # Apply config overrides (e.g. the fused gate+up SwiGLU) after
+        # Apply config overrides (e.g. the Triton SwiGLU activation) after
         # update_from_config (which fills the sharding the override factories
         # read) and before build
         if override.imports:
@@ -490,44 +489,20 @@ class VLLMModelWrapper(Module):
         Compute logits from hidden states."""
 
         with self.spmd_context():
-            # When TP is applied, forward() returns the full tensor back to vLLM.
-            # The DTensor path wraps that plain tensor before lm_head; spmd_types
-            # keeps tensors local and uses the module sharding contracts directly.
-            if (
-                self.parallel_dims.tp_enabled
-                and self.parallel_dims.spmd_backend != "spmd_types"
-            ):
-                hidden_states = DTensor.from_local(
-                    hidden_states,
-                    device_mesh=self.parallel_dims.get_mesh("tp"),
-                    placements=[
-                        Replicate(),
-                    ],
-                )
-
             logits = self.model.lm_head(hidden_states)
 
             # lm_head returns vocab-sharded logits under TP; gather to the
             # full local logits tensor that vLLM expects.
             if self.parallel_dims.tp_enabled:
-                if self.parallel_dims.spmd_backend == "spmd_types":
-                    mesh = current_spmd_mesh()
-                    assert mesh is not None
-                    logits = spmd.redistribute(
-                        logits,
-                        mesh.get_group("tp"),
-                        src=spmd.S(-1),
-                        dst=spmd.R,
-                        backward_options={"op_dtype": logits.dtype},
-                    )
-                elif isinstance(logits, DTensor):
-                    placements = tuple(
-                        Replicate()
-                        if isinstance(p, Shard) and p.dim in (-1, logits.ndim - 1)
-                        else p
-                        for p in logits.placements
-                    )
-                    logits = logits.redistribute(placements=placements).to_local()
+                mesh = current_spmd_mesh()
+                assert mesh is not None
+                logits = spmd.redistribute(
+                    logits,
+                    mesh.get_group("tp"),
+                    src=spmd.S(-1),
+                    dst=spmd.R,
+                    backward_options={"op_dtype": logits.dtype},
+                )
 
         return logits
 
@@ -549,12 +524,11 @@ class VLLMModelWrapper(Module):
                 model_config=self.config,
                 hf_assets_path=cfg.initial_load_path,
             )
-            if self.parallel_dims.spmd_backend == "spmd_types":
-                sd_adapter = PlainToDTensorStateDictAdapter(
-                    sd_adapter,
-                    self.get_state_dict_layouts(),
-                    self.parallel_dims,
-                )
+            sd_adapter = PlainToDTensorStateDictAdapter(
+                sd_adapter,
+                self.get_state_dict_layouts(),
+                self.parallel_dims,
+            )
 
         # Model-only CheckpointManager: initial_load_model_only=True (default)
         # ensures only MODEL state is loaded, so None optimizer/lr_scheduler
@@ -588,15 +562,29 @@ class VLLMModelWrapper(Module):
                 for state_name, layout in sharding_config.state_shardings.items():
                     layouts[f"{module_prefix}{state_name}"] = layout
 
-                # FusedSwiGLU exposes split w1/w3 state-dict keys while the
-                # layout is declared on the fused w13 parameter.
+                # Fused grouped experts expose split gate/up state-dict keys
+                # while the layout is declared on the fused w13 parameter.
                 w13_layout = sharding_config.state_shardings.get("w13")
                 if w13_layout is not None:
-                    for proj_name in ("w1", "w3"):
-                        layouts[f"{module_prefix}{proj_name}.weight"] = w13_layout
+                    for state_name in ("w1_EFD", "w3_EFD"):
+                        layouts[f"{module_prefix}{state_name}"] = w13_layout
 
-            if isinstance(module, FusedQKVLinear):
-                # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
+            if isinstance(module, FeedForward):
+                # FeedForward exposes w1/w3 state-dict keys, but their layout
+                # belongs to the physical w13 Linear child.
+                w13_sharding_config = getattr(module.w13, "_sharding_config", None)
+                if w13_sharding_config is not None:
+                    for (
+                        state_name,
+                        layout,
+                    ) in w13_sharding_config.state_shardings.items():
+                        for projection_name in ("w1", "w3"):
+                            layouts[
+                                f"{module_prefix}{projection_name}.{state_name}"
+                            ] = layout
+
+            if isinstance(module, QKVLinear):
+                # QKVLinear exposes split wq/wk/wv state-dict keys while
                 # the layout is declared on the fused wqkv parameter.
                 wqkv_sharding_config = getattr(
                     module.wqkv,

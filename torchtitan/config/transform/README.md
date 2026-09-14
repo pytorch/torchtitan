@@ -41,7 +41,8 @@ while VarlenInnerAttention consumes cumulative sequence offsets.
 
 Use a transform for options that replace or wrap configs in the built tree.
 Context parallelism, TP GEMM backends, MoE communication backends,
-quantization, and LoRA belong in transforms.
+quantization, and LoRA belong in transforms. Quantized modules, tensors, and
+kernels live in `torchtitan/quantization`.
 
 A CP transform specializes the selected attention for distributed execution.
 It may change input sharding and preprocessing, but it preserves the selected
@@ -51,6 +52,11 @@ attention algorithm and metadata format.
 
 This package may import other `torchtitan` packages. Those packages must not
 import this package. Recipes import and apply transforms.
+
+Model registry functions temporarily violate this direction while they accept
+and apply the legacy `ModelConfigConverter` interface. This dependency will be
+removed when config registries move to `torchtitan_recipes` and converters are
+replaced by `ModelConfigTransform`.
 
 Keep shared types outside this package. For example, `CPInnerAttention` lives
 with the attention code. Only the transform that installs it belongs here.

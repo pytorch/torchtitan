@@ -10,13 +10,14 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
     Conv1d,
     Embedding,
     Linear,
-    ScaledBiasRowwiseLinear,
+    PartialBiasRowwiseLinear,
     SigmoidGatedFeedForward,
 )
 from torchtitan.models.common.config_utils import (
@@ -33,8 +34,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -112,10 +111,10 @@ def _linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _scaled_bias_rowwise_linear(
+def _partial_bias_rowwise_linear(
     in_features: int, out_features: int
-) -> ScaledBiasRowwiseLinear.Config:
-    return ScaledBiasRowwiseLinear.Config(
+) -> PartialBiasRowwiseLinear.Config:
+    return PartialBiasRowwiseLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -138,9 +137,8 @@ def _shared_experts_config(
         w2w3_param_init=_depth_init(layer_id),
     )
     return SigmoidGatedFeedForward.Config(
-        w1=ffn.w1,
+        w13=ffn.w13,
         w2=ffn.w2,
-        w3=ffn.w3,
         gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
     )
 
@@ -184,11 +182,11 @@ def _qwen35_vision_encoder_config(
                 wq=_linear(dim, dim),
                 wk=_linear(dim, dim),
                 wv=_linear(dim, dim),
-                proj=_scaled_bias_rowwise_linear(dim, dim),
+                proj=_partial_bias_rowwise_linear(dim, dim),
             ),
             mlp=VisionMLP.Config(
                 fc1=_linear(dim, ffn_dim),
-                fc2=_scaled_bias_rowwise_linear(ffn_dim, dim),
+                fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
             ),
         ),
         rotary_pos_emb=VisionRotaryEmbedding.Config(
@@ -199,7 +197,7 @@ def _qwen35_vision_encoder_config(
             merged_hidden_size=merged_hidden_size,
             norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
             fc1=_linear(merged_hidden_size, merged_hidden_size),
-            fc2=_scaled_bias_rowwise_linear(merged_hidden_size, out_hidden_size),
+            fc2=_partial_bias_rowwise_linear(merged_hidden_size, out_hidden_size),
         ),
         param_init=_POS_EMBED_INIT,
     )
