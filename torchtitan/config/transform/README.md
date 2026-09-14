@@ -53,6 +53,11 @@ attention algorithm and metadata format.
 This package may import other `torchtitan` packages. Those packages must not
 import this package. Recipes import and apply transforms.
 
+Model registry functions temporarily violate this direction while they accept
+and apply the legacy `ModelConfigConverter` interface. This dependency will be
+removed when config registries move to `torchtitan_recipes` and converters are
+replaced by `ModelConfigTransform`.
+
 Keep shared types outside this package. For example, `CPInnerAttention` lives
 with the attention code. Only the transform that installs it belongs here.
 
