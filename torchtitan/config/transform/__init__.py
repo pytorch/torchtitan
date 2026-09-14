@@ -7,7 +7,6 @@
 """Model config transforms. See README.md for what belongs here."""
 
 from .apply import apply_transforms, transform_model_config_
-from .async_tensor_parallel import AsyncTensorParallelTransform
 from .base import convert_config_type, ModelConfigTransform
 from .context_parallel import ContextParallelTransform
 from .lora import LoRAConverter
@@ -19,7 +18,7 @@ from .quantization import (
     NVFP4LinearConverter,
     QuantizationConverter,
 )
-from .tensor_parallel import TensorParallelTransform
+from .tensor_parallel import AsyncTensorParallelTransform, TensorParallelTransform
 
 __all__ = [
     "ModelConfigTransform",
