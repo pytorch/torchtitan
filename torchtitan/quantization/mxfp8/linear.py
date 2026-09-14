@@ -48,6 +48,32 @@ InputActivationFormatForBackward = Literal["bf16", "mxfp8"]
 _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD = ("bf16", "mxfp8")
 
 
+def _scaled_mm_out(
+    lhs: torch.Tensor,
+    rhs: torch.Tensor,
+    lhs_scale: torch.Tensor,
+    rhs_scale: torch.Tensor,
+    bias: torch.Tensor | None,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    """Write one block-scaled matrix product into caller-owned storage."""
+    return torch.ops.aten._scaled_mm_v2.out(  # pyrefly: ignore[missing-attribute]
+        lhs,
+        rhs,
+        [lhs_scale],
+        [int(F.ScalingType.BlockWise1x32)],
+        [int(F.SwizzleType.SWIZZLE_32_4_4)],
+        [rhs_scale],
+        [int(F.ScalingType.BlockWise1x32)],
+        [int(F.SwizzleType.SWIZZLE_32_4_4)],
+        bias,
+        torch.bfloat16,
+        [],
+        False,
+        out=out,
+    )
+
+
 def _pad_rows(x_MK: torch.Tensor) -> tuple[torch.Tensor, int]:
     num_rows = x_MK.shape[0]
     num_padded_rows = (
@@ -153,19 +179,34 @@ class _MXFP8LinearFunction(torch.autograd.Function):
             x_scale_col = triton_mx_block_rearrange(x_scale_col)
 
         # The 32x32 weight quantizer returns both qdata/scale pairs ready for
-        # this exact BlockWise1x32 and SWIZZLE_32_4_4 B-operand contract.
-        output_MN = F.scaled_mm(
-            x_qdata_row_MK,
-            weight_qdata_fprop_KN,
-            scale_a=x_scale_row,
-            scale_recipe_a=F.ScalingType.BlockWise1x32,
-            scale_b=weight_scale_fprop_swizzled,
-            scale_recipe_b=F.ScalingType.BlockWise1x32,
-            swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
-            swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
-            bias=bias_N,
-            output_dtype=torch.bfloat16,
-        )
+        # this exact BlockWise1x32 and SWIZZLE_32_4_4 B-operand contract. Use
+        # caller-owned storage when rows are aligned so downstream in-place
+        # consumers do not receive a view created inside this custom function.
+        output_shape = (*input_shape[:-1], weight_NK.shape[0])
+        if x_MK.shape[0] == num_rows:
+            output = x.new_empty(output_shape, dtype=torch.bfloat16)
+            _scaled_mm_out(
+                x_qdata_row_MK,
+                weight_qdata_fprop_KN,
+                x_scale_row,
+                weight_scale_fprop_swizzled,
+                bias_N,
+                output.view(num_rows, weight_NK.shape[0]),
+            )
+        else:
+            output_MN = F.scaled_mm(
+                x_qdata_row_MK,
+                weight_qdata_fprop_KN,
+                scale_a=x_scale_row,
+                scale_recipe_a=F.ScalingType.BlockWise1x32,
+                scale_b=weight_scale_fprop_swizzled,
+                scale_recipe_b=F.ScalingType.BlockWise1x32,
+                swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
+                swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
+                bias=bias_N,
+                output_dtype=torch.bfloat16,
+            )
+            output = output_MN[:num_rows].reshape(output_shape).clone()
 
         # Save exactly one input-activation operands for WGRAD. BF16 mode
         # keeps the original tensor and builds the columnwise operand in
@@ -192,7 +233,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         ctx.input_activation_format_for_backward = input_activation_format_for_backward
         ctx.has_bias = bias_N is not None
 
-        return output_MN[:num_rows].reshape(*input_shape[:-1], weight_NK.shape[0])
+        return output
 
     @staticmethod
     @once_differentiable
