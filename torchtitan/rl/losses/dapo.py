@@ -20,6 +20,23 @@ from torchtitan.config import CompileConfig
 _MAX_LOG_RATIO = 10.0
 
 
+def _normalize(
+    value: torch.Tensor,
+    global_valid_tokens: int | float | torch.Tensor | None,
+) -> torch.Tensor:
+    if isinstance(global_valid_tokens, torch.Tensor):
+        # A tensor denominator is required when the token count is a mutable
+        # CUDA graph input. Multiplication keeps that path capture-friendly.
+        return value * global_valid_tokens.clamp_min(1).reciprocal()
+
+    loss_denominator = (
+        max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
+    )
+    # Preserve the eager RL path's established scalar division exactly. On
+    # some GPU architectures this differs bitwise from reciprocal multiplication.
+    return value / loss_denominator
+
+
 class DAPOLoss(BaseLoss):
     """Per-token clipped surrogate loss with DAPO-style "clip-higher".
 
@@ -99,17 +116,7 @@ class DAPOLoss(BaseLoss):
         token_loss = -torch.min(ratio * advantages, clipped_ratio * advantages)
 
         masked_loss = token_loss * effective_loss_mask
-        if isinstance(global_valid_tokens, torch.Tensor):
-            # Keep the CUDA arithmetic identical to division by the Python
-            # scalar used before the trainer shared CUDA-graph inputs. PyTorch
-            # implements that scalar division as multiplication by a reciprocal.
-            loss_normalizer = global_valid_tokens.clamp_min(1).reciprocal()
-        else:
-            loss_denominator = (
-                max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
-            )
-            loss_normalizer = 1 / loss_denominator
-        loss = masked_loss.sum() * loss_normalizer
+        loss = _normalize(masked_loss.sum(), global_valid_tokens)
 
         with torch.no_grad():
             diff_for_metrics = torch.where(
@@ -120,24 +127,30 @@ class DAPOLoss(BaseLoss):
             masked_ratio = ratio * effective_loss_mask
             metrics = {
                 "loss/mean": loss.detach(),
-                "loss/ratio_mean": masked_ratio.sum() * loss_normalizer,
-                "loss/ratio_clipped_frac": (
-                    (torch.abs(ratio - clipped_ratio) > 1e-6).float()
-                    * effective_loss_mask
-                ).sum()
-                * loss_normalizer,
+                "loss/ratio_mean": _normalize(masked_ratio.sum(), global_valid_tokens),
+                "loss/ratio_clipped_frac": _normalize(
+                    (
+                        (torch.abs(ratio - clipped_ratio) > 1e-6).float()
+                        * effective_loss_mask
+                    ).sum(),
+                    global_valid_tokens,
+                ),
                 # Mean per-token log-ratio (log p_trainer - log q_generator) over
                 # sampled tokens. This is the k1 Monte-Carlo estimate of -KL(q || p).
-                "bit_wise/logprob_diff/mean": diff_for_metrics.float().sum()
-                * loss_normalizer,
-                "bit_wise/ratio_tokens_different/mean": (
-                    (diff_for_metrics.abs() > 1e-6).float() * effective_loss_mask
-                ).sum()
-                * loss_normalizer,
+                "bit_wise/logprob_diff/mean": _normalize(
+                    diff_for_metrics.float().sum(), global_valid_tokens
+                ),
+                "bit_wise/ratio_tokens_different/mean": _normalize(
+                    (
+                        (diff_for_metrics.abs() > 1e-6).float() * effective_loss_mask
+                    ).sum(),
+                    global_valid_tokens,
+                ),
                 "bit_wise/logprob_diff/max": diff_for_metrics.abs().max(),
                 # Mean trainer-policy entropy H(p) over tokens used by the loss.
-                "trainer/entropy/mean": (token_entropy * effective_loss_mask).sum()
-                * loss_normalizer,
+                "trainer/entropy/mean": _normalize(
+                    (token_entropy * effective_loss_mask).sum(), global_valid_tokens
+                ),
             }
 
         return loss, metrics
