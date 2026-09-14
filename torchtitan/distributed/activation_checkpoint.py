@@ -10,7 +10,6 @@
 import logging
 import os
 from dataclasses import dataclass, field
-from threading import local
 from typing import Annotated, cast
 
 import torch
@@ -22,52 +21,16 @@ from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
-from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.checkpoint import (
     CheckpointPolicy,
     create_selective_checkpoint_contexts,
 )
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.spmd_types import current_spmd_mesh, set_current_spmd_mesh
 from torchtitan.protocols.module import Module
 
 
 logger = logging.getLogger(__name__)
-
-
-class _SpmdMeshRecomputeStateHook:
-    """Restore the forward's SPMD mesh while torch_remat replays a region.
-
-    ``set_current_spmd_mesh`` is scoped, so each restore closes the context
-    installed by the previous restore before activating the requested mesh.
-    torch_remat's final restore therefore also removes the replay-only context.
-    """
-
-    def __init__(self) -> None:
-        # Recompute may run on an autograd worker thread. Keep the context
-        # installed by restore() on that thread so concurrent threads cannot
-        # close or replace each other's SPMD mesh contexts.
-        self._thread_state = local()
-
-    def snapshot(self) -> DeviceMesh | None:
-        return current_spmd_mesh()
-
-    def restore(self, mesh: DeviceMesh | None) -> None:
-        # set_current_spmd_mesh() pushes onto both TorchTitan's and spmd_types'
-        # thread-local stacks. Keep its context entered throughout replay, then
-        # close it before torch_remat restores the next absolute snapshot.
-        active_context = getattr(self._thread_state, "active_context", None)
-        if active_context is not None:
-            active_context.__exit__(None, None, None)
-            self._thread_state.active_context = None
-
-        if current_spmd_mesh() is mesh:
-            return
-
-        active_context = set_current_spmd_mesh(mesh)
-        active_context.__enter__()
-        self._thread_state.active_context = active_context
 
 
 def _get_default_save_ops() -> set:
@@ -385,7 +348,6 @@ class RegionAC(ActivationCheckpointing):
             region_name=checkpoint_region_name,
             determinism_check=config.determinism_check,
             preserve_rng_state=False,
-            recompute_state_hooks=(_SpmdMeshRecomputeStateHook(),),
         )(module.forward)
         module.forward = checkpointed_forward
         return module
