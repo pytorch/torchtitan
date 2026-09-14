@@ -238,15 +238,16 @@ class ParallelismConfig:
     potentially exposing additional FSDP all-gather communication.
     """
 
-    pipeline_parallel_unshard_lookahead: Literal["auto", "full"] | tuple[
+    pipeline_parallel_unshard_lookahead: Literal["default", "auto"] | tuple[
         int, ...
-    ] = "auto"
+    ] = "default"
     """FSDP prefetch distance for a looped pipeline schedule.
 
-    ``"auto"`` uses a rank-aware distance bounded by
-    ``pipeline_parallel_max_param_unsharded_stages``. ``"full"`` prefetches
-    the full residency window. A tuple provides one explicit distance per
-    pipeline rank for schedules that benefit from asymmetric prefetch.
+    ``"default"`` preserves PyTorch's full-residency behavior. ``"auto"``
+    uses a rank-aware distance bounded by
+    ``pipeline_parallel_max_param_unsharded_stages``. A tuple provides one
+    explicit distance per pipeline rank for schedules that benefit from
+    asymmetric prefetch.
     """
 
     context_parallel_degree: int = 1
@@ -291,7 +292,7 @@ class ParallelismConfig:
             )
         lookahead = self.pipeline_parallel_unshard_lookahead
         if isinstance(lookahead, str):
-            valid_lookahead = lookahead in {"auto", "full"}
+            valid_lookahead = lookahead in {"default", "auto"}
         elif isinstance(lookahead, tuple):
             valid_lookahead = len(lookahead) == self.pipeline_parallel_degree and all(
                 not isinstance(value, bool) and isinstance(value, int) and value >= 1
@@ -304,7 +305,7 @@ class ParallelismConfig:
             valid_lookahead = False
         if not valid_lookahead:
             raise ValueError(
-                "pipeline_parallel_unshard_lookahead must be 'auto', 'full', "
+                "pipeline_parallel_unshard_lookahead must be 'default', 'auto', "
                 "or a tuple with one positive integer per pipeline rank. "
                 "Tuple values may not exceed "
                 "pipeline_parallel_max_param_unsharded_stages when that limit "
