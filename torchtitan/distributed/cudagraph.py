@@ -8,7 +8,7 @@
 
 import logging
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -123,6 +123,54 @@ class CUDAGraphInputSpec:
         return pytree.tree_unflatten(outer_leaves, self._tree_spec)
 
 
+class CUDAGraphGradientState:
+    """Keep capture-created gradients alive across CUDA graph replays.
+
+    Clearing ``parameter.grad`` drops its reference to the buffer. This state
+    prevents graph-pool reuse and reattaches the buffer after each replay.
+    """
+
+    def __init__(self, parameters: Iterable[torch.nn.Parameter]) -> None:
+        unique_parameters: list[torch.nn.Parameter] = []
+        seen: set[int] = set()
+        for parameter in parameters:
+            if parameter.requires_grad and id(parameter) not in seen:
+                seen.add(id(parameter))
+                unique_parameters.append(parameter)
+        self.parameters = tuple(unique_parameters)
+        self._gradients: tuple[
+            tuple[torch.nn.Parameter, torch.Tensor], ...
+        ] | None = None
+
+    def require_cleared(self) -> None:
+        if any(parameter.grad is not None for parameter in self.parameters):
+            raise RuntimeError(
+                "All parameter gradients must be None before CUDA graph capture "
+                "and replay."
+            )
+
+    def record(self) -> None:
+        assert self._gradients is None, "CUDA graph gradients were already recorded"
+        self._gradients = tuple(
+            (parameter, gradient)
+            for parameter in self.parameters
+            if (gradient := parameter.grad) is not None
+        )
+
+    def restore(self) -> None:
+        assert self._gradients is not None, "CUDA graph gradients were not recorded"
+        for parameter, gradient in self._gradients:
+            parameter.grad = gradient
+
+    def teardown(self) -> None:
+        if self._gradients is None:
+            return
+        for parameter, gradient in self._gradients:
+            if parameter.grad is gradient:
+                parameter.grad = None
+        self._gradients = None
+
+
 class _CUDAGraphManager:
     """Singleton that owns a shared graph pool, stream, and annotations."""
 
@@ -207,6 +255,7 @@ class CUDAGraphWrapper:
         tensor_input_indices: Indices of inputs that should be copied before
             replay. When omitted, these are inferred from ``example_inputs``.
         num_warmup_iterations: Number of eager invocations before capture.
+        gradient_state: State that owns gradients allocated during capture.
 
     Raises:
         ValueError: If ``num_warmup_iterations`` is negative.
@@ -221,6 +270,7 @@ class CUDAGraphWrapper:
         tensor_input_indices: Sequence[int] | None = None,
         *,
         num_warmup_iterations: int = 1,
+        gradient_state: CUDAGraphGradientState | None = None,
     ):
         if num_warmup_iterations < 0:
             raise ValueError("num_warmup_iterations must be non-negative")
@@ -262,6 +312,7 @@ class CUDAGraphWrapper:
         self._output: Any = None
         self._should_check_address = should_check_address
         self._static_input_addresses: dict[int, int] = {}
+        self._gradient_state = gradient_state
 
         _manager.maybe_initialize()
         _manager.register(self)
@@ -324,6 +375,9 @@ class CUDAGraphWrapper:
             current_stream.wait_stream(_manager.stream)
             return output
 
+        if self._gradient_state is not None:
+            self._gradient_state.require_cleared()
+
         if self._graph is None:
             self._args = args
             self._record_static_input_addresses(args)
@@ -336,6 +390,8 @@ class CUDAGraphWrapper:
                 capture_error_mode="thread_local",
             ):
                 self._output = self._fn(*args)
+            if self._gradient_state is not None:
+                self._gradient_state.record()
             _manager.all_annotations.update(get_kernel_annotations())
             logger.info("Recorded CUDA graph")
 
@@ -347,9 +403,13 @@ class CUDAGraphWrapper:
         for i in self._input_indices_to_copy:
             self._args[i].copy_(args[i])
         self._graph.replay()
+        if self._gradient_state is not None:
+            self._gradient_state.restore()
         return self._output
 
     def teardown(self) -> None:
+        if self._gradient_state is not None:
+            self._gradient_state.teardown()
         self._graph = None
         self._args = None
         self._output = None
@@ -361,10 +421,10 @@ class CUDAGraphWrapper:
 def wrap_with_cuda_graph(
     fn: Callable[..., torch.Tensor],
     *,
-    gradient_accumulation_steps: int,
     sdc_num_steps: int,
     sdc_num_replays: int,
     num_warmup_steps: int = 2,
+    gradient_state: CUDAGraphGradientState | None = None,
 ) -> Callable[..., torch.Tensor]:
     """Decorate a structured callable with CUDA graph capture and replay.
 
@@ -378,10 +438,10 @@ def wrap_with_cuda_graph(
 
     Args:
         fn: Callable to capture.
-        gradient_accumulation_steps: Forward-backward calls per optimizer step.
         sdc_num_steps: Initial optimizer steps checked by SDC, or -1 for all.
         sdc_num_replays: Additional calls for each SDC-checked optimizer step.
         num_warmup_steps: Number of eager optimizer steps before capture.
+        gradient_state: State that owns gradients allocated during capture.
     """
 
     if not (
@@ -395,15 +455,15 @@ def wrap_with_cuda_graph(
         )
         return fn
 
-    # SDC checks only the first accumulation group of each checked step.
-    num_checked_steps = (
+    # Warmup is measured in optimizer steps, but this wrapper counts calls.
+    # Include the extra forward-backward calls made by SDC replay.
+    num_checked_warmup_steps = (
         num_warmup_steps
         if sdc_num_steps == -1
         else min(num_warmup_steps, sdc_num_steps)
     )
     num_warmup_iterations = (
-        num_warmup_steps * gradient_accumulation_steps
-        + num_checked_steps * sdc_num_replays
+        num_warmup_steps + num_checked_warmup_steps * sdc_num_replays
     )
 
     # Every wrapper is registered to the manager in this module and persists
@@ -427,6 +487,7 @@ def wrap_with_cuda_graph(
                 flat_fn,
                 flat_inputs,
                 num_warmup_iterations=num_warmup_iterations,
+                gradient_state=gradient_state,
             )
         else:
             assert input_spec is not None
