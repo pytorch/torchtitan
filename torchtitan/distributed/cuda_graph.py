@@ -31,7 +31,7 @@ class _BlockMaskInputSpec:
 
 # TODO(@jinsooihm): Remove this class and use standard pytree flattening after
 # attention mask creation moves into model code and BlockMask is no longer an input.
-class CudaGraphInputSpec:
+class CUDAGraphInputSpec:
     """Flatten structured inputs while exposing tensors stored in ``BlockMask``."""
 
     def __init__(self, tree: Any) -> None:
@@ -117,7 +117,7 @@ class CudaGraphInputSpec:
         return pytree.tree_unflatten(outer_leaves, self._tree_spec)
 
 
-class _CudaGraphManager:
+class _CUDAGraphManager:
     """Singleton that owns a shared graph pool, stream, and annotations."""
 
     def __init__(self) -> None:
@@ -174,7 +174,7 @@ class _CudaGraphManager:
         self._initialized = False
 
 
-_manager = _CudaGraphManager()
+_manager = _CUDAGraphManager()
 
 
 def cuda_graph_teardown() -> None:
@@ -384,13 +384,13 @@ def wrap_with_cuda_graph(
     # Every wrapper is registered to the manager in this module and persists
     # until cuda_graph_teardown is called.
     graph_wrapper: CUDAGraphWrapper | None = None
-    input_spec: CudaGraphInputSpec | None = None
+    input_spec: CUDAGraphInputSpec | None = None
 
     def run(*args: Any, **kwargs: Any) -> torch.Tensor:
         nonlocal graph_wrapper, input_spec
 
         if graph_wrapper is None:
-            input_spec = CudaGraphInputSpec((args, kwargs))
+            input_spec = CUDAGraphInputSpec((args, kwargs))
 
             def flat_fn(*flat_inputs: Any) -> torch.Tensor:
                 assert input_spec is not None
