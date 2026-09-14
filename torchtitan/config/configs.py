@@ -80,9 +80,9 @@ class TrainingConfig:
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
-    with the host during dispatch. Pipeline parallelism
-    is supported with single-stage schedules such as GPipe and 1F1B. CUDA graphs
-    are independent of ``torch.compile(mode="reduce-overhead")``, which performs
+    with the host during dispatch. Looped pipeline
+    schedules require one process group per directed physical-rank edge. CUDA
+    graphs are independent of ``torch.compile(mode="reduce-overhead")``, which performs
     its own CUDA graph capture.
     """
 
@@ -230,6 +230,25 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
+    pipeline_parallel_max_param_unsharded_stages: int | None = None
+    """Maximum local pipeline stages whose parameters may remain unsharded.
+
+    By default, all local stages may remain unsharded to maximize communication
+    overlap. Set a smaller value to reduce peak parameter memory at the cost of
+    potentially exposing additional FSDP all-gather communication.
+    """
+
+    pipeline_parallel_unshard_lookahead: Literal["auto", "full"] | tuple[
+        int, ...
+    ] = "auto"
+    """FSDP prefetch distance for a looped pipeline schedule.
+
+    ``"auto"`` uses a rank-aware distance bounded by
+    ``pipeline_parallel_max_param_unsharded_stages``. ``"full"`` prefetches
+    the full residency window. A tuple provides one explicit distance per
+    pipeline rank for schedules that benefit from asymmetric prefetch.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -262,6 +281,35 @@ class ParallelismConfig:
                 "parallelism.context_parallel_load_balancer must be one of: "
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
+            )
+        if (
+            self.pipeline_parallel_max_param_unsharded_stages is not None
+            and self.pipeline_parallel_max_param_unsharded_stages < 1
+        ):
+            raise ValueError(
+                "pipeline_parallel_max_param_unsharded_stages must be positive"
+            )
+        lookahead = self.pipeline_parallel_unshard_lookahead
+        if isinstance(lookahead, str):
+            valid_lookahead = lookahead in {"auto", "full"}
+        elif isinstance(lookahead, tuple):
+            valid_lookahead = len(lookahead) == self.pipeline_parallel_degree and all(
+                not isinstance(value, bool) and isinstance(value, int) and value >= 1
+                for value in lookahead
+            )
+            max_unsharded = self.pipeline_parallel_max_param_unsharded_stages
+            if valid_lookahead and max_unsharded is not None:
+                valid_lookahead = all(value <= max_unsharded for value in lookahead)
+        else:
+            valid_lookahead = False
+        if not valid_lookahead:
+            raise ValueError(
+                "pipeline_parallel_unshard_lookahead must be 'auto', 'full', "
+                "or a tuple with one positive integer per pipeline rank. "
+                "Tuple values may not exceed "
+                "pipeline_parallel_max_param_unsharded_stages when that limit "
+                f"is set; got {lookahead!r} for pipeline degree "
+                f"{self.pipeline_parallel_degree}"
             )
         if self.enable_fsdp_symm_mem and (
             not torch.cuda.is_available()
