@@ -45,21 +45,6 @@ class Linear(nn.Linear, Module):
         )
 
 
-class AllGatherLinear(Linear):
-    """Column-parallel linear with an input all-gather boundary.
-
-    The subclass keeps ``Linear`` computation unchanged. Its distinct config
-    type lets sharding setup attach the input all-gather to this module and lets
-    transforms replace only projections with this communication role. The
-    resulting ``ShardingConfig`` makes ``Module.parallelize`` install the
-    synchronous all-gather.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        pass
-
-
 class LinearReduceScatter(Linear):
     """Row-parallel linear with an output reduction boundary.
 
@@ -174,7 +159,6 @@ class PartialBiasRowwiseLinear(Linear):
 
 
 __all__ = [
-    "AllGatherLinear",
     "Linear",
     "LinearReduceScatter",
     "PartialBiasRowwiseLinear",

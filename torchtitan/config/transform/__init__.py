@@ -19,6 +19,7 @@ from .quantization import (
     NVFP4LinearConverter,
     QuantizationConverter,
 )
+from .tensor_parallel import TensorParallelFeedForwardTransform
 
 __all__ = [
     "ModelConfigTransform",
@@ -27,6 +28,7 @@ __all__ = [
     "transform_model_config_",
     "convert_config_type",
     "ContextParallelTransform",
+    "TensorParallelFeedForwardTransform",
     "LoRAConverter",
     "Float8GroupedExpertsConverter",
     "Float8LinearConverter",

@@ -16,7 +16,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.config.transform import LoRAConverter
+from torchtitan.config.transform import (
+    LoRAConverter,
+    TensorParallelFeedForwardTransform,
+)
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -130,6 +133,8 @@ class TestTpRematRegions(DTensorTestBase):
             w1_param_init=init,
             w2w3_param_init=init,
         )
+        config = TensorParallelFeedForwardTransform().transform(config)
+        assert isinstance(config, FeedForward.Config)
         if use_lora:
             config = LoRAConverter.Config(rank=2, alpha=4).build().convert(config)
             assert isinstance(config, FeedForward.Config)
