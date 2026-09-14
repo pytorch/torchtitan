@@ -9,6 +9,7 @@ from dataclasses import replace
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from torchtitan.models.common.config_utils import (
     make_moe_config,
@@ -16,6 +17,7 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.nn_modules import RMSNorm
 
 
 class _RecordingGroupedLinear(GroupedLinear):
@@ -178,22 +180,26 @@ class TestMoE(unittest.TestCase):
         self.assertEqual(routed_experts.w2.weight.shape, (2, 4, 8))
         self.assertEqual(set(routed_experts.state_dict()), {"w13.weight", "w2.weight"})
 
-    def test_routed_experts_postprocesses_routes_before_combine(self):
-        """The optional callback transforms expert rows before combine."""
-        config = make_routed_experts_config(
-            dim=4,
-            hidden_dim=4,
-            num_experts=2,
-            top_k=1,
-            param_init={},
-            comm_backend="standard",
+    def test_routed_experts_own_postprocess_before_combine(self):
+        config = replace(
+            make_routed_experts_config(
+                dim=4,
+                hidden_dim=4,
+                num_experts=2,
+                top_k=1,
+                param_init={},
+                comm_backend="standard",
+            ),
+            expert_output_postprocess=RMSNorm.Config(normalized_shape=4),
         )
         routed_experts = config.build()
         routed_experts.w13 = _AddOneW13()
         routed_experts.activation_fn = _SelectGate()
         routed_experts.w2 = _IdentityW2()
         routed_experts.token_dispatcher = _IdentityDispatcher()
-        scale = nn.Parameter(torch.tensor(3.0))
+        assert isinstance(routed_experts.expert_output_postprocess, RMSNorm)
+        with torch.no_grad():
+            routed_experts.expert_output_postprocess.weight.fill_(3.0)
         x = torch.arange(8, dtype=torch.float32).reshape(2, 4).requires_grad_()
 
         output = routed_experts(
@@ -201,13 +207,19 @@ class TestMoE(unittest.TestCase):
             torch.ones(2, 1),
             torch.zeros(2, 1, dtype=torch.int64),
             torch.tensor([2, 0]),
-            expert_output_postprocess=lambda value: value * scale,
         )
-        torch.testing.assert_close(output, (x + 1) * scale)
+        expected = F.rms_norm(
+            x + 1,
+            (4,),
+            routed_experts.expert_output_postprocess.weight,
+            routed_experts.expert_output_postprocess.eps,
+        )
+        torch.testing.assert_close(output, expected)
+        self.assertIn("expert_output_postprocess.weight", routed_experts.state_dict())
 
         output.sum().backward()
-        torch.testing.assert_close(x.grad, torch.full_like(x, 3.0))
-        torch.testing.assert_close(scale.grad, (x.detach() + 1).sum())
+        self.assertIsNotNone(x.grad)
+        self.assertIsNotNone(routed_experts.expert_output_postprocess.weight.grad)
 
     def test_routed_expert_config_validates_projection_contract(self):
         config = make_routed_experts_config(
