@@ -241,13 +241,18 @@ class ParallelismConfig:
     pipeline_parallel_unshard_lookahead: Literal["full", "auto"] | tuple[
         int, ...
     ] = "auto"
-    """FSDP prefetch distance for a looped pipeline schedule.
+    """FSDP all-gather prefetch distance for looped pipeline schedules.
 
-    ``"auto"`` uses a schedule-derived, rank-aware distance bounded by
-    ``pipeline_parallel_max_param_unsharded_stages`` and is TorchTitan's
-    default. ``"full"`` requests PyTorch's full-residency compatibility policy.
-    A tuple provides one explicit distance per pipeline rank for expert tuning
-    of asymmetric schedules.
+    This is independent of parameter residency:
+    ``pipeline_parallel_max_param_unsharded_stages`` controls which stages stay
+    resident and when they reshard, while this setting controls only how early
+    eligible unshards are issued. ``"full"`` uses that entire residency window
+    on every rank and preserves PyTorch's schedule default. ``"auto"``, the
+    TorchTitan default, resolves rank ``r`` to
+    ``min(r + 2, max_unsharded_stages)``. A tuple provides one positive distance
+    per PP rank for expert tuning; its length must equal the PP degree and no
+    value may exceed the residency bound. See ``docs/composability.md`` for the
+    scheduling contract and measured tradeoffs.
     """
 
     context_parallel_degree: int = 1
