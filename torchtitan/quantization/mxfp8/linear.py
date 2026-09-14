@@ -13,7 +13,7 @@ Tensor shape suffixes:
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, cast, Literal
 
 import spmd_types as spmd
 import torch
@@ -57,15 +57,16 @@ def _scaled_mm_out(
     out: torch.Tensor,
 ) -> torch.Tensor:
     """Write one block-scaled matrix product into caller-owned storage."""
-    return torch.ops.aten._scaled_mm_v2.out(  # pyrefly: ignore[missing-attribute]
+    scaled_mm_v2 = cast(Any, torch.ops.aten)._scaled_mm_v2
+    return scaled_mm_v2.out(
         lhs,
         rhs,
         [lhs_scale],
-        [int(F.ScalingType.BlockWise1x32)],
-        [int(F.SwizzleType.SWIZZLE_32_4_4)],
+        [F.ScalingType.BlockWise1x32.value],
+        [F.SwizzleType.SWIZZLE_32_4_4.value],
         [rhs_scale],
-        [int(F.ScalingType.BlockWise1x32)],
-        [int(F.SwizzleType.SWIZZLE_32_4_4)],
+        [F.ScalingType.BlockWise1x32.value],
+        [F.SwizzleType.SWIZZLE_32_4_4.value],
         bias,
         torch.bfloat16,
         [],
