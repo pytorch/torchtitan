@@ -26,6 +26,7 @@ from tests.utils import hash_gradient, hash_model
 from torch.nn.attention.flex_attention import flex_attention
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
@@ -234,12 +235,16 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
-            loss = trainer.forward_backward_step(
-                input_dict={
-                    "input": self.inputs,
-                    "positions": self.positions,
-                    "labels": self.labels,
-                },
+            loss = trainer.engine.forward_backward_microbatch(
+                microbatch_group=[
+                    TokenizedTrainingMicrobatch(
+                        input=self.inputs,
+                        positions=self.positions,
+                        labels=self.labels,
+                        padding_mask=torch.zeros_like(self.labels, dtype=torch.bool),
+                        num_valid_tokens=self.labels.numel(),
+                    )
+                ],
                 global_valid_tokens=global_valid_tokens,
             )
             optimizer.step()
@@ -329,7 +334,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 example_inputs=example_inputs,
             )
 
-        # Step 4: Apply load-time passes (cudagraph)
+        # Step 4: Apply load-time passes (CUDA graph)
         if enable_passes:
             load_config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),

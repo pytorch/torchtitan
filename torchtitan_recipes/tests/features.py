@@ -15,6 +15,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
+from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -32,7 +33,9 @@ from torchtitan.models.llama3.config_registry import (
     sft_debugmodel,
 )
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
+from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 from . import _set_spmd_typechecking
 
@@ -40,26 +43,40 @@ from . import _set_spmd_typechecking
 logger = logging.getLogger(__name__)
 
 
-class SDCReplayMismatchTrainer(Trainer):
-    """Inject a replay-only gradient mismatch and verify it is fatal."""
+class SDCReplayMismatchTrainingEngine(TrainingEngine):
+    """Inject a gradient mismatch into the first SDC replay execution."""
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(Trainer.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__(config)
+    def __init__(
+        self,
+        config: TrainingEngine.Config,
+        *,
+        model_config: BaseModel.Config,
+        max_num_documents: int | None,
+        output_dir: str,
+    ) -> None:
+        super().__init__(
+            config,
+            model_config=model_config,
+            max_num_documents=max_num_documents,
+            output_dir=output_dir,
+        )
         self._num_forward_backward_calls = 0
 
-    def forward_backward_step(
+    def _forward_backward_body(
         self,
         *,
-        input_dict: dict[str, Any] | list[dict[str, Any]],
+        inputs: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
         global_valid_tokens: torch.Tensor,
+        model_kwargs: dict[str, Any],
+        loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        loss = super().forward_backward_step(
-            input_dict=input_dict,
+        loss = super()._forward_backward_body(
+            inputs=inputs,
+            labels=labels,
             global_valid_tokens=global_valid_tokens,
+            model_kwargs=model_kwargs,
+            loss_kwargs=loss_kwargs,
         )
         self._num_forward_backward_calls += 1
         if self._num_forward_backward_calls != 2 or dist.get_rank() != 0:
@@ -73,15 +90,25 @@ class SDCReplayMismatchTrainer(Trainer):
                     grad = parameter.grad
                     local_grad = grad.to_local() if isinstance(grad, DTensor) else grad
                     if local_grad.numel() > 0:
-                        # Intentionally corrupt one local gradient element to verify
-                        # that SDC replay reports the injected mismatch.
+                        # Corrupt the first replay before SDC captures its signature.
                         local_grad[(0,) * local_grad.ndim].add_(1)
                         return loss
         raise AssertionError("Could not find a local gradient to corrupt.")
 
+
+class SDCReplayMismatchTrainer(Trainer):
+    """Inject a replay-only gradient mismatch and verify it is fatal."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Trainer.Config):
+        pass
+
+    engine_cls = SDCReplayMismatchTrainingEngine
+    engine: SDCReplayMismatchTrainingEngine
+
     def train_step(
         self,
-        data_iterator: Iterator[dict[str, Any]],
+        data_iterator: Iterator[TrainingMicrobatch],
     ) -> None:
         try:
             super().train_step(data_iterator)
@@ -92,8 +119,8 @@ class SDCReplayMismatchTrainer(Trainer):
             assert error.rank == 0
             assert error.signature_mismatch is not None
             assert error.signature_mismatch.startswith("gradient:0:")
-            assert self.sdc_replayer is not None
-            assert self.sdc_replayer.steps_since_reset == 0
+            assert self.engine.sdc_replayer is not None
+            assert self.engine.sdc_replayer.steps_since_reset == 0
             logger.info("Detected expected %s", error)
             return
         raise AssertionError("Expected SDC replay to detect the injected mismatch.")
@@ -118,7 +145,7 @@ def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_sdc_replay_cudagraph() -> Trainer.Config:
+def llama3_debugmodel_sdc_replay_cuda_graph() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     config.debug.deterministic = True
     config.debug.seed = 42
@@ -548,6 +575,6 @@ def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
     config.checkpoint.enable = True
-    config.checkpoint.create_seed_checkpoint = True
+    config.create_seed_checkpoint = True
     config.training.disable_cuda_graphs = True
     return config

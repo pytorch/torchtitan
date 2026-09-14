@@ -579,9 +579,6 @@ class BaseCheckpointManager(Configurable, ABC):
         enable_first_step_checkpoint: bool = False
         """Whether to save immediately after the first training step."""
 
-        create_seed_checkpoint: bool = False
-        """Whether to initialize and save an unsharded seed checkpoint."""
-
         load_only: bool = False
         """Whether to permit loads while disabling all saves."""
 
