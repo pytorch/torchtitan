@@ -437,6 +437,9 @@ class MXFP8StackedLinear(StackedLinear):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # The local weight is [num_linears, local_out_features, in_features].
+        # TP shards dimension 1, so validate the post-TP width rather than only
+        # the global out_features checked by Config.
         local_out_features = self.weight.shape[-2]
         if local_out_features % _MXFP8_BLOCK_SIZE:
             raise ValueError(
@@ -445,6 +448,12 @@ class MXFP8StackedLinear(StackedLinear):
                 "StackedLinear out_features or TP degree so quantization "
                 "blocks do not span projection boundaries."
             )
+
+        # MXFP8 GEMM consumes a 2D [N, K] weight. Flattening
+        # [num_linears, local_out_features, in_features] preserves the physical
+        # order: each linear occupies one contiguous row range. The divisibility
+        # check above guarantees that a 32-row quantization block cannot cross
+        # from one linear into the next.
         weight_NK = self.weight.flatten(0, -2)
         bias_N = None if self.bias is None else self.bias.flatten()
         output = _mxfp8_linear(
@@ -453,4 +462,7 @@ class MXFP8StackedLinear(StackedLinear):
             bias_N,
             self.input_activation_format_for_backward,
         )
+
+        # Restore the public StackedLinear output shape
+        # [..., num_linears, local_out_features] from the flat GEMM result.
         return output.unflatten(-1, self.weight.shape[:-1])
