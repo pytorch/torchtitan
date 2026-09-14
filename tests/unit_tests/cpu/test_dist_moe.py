@@ -15,11 +15,9 @@ import torchtitan.config.transform.quantization as quantization_transform
 from dist_moe import DistMoeInputScaledRMSNorm
 from torchtitan.components.dist_moe import (
     DistMoeRoutedExperts,
+    DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
-)
-from torchtitan.components.dist_moe.backend import (
-    _DistMoeRuntime,
-    _validate_dist_moe_runtime,
+    prepare_dist_moe_runtime,
 )
 from torchtitan.config.transform import DistMoeTransform, MXFP8DistMoeTransform
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
@@ -53,10 +51,11 @@ def _stock_config() -> RoutedExperts.Config:
     )
 
 
-def _runtime(prefetch: Any = None) -> _DistMoeRuntime:
-    return _DistMoeRuntime(
+def _runtime(prefetch: Any = None) -> DistMoeRuntime:
+    return DistMoeRuntime(
         config=cast(Any, object()),
         group=cast(Any, object()),
+        device=torch.device("cuda"),
         prefetch=prefetch,
     )
 
@@ -96,7 +95,7 @@ def test_runtime_releases_pending_prefetch_after_failure_and_close():
         ),
         pytest.raises(RuntimeError, match="context creation failed"),
     ):
-        runtime.initialize(torch.device("cuda"))
+        runtime.initialize()
 
     prefetch.close.assert_called_once_with()
     runtime.close()
@@ -107,8 +106,11 @@ def test_runtime_consumes_pipeline_metadata_before_model_forward():
     runtime = _runtime()
     runtime.slots[(3, 7)] = (2, 5)
     runtime.context = Mock()
+    context = runtime.context
+    hook = Mock()
+    runtime._pipeline_hooks.append(hook)
 
-    args, kwargs = runtime.select_from_stage_forward(
+    args, kwargs = runtime.select_pipeline_slot(
         Mock(),
         (torch.empty(1),),
         {
@@ -118,9 +120,13 @@ def test_runtime_consumes_pipeline_metadata_before_model_forward():
         },
     )
 
-    runtime.context.select_activation_slot.assert_called_once_with(2, 5)
+    context.select_activation_slot.assert_called_once_with(2, 5)
     assert len(args) == 1
     assert kwargs == {"input_batch": "value"}
+    runtime.close()
+    runtime.close()
+    hook.remove.assert_called_once_with()
+    context.close.assert_called_once_with()
 
 
 def test_transform_rejects_specialized_routed_experts():
@@ -227,7 +233,9 @@ def test_dist_moe_config_rejects_invalid_values(kwargs, message):
         )
 
 
-def test_runtime_policy_allows_layer_specific_initializers(monkeypatch):
+def test_prepare_runtime_allows_initializers_and_rejects_shared_policy_mismatch(
+    monkeypatch,
+):
     config = eager_configs.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
     expert_configs = [
         entry[1]
@@ -236,14 +244,40 @@ def test_runtime_policy_allows_layer_specific_initializers(monkeypatch):
     modules = tuple(expert_config.build() for expert_config in expert_configs[:2])
     assert modules[0]._dist_moe_config.w13 != modules[1]._dist_moe_config.w13
     assert modules[0]._dist_moe_config.w2 != modules[1]._dist_moe_config.w2
+    group = Mock()
+    ep_mesh = Mock()
+    ep_mesh.get_group.return_value = group
+    parallel_dims = Mock(cp=1, tp=1, pp_enabled=False)
+    parallel_dims.get_optional_mesh.return_value = ep_mesh
+    memory_plan = Mock(uses_host_scratch=False)
+    memory_plan.explain.return_value = "test memory plan"
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (10, 0))
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda _group: 1)
+    monkeypatch.setattr(
+        "torchtitan.components.dist_moe.backend.plan_dist_moe_memory",
+        lambda *_args, **_kwargs: memory_plan,
+    )
 
-    policy = _validate_dist_moe_runtime(modules, device=torch.device("cuda"))
+    runtime = prepare_dist_moe_runtime(
+        config=config,
+        model_parts=list(modules),
+        parallel_dims=parallel_dims,
+        device=torch.device("cuda"),
+        pp_schedule=None,
+    )
 
-    assert policy is modules[0]._dist_moe_config
+    assert runtime is not None
+    assert all(module._runtime is runtime for module in modules)
+    runtime.close()
     modules[1]._dist_moe_config.activation_slot_policy = "microbatch"
     with pytest.raises(ValueError, match="activation-slot and VMM-prefetch policy"):
-        _validate_dist_moe_runtime(modules, device=torch.device("cuda"))
+        prepare_dist_moe_runtime(
+            config=config,
+            model_parts=list(modules),
+            parallel_dims=parallel_dims,
+            device=torch.device("cuda"),
+            pp_schedule=None,
+        )
 
 
 @pytest.mark.parametrize(

@@ -236,17 +236,29 @@ FSDP, the module prepares its ordinary parameter dynamically for each call.
 
 ## Runtime Setup And Memory Ownership
 
-`setup_dist_moe()` runs once after model parallelization and before parameter
-materialization. Its phases are explicit:
+The trainer, rather than an individual expert layer, owns the rank-local
+`DistMoeRuntime`. This ownership matches the resource: its memory plan depends
+on every local MoE layer, the EP group, and the finalized PP schedule, and its
+symmetric/VMM allocations must be created and released exactly once. Keeping
+the runtime on the trainer also makes independent trainer and test lifetimes
+explicit instead of relying on implicit process-global state.
 
-1. Collect each local DistMoE module once.
-2. Validate the resolved runtime and hardware invariants.
-3. Derive topology, token capacity, and schedule-aware activation ownership.
-4. Bind one shared context and its pipeline metadata hooks.
+The standard trainer performs two explicit setup steps:
 
-The standard trainer calls this setup automatically after constructing the
-final PP schedule. Recipe authors configure the transforms; they do not create
-per-layer contexts or call `setup_dist_moe()` themselves.
+1. After model parallelization and PP schedule construction, but before model
+   state initialization, `prepare_dist_moe_runtime()` resolves one memory plan,
+   starts optional VMM preparation, and attaches the resulting shared runtime
+   to every local DistMoE layer.
+2. After parameters and buffers have been materialized, the trainer calls
+   `DistMoeRuntime.initialize()` to construct the annex context and consume any
+   prepared VMM mapping.
+
+Starting VMM preparation before model state initialization preserves overlap
+without giving layers independent contexts or ownership. All modes attach the
+same runtime reference to their local DistMoE modules. PP additionally installs
+one pre-hook on each participating stage root to select its immutable
+stage/microbatch activation slot. Recipe authors configure transforms; they do
+not call either runtime setup method.
 
 The annex owns four distinct allocations:
 
@@ -299,7 +311,11 @@ token divisibility, and shared context policy. Unsupported hardware,
 postprocessors, schedules, or inconsistent local layer configurations fail
 explicitly rather than selecting a slower fallback.
 
-Trainer teardown calls the generic, idempotent `Module.close()` lifecycle.
-DistMoE uses it to remove pipeline hooks and release symmetric and VMM storage.
-Kernel algorithms and allocator internals are documented in the annex; this
-guide defines only TorchTitan ownership and composition.
+If model-state initialization fails after VMM preparation, the trainer closes
+the pending mapping before propagating the exception. Context construction also
+closes an unconsumed mapping on failure. Normal trainer teardown calls the
+idempotent `DistMoeRuntime.close()` exactly once to remove PP hooks and release
+symmetric, activation, scratch, and VMM resources. Expert modules do not own or
+recursively close this shared state. Kernel algorithms and allocator internals
+are documented in the annex; this guide defines only TorchTitan ownership and
+composition.

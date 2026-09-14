@@ -24,7 +24,11 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.dist_moe import DistMoeRoutedExperts, setup_dist_moe
+from torchtitan.components.dist_moe import (
+    DistMoeRoutedExperts,
+    DistMoeRuntime,
+    prepare_dist_moe_runtime,
+)
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -58,7 +62,6 @@ from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.protocols.module import Module
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
 
@@ -323,6 +326,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     pp_has_first_stage: bool
     pp_has_last_stage: bool
     sdc_replayer: SDCReplayer | None
+    dist_moe_runtime: DistMoeRuntime | None
 
     # additional training states
     step: int
@@ -477,6 +481,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
             num_tokens_per_dp_rank * dp_degree
         )
+        self.dist_moe_runtime = None
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):
             if parallel_dims.pp_enabled:
@@ -509,27 +514,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 # model_parts is used instead
                 del model
 
-                setup_dist_moe(
+                self.dist_moe_runtime = prepare_dist_moe_runtime(
                     config=config,
                     model_parts=self.model_parts,
                     parallel_dims=parallel_dims,
                     device=self.device,
                     pp_schedule=self.pp_schedule,
-                )
-
-                for m in self.model_parts:
-                    m.to_empty(device=init_device)
-                    with torch.no_grad():
-                        # TODO: Change this back to init_weights once
-                        # autoparallel contains the wrap_init_states
-                        cast(BaseModel, m).init_weights(buffer_device=buffer_device)
-                    m.train()
-
-                # confirm that user will be able to view loss metrics on the console
-                ensure_pp_loss_visible(
-                    parallel_dims=parallel_dims,
-                    pp_schedule=config.parallelism.pipeline_parallel_schedule,
-                    color=color,
                 )
             else:
                 if not config.checkpoint.create_seed_checkpoint:
@@ -546,19 +536,39 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     )
 
                 self.model_parts = [model]
-                setup_dist_moe(
+                self.dist_moe_runtime = prepare_dist_moe_runtime(
                     config=config,
                     model_parts=self.model_parts,
                     parallel_dims=parallel_dims,
                     device=self.device,
                     pp_schedule=None,
                 )
-                model.to_empty(device=init_device)
-                with torch.no_grad():
-                    # TODO: Change this back to init_weights once
-                    # autoparallel contains the wrap_init_states
-                    cast(BaseModel, model).init_weights(buffer_device=buffer_device)
-                model.train()
+
+            try:
+                for model_part in self.model_parts:
+                    model_part.to_empty(device=init_device)
+                    with torch.no_grad():
+                        # TODO: Change this back to init_weights once
+                        # autoparallel contains the wrap_init_states
+                        cast(BaseModel, model_part).init_weights(
+                            buffer_device=buffer_device
+                        )
+                    model_part.train()
+                if self.dist_moe_runtime is not None:
+                    self.dist_moe_runtime.initialize()
+            except Exception:
+                if self.dist_moe_runtime is not None:
+                    self.dist_moe_runtime.close()
+                    self.dist_moe_runtime = None
+                raise
+
+            # confirm that user will be able to view loss metrics on the console
+            if parallel_dims.pp_enabled:
+                ensure_pp_loss_visible(
+                    parallel_dims=parallel_dims,
+                    pp_schedule=config.parallelism.pipeline_parallel_schedule,
+                    color=color,
+                )
 
         # Set lm_head reference for ChunkedLossWrapper after model construction.
         # Non-PP: single model part always has lm_head.
@@ -1152,11 +1162,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             self.dataloader.close()
         if not self.config.training.disable_cuda_graphs:
             cudagraph_teardown()
-        if hasattr(self, "model_parts"):
-            for model in self.model_parts:
-                for module in model.modules():
-                    if isinstance(module, Module):
-                        module.close()
+        dist_moe_runtime = getattr(self, "dist_moe_runtime", None)
+        if dist_moe_runtime is not None:
+            dist_moe_runtime.close()
+            self.dist_moe_runtime = None
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
