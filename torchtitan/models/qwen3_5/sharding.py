@@ -105,12 +105,6 @@ def _conv_weight_sharding() -> ShardingConfig:
     )
 
 
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w13_E2FD": spmd.S(2),
-    "w2_EDF": spmd.S(2),
-}
-
-
 def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
@@ -198,7 +192,6 @@ def _set_qwen35_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
         _set_shared_expert_gate_sharding(
             # pyrefly: ignore [missing-attribute]

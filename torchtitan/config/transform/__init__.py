@@ -11,9 +11,9 @@ from .base import convert_config_type, ModelConfigTransform
 from .context_parallel import ContextParallelTransform
 from .lora import LoRAConverter
 from .quantization import (
-    Float8GroupedExpertsConverter,
+    Float8GroupedLinearConverter,
     Float8LinearConverter,
-    MXFP8GroupedExpertsConverter,
+    MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
     NVFP4LinearConverter,
     QuantizationConverter,
@@ -26,9 +26,9 @@ __all__ = [
     "convert_config_type",
     "ContextParallelTransform",
     "LoRAConverter",
-    "Float8GroupedExpertsConverter",
+    "Float8GroupedLinearConverter",
     "Float8LinearConverter",
-    "MXFP8GroupedExpertsConverter",
+    "MXFP8GroupedLinearConverter",
     "MXFP8LinearConverter",
     "NVFP4LinearConverter",
     "QuantizationConverter",
