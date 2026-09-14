@@ -572,7 +572,7 @@ class VLLMModelWrapper(Module):
 
             if isinstance(module, FeedForward):
                 # FeedForward exposes w1/w3 state-dict keys, but their layout
-                # belongs to the physical w13 StackedLinear child.
+                # belongs to the physical w13 Linear child.
                 w13_sharding_config = getattr(module.w13, "_sharding_config", None)
                 if w13_sharding_config is not None:
                     for state_name in ("weight", "bias"):

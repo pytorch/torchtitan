@@ -31,7 +31,7 @@ from torchtitan.models.common.dist_gemm import (
     RowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear, RouterGateLinear, StackedLinear
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
@@ -292,7 +292,7 @@ def make_ffn_config(
     """
     ffn_cls = DistGEMMFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
     return ffn_cls.Config(
-        w13=StackedLinear.Config(
+        w13=Linear.Config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,

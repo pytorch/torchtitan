@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -20,7 +20,6 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.common.linear import StackedLinearBase
 
 logger = logging.getLogger(__name__)
 
@@ -273,16 +272,18 @@ def apply_fsdp_to_decoder(
             )
 
     for layer_id, transformer_block in model.layers.items():
-        # StackedLinear keeps small selector dimensions (for example W1/W3
+        # A stacked Linear keeps small selector dimensions (for example W1/W3
         # or Q/K/V) separate from the matrix-row dimension. Shard matrix rows so
         # every rank retains all selectors and can run the fused projection.
         stacked_param_placements: dict[nn.Parameter, Shard] = {}
         for module in transformer_block.modules():
-            if not isinstance(module, StackedLinearBase):
+            if not isinstance(module, nn.Linear) or module.weight.ndim == 2:
                 continue
-            stacked_param_placements[module.weight] = Shard(module.weight.ndim - 2)
+            weight = cast(nn.Parameter, module.weight)
+            stacked_param_placements[weight] = Shard(weight.ndim - 2)
             if module.bias is not None:
-                stacked_param_placements[module.bias] = Shard(module.bias.ndim - 1)
+                bias = module.bias
+                stacked_param_placements[bias] = Shard(bias.ndim - 1)
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
