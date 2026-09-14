@@ -31,9 +31,8 @@ from torchtitan.models.common.dist_gemm import (
     RowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import GroupedLinear, Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
-    GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
     MoE,
     RoutedExperts,
@@ -205,21 +204,26 @@ def fused_gate_up_param_init(
     return {"weight": _make_fused_linear_init(gate_init, up_init)}
 
 
-def fused_grouped_experts_param_init(
+def _fused_grouped_gate_up_init(
+    param_init: dict[str, Callable],
+) -> Callable:
+    """Initialize gate and up slices of a structured ``[E, 2, F, D]`` weight."""
+
+    def init(weight_E2FD: torch.Tensor) -> None:
+        param_init["w1_EFD"](weight_E2FD[:, 0])
+        param_init["w3_EFD"](weight_E2FD[:, 1])
+
+    return init
+
+
+def fused_grouped_gate_up_param_init(
     param_init: dict[str, Callable],
 ) -> dict[str, Callable]:
-    """Initialize the logical gate/up slices of the physical W13 weight."""
-    if not param_init:
-        return param_init
-
-    def init_w13(w13_E2FD: torch.Tensor) -> None:
-        param_init["w1_EFD"](w13_E2FD[:, 0])
-        param_init["w3_EFD"](w13_E2FD[:, 1])
-
-    return {
-        "w13_E2FD": init_w13,
-        "w2_EDF": param_init["w2_EDF"],
-    }
+    """Build ``w13.weight`` initialization from logical expert projections."""
+    missing = {"w1_EFD", "w3_EFD"} - param_init.keys()
+    if missing:
+        raise ValueError(f"Missing routed-expert initializers: {sorted(missing)}")
+    return {"weight": _fused_grouped_gate_up_init(param_init)}
 
 
 def make_gqa_config(
@@ -445,13 +449,25 @@ def make_routed_experts_config(
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
 ) -> RoutedExperts.Config:
-    """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
+    """Build routed experts with structured gate/up and down projections."""
+    missing = {"w1_EFD", "w2_EDF", "w3_EFD"} - param_init.keys()
+    if param_init and missing:
+        raise ValueError(f"Missing routed-expert initializers: {sorted(missing)}")
+
     return RoutedExperts.Config(
-        inner_experts=GroupedExperts.Config(
-            dim=dim,
-            hidden_dim=hidden_dim,
-            num_experts=num_experts,
-            param_init=fused_grouped_experts_param_init(param_init),
+        w13=GroupedLinear.Config(
+            group_size=num_experts,
+            in_features=dim,
+            out_features=(2, hidden_dim),
+            param_init=(
+                fused_grouped_gate_up_param_init(param_init) if param_init else None
+            ),
+        ),
+        w2=GroupedLinear.Config(
+            group_size=num_experts,
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init={"weight": param_init["w2_EDF"]} if param_init else None,
         ),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
