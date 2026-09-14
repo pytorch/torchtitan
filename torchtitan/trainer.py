@@ -20,11 +20,6 @@ import torch.distributed.checkpoint.stateful
 import torch.distributed.config as dist_config
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.pipelining.schedules import (
-    _PipelineScheduleRuntime,
-    get_schedule_class,
-    PipelineScheduleMulti,
-)
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
@@ -190,18 +185,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "validation because validation reinitializes the shared "
                     "pipeline schedule. Disable validation or CUDA graphs."
                 )
-
-            if pp_enabled:
-                pp_schedule_class = (
-                    _PipelineScheduleRuntime
-                    if self.parallelism.pipeline_parallel_schedule_csv
-                    else get_schedule_class(self.parallelism.pipeline_parallel_schedule)
-                )
-                if issubclass(pp_schedule_class, PipelineScheduleMulti):
-                    raise ValueError(
-                        "CUDA graphs do not support looped pipeline schedules yet. "
-                        "Use a single-stage pipeline schedule or disable CUDA graphs."
-                    )
 
             if self.dataloader.max_num_documents is None:
                 for fqn, _, _, _ in self.model_spec.model.traverse(
