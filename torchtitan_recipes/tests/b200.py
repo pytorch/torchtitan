@@ -55,7 +55,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
 
 
 def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
-    """Exercise prefetched VMM host scratch with the MXFP8 integration."""
+    """Exercise host-backed VMM scratch preallocation with MXFP8 DistMoE."""
     from torchtitan.components.dist_moe import DistMoeRoutedExperts
 
     config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
@@ -64,6 +64,6 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     assert experts, "the VMM integration recipe requires routed experts"
     for _, expert, _, _ in experts:
         assert isinstance(expert, DistMoeRoutedExperts.Config)
-        expert.backend.vmm_host_scratch_imbalance_factor = 4.0
-        expert.backend.prefetch_vmm = True
+        expert.vmm_host_scratch_imbalance_factor = 4.0
+        expert.prefetch_vmm = True
     return config

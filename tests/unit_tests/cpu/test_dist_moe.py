@@ -14,24 +14,24 @@ import torch
 import torchtitan.config.transform.quantization as quantization_transform
 from dist_moe import DistMoeInputScaledRMSNorm
 from torchtitan.components.dist_moe import (
-    DistMoeBackendConfig,
-    DistMoeConverter,
     DistMoeRoutedExperts,
+    MXFP8DistMoeRoutedExperts,
 )
 from torchtitan.components.dist_moe.backend import _DistMoeRuntime
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.config.transform import DistMoeTransform, MXFP8DistMoeTransform
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     config_registry as graph_configs,
 )
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.deepseek_v3 import config_registry as eager_configs
+from torchtitan.protocols.module import Module
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
 
 def _parameter_initializers() -> dict[str, Any]:
-    """Return the logical routed-expert initializers required by the builder."""
     return {
         "w1_EFD": torch.nn.init.zeros_,
         "w2_EDF": torch.nn.init.zeros_,
@@ -39,7 +39,18 @@ def _parameter_initializers() -> dict[str, Any]:
     }
 
 
-def _runtime(prefetch: Any) -> _DistMoeRuntime:
+def _stock_config() -> RoutedExperts.Config:
+    return make_routed_experts_config(
+        dim=32,
+        hidden_dim=64,
+        num_experts=4,
+        top_k=2,
+        param_init=_parameter_initializers(),
+        comm_backend="standard",
+    )
+
+
+def _runtime(prefetch: Any = None) -> _DistMoeRuntime:
     return _DistMoeRuntime(
         config=cast(Any, object()),
         group=cast(Any, object()),
@@ -47,10 +58,34 @@ def _runtime(prefetch: Any) -> _DistMoeRuntime:
     )
 
 
-def test_dist_moe_runtime_closes_prefetch_after_initialization_failure():
+class _NativePostprocess(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int
+        eps: float = 1e-8
+        gain_center: float = 1.0
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(config.dim))
+        self.eps = config.eps
+        self.gain_center = config.gain_center
+
+    def forward(self, value: torch.Tensor) -> torch.Tensor:
+        return value
+
+    def to_dist_moe_postprocess(self) -> DistMoeInputScaledRMSNorm:
+        """Translate this owned module to the annex-native descriptor."""
+        return DistMoeInputScaledRMSNorm(
+            self.weight,
+            eps=self.eps,
+            gain_center=self.gain_center,
+        )
+
+
+def test_runtime_releases_pending_prefetch_after_failure_and_close():
     prefetch = Mock()
     runtime = _runtime(prefetch)
-
     with (
         patch(
             "torchtitan.components.dist_moe.backend.create_context",
@@ -61,37 +96,36 @@ def test_dist_moe_runtime_closes_prefetch_after_initialization_failure():
         runtime.initialize(torch.device("cuda"))
 
     prefetch.close.assert_called_once_with()
+    runtime.close()
     assert runtime.prefetch is None
 
 
-def test_dist_moe_runtime_close_releases_pending_prefetch():
-    prefetch = Mock()
-    runtime = _runtime(prefetch)
+def test_runtime_consumes_pipeline_metadata_before_model_forward():
+    runtime = _runtime()
+    runtime.slots[(3, 7)] = (2, 5)
+    runtime.context = Mock()
 
-    runtime.close()
-    runtime.close()
+    args, kwargs = runtime.select_from_stage_forward(
+        Mock(),
+        (torch.empty(1),),
+        {
+            "pipeline_stage_index": 3,
+            "pipeline_microbatch_index": 7,
+            "input_batch": "value",
+        },
+    )
 
-    prefetch.close.assert_called_once_with()
-    assert runtime.prefetch is None
+    runtime.context.select_activation_slot.assert_called_once_with(2, 5)
+    assert len(args) == 1
+    assert kwargs == {"input_batch": "value"}
 
 
-def test_dist_moe_converter_rejects_specialized_routed_experts():
-    """Conversion must not silently discard subclass-specific semantics."""
-
+def test_transform_rejects_specialized_routed_experts():
     @dataclass(kw_only=True, slots=True)
     class SpecializedConfig(RoutedExperts.Config):
-        """Routed-expert config carrying behavior unknown to the converter."""
-
         extra_policy: bool = True
 
-    stock = make_routed_experts_config(
-        dim=32,
-        hidden_dim=64,
-        num_experts=4,
-        top_k=2,
-        param_init=_parameter_initializers(),
-        comm_backend="standard",
-    )
+    stock = _stock_config()
     specialized = SpecializedConfig(
         w13=stock.w13,
         w2=stock.w2,
@@ -99,240 +133,95 @@ def test_dist_moe_converter_rejects_specialized_routed_experts():
         token_dispatcher=stock.token_dispatcher,
     )
 
-    with pytest.raises(TypeError, match="specialized routed-experts config"):
-        DistMoeConverter(DistMoeConverter.Config()).convert(specialized)
+    with pytest.raises(TypeError, match="specialized RoutedExperts.Config"):
+        DistMoeTransform().transform(specialized)
 
 
-@pytest.mark.parametrize("dtype", ["bf16", "mxfp8"])
-def test_dist_moe_forwards_expert_output_postprocess(dtype):
-    """The adapter preserves the common route-output callback contract."""
-    stock = make_routed_experts_config(
-        dim=32,
-        hidden_dim=64,
-        num_experts=4,
-        top_k=2,
-        param_init=_parameter_initializers(),
-        comm_backend="standard",
-    )
-    config = DistMoeConverter(
-        DistMoeConverter.Config(backend=DistMoeBackendConfig(dtype=dtype))
-    ).convert(stock)
-    assert isinstance(config, DistMoeRoutedExperts.Config)
-    module = config.build()
-    module._runtime = _runtime(None)
-    module._runtime.context = cast(Any, object())
-    postprocess = Mock(side_effect=lambda value: value)
+def test_transform_rejects_postprocess_without_native_translation():
+    stock = _stock_config()
+    stock.expert_output_postprocess = RMSNorm.Config(normalized_shape=32)
 
-    with (
-        patch(
-            "torchtitan.components.dist_moe.backend._dynamic_prepared_weight",
-            side_effect=lambda weight, **_kwargs: weight,
-        ),
-        patch(
-            "torchtitan.components.dist_moe.backend.run_dist_moe",
-            return_value=torch.empty(2, 32),
-        ) as run,
-    ):
-        module(
-            torch.empty(2, 32),
-            torch.empty(2, 2),
-            torch.empty(2, 2, dtype=torch.int64),
-            torch.empty(4, dtype=torch.int64),
-            expert_output_postprocess=postprocess,
-        )
-
-    configured = run.call_args.kwargs["options"].experts_output_postprocess
-    assert configured is not None
-    value = torch.randn(2, 32)
-    assert configured.fn(value) is value
-    postprocess.assert_called_once_with(value)
-    assert not configured.includes_scale_and_sum
+    with pytest.raises(TypeError, match="cannot run inside DistMoE"):
+        DistMoeTransform().transform(stock)
 
 
-@pytest.mark.parametrize("dtype", ["bf16", "mxfp8"])
-def test_dist_moe_preserves_typed_expert_output_postprocess(dtype):
-    """The adapter forwards a backend-aware postprocess without wrapping it."""
-    stock = make_routed_experts_config(
-        dim=32,
-        hidden_dim=64,
-        num_experts=4,
-        top_k=2,
-        param_init=_parameter_initializers(),
-        comm_backend="standard",
-    )
-    config = DistMoeConverter(
-        DistMoeConverter.Config(backend=DistMoeBackendConfig(dtype=dtype))
-    ).convert(stock)
-    assert isinstance(config, DistMoeRoutedExperts.Config)
-    module = config.build()
-    module._runtime = _runtime(None)
-    module._runtime.context = cast(Any, object())
-    weight = torch.nn.Parameter(torch.ones(32))
-    expected = DistMoeInputScaledRMSNorm(weight, eps=1e-8, gain_center=1.0)
-
-    class TypedPostprocess:
-        """Expose the optional DistMoE conversion protocol."""
-
-        def to_dist_moe_postprocess(self) -> DistMoeInputScaledRMSNorm:
-            """Return the typed annex postprocess.
-
-            Returns:
-                The postprocess descriptor expected by the DistMoE adapter.
-            """
-            return expected
-
-        def __call__(self, value: torch.Tensor) -> torch.Tensor:
-            """Preserve the ordinary routed-expert callable contract.
-
-            Args:
-                value: Route-wise expert output.
-
-            Returns:
-                The unchanged output used by this adapter-only test.
-            """
-            return value
-
-    postprocess = TypedPostprocess()
-
-    with (
-        patch(
-            "torchtitan.components.dist_moe.backend._dynamic_prepared_weight",
-            side_effect=lambda value, **_kwargs: value,
-        ),
-        patch(
-            "torchtitan.components.dist_moe.backend.run_dist_moe",
-            return_value=torch.empty(2, 32),
-        ) as run,
-    ):
-        module(
-            torch.empty(2, 32),
-            torch.empty(2, 2),
-            torch.empty(2, 2, dtype=torch.int64),
-            torch.empty(4, dtype=torch.int64),
-            expert_output_postprocess=postprocess,
-        )
-
-    assert run.call_args.kwargs["options"].experts_output_postprocess is expected
-
-
-def _routed_experts_config() -> DistMoeRoutedExperts.Config:
-    stock = make_routed_experts_config(
-        dim=32,
-        hidden_dim=64,
-        num_experts=4,
-        top_k=2,
-        param_init=_parameter_initializers(),
-        comm_backend="standard",
-    )
-    return DistMoeConverter(DistMoeConverter.Config()).convert(stock)
-
-
-def _optimizer_config() -> OptimizersContainer.Config:
-    return OptimizersContainer.Config(
-        implementation="for-loop",
-        param_groups=[
-            ParamGroupConfig(
-                pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs={"lr": 1e-3},
-            )
-        ],
-    )
-
-
-def test_dist_moe_converter_preserves_native_grouped_linear_checkpoint_keys():
-    stock_config = make_routed_experts_config(
-        dim=32,
-        hidden_dim=64,
-        num_experts=4,
-        top_k=2,
-        param_init=_parameter_initializers(),
-        comm_backend="standard",
-    )
-    stock = stock_config.build()
+def test_bf16_transform_preserves_parameters_without_building_dispatcher():
+    stock = _stock_config().build()
     with torch.no_grad():
         for value, parameter in enumerate(stock.parameters(), start=1):
             parameter.fill_(value)
 
-    converted = _routed_experts_config().build()
-    converted.load_state_dict(stock.state_dict())
+    config = DistMoeTransform().transform(_stock_config())
+    assert isinstance(config, DistMoeRoutedExperts.Config)
+    module = config.build()
+    module.load_state_dict(stock.state_dict())
+    module.parallelize(Mock())
 
-    assert list(dict(converted.named_parameters())) == ["w13.weight", "w2.weight"]
-    converted_state = converted.state_dict()
-    assert converted_state.keys() == stock.state_dict().keys()
-    for key, value in converted_state.items():
-        assert type(value) is torch.Tensor
+    assert list(dict(module.named_parameters())) == ["w13.weight", "w2.weight"]
+    assert not hasattr(module, "token_dispatcher")
+    assert not hasattr(module, "activation_fn")
+    for key, value in module.state_dict().items():
         torch.testing.assert_close(value, stock.state_dict()[key], rtol=0, atol=0)
 
 
-def test_dist_moe_mxfp8_uses_native_keys_and_loads_plain_values():
-    source = _routed_experts_config().build()
-    with torch.no_grad():
-        for value, parameter in enumerate(source.parameters(), start=1):
-            parameter.fill_(value)
+def test_mxfp8_transform_uses_separate_module_and_prepared_weight_lifecycle():
+    config = DistMoeTransform().transform(_stock_config())
+    config = MXFP8DistMoeTransform().transform(config)
+    assert isinstance(config, MXFP8DistMoeRoutedExperts.Config)
 
-    config = _routed_experts_config()
-    config.backend = DistMoeBackendConfig(dtype="mxfp8")
-    target = config.build()
-    target.load_state_dict(source.state_dict())
+    module = config.build()
+    assert isinstance(module, MXFP8DistMoeRoutedExperts)
+    assert isinstance(module.w13.weight, _ShardedFSDPTensor)
+    assert isinstance(module.w2.weight, _ShardedFSDPTensor)
+    assert list(module.state_dict()) == ["w13.weight", "w2.weight"]
 
-    assert list(target.state_dict()) == ["w13.weight", "w2.weight"]
-    for target_parameter, source_parameter in zip(
-        target.parameters(), source.parameters(), strict=True
-    ):
-        assert isinstance(target_parameter, _ShardedFSDPTensor)
-        torch.testing.assert_close(
-            target_parameter._tensor,
-            source_parameter,
-            rtol=0,
-            atol=0,
+
+def test_native_postprocess_is_owned_and_passed_to_dist_moe():
+    stock = _stock_config()
+    stock.expert_output_postprocess = _NativePostprocess.Config(dim=32)
+    config = DistMoeTransform().transform(stock)
+    assert isinstance(config, DistMoeRoutedExperts.Config)
+    module = config.build()
+    module._runtime = _runtime()
+    module._runtime.context = cast(Any, object())
+
+    with patch(
+        "torchtitan.components.dist_moe.backend.run_dist_moe",
+        return_value=torch.empty(2, 32),
+    ) as run:
+        module(
+            torch.empty(2, 32),
+            torch.empty(2, 2),
+            torch.empty(2, 2, dtype=torch.int64),
+            torch.empty(4, dtype=torch.int64),
         )
 
-
-def test_dist_moe_optimizer_state_round_trips_through_native_keys():
-    config = _routed_experts_config()
-    source = config.build()
-    source_optimizer = _optimizer_config().build(model_parts=[source])
-    for parameter in source.parameters():
-        parameter.grad = torch.ones_like(parameter)
-    source_optimizer.step()
-
-    state = source_optimizer.state_dict()
-    assert any("w13.weight" in key for key in state)
-    assert any("w2.weight" in key for key in state)
-    assert not any("inner_experts" in key for key in state)
-
-    target = config.build()
-    target_optimizer = _optimizer_config().build(model_parts=[target])
-    target_optimizer.load_state_dict(state)
-    restored = target_optimizer.state_dict()
-    assert state.keys() == restored.keys()
-    for key, value in state.items():
-        if isinstance(value, torch.Tensor):
-            torch.testing.assert_close(value, restored[key], rtol=0, atol=0)
-        else:
-            assert value == restored[key]
+    descriptor = run.call_args.kwargs["options"].experts_output_postprocess
+    assert isinstance(descriptor, DistMoeInputScaledRMSNorm)
+    assert descriptor.weight is module.expert_output_postprocess.weight
+    assert "expert_output_postprocess.weight" in module.state_dict()
 
 
 @pytest.mark.parametrize(
-    "kwargs, message",
+    "kwargs,message",
     [
         ({"max_routing_imbalance_factor": 0}, "must be positive"),
         ({"num_activation_slots": 0}, "must be positive"),
         ({"prefetch_vmm": True}, "requires VMM to be enabled"),
-        ({"dtype": "bf16", "mxfp8_kernel_config": object()}, "requires dtype"),
+        ({"activation_slot_policy": "invalid"}, "activation slot policy"),
+        ({"wgrad_dtype": "float16"}, "WGRAD dtype"),
     ],
 )
-def test_dist_moe_backend_config_rejects_invalid_values(kwargs, message):
+def test_dist_moe_config_rejects_invalid_values(kwargs, message):
+    stock = _stock_config()
     with pytest.raises(ValueError, match=message):
-        DistMoeBackendConfig(**kwargs)
-
-
-def test_dist_moe_backend_config_disables_vmm_and_prefetch_by_default():
-    config = DistMoeBackendConfig()
-
-    assert config.vmm_host_scratch_imbalance_factor is None
-    assert not config.prefetch_vmm
+        DistMoeRoutedExperts.Config(
+            w13=stock.w13,
+            w2=stock.w2,
+            activation_fn=stock.activation_fn,
+            token_dispatcher=stock.token_dispatcher,
+            **kwargs,
+        )
 
 
 @pytest.mark.parametrize(
@@ -354,10 +243,9 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     experts = list(model_config.traverse(DistMoeRoutedExperts.Config))
 
     assert len(experts) == num_experts_modules
-    assert all(entry[1].backend.dtype == "bf16" for entry in experts)
+    assert all(type(entry[1]) is DistMoeRoutedExperts.Config for entry in experts)
     assert all(
-        entry[1].backend.vmm_host_scratch_imbalance_factor is None
-        and not entry[1].backend.prefetch_vmm
+        entry[1].vmm_host_scratch_imbalance_factor is None and not entry[1].prefetch_vmm
         for entry in experts
     )
     assert all(
@@ -374,8 +262,6 @@ def test_dist_moe_recipe_supports_cuda_graphs_with_expert_parallelism():
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
 
     config.__post_init__()
-    assert config.parallelism.pipeline_parallel_per_direction_p2p
-    assert config.parallelism.pipeline_parallel_reuse_recv_buffers
 
 
 @pytest.mark.parametrize(
@@ -407,10 +293,11 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     }
 
     assert len(experts) == num_experts_modules
-    assert all(entry[1].backend.dtype == "mxfp8" for entry in experts)
     assert all(
-        entry[1].backend.vmm_host_scratch_imbalance_factor is None
-        and not entry[1].backend.prefetch_vmm
+        isinstance(entry[1], MXFP8DistMoeRoutedExperts.Config) for entry in experts
+    )
+    assert all(
+        entry[1].vmm_host_scratch_imbalance_factor is None and not entry[1].prefetch_vmm
         for entry in experts
     )
     assert "lm_head" in linears

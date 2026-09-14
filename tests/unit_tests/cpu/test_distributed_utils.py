@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from datetime import timedelta
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -14,7 +13,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import CommConfig
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed import DistributedTopology, utils as dist_utils
 from torchtitan.distributed.utils import init_distributed
 
 
@@ -40,7 +39,8 @@ def test_fake_pg_uses_requested_rank(monkeypatch: pytest.MonkeyPatch) -> None:
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torchtitan.distributed.utils.init_fake_mode") as init_fake_mode,
     ):
-        assert init_distributed(CommConfig(mode="fake_backend")) == 8
+        topology = init_distributed(CommConfig(mode="fake_backend"))
+    assert topology == DistributedTopology(world_size=8)
     init_fake_mode.assert_called_once_with(8, rank=6)
 
 
@@ -51,23 +51,56 @@ def test_fake_pg_rejects_out_of_range_rank(
     monkeypatch.setenv("RANK", "8")
     with (
         patch("torch.distributed.is_initialized", return_value=False),
-        pytest.raises(ValueError, match=r"RANK must be in \[0, 8\)"),
+        pytest.raises(ValueError, match=r"Fake rank must be in \[0, 8\)"),
     ):
         init_distributed(CommConfig(mode="fake_backend"))
 
 
-def test_real_pp_fake_spmd_init_maps_physical_to_logical_ranks(
+def test_fake_pp_uses_explicit_pipeline_and_spmd_coordinates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("NGPU", "16")
+    monkeypatch.setenv("FAKE_PP_RANK", "2")
+    monkeypatch.setenv("FAKE_SPMD_RANK", "1")
+    with (
+        patch("torch.distributed.is_initialized", return_value=False),
+        patch("torchtitan.distributed.utils.init_fake_mode") as init_fake_mode,
+    ):
+        topology = init_distributed(
+            CommConfig(mode="fake_backend"), pipeline_parallel_degree=4
+        )
+
+    assert topology == DistributedTopology(world_size=16)
+    init_fake_mode.assert_called_once_with(16, rank=9)
+
+
+def test_fake_pp_requires_both_logical_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NGPU", "16")
+    monkeypatch.setenv("FAKE_PP_RANK", "2")
+    monkeypatch.delenv("FAKE_SPMD_RANK", raising=False)
+
+    with (
+        patch("torch.distributed.is_initialized", return_value=False),
+        pytest.raises(ValueError, match="FAKE_SPMD_RANK environment variable"),
+    ):
+        init_distributed(CommConfig(mode="fake_backend"), pipeline_parallel_degree=4)
+
+
+def test_real_pp_fake_spmd_returns_named_real_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NGPU", "16")
     monkeypatch.setenv("WORLD_SIZE", "4")
     monkeypatch.setenv("RANK", "2")
     monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("FAKE_SPMD_RANK", "1")
     process_group = torch.distributed.ProcessGroup(2, 4)
     store = MagicMock()
-    pp_mesh = cast(DeviceMesh, MagicMock())
 
     with (
-        patch.object(dist_utils, "_real_pp_fake_spmd_state", None),
+        patch("torch.distributed.is_initialized", return_value=False),
         patch.object(dist_utils, "init_fake_mode") as init_fake_mode,
         patch.object(
             dist_utils.dist,
@@ -79,37 +112,34 @@ def test_real_pp_fake_spmd_init_maps_physical_to_logical_ranks(
             "_new_process_group_helper",
             return_value=(process_group, store),
         ) as new_process_group,
-        patch.object(dist_utils.DeviceMesh, "from_group", return_value=pp_mesh),
         patch.dict(dist_utils.c10d._world.pg_group_ranks, {}, clear=False),
     ):
-        assert dist_utils._init_real_pp_fake_spmd(16, timedelta(seconds=30)) == 16
+        topology = init_distributed(
+            CommConfig(mode="real_pp_fake_spmd_backend"),
+            pipeline_parallel_degree=4,
+        )
 
-        init_fake_mode.assert_called_once_with(16, rank=8)
-        assert new_process_group.call_args.kwargs["global_ranks_in_group"] == [
-            0,
-            4,
-            8,
-            12,
-        ]
-        assert dist_utils.c10d._world.pg_group_ranks[process_group] == {
-            0: 0,
-            4: 1,
-            8: 2,
-            12: 3,
-        }
-        assert dist_utils.get_real_pp_mesh(4) is pp_mesh
+    init_fake_mode.assert_called_once_with(16, rank=9)
+    assert topology.world_size == 16
+    assert topology.real_axis_groups == ((dist_utils.MeshAxisName.PP, process_group),)
+    assert new_process_group.call_args.kwargs["global_ranks_in_group"] == [1, 5, 9, 13]
 
 
-def test_real_pp_fake_spmd_requires_one_process_per_pp_rank() -> None:
-    state = dist_utils._RealPPFakeSpmdState(
-        pp_mesh=cast(DeviceMesh, MagicMock()),
-        physical_world_size=4,
-    )
+def test_real_pp_fake_spmd_requires_one_process_per_pp_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NGPU", "16")
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "2")
+    monkeypatch.setenv("FAKE_SPMD_RANK", "0")
     with (
-        patch.object(dist_utils, "_real_pp_fake_spmd_state", state),
+        patch("torch.distributed.is_initialized", return_value=False),
         pytest.raises(ValueError, match="one physical process per PP rank"),
     ):
-        dist_utils.get_real_pp_mesh(2)
+        init_distributed(
+            CommConfig(mode="real_pp_fake_spmd_backend"),
+            pipeline_parallel_degree=2,
+        )
 
 
 def test_dist_sum_tensor_keeps_local_result_as_tensor():

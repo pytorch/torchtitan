@@ -8,13 +8,16 @@ from typing import Literal
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
-from torchtitan.components.dist_moe import DistMoeBackendConfig, DistMoeConverter
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
+    apply_transforms,
+    DistMoeTransform,
     Float8GroupedLinearConverter,
     Float8LinearConverter,
+    ModelConfigTransform,
+    MXFP8DistMoeTransform,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
 )
@@ -67,8 +70,6 @@ def _enable_dist_moe(
     dtype: Literal["bf16", "mxfp8"],
 ) -> Trainer.Config:
     """Replace routed experts while preserving the base training recipe."""
-    config.parallelism.pipeline_parallel_per_direction_p2p = True
-    config.parallelism.pipeline_parallel_reuse_recv_buffers = True
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
     )
@@ -80,14 +81,6 @@ def _enable_dist_moe(
                 include_lm_head=True,
             )
         )
-    converters.append(
-        DistMoeConverter.Config(
-            backend=DistMoeBackendConfig(
-                dtype=dtype,
-                mxfp8_fast_math=dtype == "mxfp8",
-            )
-        )
-    )
     config.model_spec = model_registry(
         flavor,
         seq_len=seq_len,
@@ -95,7 +88,10 @@ def _enable_dist_moe(
         converters=converters,
     )
     config.dataloader.max_num_documents = 512
-    return config
+    transforms: list[ModelConfigTransform] = [DistMoeTransform()]
+    if dtype == "mxfp8":
+        transforms.append(MXFP8DistMoeTransform(fast_math=True))
+    return apply_transforms(config, transforms)
 
 
 def deepseek_v3_debugmodel(

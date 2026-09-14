@@ -630,6 +630,7 @@ def create_varlen_metadata_for_document(
     """
     num_tokens = positions.shape[0]
     device = positions.device
+
     real_doc_starts = positions == 0
     padding_doc_starts = None
     if padding_mask is None:
