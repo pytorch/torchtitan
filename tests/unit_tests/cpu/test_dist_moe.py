@@ -14,6 +14,7 @@ from dist_moe import DistMoeInputScaledRMSNorm
 
 from torchtitan.components.dist_moe import (
     DistMoeRoutedExperts,
+    DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
 )
 from torchtitan.components.dist_moe.backend import _DistMoeRuntime
@@ -44,10 +45,11 @@ def _stock_config() -> RoutedExperts.Config:
     )
 
 
-def _runtime(prefetch: Any = None) -> _DistMoeRuntime:
-    return _DistMoeRuntime(
+def _runtime(prefetch: Any = None) -> DistMoeRuntime:
+    return DistMoeRuntime(
         config=cast(Any, object()),
         group=cast(Any, object()),
+        device=torch.device("cuda"),
         prefetch=prefetch,
     )
 
@@ -87,7 +89,7 @@ def test_runtime_releases_pending_prefetch_after_failure_and_close():
         ),
         pytest.raises(RuntimeError, match="context creation failed"),
     ):
-        runtime.initialize(torch.device("cuda"))
+        runtime.initialize()
 
     prefetch.close.assert_called_once_with()
     runtime.close()
@@ -98,8 +100,11 @@ def test_runtime_consumes_pipeline_metadata_before_model_forward():
     runtime = _runtime()
     runtime.slots[(3, 7)] = (2, 5)
     runtime.context = Mock()
+    context = runtime.context
+    hook = Mock()
+    runtime._pipeline_hooks.append(hook)
 
-    args, kwargs = runtime.select_from_stage_forward(
+    args, kwargs = runtime.select_pipeline_slot(
         Mock(),
         (torch.empty(1),),
         {
@@ -109,9 +114,13 @@ def test_runtime_consumes_pipeline_metadata_before_model_forward():
         },
     )
 
-    runtime.context.select_activation_slot.assert_called_once_with(2, 5)
+    context.select_activation_slot.assert_called_once_with(2, 5)
     assert len(args) == 1
     assert kwargs == {"input_batch": "value"}
+    runtime.close()
+    runtime.close()
+    hook.remove.assert_called_once_with()
+    context.close.assert_called_once_with()
 
 
 def test_transform_rejects_specialized_routed_experts():
