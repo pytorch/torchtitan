@@ -72,6 +72,7 @@ def _build_test_stage_graphs(
     loss_kwargs: dict[str, Any],
     *,
     compile_graphs: bool = True,
+    extract_fsdp_grad_reduction: bool = True,
 ) -> None:
     _build_stage_graphs(
         stage,
@@ -84,6 +85,7 @@ def _build_test_stage_graphs(
         model_config=stage.model_config,
         parallelism=stage.parallelism,
         compile_graphs=compile_graphs,
+        extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
     )
 
 
@@ -229,7 +231,10 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
         stage = types.SimpleNamespace(
             submod=model,
             stage_index=0,
-            graphs=types.SimpleNamespace(num_unsharded_param_grad_values=2),
+            graphs=types.SimpleNamespace(
+                num_unsharded_param_grad_values=2,
+                requires_grad_reduction=True,
+            ),
             state=GraphPPStageRuntimeState(),
         )
         runner = GraphPipelineRuntime.__new__(GraphPipelineRuntime)
@@ -387,7 +392,10 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
                 loss_kwargs,
             ) -> dict[tuple[int, int], object]:
                 self.ctx = provider_ctx
-                stage.graphs = types.SimpleNamespace(num_unsharded_param_grad_values=2)
+                stage.graphs = types.SimpleNamespace(
+                    num_unsharded_param_grad_values=2,
+                    requires_grad_reduction=True,
+                )
                 return {}
 
         provider = Provider()
