@@ -10,13 +10,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.models.common.activation import SiTUGLU, Softmax, SqrtSoftplus
+from torchtitan.models.common.activation import Sigmoid, SiTUGLU, Softmax, SqrtSoftplus
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
 )
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import RouterGateLinear
+from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -49,6 +50,21 @@ class _FixedRouter(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_make_router_config_requires_score_func(self):
+        with self.assertRaisesRegex(TypeError, "score_func"):
+            make_router_config(
+                dim=4,
+                num_experts=4,
+                gate_param_init={"weight": nn.init.zeros_},
+            )
+
+    def test_token_choice_router_requires_score_func(self):
+        with self.assertRaisesRegex(TypeError, "score_func"):
+            TokenChoiceTopKRouter.Config(
+                num_experts=4,
+                gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            )
+
     def test_grouped_experts_use_configured_activation(self):
         activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
         experts = GroupedExperts.Config(
@@ -75,6 +91,7 @@ class TestMoE(unittest.TestCase):
                 config = make_router_config(
                     dim=4,
                     num_experts=4,
+                    score_func=Sigmoid.Config(),
                     gate_param_init={"weight": nn.init.zeros_},
                     top_k=2,
                     route_norm=route_norm,
@@ -110,7 +127,7 @@ class TestMoE(unittest.TestCase):
         x_TD = torch.tensor([[-2.0, 0.0, 1.0, 3.0]], dtype=torch.bfloat16)
         x_fp32_TD = x_TD.float()
         cases = (
-            ("default", None, torch.sigmoid(x_fp32_TD)),
+            ("sigmoid", Sigmoid.Config(), torch.sigmoid(x_fp32_TD)),
             ("softmax", Softmax.Config(), F.softmax(x_fp32_TD, dim=-1)),
             (
                 "sqrtsoftplus",
@@ -121,21 +138,13 @@ class TestMoE(unittest.TestCase):
 
         for name, score_func, expected_scores_TE in cases:
             with self.subTest(score_func=name):
-                if score_func is None:
-                    config = make_router_config(
-                        dim=4,
-                        num_experts=4,
-                        gate_param_init={"weight": nn.init.zeros_},
-                        top_k=4,
-                    )
-                else:
-                    config = make_router_config(
-                        dim=4,
-                        num_experts=4,
-                        gate_param_init={"weight": nn.init.zeros_},
-                        top_k=4,
-                        score_func=score_func,
-                    )
+                config = make_router_config(
+                    dim=4,
+                    num_experts=4,
+                    gate_param_init={"weight": nn.init.zeros_},
+                    score_func=score_func,
+                    top_k=4,
+                )
                 router = config.build()
                 with torch.no_grad():
                     router.gate.weight.copy_(torch.eye(4))
@@ -169,6 +178,7 @@ class TestMoE(unittest.TestCase):
                 dim=dim,
                 num_experts=num_experts,
                 gate_param_init={"weight": nn.init.zeros_},
+                score_func=Sigmoid.Config(),
                 top_k=top_k,
             ),
             routed_experts=make_routed_experts_config(

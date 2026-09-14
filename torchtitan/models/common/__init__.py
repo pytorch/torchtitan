@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from .activation import (
-    ActivationFn,
+    BinaryActivationFn,
     Sigmoid,
     SiTUGLU,
     Softmax,
@@ -80,7 +80,7 @@ __all__ = [
     "ScaledDotProductInnerAttention",
     "Sigmoid",
     "SiLU",
-    "ActivationFn",
+    "BinaryActivationFn",
     "SiTUGLU",
     "Softmax",
     "SqrtSoftplus",

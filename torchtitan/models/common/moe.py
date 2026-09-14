@@ -22,8 +22,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_sparse_mesh,
 )
 from torchtitan.models.common.activation import (
-    ActivationFn,
-    Sigmoid,
+    BinaryActivationFn,
     SwiGLU,
     UnaryActivationFn,
 )
@@ -54,7 +53,7 @@ class GroupedExperts(Module):
         dim: int
         hidden_dim: int
         num_experts: int
-        activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
+        activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -190,8 +189,8 @@ class TokenChoiceTopKRouter(Module):
     class Config(Module.Config):
         num_experts: int
         gate: RouterGateLinear.Config
+        score_func: UnaryActivationFn.Config
         top_k: int = 1
-        score_func: UnaryActivationFn.Config = field(default_factory=Sigmoid.Config)
         route_norm: bool = False
         route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0

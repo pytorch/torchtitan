@@ -15,7 +15,7 @@ from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
 
 
-class ActivationFn(Function[torch.Tensor], ABC):
+class BinaryActivationFn(Function[torch.Tensor], ABC):
     """Base class for configurable two-input activation functions."""
 
     @dataclass(kw_only=True, slots=True)
@@ -105,11 +105,11 @@ class SqrtSoftplus(UnaryActivationFn):
         return F.softplus(x).sqrt()
 
 
-class SwiGLU(ActivationFn):
+class SwiGLU(BinaryActivationFn):
     """SwiGLU activation."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ActivationFn.Config):
+    class Config(BinaryActivationFn.Config):
         pass
 
     def __init__(self, config: Config) -> None:
@@ -125,11 +125,11 @@ class SwiGLU(ActivationFn):
         return F.silu(gate) * up
 
 
-class SiTUGLU(ActivationFn):
+class SiTUGLU(BinaryActivationFn):
     """Kimi's SiTU-GLU activation, evaluated in FP32."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ActivationFn.Config):
+    class Config(BinaryActivationFn.Config):
         beta: float = 1.0
         linear_beta: float | None = None
 
