@@ -112,14 +112,51 @@ class KimiMLAAttention(BaseAttention):
     ) -> torch.Tensor:
         del positions
 
-        num_tokens = x_TD.shape[0]
-        q_THK = self.wq_b(self.q_norm(self.wq_a(x_TD))).view(
-            num_tokens, self.n_heads, self.q_head_dim
+        q_THK = remat.region(
+            self._project_q,
+            self.remat_region_name("q"),
+            recompute=self.remat_should_recompute("q"),
+        )(x_TD)
+        k_THK, v_THV = remat.region(
+            self._project_kv,
+            self.remat_region_name("kv"),
+            recompute=self.remat_should_recompute("kv"),
+        )(x_TD)
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
+            q_THK,
+            k_THK,
+            v_THV,
+            attention_masks=attention_masks,
+            scale=self.scale,
+        )
+        gate_TD = remat.region(
+            self.gate,
+            self.remat_region_name("gate"),
+            recompute=self.remat_should_recompute("gate"),
+        )(x_TD)
+        remat.recompute_needs_tensor(out_THV, gate_TD)
+        out_TD = out_THV.reshape(out_THV.shape[0], -1) * torch.sigmoid(gate_TD)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
+
+    def _project_q(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.wq_b(self.q_norm(self.wq_a(x_TD))).view(
+            x_TD.shape[0], self.n_heads, self.q_head_dim
         )
 
-        compressed_kv_TC = self.wkv_a(x_TD)
+    def _project_kv(self, x_TD: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = x_TD.shape[0]
         kv_latent_TC, k_rope_TK = torch.split(
-            compressed_kv_TC,
+            self.wkv_a(x_TD),
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
@@ -136,18 +173,7 @@ class KimiMLAAttention(BaseAttention):
         k_rope_THK = k_rope_TK.view(num_tokens, 1, self.qk_rope_head_dim).expand(
             -1, self.n_heads, -1
         )
-        k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
-
-        out_THV = self.inner_attention(
-            q_THK,
-            k_THK,
-            v_THV,
-            attention_masks=attention_masks,
-            scale=self.scale,
-        )
-        out_TD = out_THV.reshape(num_tokens, self.n_heads * self.v_head_dim)
-        out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
-        return self.wo(out_TD)
+        return torch.cat((k_nope_THK, k_rope_THK), dim=-1), v_THV
 
 
 def _apply_attention_residual(
@@ -248,6 +274,12 @@ class KimiK3TransformerBlock(Module):
         self.ffn_res_proj = config.ffn_res_proj.build()
         # False when an activation-checkpointing policy wraps the whole block.
         self.checkpoint_residual = True
+        self._region_ac = False
+
+    def configure_remat_regions(self, save_patterns: list[str]) -> None:
+        # Called by RegionAC on every block it checkpoints.
+        self._region_ac = True
+        super().configure_remat_regions(save_patterns)
 
     def _attention_residual(
         self,
@@ -259,6 +291,13 @@ class KimiK3TransformerBlock(Module):
     ) -> torch.Tensor:
         """Attention residual whose fp32 intermediates are recomputed in backward."""
         args = (prefix_sum_TD, block_residual_TND, projection, norm)
+        if self._region_ac:
+            # A torch_remat checkpoint cannot nest inside RegionAC's block checkpoint.
+            return remat.region(
+                _apply_attention_residual,
+                self.remat_region_name(name),
+                recompute=self.remat_should_recompute(name),
+            )(*args)
         if not self.checkpoint_residual:
             return _apply_attention_residual(*args)
         return _checkpointed_attention_residual(name, *args)
@@ -293,6 +332,7 @@ class KimiK3TransformerBlock(Module):
                 dim=1,
             )
 
+        remat.recompute_needs_tensor(x_TD)
         h_TD = self.attention_norm(x_TD)
         layer_mask = (
             attention_masks[self.attn_mask_key] if attention_masks is not None else None
@@ -311,6 +351,7 @@ class KimiK3TransformerBlock(Module):
             self.ffn_res_proj,
             self.ffn_res_norm,
         )
+        remat.recompute_needs_tensor(h_TD)
         h_TD = self.ffn_norm(h_TD)
         if self.moe is not None:
             h_TD = self.moe(h_TD)
