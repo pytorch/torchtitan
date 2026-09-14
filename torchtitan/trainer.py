@@ -49,6 +49,7 @@ from torchtitan.distributed.activation_checkpoint import (
     SelectiveAC,
 )
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
+from torchtitan.distributed.xpugraph import wrap_with_xpu_graph, xpugraph_teardown
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.common.token_dispatcher import (
@@ -666,7 +667,12 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         if not config.training.disable_cuda_graphs:
             sdc_config = config.sdc_replayer
-            self.fwd_bwd_fn = wrap_with_cuda_graph(
+            wrap_fn = (
+                wrap_with_xpu_graph
+                if utils.device_type == "xpu"
+                else wrap_with_cuda_graph
+            )
+            self.fwd_bwd_fn = wrap_fn(
                 self.fwd_bwd_fn,
                 gradient_accumulation_steps=self.gradient_accumulation_steps,
                 sdc_num_steps=sdc_config.num_steps if sdc_config is not None else 0,
@@ -1138,7 +1144,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if hasattr(self, "dataloader") and self.dataloader:
             self.dataloader.close()
         if not self.config.training.disable_cuda_graphs:
-            cudagraph_teardown()
+            if utils.device_type == "xpu":
+                xpugraph_teardown()
+            else:
+                cudagraph_teardown()
         if hasattr(self, "checkpointer") and self.checkpointer:
             self.checkpointer.close()
         if hasattr(self, "metrics_processor") and self.metrics_processor:
