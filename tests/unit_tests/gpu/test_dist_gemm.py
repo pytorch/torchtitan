@@ -174,6 +174,8 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
             .model_spec.model.layers[0]
             .attention
         )
+        qkv_num_linears = attn_cfg.qkv_linear.wqkv.num_linears
+        qkv_out_features = attn_cfg.qkv_linear.wqkv.out_features
         set_gqa_attention_sharding(attn_cfg, enable_sp=True)
         attn = attn_cfg.build().to(self.device_type)
         attn.parallelize(parallel_dims)
@@ -182,6 +184,10 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         self.assertIsNone(attn.wo._sharding_config.out_src_shardings)
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
+        self.assertEqual(
+            attn.qkv_linear.wqkv.weight.shape[:-1],
+            (qkv_num_linears, qkv_out_features // self.world_size),
+        )
 
     @with_comms
     def test_w13_tp_shards_the_matrix_row_dimension(self):

@@ -22,7 +22,7 @@ from torchtitan.models.common.attention import (
     QKVLinear,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, StackedLinear
 from torchtitan.models.common.rope import ComplexRoPE
 
 
@@ -91,7 +91,11 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
                 head_dim=head_dim,
                 n_heads=num_heads,
                 n_kv_heads=num_heads,
-                wqkv=Linear.Config(in_features=dim, out_features=3 * dim),
+                wqkv=StackedLinear.Config(
+                    in_features=dim,
+                    out_features=num_heads * head_dim,
+                    num_linears=3,
+                ),
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=VarlenInnerAttention.Config(),

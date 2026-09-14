@@ -442,6 +442,8 @@ One thing worth stating plainly:
   slices of the gate and up projections while keeping their rows in separate
   contiguous slabs. The output retains the same `(2, hidden)` structure. This
   also keeps block-quantization scales from spanning the two projections.
+  Fused QKV uses the same scheme: `(R, num_kv_heads * head_dim, dim)`, with TP
+  sharding dimension 1, keeps every Q/K/V projection slot in its own slab.
 
 ## Custom kernels and `torch.compile`
 

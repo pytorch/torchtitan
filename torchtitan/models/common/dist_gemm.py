@@ -43,7 +43,9 @@ from torchtitan.models.common.linear import Linear
 logger = logging.getLogger(__name__)
 
 # Shape suffix legend:
-#   T = token dimensions, F = feed-forward hidden dimension
+#   T = token dimensions, R = Q/K/V projection slot,
+#   F = per-projection or feed-forward features,
+#   H = attention heads, K = query/key head dimension, V = value head dimension
 
 
 _WARNED_NO_TP = False
@@ -119,21 +121,24 @@ class AllGatherFusedQKVLinear(QKVLinear):
             _warn_once_no_tp_overlap()
             return super().forward(x)
 
-        qkv = AllGatherLinear.apply(
+        qkv_TRF = AllGatherLinear.apply(
             x,
-            self.wqkv.weight,
-            self.wqkv.bias,
+            self.wqkv.weight.flatten(0, -2),
+            None if self.wqkv.bias is None else self.wqkv.bias.flatten(),
             tp_group,
             tp_group.group_name,
-        )
+        ).unflatten(-1, self.wqkv.weight.shape[:-1])
 
-        num_tokens = qkv.shape[0]
-        qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
-        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
+        num_tokens = qkv_TRF.shape[0]
+        local_num_kv_heads = qkv_TRF.shape[-1] // self.head_dim
+        qkv_TRHK = qkv_TRF.unflatten(-1, (local_num_kv_heads, self.head_dim))
+        xq_THRK = qkv_TRHK[:, : self.heads_per_kv].transpose(1, 2)
+        xk_THK = qkv_TRHK[:, self.heads_per_kv]
+        xv_THV = qkv_TRHK[:, self.heads_per_kv + 1]
         return (
-            xq.reshape(num_tokens, -1, self.head_dim).contiguous(),
-            xk.reshape(num_tokens, -1, self.head_dim).contiguous(),
-            xv.reshape(num_tokens, -1, self.head_dim).contiguous(),
+            xq_THRK.reshape(num_tokens, -1, self.head_dim).contiguous(),
+            xk_THK.contiguous(),
+            xv_THV.contiguous(),
         )
 
 
