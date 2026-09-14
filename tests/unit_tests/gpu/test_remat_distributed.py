@@ -13,6 +13,8 @@ import pytest
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import init_device_mesh
+from torch.nn.attention.flex_attention import create_block_mask
+from torch.profiler import profile, ProfilerActivity
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -20,7 +22,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.attention import FlexInnerAttention, GQAttention
+from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
@@ -52,35 +54,47 @@ class _Model(Module):
 class _QKVProjection(Module):
     def __init__(self):
         super().__init__()
-        self.linear = Linear.Config(in_features=4, out_features=4).build()
+        self.linear = Linear.Config(in_features=32, out_features=32).build()
 
     def forward(
         self, x_TD: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        q_THK = self.linear(x_TD).unflatten(-1, (2, 2))
+        q_THK = self.linear(x_TD).unflatten(-1, (2, 16))
         return q_THK, q_THK, q_THK
 
 
 class _CPAttentionBlock(Module):
-    def __init__(self, inner_attention: Module):
+    def __init__(self, inner_attention: Module, *, device: torch.device):
         super().__init__()
         attention = GQAttention.__new__(GQAttention)
         Module.__init__(attention)
         attention.n_heads = 2
         attention.n_kv_heads = 2
-        attention.head_dim = 2
+        attention.head_dim = 16
         attention.enable_gqa = False
         attention.rope = None
         attention.qkv_linear = _QKVProjection()
-        attention.wo = Linear.Config(in_features=4, out_features=4).build()
+        attention.wo = Linear.Config(in_features=32, out_features=32).build()
         attention.inner_attention = inner_attention
         attention.q_norm = None
         attention.k_norm = None
         attention.scaling = None
         self.attention = attention
+        num_query_tokens = (
+            8 if isinstance(inner_attention, UlyssesCPFlexInnerAttention) else 4
+        )
+        self.attention_mask = create_block_mask(
+            lambda b, h, q_idx, kv_idx: q_idx >= 0,
+            B=None,
+            H=None,
+            Q_LEN=num_query_tokens,
+            KV_LEN=8,
+            device=device,
+            _compile=False,
+        )
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        return self.attention(x_TD, attention_masks=None).sum()
+        return self.attention(x_TD, attention_masks=self.attention_mask).sum()
 
 
 class _LocalExpert(Module):
@@ -161,70 +175,66 @@ class TestDistributedRematRegions(DTensorTestBase):
         mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("cp",)
         )
-        for inner_attention, num_collectives_per_forward in (
-            (KVAllGatherCPFlexInnerAttention.Config().build(), 2),
-            (UlyssesCPFlexInnerAttention.Config().build(), 4),
+        for inner_attention_type, profiler_key in (
+            (
+                KVAllGatherCPFlexInnerAttention,
+                "_c10d_functional::all_gather_into_tensor",
+            ),
+            (
+                UlyssesCPFlexInnerAttention,
+                "nccl:all_to_all",
+            ),
         ):
-            for save_regions, expected_extra_collectives in (
-                ([], num_collectives_per_forward),
-                (["attention.inner_attention"], 0),
-            ):
-                with (
-                    self.subTest(
-                        inner_attention=type(inner_attention).__name__,
-                        save_regions=save_regions,
-                    ),
-                    _use_spmd_types(mesh),
-                ):
-                    torch.manual_seed(42)
-                    baseline = _Model(
-                        _CPAttentionBlock(type(inner_attention).Config().build())
-                    ).to(self.device_type)
-                    remat_model = _Model(
-                        _CPAttentionBlock(type(inner_attention).Config().build())
-                    ).to(self.device_type)
-                    remat_model.load_state_dict(baseline.state_dict())
-                    RegionAC.Config(save_regions=save_regions).build().apply(
-                        remat_model
-                    )
+            with self.subTest(
+                inner_attention=inner_attention_type.__name__
+            ), _use_spmd_types(mesh):
+                torch.manual_seed(42)
 
-                    num_collectives = 0
-                    original_redistribute = spmd.redistribute
-
-                    def counted_redistribute(*args, **kwargs):
-                        nonlocal num_collectives
-                        num_collectives += 1
-                        return original_redistribute(*args, **kwargs)
-
-                    def inner_attention_forward(self, q, k, v, **kwargs):
-                        return (
-                            q
-                            + k.mean(dim=0, keepdim=True)
-                            + v.mean(dim=0, keepdim=True)
+                def build_model():
+                    return _Model(
+                        _CPAttentionBlock(
+                            inner_attention_type.Config().build(),
+                            device=torch.device(self.device_type),
                         )
+                    ).to(self.device_type)
 
-                    x_TD = torch.randn(4, 4, device=self.device_type)
-                    with (
-                        patch.object(
-                            spmd, "redistribute", side_effect=counted_redistribute
-                        ),
-                        patch.object(
-                            FlexInnerAttention,
-                            "forward",
-                            new=inner_attention_forward,
-                        ),
-                    ):
-                        expected = _run_forward_backward(baseline, x_TD)
-                        baseline_collectives = num_collectives
-                        num_collectives = 0
-                        actual = _run_forward_backward(remat_model, x_TD)
+                baseline = build_model()
+                saved = build_model()
+                recomputed = build_model()
+                saved.load_state_dict(baseline.state_dict())
+                recomputed.load_state_dict(baseline.state_dict())
+                RegionAC.Config(
+                    save_regions=["attention.inner_attention"]
+                ).build().apply(saved)
+                RegionAC.Config(save_regions=[]).build().apply(recomputed)
 
-                    self._assert_results_equal(expected, actual)
-                    self.assertEqual(baseline_collectives, num_collectives_per_forward)
-                    self.assertEqual(
-                        num_collectives,
-                        baseline_collectives + expected_extra_collectives,
+                x_TD = torch.randn(4, 32, device=self.device_type)
+
+                # Warm up FlexAttention compilation so profiler output only
+                # contains collectives from the measured iteration.
+                for model in (baseline, saved, recomputed):
+                    _run_forward_backward(model, x_TD)
+
+                def run(model):
+                    with profile(
+                        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]
+                    ) as profiler:
+                        result = _run_forward_backward(model, x_TD)
+                    collective_count = sum(
+                        event.count
+                        for event in profiler.key_averages()
+                        if event.key.startswith(profiler_key)
                     )
+                    return result, collective_count
+
+                expected, baseline_collectives = run(baseline)
+                saved_result, saved_collectives = run(saved)
+                recomputed_result, recomputed_collectives = run(recomputed)
+
+                self._assert_results_equal(expected, saved_result)
+                self._assert_results_equal(expected, recomputed_result)
+                self.assertEqual(saved_collectives, baseline_collectives)
+                self.assertGreater(recomputed_collectives, baseline_collectives)
 
     @with_comms
     def test_standard_all_to_all_collective_replay(self):
@@ -264,6 +274,7 @@ class TestDistributedRematRegions(DTensorTestBase):
                     num_collectives,
                     baseline_collectives + expected_extra_collectives,
                 )
+
 
 if __name__ == "__main__":
     from torch.testing._internal.common_utils import run_tests
