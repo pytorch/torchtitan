@@ -9,6 +9,7 @@ from dataclasses import replace
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from torchtitan.models.common.config_utils import (
     make_moe_config,
@@ -16,6 +17,7 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.nn_modules import RMSNorm
 
 
 class _RecordingGroupedLinear(GroupedLinear):
@@ -60,6 +62,46 @@ class _FixedRouter(nn.Module):
             device=x_TD.device,
         ).scatter_(-1, topk_expert_ids_TK, True)
         return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
+
+
+class _IdentityDispatcher(nn.Module):
+    """Return dispatched and combined rows without changing their order."""
+
+    def dispatch(
+        self,
+        x_TD,
+        topk_scores_TK,
+        topk_expert_ids_TK,
+        num_local_tokens_per_expert_E,
+    ):
+        """Return the input rows and supplied per-expert counts."""
+        del topk_scores_TK, topk_expert_ids_TK
+        return x_TD, num_local_tokens_per_expert_E, None
+
+    def combine(self, routed_output_RD, metadata, x_TD):
+        """Return the routed rows presented to the combine boundary."""
+        del metadata, x_TD
+        return routed_output_RD
+
+
+class _AddOneW13(nn.Module):
+    """Produce a gate row that is visibly different from the input."""
+
+    def forward(self, x_RD, offsets_E):
+        del offsets_E
+        return torch.stack((x_RD + 1, x_RD), dim=-2)
+
+
+class _SelectGate(nn.Module):
+    def forward(self, gate_RD, up_RD, *, offsets):
+        del up_RD, offsets
+        return gate_RD
+
+
+class _IdentityW2(nn.Module):
+    def forward(self, hidden_RD, offsets_E):
+        del offsets_E
+        return hidden_RD
 
 
 class TestMoE(unittest.TestCase):
@@ -137,6 +179,47 @@ class TestMoE(unittest.TestCase):
         self.assertEqual(routed_experts.w13.weight.shape, (2, 2, 8, 4))
         self.assertEqual(routed_experts.w2.weight.shape, (2, 4, 8))
         self.assertEqual(set(routed_experts.state_dict()), {"w13.weight", "w2.weight"})
+
+    def test_routed_experts_own_postprocess_before_combine(self):
+        config = replace(
+            make_routed_experts_config(
+                dim=4,
+                hidden_dim=4,
+                num_experts=2,
+                top_k=1,
+                param_init={},
+                comm_backend="standard",
+            ),
+            expert_output_postprocess=RMSNorm.Config(normalized_shape=4),
+        )
+        routed_experts = config.build()
+        routed_experts.w13 = _AddOneW13()
+        routed_experts.activation_fn = _SelectGate()
+        routed_experts.w2 = _IdentityW2()
+        routed_experts.token_dispatcher = _IdentityDispatcher()
+        assert isinstance(routed_experts.expert_output_postprocess, RMSNorm)
+        with torch.no_grad():
+            routed_experts.expert_output_postprocess.weight.fill_(3.0)
+        x = torch.arange(8, dtype=torch.float32).reshape(2, 4).requires_grad_()
+
+        output = routed_experts(
+            x,
+            torch.ones(2, 1),
+            torch.zeros(2, 1, dtype=torch.int64),
+            torch.tensor([2, 0]),
+        )
+        expected = F.rms_norm(
+            x + 1,
+            (4,),
+            routed_experts.expert_output_postprocess.weight,
+            routed_experts.expert_output_postprocess.eps,
+        )
+        torch.testing.assert_close(output, expected)
+        self.assertIn("expert_output_postprocess.weight", routed_experts.state_dict())
+
+        output.sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertIsNotNone(routed_experts.expert_output_postprocess.weight.grad)
 
     def test_routed_expert_config_validates_projection_contract(self):
         config = make_routed_experts_config(
