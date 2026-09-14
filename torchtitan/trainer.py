@@ -17,6 +17,7 @@ from typing import Annotated, Any, cast
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
+import torch.distributed.config as dist_config
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.pipelining.schedules import (
@@ -714,12 +715,14 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:
         config = self.config
+        dist_config.pipeline_per_direction_p2p = (
+            config.parallelism.pipeline_parallel_degree > 1
+        )
         world_size = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=config.dump_folder,
         )
-
         return ParallelDims.from_config(config.parallelism, world_size)
 
     def batch_generator(
