@@ -144,6 +144,9 @@ class VarlenInnerAttention(InnerAttention):
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
 
+        max_num_documents: int | None = None
+        """Upper bound on packed documents used for fixed-shape metadata."""
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.window_size = config.window_size

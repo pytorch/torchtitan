@@ -9,6 +9,7 @@ import logging
 import math
 import os
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -323,14 +324,28 @@ def _build_pipeline_schedule(
         return loss
 
     if looped_schedule:
+        lookahead = parallelism.pipeline_parallel_unshard_lookahead
+        schedule_kwargs: dict[str, Any] = {
+            "reuse_recv_buffers": True,
+            "max_active_stages": (
+                parallelism.pipeline_parallel_max_param_unsharded_stages or len(stages)
+            ),
+            "unshard_lookahead": "default" if lookahead == "full" else lookahead,
+        }
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
             n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
+            **schedule_kwargs,
         )
     else:
+        if isinstance(parallelism.pipeline_parallel_unshard_lookahead, tuple):
+            raise ValueError(
+                "Per-rank pipeline_parallel_unshard_lookahead is supported "
+                "only by multi-stage pipeline schedules"
+            )
         schedule = schedule_class(
             stages[0],
             n_microbatches=num_microbatches,
@@ -602,6 +617,7 @@ def _pipeline_module_split(
                                - "layers.0", "layers.1" for specific transformer layers
                                - "norm" for the final normalization layer
                                - "lm_head" for the output projection layer
+        get_mesh: Callback used to reconstruct DTensor inputs after PP receives.
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
