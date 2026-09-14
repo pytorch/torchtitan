@@ -235,12 +235,7 @@ class Decoder(BaseModel):
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
-        *,
-        pipeline_stage_index: int | None = None,
-        pipeline_microbatch_index: int | None = None,
     ):
-        del pipeline_stage_index, pipeline_microbatch_index
-
         # positions is listed before attention_masks so AutoParallel's input_fn,
         # which returns (tokens, positions) and binds them positionally, maps
         # positions to the right parameter (it would otherwise land in the

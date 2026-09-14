@@ -70,18 +70,18 @@ def _get_expert_shard_dims(model: Qwen3Model) -> tuple[int | None, int | None]:
         if layer.moe_enabled:
             # pyrefly: ignore [missing-attribute]
             routed_experts = layer.moe.routed_experts
-
-            def shard_dim(param):
-                if hasattr(param, "placements"):
-                    for placement in param.placements:
-                        if isinstance(placement, Shard):
-                            return placement.dim
-                return None
-
-            return shard_dim(routed_experts.w13.weight), shard_dim(
+            return _shard_dim(routed_experts.w13.weight), _shard_dim(
                 routed_experts.w2.weight
             )
     return None, None
+
+
+def _shard_dim(param: torch.Tensor) -> int | None:
+    """Return a DTensor parameter's shard dimension, if any."""
+    for placement in getattr(param, "placements", ()):
+        if isinstance(placement, Shard):
+            return placement.dim
+    return None
 
 
 class TestApplyFsdpMoESharding(DTensorTestBase):
@@ -146,6 +146,43 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         self.assertEqual(_get_expert_shard_dims(model), (2, 1))
+
+    @with_comms
+    def test_with_ep_preserves_model_specific_expert_layout(self):
+        """Model-specific grouped experts retain expert-axis sharding."""
+        from torchtitan.models.gpt_oss import model_registry
+
+        config = model_registry("debugmodel", seq_len=128, attn_backend="flex").model
+        for layer_config in config.layers:
+            # Keep GPT-OSS's real parameter names while reducing test memory.
+            layer_config.moe.routed_experts.w13.out_features = (2, 16)
+            layer_config.moe.routed_experts.w2.in_features = 16
+        model = config.build().to(self.device_type)
+        edp_mesh = init_device_mesh(
+            self.device_type, (2, 2), mesh_dim_names=("efsdp", "ep")
+        )
+        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            ep_degree=2,
+            edp_mesh=edp_mesh,
+        )
+
+        for layer in model.layers.values():
+            experts = layer.moe.routed_experts
+            self.assertEqual(
+                {
+                    _shard_dim(param)
+                    for linear in (experts.w13, experts.w2)
+                    for param in linear.parameters()
+                },
+                {0},
+            )
 
 
 if __name__ == "__main__":
