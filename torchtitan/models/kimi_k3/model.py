@@ -19,7 +19,7 @@ from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
 )
-from torchtitan.models.common import Linear
+from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -44,7 +44,7 @@ from torchtitan.models.utils import (
 from torchtitan.protocols.module import Module
 
 from .kda import KDA
-from .moe import KimiFeedForward, KimiLatentMoE
+from .moe import KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
 
 KimiK3AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
@@ -181,7 +181,7 @@ class KimiK3TransformerBlock(Module):
         attn_res_block_size: int
         attention: KimiMLAAttention.Config | None
         delta_attention: KDA.Config | None
-        feed_forward: KimiFeedForward.Config | None
+        feed_forward: FeedForward.Config | None
         moe: KimiLatentMoE.Config | None
         attention_norm: RMSNorm.Config
         ffn_norm: RMSNorm.Config

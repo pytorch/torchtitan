@@ -8,11 +8,42 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
+from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.overrides.fused_swiglu import fused_grouped_experts
 from torchtitan.protocols.sharding import ShardingConfig
 
 from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
+
+
+def test_state_dict_layouts_include_split_feed_forward_weights():
+    """Verify fused dense FFN layouts use the exposed w1/w3 state-dict keys."""
+    colwise = dense_param_placement(tp=spmd.S(0))
+    rowwise = dense_param_placement(tp=spmd.S(1))
+    config = FeedForward.Config(
+        w13=Linear.Config(
+            in_features=16,
+            out_features=64,
+            sharding_config=ShardingConfig(state_shardings={"weight": colwise}),
+        ),
+        w2=Linear.Config(
+            in_features=32,
+            out_features=16,
+            sharding_config=ShardingConfig(state_shardings={"weight": rowwise}),
+        ),
+    )
+    model = torch.nn.Module()
+    model.feed_forward = config.build()
+    wrapper = VLLMModelWrapper.__new__(VLLMModelWrapper)
+    torch.nn.Module.__init__(wrapper)
+    wrapper.model = model
+
+    layouts = wrapper.get_state_dict_layouts()
+
+    assert layouts["feed_forward.w1.weight"] is colwise
+    assert layouts["feed_forward.w3.weight"] is colwise
+    assert layouts["feed_forward.w2.weight"] is rowwise
 
 
 def test_state_dict_layouts_include_split_expert_weights():

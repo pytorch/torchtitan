@@ -61,6 +61,35 @@ class TextProcessor(SampleProcessor):
         )
 
 
+def _require_token_prefix(full_tokens: list[int], prompt_tokens: list[int]) -> None:
+    """Raise if prompt_tokens is not an exact prefix of full_tokens.
+
+    ChatProcessor locates the prompt/response boundary by re-rendering the
+    prompt alone and requiring it to tokenize to a prefix of the full
+    conversation. That holds only when rendering the prompt with
+    ``add_generation_prompt=True`` produces a textual prefix of the full render
+    and the tokenizer does not merge characters across that seam. Both are
+    properties of the template and tokenizer together rather than of an
+    individual sample.
+
+    Raise instead of dropping the sample: a mismatch means the label boundary
+    is unknown, and because the cause is systematic it would fire for most
+    samples, so dropping would silently train on a fraction of the dataset.
+    The overflow path drops because an oversized example really is per-sample.
+    """
+    if full_tokens[: len(prompt_tokens)] != prompt_tokens:
+        raise ValueError(
+            "Prompt tokens are not an exact prefix of the full conversation "
+            "tokens, so the prompt/response boundary cannot be located. "
+            "ChatProcessor requires that rendering the prompt with "
+            "add_generation_prompt=True yields a textual prefix of the full "
+            "render, and that the tokenizer does not merge characters across "
+            "that seam. A template that rewrites earlier turns when later ones "
+            "are present, or turn separators that only merge in context, break "
+            "this assumption."
+        )
+
+
 class ChatProcessor(SampleProcessor):
     """Tokenizes one single-turn chat sample and masks prompt labels."""
 
@@ -85,8 +114,9 @@ class ChatProcessor(SampleProcessor):
     @staticmethod
     def _validate_messages(messages: list[dict[str, str]]) -> None:
         """Validate that messages are a single-turn [user, assistant] pair."""
-        # TODO(data-sft-multiturn): Extend validation and loss masking before
-        # accepting multi-turn conversations.
+        # TODO(data-sft-multiturn): Multi-turn needs per-turn spans that survive
+        # templates which rewrite earlier turns, so prefix re-rendering is not
+        # enough. See the RFC in #3304 and the implementation in #2769.
         if len(messages) != 2:
             raise ValueError(
                 f"Expected single-turn [user, assistant], got {len(messages)} messages"
@@ -139,8 +169,7 @@ class ChatProcessor(SampleProcessor):
             messages[:1], add_generation_prompt=True
         )
         prompt_tokens = self._tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
-        # TODO(data-chat-loss-boundary): Validate prompt tokens are an exact prefix
-        # of full-conversation tokens before masking on prompt_len.
+        _require_token_prefix(full_tokens, prompt_tokens)
         prompt_len = len(prompt_tokens)
 
         tokens = np.asarray(full_tokens, dtype=np.int64)

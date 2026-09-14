@@ -1335,7 +1335,7 @@ class VLLMGenerator(Configurable):
         model_sd = model.model.state_dict()
         await self._get_spmd_state_dict(model_sd, model=model)
         # state_dict() returns hook-produced copies for fused modules (e.g.
-        # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
+        # QKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
         # reaches the real param. Re-apply via load_state_dict to run the merge hook.
         # Non-fused params share storage with model_sd, so reloading them is a
         # harmless self-copy; only the fused wqkv is actually rebuilt.
