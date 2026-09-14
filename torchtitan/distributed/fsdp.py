@@ -276,15 +276,13 @@ def apply_fsdp_to_decoder(
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
         # - When EP = 1: all params use the same FSDP mesh, but experts may
-        #   use Shard(1) when FSDP degree > num_experts to avoid padding
+        #   shard their output features when FSDP degree > num_experts
         # Dense blocks (no ``moe_enabled``) fall through to a plain fully_shard.
         if getattr(transformer_block, "moe_enabled", False):
             assert hasattr(transformer_block, "moe")
-            # Expert weights live on the grouped-GEMM child (inner_experts).
             # pyrefly: ignore [missing-attribute]
-            experts = transformer_block.moe.routed_experts.inner_experts
-            expert_params = set(experts.parameters())
-            num_experts = experts.num_experts
+            routed_experts = transformer_block.moe.routed_experts
+            num_experts = routed_experts.w13.group_size
 
             if ep_degree > 1:
                 assert edp_mesh is not None
@@ -292,28 +290,35 @@ def apply_fsdp_to_decoder(
             else:
                 efsdp_ep_size = fsdp_config["mesh"].size()
 
-            if efsdp_ep_size > num_experts:
-                expert_shard_placement = Shard(1)
-            else:
-                expert_shard_placement = Shard(0)
+            shard_expert_features = efsdp_ep_size > num_experts
+            expert_param_placements = {
+                **{
+                    param: Shard(2 if shard_expert_features else 0)
+                    for param in routed_experts.w13.parameters()
+                },
+                **{
+                    param: Shard(1 if shard_expert_features else 0)
+                    for param in routed_experts.w2.parameters()
+                },
+            }
 
-            # When ep_degree == 1 and no Shard(1) override needed, skip
-            # shard_placement_fn entirely for simplicity
-            if ep_degree == 1 and expert_shard_placement == Shard(0):
+            # Without feature sharding, the default expert-axis placement is
+            # already correct for the single-mesh case.
+            if ep_degree == 1 and not shard_expert_features:
                 fully_shard(
                     transformer_block,
                     **fsdp_config,
                     reshard_after_forward=reshard_after_forward,
                 )
             elif ep_degree == 1:
-                # ep_degree == 1 but need Shard(1) for experts to avoid padding
+                # Shard each structured projection along its output feature axis.
                 def _experts_shard_placement_fn(
                     param: nn.Parameter,
-                    _expert_params: set = expert_params,
+                    _expert_param_placements: dict[
+                        nn.Parameter, Shard
+                    ] = expert_param_placements,
                 ) -> Shard | None:
-                    if param in _expert_params:
-                        return Shard(1)
-                    return None
+                    return _expert_param_placements.get(param)
 
                 fully_shard(
                     transformer_block,
@@ -345,14 +350,15 @@ def apply_fsdp_to_decoder(
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
-                    _expert_params: set = expert_params,
-                    _expert_placement: Shard = expert_shard_placement,
+                    _expert_param_placements: dict[
+                        nn.Parameter, Shard
+                    ] = expert_param_placements,
                     _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
                     _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
                 ) -> ShardPlacementResult:
-                    if param in _expert_params:
+                    if (placement := _expert_param_placements.get(param)) is not None:
                         return ShardPlacementResult(
-                            placement=_expert_placement, mesh_info=_edp_mesh_info
+                            placement=placement, mesh_info=_edp_mesh_info
                         )
                     else:
                         return ShardPlacementResult(

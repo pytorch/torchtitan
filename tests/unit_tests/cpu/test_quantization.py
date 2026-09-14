@@ -27,12 +27,11 @@ from torchtitan.config.transform import (
 from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
+from torchtitan.models.common.linear import GroupedLinear, Linear
+from torchtitan.models.gpt_oss.moe import GptOssDownGroupedLinear, GptOssGroupedLinear
 from torchtitan.quantization import Float8Linear, MXFP8Linear, NVFP4Linear
-from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls
-from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
+from torchtitan.quantization.float8 import _get_float8_grouped_linear_cls
+from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
 from torchtitan.quantization.utils import has_quantization
 
 
@@ -383,31 +382,29 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     assert not any("_rht_sign_vector" in k for k in hf_sd)
 
 
-def test_quantized_grouped_experts():
-    """Quantized GroupedExperts: _owner, subclass handling, extra config fields."""
-    # Base case
-    MXFP8GroupedExperts = _get_mxfp8_grouped_experts_cls(GroupedExperts)
-    Float8GroupedExperts = _get_float8_grouped_experts_cls(GroupedExperts)
+def test_quantized_grouped_linear():
+    """Quantized grouped linears preserve base and specialized module types."""
+    MXFP8GroupedLinear = _get_mxfp8_grouped_linear_cls(GroupedLinear)
+    Float8GroupedLinear = _get_float8_grouped_linear_cls(GroupedLinear)
 
-    assert MXFP8GroupedExperts.Config._owner is MXFP8GroupedExperts
-    assert Float8GroupedExperts.Config._owner is Float8GroupedExperts
+    assert MXFP8GroupedLinear.Config._owner is MXFP8GroupedLinear
+    assert Float8GroupedLinear.Config._owner is Float8GroupedLinear
 
-    # Subclass case (GptOssGroupedExperts has extra swiglu_limit field)
-    mxfp8_cls = _get_mxfp8_grouped_experts_cls(GptOssGroupedExperts)
-    float8_cls = _get_float8_grouped_experts_cls(GptOssGroupedExperts)
+    mxfp8_cls = _get_mxfp8_grouped_linear_cls(GptOssDownGroupedLinear)
+    float8_cls = _get_float8_grouped_linear_cls(GptOssDownGroupedLinear)
 
     assert mxfp8_cls.Config._owner is mxfp8_cls
     assert float8_cls.Config._owner is float8_cls
-    assert issubclass(mxfp8_cls, GptOssGroupedExperts)
-    assert issubclass(float8_cls, GptOssGroupedExperts)
-    assert hasattr(mxfp8_cls.Config, "swiglu_limit")
-    assert hasattr(float8_cls.Config, "swiglu_limit")
+    assert issubclass(mxfp8_cls, GptOssDownGroupedLinear)
+    assert issubclass(float8_cls, GptOssDownGroupedLinear)
 
 
-@pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
+@pytest.mark.parametrize(
+    "parent_cls", [GroupedLinear, GptOssGroupedLinear, GptOssDownGroupedLinear]
+)
 @pytest.mark.parametrize(
     "make_quantized_cls",
-    [_get_mxfp8_grouped_experts_cls, _get_float8_grouped_experts_cls],
+    [_get_mxfp8_grouped_linear_cls, _get_float8_grouped_linear_cls],
     ids=["mxfp8", "float8"],
 )
 def test_grouped_mm_overrides_keep_the_seam_signature(make_quantized_cls, parent_cls):
@@ -427,12 +424,15 @@ def test_grouped_mm_overrides_keep_the_seam_signature(make_quantized_cls, parent
         assert override.parameters[name].kind == parameter.kind
 
 
-@pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
-def test_float8_grouped_experts_checkpoint_state_uses_plain_tensors(parent_cls):
+@pytest.mark.parametrize(
+    "parent_cls", [GroupedLinear, GptOssGroupedLinear, GptOssDownGroupedLinear]
+)
+def test_float8_grouped_linear_checkpoint_state_uses_plain_tensors(parent_cls):
     pytest.importorskip("torchao")
-    stock = parent_cls.Config(dim=16, hidden_dim=32, num_experts=2).build()
-    float8_cls = _get_float8_grouped_experts_cls(parent_cls)
-    module = float8_cls.Config(dim=16, hidden_dim=32, num_experts=2).build()
+    config = dict(group_size=2, in_features=16, out_features=32)
+    stock = parent_cls.Config(**config).build()
+    float8_cls = _get_float8_grouped_linear_cls(parent_cls)
+    module = float8_cls.Config(**config).build()
 
     assert all(type(param) is torch.nn.Parameter for param in module.parameters())
     stock_state = stock.state_dict()
@@ -445,10 +445,10 @@ def test_float8_grouped_experts_checkpoint_state_uses_plain_tensors(parent_cls):
 
 
 @pytest.mark.filterwarnings("ignore:torch.distributed is disabled")
-def test_float8_grouped_experts_dcp_round_trip_needs_no_safe_globals(tmp_path):
+def test_float8_grouped_linear_dcp_round_trip_needs_no_safe_globals(tmp_path):
     pytest.importorskip("torchao")
-    float8_cls = _get_float8_grouped_experts_cls(GroupedExperts)
-    config = float8_cls.Config(dim=16, hidden_dim=32, num_experts=2)
+    float8_cls = _get_float8_grouped_linear_cls(GroupedLinear)
+    config = float8_cls.Config(group_size=2, in_features=16, out_features=32)
     source = config.build()
     target = config.build()
 
@@ -462,7 +462,9 @@ def test_float8_grouped_experts_dcp_round_trip_needs_no_safe_globals(tmp_path):
     try:
         torch.serialization.clear_safe_globals()
         dcp.save(source.state_dict(), checkpoint_id=tmp_path, no_dist=True)
-        dcp.load(target.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+        target_state = target.state_dict()
+        dcp.load(target_state, checkpoint_id=tmp_path, no_dist=True)
+        target.load_state_dict(target_state)
     finally:
         torch.serialization.clear_safe_globals()
         torch.serialization.add_safe_globals(saved_safe_globals)
