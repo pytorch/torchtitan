@@ -66,6 +66,8 @@ class FaultTolerantTrainer(Trainer):
             raise ValueError(
                 "fsdp_defer_gradient_reduction is not supported with TorchFT."
             )
+        if config.training.enable_optimizer_cuda_graph:
+            raise ValueError("Optimizer CUDA graphs are not supported with TorchFT.")
         # Logging needs to happen after distributed initialized
         config.maybe_log()
 
@@ -432,7 +434,7 @@ class FaultTolerantTrainer(Trainer):
     def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         self.optimizers.zero_grad(set_to_none=True)
         # Save the current step learning rate for logging
-        lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
+        lr = self.lr_schedulers.get_host_lrs_per_scheduler()[0][0]
         should_log = self.metrics_processor.should_log(self.step)
 
         # Keep these variables local to shorten the code as these are
