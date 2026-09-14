@@ -272,10 +272,18 @@ class Trainer(Configurable):
         engine = self.engine
         self._step_compute_start = time.perf_counter()
         self._step_start_ntokens = engine.ntokens_seen
-        global_valid_tokens = engine.prepare_step(
+        prepared_global_valid_tokens = engine.prepare_step(
             num_global_valid_tokens, step=engine.step + 1
         )
-        assert global_valid_tokens is not None
+        assert prepared_global_valid_tokens is not None
+        # Keep the established eager loss arithmetic exactly: a Python scalar
+        # and a device tensor can select different division kernels. CUDA graphs
+        # need the mutable device tensor because this count changes each step.
+        global_valid_tokens: int | torch.Tensor = (
+            num_global_valid_tokens
+            if self.config.training.disable_cuda_graphs
+            else prepared_global_valid_tokens
+        )
         microbatch_metrics: list[dict[str, float]] = []
         num_accumulation_steps = len(training_data)
 

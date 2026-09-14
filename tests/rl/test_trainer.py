@@ -129,6 +129,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             side_effect=forward_backward_microbatch
         )
         trainer.engine = engine
+        trainer.config = Trainer.Config()
         trainer.dp_rank = 0
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
@@ -160,6 +161,10 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         ] == [0, 1]
         assert all(
             call.kwargs["num_accumulation_steps"] == 2
+            for call in engine.forward_backward_microbatch.call_args_list
+        )
+        assert all(
+            call.kwargs["global_valid_tokens"] == 3
             for call in engine.forward_backward_microbatch.call_args_list
         )
         assert trainer._reduce_forward_backward_metrics.call_count == 2

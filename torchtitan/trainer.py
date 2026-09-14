@@ -386,7 +386,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         microbatch_group: list[TrainingMicrobatch],
-        global_valid_tokens: torch.Tensor | None = None,
+        global_valid_tokens: int | torch.Tensor | None = None,
         loss_kwargs: dict[str, Any] | None = None,
         accumulation_index: int = 0,
         num_accumulation_steps: int = 1,
@@ -503,7 +503,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: int | torch.Tensor,
         model_kwargs: dict[str, Any],
         loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
@@ -525,7 +525,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         arg_mbs: list[tuple[torch.Tensor, ...]] | None,
         kwarg_mbs: list[dict[str, Any]],
         target_mbs: list[torch.Tensor] | None,
-        global_valid_tokens: torch.Tensor,
+        global_valid_tokens: int | torch.Tensor,
     ) -> torch.Tensor:
         loss_kwargs = {"global_valid_tokens": global_valid_tokens}
         with self.train_context():
@@ -833,7 +833,7 @@ class Trainer(Configurable):
         self,
         *,
         microbatch_group: list[TrainingMicrobatch],
-        global_valid_tokens: torch.Tensor | None = None,
+        global_valid_tokens: int | torch.Tensor | None = None,
         loss_kwargs: dict[str, Any] | None = None,
         accumulation_index: int = 0,
         num_accumulation_steps: int = 1,
