@@ -272,7 +272,6 @@ def llama3_debugmodel_tp2_pp2_gpipe() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "GPipe"
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
     return config
 
 
@@ -285,7 +284,6 @@ def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
     return config
 
 
@@ -304,7 +302,6 @@ def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.compile.enable = True
-    config.training.disable_cuda_graphs = True
     return config
 
 
@@ -314,16 +311,8 @@ def llama3_debugmodel_pp4_interleaved_1f1b() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 4
     config.parallelism.num_pp_microbatches = 8
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
-    return config
-
-
-def llama3_debugmodel_pp4_interleaved_1f1b_cudagraph() -> Trainer.Config:
-    config = llama3_debugmodel_pp4_interleaved_1f1b()
     config.debug.deterministic = True
     config.debug.seed = 42
-    config.training.disable_cuda_graphs = False
-    config.parallelism.pipeline_parallel_per_direction_p2p = True
     return config
 
 
@@ -337,6 +326,7 @@ def llama3_debugmodel_pp4_zero_bubble() -> Trainer.Config:
     config = llama3_debugmodel_pp4_interleaved_1f1b()
     config.parallelism.pipeline_parallel_schedule = "InterleavedZeroBubble"
     config.activation_checkpoint = FullAC.Config()
+    config.training.disable_cuda_graphs = True
     return config
 
 
@@ -541,7 +531,6 @@ def llama3_debugmodel_float8_emulate_lora_tp2_pp2() -> Trainer.Config:
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.disable_cuda_graphs = True
     return config
 
 

@@ -322,11 +322,7 @@ class MTPDecoder(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
-        *,
-        pipeline_stage_index: int | None = None,
-        pipeline_microbatch_index: int | None = None,
     ):
-        del pipeline_stage_index, pipeline_microbatch_index
         if self.mtp_layers is None:
             if not isinstance(tokens, torch.Tensor):
                 raise ValueError("A decoder without MTP expects one token tensor.")
