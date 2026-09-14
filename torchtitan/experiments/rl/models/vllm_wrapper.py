@@ -40,7 +40,8 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
-from torchtitan.models.common.attention import FusedQKVLinear
+from torchtitan.models.common.attention import QKVLinear
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -354,7 +355,7 @@ class VLLMModelWrapper(Module):
             )
         )
 
-        # Apply config overrides (e.g. the fused gate+up SwiGLU) after
+        # Apply config overrides (e.g. the Triton SwiGLU activation) after
         # update_from_config (which fills the sharding the override factories
         # read) and before build
         if override.imports:
@@ -561,21 +562,29 @@ class VLLMModelWrapper(Module):
                 for state_name, layout in sharding_config.state_shardings.items():
                     layouts[f"{module_prefix}{state_name}"] = layout
 
-                # Fused modules expose split gate/up state-dict keys while the
-                # layout is declared on the fused w13 parameter. Dense SwiGLU
-                # uses w1.weight/w3.weight; grouped experts use w1_EFD/w3_EFD.
+                # Fused grouped experts expose split gate/up state-dict keys
+                # while the layout is declared on the fused w13 parameter.
                 w13_layout = sharding_config.state_shardings.get("w13")
                 if w13_layout is not None:
-                    for state_name in (
-                        "w1.weight",
-                        "w3.weight",
-                        "w1_EFD",
-                        "w3_EFD",
-                    ):
+                    for state_name in ("w1_EFD", "w3_EFD"):
                         layouts[f"{module_prefix}{state_name}"] = w13_layout
 
-            if isinstance(module, FusedQKVLinear):
-                # FusedQKVLinear exposes split wq/wk/wv state-dict keys while
+            if isinstance(module, FeedForward):
+                # FeedForward exposes w1/w3 state-dict keys, but their layout
+                # belongs to the physical w13 Linear child.
+                w13_sharding_config = getattr(module.w13, "_sharding_config", None)
+                if w13_sharding_config is not None:
+                    for (
+                        state_name,
+                        layout,
+                    ) in w13_sharding_config.state_shardings.items():
+                        for projection_name in ("w1", "w3"):
+                            layouts[
+                                f"{module_prefix}{projection_name}.{state_name}"
+                            ] = layout
+
+            if isinstance(module, QKVLinear):
+                # QKVLinear exposes split wq/wk/wv state-dict keys while
                 # the layout is declared on the fused wqkv parameter.
                 wqkv_sharding_config = getattr(
                     module.wqkv,
