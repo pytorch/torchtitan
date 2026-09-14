@@ -43,19 +43,17 @@ def test_cudagraph_wrapper_rejects_negative_warmup_iterations() -> None:
 
 
 @pytest.mark.parametrize(
-    ("gradient_accumulation_steps", "sdc_num_steps", "sdc_num_replays", "expected"),
+    ("sdc_num_steps", "sdc_num_replays", "expected"),
     [
-        (1, 0, 0, 2),
-        (4, 0, 0, 8),
-        (1, 1, 1, 3),
-        (4, 2, 1, 10),
-        (4, -1, 1, 10),
-        (4, 1, 3, 11),
-        (4, 5, 3, 14),
+        (0, 0, 2),
+        (1, 1, 3),
+        (2, 1, 4),
+        (-1, 1, 4),
+        (1, 3, 5),
+        (5, 3, 8),
     ],
 )
 def test_cuda_graph_warmup_covers_two_optimizer_steps(
-    gradient_accumulation_steps: int,
     sdc_num_steps: int,
     sdc_num_replays: int,
     expected: int,
@@ -81,7 +79,6 @@ def test_cuda_graph_warmup_covers_two_optimizer_steps(
     ):
         run = wrap_with_cuda_graph(
             fn,
-            gradient_accumulation_steps=gradient_accumulation_steps,
             sdc_num_steps=sdc_num_steps,
             sdc_num_replays=sdc_num_replays,
         )
@@ -190,7 +187,6 @@ def test_structured_wrapper_validates_and_copies_replay_inputs() -> None:
     ):
         run = wrap_with_cuda_graph(
             fn,
-            gradient_accumulation_steps=1,
             sdc_num_steps=0,
             sdc_num_replays=0,
             num_warmup_steps=1,
