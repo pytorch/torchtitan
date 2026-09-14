@@ -51,6 +51,10 @@ from dist_moe import (
 
 logger = logging.getLogger(__name__)
 
+# Shape suffix legend for DistMoE weights:
+#   E = experts, 2 = fused gate/up projections, F = intermediate dimension,
+#   D = model dimension
+
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
     from torchtitan.trainer import Trainer
@@ -290,9 +294,11 @@ class DistMoeRoutedExperts(RoutedExperts):
         """Shard owned parameters without wiring the unused stock dispatcher."""
         Module.parallelize(self, parallel_dims)
 
-    def _dist_moe_weight_arguments(self) -> tuple[Any, Any]:
-        """Return W13 and W2 arguments for the standalone DistMoE call."""
-        return self.w13.weight.flatten(1, 2), self.w2.weight
+    def _dist_moe_weight_operands(self) -> tuple[Any, Any]:
+        """Return W13 and W2 operands for the standalone DistMoE call."""
+        w13_E2FD = self.w13.weight
+        w2_EDF = self.w2.weight
+        return w13_E2FD.flatten(1, 2), w2_EDF
 
     def _build_dist_moe_postprocess(self) -> DistMoeInputScaledRMSNorm | None:
         """Translate the current postprocess parameters to a kernel descriptor."""
@@ -335,7 +341,7 @@ class DistMoeRoutedExperts(RoutedExperts):
         runtime = self._runtime
         if runtime is None or runtime.context is None:
             raise RuntimeError("DistMoE context is not initialized")
-        w13, w2 = self._dist_moe_weight_arguments()
+        w13_operand, w2_operand = self._dist_moe_weight_operands()
         options = DistMoeExecutionOptions(
             inplace_wgrad_accum=self._dist_moe_config.inplace_wgrad_accum,
             wgrad_parameter_owners=(self.w13.weight, self.w2.weight)
@@ -347,8 +353,8 @@ class DistMoeRoutedExperts(RoutedExperts):
             x_TD.contiguous(),
             topk_expert_ids_TK.contiguous(),
             topk_scores_TK.contiguous(),
-            w13,
-            w2,
+            w13_operand,
+            w2_operand,
             runtime.context,
             options=options,
         )
@@ -386,21 +392,21 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
             requires_grad=self.w2.weight.requires_grad,
         )
 
-    def _dist_moe_weight_arguments(self) -> tuple[Any, Any]:
+    def _dist_moe_weight_operands(self) -> tuple[Any, Any]:
         """Return prepared grouped MXFP8 operands for this unshard lifetime."""
-        w13 = self.w13.weight
-        w2 = self.w2.weight
-        w13_arg = (
-            w13.operands.prepared(w13.flatten(1, 2))
-            if isinstance(w13, _UnshardedFSDPTensor)
-            else _dynamic_prepared_weight(w13, gate_up=True)
+        w13_E2FD = self.w13.weight
+        w2_EDF = self.w2.weight
+        w13_operand = (
+            w13_E2FD.operands.prepared(w13_E2FD.flatten(1, 2))
+            if isinstance(w13_E2FD, _UnshardedFSDPTensor)
+            else _dynamic_prepared_weight(w13_E2FD, gate_up=True)
         )
-        w2_arg = (
-            w2.operands.prepared(w2)
-            if isinstance(w2, _UnshardedFSDPTensor)
-            else _dynamic_prepared_weight(w2, gate_up=False)
+        w2_operand = (
+            w2_EDF.operands.prepared(w2_EDF)
+            if isinstance(w2_EDF, _UnshardedFSDPTensor)
+            else _dynamic_prepared_weight(w2_EDF, gate_up=False)
         )
-        return w13_arg, w2_arg
+        return w13_operand, w2_operand
 
 
 def _build_dist_moe_runtime_config(
