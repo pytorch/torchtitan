@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, StructuredLinear
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -58,6 +58,7 @@ def _lora_adapter_sharding(
 
 
 _lora_class_cache: dict[type, type] = {}
+_structured_lora_class_cache: dict[type, type] = {}
 _frozen_config_class_cache: dict[type, type] = {}
 
 
@@ -115,6 +116,57 @@ def _get_lora_cls(parent_cls: type) -> type:
     return LoRALinear
 
 
+def _get_structured_lora_cls(parent_cls: type) -> type:
+    """Get or create a LoRA subclass for a structured linear projection."""
+    if parent_cls in _structured_lora_class_cache:
+        return _structured_lora_class_cache[parent_cls]
+
+    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
+
+    class LoRAStructuredLinear(parent_cls):  # type: ignore[valid-type, misc]
+        @dataclass(kw_only=True, slots=True)
+        class Config(parent_config_cls):  # type: ignore[misc]
+            rank: int
+            alpha: float
+
+        def __init__(self, config: Config) -> None:
+            super().__init__(config)
+            for param in nn.Module.parameters(self):
+                param.requires_grad_(False)
+            self._lora_scaling = config.alpha / config.rank
+            replicated_weight = ShardingConfig(
+                state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+            )
+            self.lora_a = Linear.Config(
+                in_features=config.in_features,
+                out_features=config.rank,
+                bias=False,
+                sharding_config=(
+                    replicated_weight if config.sharding_config is not None else None
+                ),
+                param_init={
+                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
+                },
+            ).build()
+            self.lora_b = StructuredLinear.Config(
+                in_features=config.rank,
+                output_shape=config.output_shape,
+                bias=False,
+                sharding_config=config.sharding_config,
+                param_init={"weight": nn.init.zeros_},
+            ).build()
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            base_out = super().forward(input)
+            lora_out = self.lora_b(self.lora_a(input))
+            return base_out + self._lora_scaling * lora_out
+
+    LoRAStructuredLinear.__name__ = f"LoRA{parent_cls.__name__}"
+    LoRAStructuredLinear.__qualname__ = f"LoRA{parent_cls.__qualname__}"
+    _structured_lora_class_cache[parent_cls] = LoRAStructuredLinear
+    return LoRAStructuredLinear
+
+
 def _get_frozen_config_cls(
     config_cls: type[Module.Config],
 ) -> type[Module.Config]:
@@ -144,8 +196,9 @@ def _make_frozen_config(cfg: Module.Config) -> Module.Config:
 class LoRAConverter(ModelConfigConverter):
     """Apply LoRA adapters to supported projection layers in a model.
 
-    The base converter supports ``Linear.Config``. Subclasses may extend
-    ``_supports_lora`` and ``_make_lora_config`` for other projection types.
+    The base converter supports ``Linear.Config`` and
+    ``StructuredLinear.Config``. Subclasses may extend ``_supports_lora`` and
+    ``_make_lora_config`` for other projection types.
     Non-target modules are replaced with dynamic frozen config subclasses that
     freeze direct parameters at build time.
 
@@ -189,15 +242,18 @@ class LoRAConverter(ModelConfigConverter):
     def _supports_lora(self, cfg: Module.Config) -> bool:
         """Return whether this converter can adapt ``cfg`` with LoRA.
 
-        Subclasses may extend this hook for projection types that do not
-        inherit from ``Linear.Config``.
+        Subclasses may extend this hook for other projection types.
         """
-        return isinstance(cfg, Linear.Config)
+        return isinstance(cfg, (Linear.Config, StructuredLinear.Config))
 
     def _make_lora_config(self, cfg: Module.Config) -> Module.Config:
         """Create an adapter config for a supported projection."""
         assert cfg._owner is not None
-        lora_cls = _get_lora_cls(cfg._owner)
+        lora_cls = (
+            _get_structured_lora_cls(cfg._owner)
+            if isinstance(cfg, StructuredLinear.Config)
+            else _get_lora_cls(cfg._owner)
+        )
         return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
             **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
             rank=self.rank,
@@ -241,6 +297,6 @@ class LoRAConverter(ModelConfigConverter):
         if unmatched:
             logger.warning(
                 f"LoRA target_modules {sorted(unmatched)} did not match any "
-                f"Linear.Config in the model config tree."
+                f"supported linear config in the model config tree."
             )
         return converted_root

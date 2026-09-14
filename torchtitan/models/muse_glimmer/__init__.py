@@ -17,6 +17,7 @@ from torchtitan.models.common import (
     Embedding,
     Linear,
     PartialBiasRowwiseLinear,
+    StructuredLinear,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
 from torchtitan.models.common.config_utils import (
@@ -167,9 +168,9 @@ def _build_muse_glimmer_attention(
             head_dim=head_dim,
             n_heads=n_heads,
             n_kv_heads=n_kv_heads,
-            wqkv=Linear.Config(
+            wqkv=StructuredLinear.Config(
                 in_features=dim,
-                out_features=(n_heads + 2 * n_kv_heads) * head_dim,
+                output_shape=(n_heads // n_kv_heads + 2, n_kv_heads * head_dim),
                 param_init=fused_qkv_param_init(
                     _LINEAR_INIT,
                     n_heads=n_heads,

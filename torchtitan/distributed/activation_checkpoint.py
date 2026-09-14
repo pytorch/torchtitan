@@ -27,6 +27,7 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import Configurable
+from torchtitan.models.common.linear import StructuredLinearBase
 from torchtitan.protocols.module import Module
 
 
@@ -205,7 +206,8 @@ class SelectiveAC(ActivationCheckpointing):
         """
         This list of fully qualified names is used to determine which mm shapes to
         force recompute, rather than being considered by rest of the sac policy,
-        e.g save every other mm. Only nn.Linear modules are supported today.
+        e.g save every other mm. Linear and StructuredLinear modules are
+        supported today.
 
         Note: this config applies to mms not limited to those matching the specified
         fqns, e.g. if "moe.router.gate", corresponding to Linear(in, out), is specified,
@@ -234,12 +236,13 @@ class SelectiveAC(ActivationCheckpointing):
                 fqn = f"{base_fqn}.{module_fqn}" if base_fqn else module_fqn
                 if not any(f in fqn for f in mm_recompute_fqns):
                     continue
-                if not isinstance(submod, nn.Linear):
+                if not isinstance(submod, (nn.Linear, StructuredLinearBase)):
                     raise ValueError(
                         "force_recompute_mm_shapes_by_fqns expected to "
-                        f"match a nn.Linear, but got: {submod}"
+                        f"match a linear projection, but got: {submod}"
                     )
-                out_f, in_f = submod.weight.shape
+                in_f = submod.weight.shape[-1]
+                out_f = submod.weight.numel() // in_f
                 mm_recompute_shapes.add((in_f, out_f))
 
         # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op

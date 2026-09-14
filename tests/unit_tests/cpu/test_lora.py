@@ -14,7 +14,7 @@ from torchtitan.config.transform import Float8LinearConverter
 from torchtitan.config.transform.lora import _get_lora_cls, LoRAConverter
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, StructuredLinear
 from torchtitan.models.llama3 import model_registry
 from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.module import Module
@@ -88,7 +88,9 @@ def test_lora_targets_fused_feed_forward_projection():
     """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w13=Linear.Config(in_features=4, out_features=16, param_init=init),
+        w13=StructuredLinear.Config(
+            in_features=4, output_shape=(2, 8), param_init=init
+        ),
         w2=Linear.Config(in_features=8, out_features=4, param_init=init),
     )
     config = LoRAConverter(
@@ -122,10 +124,9 @@ def test_lora_targets_fused_feed_forward_projection():
             adapter.weight.copy_(torch.randn_like(adapter.weight))
 
     x = torch.randn(3, 4)
-    gate_up = F.linear(x, feed_forward.w13.weight)
+    gate_up = F.linear(x, feed_forward.w13.weight.flatten(0, -2)).unflatten(-1, (2, 8))
     gate_up = gate_up + 2 * feed_forward.w13.lora_b(feed_forward.w13.lora_a(x))
-    gate_up = gate_up.unflatten(-1, (8, 2))
-    gate, up = gate_up.unbind(-1)
+    gate, up = gate_up.unbind(-2)
     expected = feed_forward.w2(F.silu(gate) * up)
     torch.testing.assert_close(feed_forward(x), expected)
 
@@ -138,14 +139,16 @@ def test_lora_targets_fused_feed_forward_projection():
 def test_float8_lora_targets_fused_feed_forward_projection():
     """Quantized w13 uses one LoRA adapter."""
     pytest.importorskip("torchao")
-    from torchtitan.quantization import Float8Linear
+    from torchtitan.quantization import Float8StructuredLinear
 
-    if Float8Linear is None:
+    if Float8StructuredLinear is None:
         pytest.skip("torchao Float8Linear is unavailable")
 
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w13=Linear.Config(in_features=16, out_features=64, param_init=init),
+        w13=StructuredLinear.Config(
+            in_features=16, output_shape=(2, 32), param_init=init
+        ),
         w2=Linear.Config(in_features=32, out_features=16, param_init=init),
     )
     config = Float8LinearConverter(
@@ -161,7 +164,7 @@ def test_float8_lora_targets_fused_feed_forward_projection():
     feed_forward = config.build()
     feed_forward.init_states()
 
-    assert isinstance(feed_forward.w13, Float8Linear)
+    assert isinstance(feed_forward.w13, Float8StructuredLinear)
     assert set(feed_forward.state_dict()) == {
         "w1.weight",
         "w2.weight",

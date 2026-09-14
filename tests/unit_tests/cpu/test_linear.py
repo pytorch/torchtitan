@@ -19,7 +19,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.linear import Linear, PartialBiasRowwiseLinear
+from torchtitan.models.common.linear import (
+    Linear,
+    PartialBiasRowwiseLinear,
+    StructuredLinear,
+)
 from torchtitan.protocols.module import Module
 
 
@@ -136,6 +140,45 @@ class TestLinear(unittest.TestCase):
         linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
+
+
+class TestStructuredLinear(unittest.TestCase):
+    def test_default_initialization_matches_linear(self):
+        torch.manual_seed(42)
+        structured = StructuredLinear.Config(
+            in_features=4,
+            output_shape=(2, 8),
+            bias=True,
+        ).build()
+        torch.manual_seed(42)
+        linear = Linear.Config(in_features=4, out_features=16, bias=True).build()
+
+        torch.testing.assert_close(structured.weight.flatten(0, -2), linear.weight)
+        torch.testing.assert_close(structured.bias.flatten(), linear.bias)
+
+    def test_forward_matches_flat_linear(self):
+        linear = StructuredLinear.Config(
+            in_features=4,
+            output_shape=(2, 8),
+            bias=True,
+        ).build()
+        linear.init_states()
+        input_TD = torch.randn(3, 4)
+
+        actual_T2F = linear(input_TD)
+        expected_T2F = F.linear(
+            input_TD,
+            linear.weight.flatten(0, -2),
+            linear.bias.flatten(),
+        ).unflatten(-1, (2, 8))
+
+        self.assertEqual(linear.weight.shape, torch.Size([2, 8, 4]))
+        self.assertEqual(linear.out_features, 16)
+        torch.testing.assert_close(actual_T2F, expected_T2F)
+
+    def test_rejects_invalid_output_shape(self):
+        with self.assertRaisesRegex(ValueError, "positive dimensions"):
+            StructuredLinear.Config(in_features=4, output_shape=(2, 0))
 
 
 class TestPartialBiasRowwiseLinear(unittest.TestCase):

@@ -31,7 +31,7 @@ from torchtitan.models.common.dist_gemm import (
     RowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import Linear, RouterGateLinear, StructuredLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
@@ -55,12 +55,19 @@ DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
 
 
 def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
-    """Build an initializer for an interleaved 2D gate/up linear weight."""
+    """Build an initializer for a structured gate/up linear weight."""
 
     def _init(t: torch.Tensor) -> None:
-        gate_up = t.unflatten(0, (-1, 2))
+        # Initialize through the former interleaved view so a fixed RNG seed
+        # produces the same logical W1/W3 tensors with the same TP/FSDP setup.
+        # The transpose maps Shard(1) on [2, F, D] to the old Shard(0) on
+        # [F, 2, D], preserving DTensor's distributed RNG offsets.
+        gate_up = t.transpose(0, 1).contiguous()
         gate_init(gate_up[:, 0])
         up_init(gate_up[:, 1])
+        fused = gate_up.transpose(0, 1).contiguous()
+        with torch.no_grad():
+            t.copy_(fused)
 
     return _init
 
@@ -126,12 +133,12 @@ def fused_qkv_param_init(
     """Initialize fused ``wqkv`` from logical ``wq``/``wk``/``wv`` draws.
 
     Q, K, and V are initialized as separate contiguous tensors, then packed into
-    the fused ``(n_kv_heads, R, head_dim, dim)`` layout, where
+    the fused ``(R, n_kv_heads * head_dim, dim)`` layout, where
     ``R = heads_per_kv + 2``. This preserves logical initialization order and
     matches the packing used when loading separate checkpoint tensors.
 
     Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) param --
-    e.g. a ``Shard(0)`` DTensor for the colwise wqkv. ``t.new_empty(...)``
+    e.g. a ``Shard(1)`` DTensor for the structured colwise wqkv. ``t.new_empty(...)``
     returns ``Replicate`` DTensors, so each ``base_init`` runs on the full tensor
     and draws the same values on every rank (the weights do not depend on the
     TP/FSDP degree). ``cat`` of ``Replicate`` stays ``Replicate``, and the final
@@ -141,12 +148,12 @@ def fused_qkv_param_init(
     """
     heads_per_kv = n_heads // n_kv_heads
 
-    def _make_init(base_init: Callable) -> Callable:
+    def _make_init(base_init: Callable, param: str) -> Callable:
         # ``tail`` is the per-row shape: () for bias, (in_features,) for weight.
         # Building q/k/v with their logical shapes preserves their independent
         # initialization order before packing them into wqkv.
         def _init(t):
-            tail = t.shape[1:]
+            tail = t.shape[-1:] if param == "weight" else ()
             # If t is a sharded DTensor, new_empty (with the full logical shape)
             # returns Replicate DTensors, so base_init runs replicated and draws
             # the same values on every rank (parallelism-agnostic RNG).
@@ -158,20 +165,18 @@ def fused_qkv_param_init(
             base_init(v)
             fused = torch.cat(
                 [
-                    q.view(n_kv_heads, heads_per_kv, head_dim, *tail),
-                    k.view(n_kv_heads, 1, head_dim, *tail),
-                    v.view(n_kv_heads, 1, head_dim, *tail),
+                    q.view(n_kv_heads, heads_per_kv, head_dim, *tail)
+                    .transpose(0, 1)
+                    .flatten(1, 2),
+                    k.view(1, n_kv_heads * head_dim, *tail),
+                    v.view(1, n_kv_heads * head_dim, *tail),
                 ],
-                dim=1,
-            ).view(-1, *tail)
+                dim=0,
+            )
             with torch.no_grad():
-                # fused is Replicate (cat of Replicates). Flatten it to t's native
-                # 2D [(n_kv_heads*r_dim*head_dim), *tail] shape and copy_ into t,
-                # which scatters each rank's own shard. Reshaping the Replicate
-                # source (instead of t.view(n_kv_heads, ...) on the sharded t)
-                # avoids the "unflatten unevenly sharded" error when dp_shard*tp
-                # does not divide n_kv_heads (e.g. dp_shard=8, n_kv_heads=4); no
-                # gather, since fused is already replicated.
+                # fused is Replicate (cat of Replicates). Copying it into t
+                # scatters each rank's own shard without reshaping the sharded
+                # destination.
                 if not isinstance(t, DTensor) and (tp_size := spmd_mesh_size("tp")) > 1:
                     # RL generator init_weights() only needs non-persistent
                     # buffers; weights come from trainer state dict. Until it has
@@ -180,7 +185,7 @@ def fused_qkv_param_init(
                     mesh = current_spmd_mesh()
                     assert mesh is not None
                     tp_rank = mesh.get_local_rank("tp")
-                    fused = fused.chunk(tp_size, dim=0)[tp_rank]
+                    fused = fused.chunk(tp_size, dim=1)[tp_rank]
                 t.copy_(fused)
 
         return _init
@@ -189,7 +194,7 @@ def fused_qkv_param_init(
     for param in ("weight", "bias"):
         base_init = base_param_init.get(param)
         if base_init is not None:
-            out[param] = _make_init(base_init)
+            out[param] = _make_init(base_init, param)
     return out
 
 
@@ -248,9 +253,9 @@ def make_gqa_config(
         head_dim=per_head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv,
-        wqkv=Linear.Config(
+        wqkv=StructuredLinear.Config(
             in_features=dim,
-            out_features=(n_heads + 2 * n_kv) * per_head_dim,
+            output_shape=(n_heads // n_kv + 2, n_kv * per_head_dim),
             param_init=fused_qkv_param_init(
                 wqkv_param_init,
                 n_heads=n_heads,
@@ -293,9 +298,9 @@ def make_ffn_config(
     """
     ffn_cls = DistGEMMFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
     return ffn_cls.Config(
-        w13=Linear.Config(
+        w13=StructuredLinear.Config(
             in_features=dim,
-            out_features=2 * hidden_dim,
+            output_shape=(2, hidden_dim),
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
         w2=Linear.Config(

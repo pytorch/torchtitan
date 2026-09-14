@@ -19,6 +19,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    StructuredLinear,
     TransformerBlock,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
@@ -98,9 +99,9 @@ def _make_gptoss_attn_config(
         head_dim=head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
-        wqkv=Linear.Config(
+        wqkv=StructuredLinear.Config(
             in_features=dim,
-            out_features=(n_heads + 2 * n_kv_heads) * head_dim,
+            output_shape=(n_heads // n_kv_heads + 2, n_kv_heads * head_dim),
             bias=True,
             param_init=_depth_init(layer_id),
         ),
