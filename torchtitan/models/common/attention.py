@@ -840,7 +840,10 @@ class QKVLinear(Module):
 class AllGatherQKVLinear(QKVLinear):
     """QKV projection with an input all-gather boundary.
 
-    The boundary belongs here rather than on ``wqkv`` so it runs before
+    The subclass keeps ``QKVLinear`` computation unchanged. Its distinct config
+    type lets sharding setup attach the input all-gather to this module and lets
+    transforms replace only QKV projections with this communication role. The
+    boundary belongs here rather than on ``wqkv`` so it runs before
     ``QKVLinear`` enters its local SPMD region and splits the fused output.
     """
 
