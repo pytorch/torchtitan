@@ -14,6 +14,9 @@ TorchTitan provides two distinct test modes:
   Use it when pipeline communication and buffer lifetimes must be exercised.
 
 Neither mode replaces a real distributed numerical or performance test.
+The authoritative user-facing launch contract, including complete command
+examples and environment-variable semantics, is in
+[`docs/debugging.md`](../../../docs/debugging.md#fake-backend-debugging).
 
 ## Logical Rank Coordinates
 
@@ -35,6 +38,12 @@ Pure fake runs without PP retain the ordinary `RANK` interface. In hybrid mode,
 the physical `RANK` is the PP coordinate, `WORLD_SIZE` must equal the PP degree,
 and `FAKE_SPMD_RANK` selects which logical SPMD coordinate each physical PP
 rank represents.
+
+`COMM_MODE=fake_backend` is a convenience understood by `run_train.sh` for a
+single-process pure-fake run. Launch hybrid mode with `torchrun`, set `NGPU` to
+the logical world size, and pass
+`--comm.mode real_pp_fake_spmd_backend`; `torchrun` supplies the physical
+`RANK`, `WORLD_SIZE`, `LOCAL_RANK`, and rendezvous variables.
 
 ## Memory Debugging Workflow
 
