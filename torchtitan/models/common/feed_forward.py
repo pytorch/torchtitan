@@ -96,11 +96,7 @@ class FeedForward(Module):
 
     def parallelize(self, parallel_dims: ParallelDims) -> None:
         sharding_config = self._sharding_config
-        if (
-            type(self) is FeedForward
-            and parallel_dims.spmd_backend == "spmd_types"
-            and sharding_config is not None
-        ):
+        if type(self) is FeedForward and sharding_config is not None:
             in_src = sharding_config.in_src_shardings or {}
             in_dst = sharding_config.in_dst_shardings or {}
             out_src = sharding_config.out_src_shardings
