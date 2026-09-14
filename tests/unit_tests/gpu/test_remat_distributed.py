@@ -9,6 +9,7 @@ import unittest
 
 from unittest.mock import patch
 
+import pytest
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import init_device_mesh
@@ -19,7 +20,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 from torchtitan.models.common.attention import FlexInnerAttention, GQAttention
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
@@ -31,15 +31,13 @@ from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.module import Module, ModuleDict
 
 
+pytestmark = pytest.mark.multi_gpu
+
+
 @contextlib.contextmanager
 def _use_spmd_types(mesh):
-    previous_backend = get_spmd_backend()
-    set_spmd_backend("spmd_types")
-    try:
-        with set_current_spmd_mesh(mesh):
-            yield
-    finally:
-        set_spmd_backend(previous_backend)
+    with set_current_spmd_mesh(mesh):
+        yield
 
 
 class _Model(Module):
