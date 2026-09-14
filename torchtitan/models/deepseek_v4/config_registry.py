@@ -728,7 +728,7 @@ def deepseek_v4_flash_8k_ep4_blk32(seq_len: int | None = 8192) -> Trainer.Config
     -- barely over the noise floor, but in the same direction twice. Worth one
     run composed with block_size 32 to see if the ordering holds at the top.
     """
-    config = deepseek_v4_flash_8k_ep(4, seq_len)
+    config = _flash_8k_ep(4, seq_len)
     for layer in config.model_spec.model.layers:
         inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
         if isinstance(inner, FlexAttention.Config):
