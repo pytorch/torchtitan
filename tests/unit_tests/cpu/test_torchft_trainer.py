@@ -64,6 +64,11 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         "build",
         lambda self, **kwargs: SimpleNamespace(max_num_documents=None),
     )
+    monkeypatch.setattr(
+        type(config.metrics),
+        "build",
+        lambda self, **kwargs: SimpleNamespace(color=""),
+    )
     monkeypatch.setattr(type(config.model_spec.model), "build", build_model)
 
     with pytest.raises(ModelBuildReachedError):
