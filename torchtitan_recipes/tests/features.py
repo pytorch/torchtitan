@@ -32,6 +32,7 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel_varlen_attn,
     sft_debugmodel,
 )
+from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 
@@ -357,9 +358,10 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_optimizer_bf16_states() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
+    config.training.mixed_precision_reduce = "float32"
     config.optimizer.implementation = "fused_opt_states_bf16"
     return config
 
