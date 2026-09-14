@@ -416,10 +416,8 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         output.sum().backward()
 
         self.assertIsNotNone(x.grad)
-        w1, w2, w3 = _expert_weights(native_moe.routed_experts)
-        self.assertIsNotNone(w1.grad)
-        self.assertIsNotNone(w2.grad)
-        self.assertIsNotNone(w3.grad)
+        self.assertIsNotNone(native_moe.routed_experts.w13.weight.grad)
+        self.assertIsNotNone(native_moe.routed_experts.w2.weight.grad)
 
 
 # ---------------------------------------------------------------------------
