@@ -9,6 +9,7 @@
 from .apply import apply_transforms, transform_model_config_
 from .base import convert_config_type, ModelConfigTransform
 from .context_parallel import ContextParallelTransform
+from .dist_moe import DistMoeTransform, MXFP8DistMoeTransform
 from .lora import LoRAConverter
 from .quantization import (
     Float8GroupedLinearConverter,
@@ -25,11 +26,13 @@ __all__ = [
     "transform_model_config_",
     "convert_config_type",
     "ContextParallelTransform",
+    "DistMoeTransform",
     "LoRAConverter",
     "Float8GroupedLinearConverter",
     "Float8LinearConverter",
     "MXFP8GroupedLinearConverter",
     "MXFP8LinearConverter",
+    "MXFP8DistMoeTransform",
     "NVFP4LinearConverter",
     "QuantizationConverter",
 ]

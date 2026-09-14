@@ -188,7 +188,7 @@ class TestConfigManager(unittest.TestCase):
 
         assert config.parallelism.pipeline_parallel_schedule == "1F1B"
 
-    def test_looped_pipeline_cuda_graphs_require_directed_p2p(self):
+    def test_cuda_graphs_allow_looped_pipeline_schedule(self):
         config = ConfigManager().parse_args(
             [
                 "--module",
@@ -203,26 +203,6 @@ class TestConfigManager(unittest.TestCase):
             ]
         )
         config.training.disable_cuda_graphs = False
-
-        with pytest.raises(ValueError, match="directed physical-rank edge"):
-            config._validate_cuda_graphs()
-
-    def test_looped_pipeline_cuda_graphs_accept_directed_p2p(self):
-        config = ConfigManager().parse_args(
-            [
-                "--module",
-                "llama3",
-                "--config",
-                "llama3_debugmodel",
-                "--training.disable-cuda-graphs",
-                "--parallelism.pipeline_parallel_degree",
-                "2",
-                "--parallelism.pipeline_parallel_schedule",
-                "Interleaved1F1B",
-            ]
-        )
-        config.training.disable_cuda_graphs = False
-        config.parallelism.pipeline_parallel_per_direction_p2p = True
 
         config._validate_cuda_graphs()
 

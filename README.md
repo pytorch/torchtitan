@@ -71,7 +71,7 @@ We look forward to your contributions!
 5. `torch.compile` support
 6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](torchtitan/quantization/float8.md))
 7. [MXFP8 training for dense and MoE models](torchtitan/quantization/mxfp8/README.md) on Blackwell GPUs.
-8. [Distributed MoE](docs/dist_moe.md) with fused CuTe DSL dispatch, expert compute, and combine on Blackwell GPUs.
+8. [Distributed MoE](torchtitan/components/dist_moe/README.md) with fused CuTe DSL dispatch, expert compute, and combine on Blackwell GPUs.
 9. Supervised Fine-Tuning (SFT) with chat-formatted datasets
 10. DDP and HSDP
 11. [TorchFT](https://github.com/pytorch/torchft) integration

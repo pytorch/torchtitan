@@ -4,22 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Dist-MoE specialization of the shared quantized FSDP tensor lifecycle."""
+"""MXFP8 prepared-weight lifecycle for DistMoE grouped projections."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import torch
-
-from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
-
 from dist_moe import (
     BlockScaledFormat,
     DistMoeBlockScaledConfig,
     DistMoePreparedWeight,
     prepare_blockscaled_weight,
 )
+
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
 
 __all__: list[str] = []
@@ -34,8 +33,8 @@ class _DistMoeMXFP8Operands:
     dgrad_scale: torch.Tensor
     quantization_workspace: torch.Tensor
 
-    def prepared(self, source: torch.Tensor):
-        """Return the annex facade consumed by one Dist-MoE invocation."""
+    def prepared(self, source: torch.Tensor) -> DistMoePreparedWeight:
+        """Return the annex facade consumed by one DistMoE invocation."""
         return DistMoePreparedWeight(
             source=source,
             format=BlockScaledFormat.MXFP8_E4M3,
@@ -59,9 +58,9 @@ def _prepare_mxfp8_weight(
         out=prepared_out,
     )
     if prepared.dgrad_data is not prepared.fprop_data:
-        raise RuntimeError("MXFP8 Dist-MoE FPROP and DGRAD must share qdata")
+        raise RuntimeError("MXFP8 DistMoE FPROP and DGRAD must share qdata")
     if prepared.dgrad_scale is None or prepared._quantization_workspace is None:
-        raise RuntimeError("MXFP8 Dist-MoE preparation returned incomplete operands")
+        raise RuntimeError("MXFP8 DistMoE preparation returned incomplete operands")
     return _DistMoeMXFP8Operands(
         qdata=prepared.fprop_data,
         fprop_scale=prepared.fprop_scale,
@@ -78,8 +77,7 @@ class _DistMoeW13ShardedTensor(_ShardedFSDPTensor):
         logical_tensor: torch.Tensor,
         out: _DistMoeMXFP8Operands | None = None,
     ) -> _DistMoeMXFP8Operands:
-        weight_E_2F_D = logical_tensor.flatten(1, 2)
-        return _prepare_mxfp8_weight(weight_E_2F_D, out)
+        return _prepare_mxfp8_weight(logical_tensor.flatten(1, 2), out)
 
 
 class _DistMoeW2ShardedTensor(_ShardedFSDPTensor):
@@ -97,8 +95,8 @@ def _dynamic_prepared_weight(
     logical_weight: torch.Tensor,
     *,
     gate_up: bool,
-):
-    """Prepare a weight when no FSDP implementation owns its unshard lifetime."""
+) -> DistMoePreparedWeight:
+    """Prepare a weight when FSDP does not own its unshard lifetime."""
     source = logical_weight.flatten(1, 2) if gate_up else logical_weight
     storage = (
         logical_weight._tensor
