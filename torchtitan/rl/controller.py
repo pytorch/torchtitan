@@ -119,7 +119,6 @@ from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.distributed.weight_sync import WeightSyncManager
 from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
-from torchtitan.rl.losses import GRPOLoss
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.controller import (
     compute_perf_ratio_metrics,
@@ -312,9 +311,7 @@ class Controller(Configurable):
         compile: CompileConfig = field(default_factory=CompileConfig)
         """torch.compile config shared by trainer and generator."""
 
-        trainer: Trainer.Config = field(
-            default_factory=lambda: Trainer.Config(loss=GRPOLoss.Config())
-        )
+        trainer: Trainer.Config
         """Trainer config. Controls optimizer, training, parallelism."""
 
         # TODO: put generator, num generators and generator router in a separate config

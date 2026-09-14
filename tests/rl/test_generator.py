@@ -40,7 +40,7 @@ from torchtitan.rl.generator import (
     GenerationFuture,
     RequestDispatcher,
     SamplingConfig,
-    VLLMCudagraphConfig,
+    VLLMCudaGraphConfig,
     VLLMGenerator,
 )
 from torchtitan.rl.model.vllm_registry import register_to_vllm
@@ -350,14 +350,14 @@ def test_qwen36_27b_config_applies_offset_rmsnorm_to_both_actors():
     assert config.generator.parallelism.tensor_parallel_degree == 4
     assert config.trainer.optimizer.implementation == "fused_opt_states_bf16"
     assert isinstance(config.trainer.activation_checkpoint, FullAC.Config)
-    assert config.generator.cudagraph.enable
+    assert config.generator.cuda_graph.enable
 
 
-# --- CUDA graph config (VLLMCudagraphConfig.get_vllm_compilation_config) ---
+# --- CUDA graph config (VLLMCudaGraphConfig.get_vllm_compilation_config) ---
 
 
-def test_cudagraph_disabled_preserves_sequence_parallel_config():
-    compilation_config = VLLMCudagraphConfig(enable=False).get_vllm_compilation_config(
+def test_cuda_graph_disabled_preserves_sequence_parallel_config():
+    compilation_config = VLLMCudaGraphConfig(enable=False).get_vllm_compilation_config(
         max_num_seqs=256,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=True,
@@ -368,12 +368,12 @@ def test_cudagraph_disabled_preserves_sequence_parallel_config():
     assert compilation_config.pass_config.sp_min_token_num == 1
 
 
-def test_expert_sequence_parallel_padding_filters_cudagraph_sizes():
+def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
     parallelism = InferenceParallelismConfig(
         tensor_parallel_degree=4,
         expert_parallel_degree=4,
     )
-    cfg = VLLMCudagraphConfig(
+    cfg = VLLMCudaGraphConfig(
         enable=True,
         capture_sizes=[1, 4, 5, 8],
     ).get_vllm_compilation_config(
@@ -385,8 +385,8 @@ def test_expert_sequence_parallel_padding_filters_cudagraph_sizes():
     assert cfg.cudagraph_capture_sizes == [4, 8]
 
 
-def test_expert_sequence_parallel_padding_keeps_small_cudagraph_batches():
-    cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(
+def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
+    cfg = VLLMCudaGraphConfig(enable=True).get_vllm_compilation_config(
         max_num_seqs=1,
         expert_sequence_parallel_size=8,
         enable_sequence_parallel=False,
@@ -396,9 +396,9 @@ def test_expert_sequence_parallel_padding_keeps_small_cudagraph_batches():
     assert all(size % 8 == 0 for size in cfg.cudagraph_capture_sizes)
 
 
-def test_expert_sequence_parallel_padding_rejects_no_valid_cudagraph_sizes():
+def test_expert_sequence_parallel_padding_rejects_no_valid_cuda_graph_sizes():
     with pytest.raises(ValueError, match="No CUDA graph capture sizes"):
-        VLLMCudagraphConfig(
+        VLLMCudaGraphConfig(
             enable=True,
             capture_sizes=[1, 2, 3],
         ).get_vllm_compilation_config(
@@ -446,10 +446,10 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
     )
 
 
-def test_cudagraph_default_mode_is_full_decode_only():
+def test_cuda_graph_default_mode_is_full_decode_only():
     # Default mode; decode-only graphs avoid the mixed-batch corruption (#3668),
     # with no inductor compile (CompilationMode.NONE == 0).
-    cfg = VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(
+    cfg = VLLMCudaGraphConfig(enable=True).get_vllm_compilation_config(
         max_num_seqs=256,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
@@ -458,9 +458,9 @@ def test_cudagraph_default_mode_is_full_decode_only():
     assert int(cfg.mode) == 0
 
 
-def test_cudagraph_full_mode_no_compile():
+def test_cuda_graph_full_mode_no_compile():
     # FULL captures the whole forward (incl. attention) with no inductor compile.
-    cfg = VLLMCudagraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
+    cfg = VLLMCudaGraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
         max_num_seqs=256,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
@@ -469,10 +469,10 @@ def test_cudagraph_full_mode_no_compile():
     assert int(cfg.mode) == 0
 
 
-def test_cudagraph_decode_only_capture_sizes_cover_max_num_seqs():
+def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
     # FULL_DECODE_ONLY only graphs decode, so capture up to max_num_seqs (plus
     # max_num_seqs itself when not a power of 2).
-    cfg = VLLMCudagraphConfig(
+    cfg = VLLMCudaGraphConfig(
         enable=True, mode="FULL_DECODE_ONLY"
     ).get_vllm_compilation_config(
         max_num_seqs=500,
@@ -482,10 +482,10 @@ def test_cudagraph_decode_only_capture_sizes_cover_max_num_seqs():
     assert cfg.cudagraph_capture_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 500]
 
 
-def test_cudagraph_full_mode_extends_capture_sizes_to_chunk():
+def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
     # FULL also graphs prefill, so sizes extend to the chunked-prefill chunk
     # (max_num_batched_tokens, 2048) on top of max_num_seqs.
-    cfg = VLLMCudagraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
+    cfg = VLLMCudaGraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
         max_num_seqs=500,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
@@ -494,9 +494,9 @@ def test_cudagraph_full_mode_extends_capture_sizes_to_chunk():
     assert 500 in cfg.cudagraph_capture_sizes  # decode batch captured exactly
 
 
-def test_cudagraph_rejects_nonpositive_max_num_seqs():
+def test_cuda_graph_rejects_nonpositive_max_num_seqs():
     with pytest.raises(ValueError, match="max_num_seqs must be positive"):
-        VLLMCudagraphConfig(enable=True).get_vllm_compilation_config(
+        VLLMCudaGraphConfig(enable=True).get_vllm_compilation_config(
             max_num_seqs=0,
             expert_sequence_parallel_size=1,
             enable_sequence_parallel=False,
@@ -511,7 +511,7 @@ def test_inference_parallelism_propagates_dense_sequence_parallelism():
 
     assert parallelism.to_training().enable_sequence_parallel
 
-    compilation_config = VLLMCudagraphConfig(
+    compilation_config = VLLMCudaGraphConfig(
         capture_sizes=[1, 4, 5, 8]
     ).get_vllm_compilation_config(
         max_num_seqs=8,

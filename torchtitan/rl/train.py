@@ -39,11 +39,11 @@ from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 logger = logging.getLogger(__name__)
 
 
-def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
+def breakable_cuda_graph_env(generator_cfg) -> dict[str, str]:
     """Per-proc launch env a FULL_AND_PIECEWISE generator needs: ``VLLM_USE_BREAKABLE_CUDAGRAPH``.
 
     rl/model/attention.py's ``@eager_break_during_capture`` reads this env at MODULE IMPORT and
-    makes prefill attention a cudagraph break (run eager at replay). The import happens before the
+    makes prefill attention a CUDA graph break (run eager at replay). The import happens before the
     generator actor's ``__init__`` and in the vLLM EngineCore worker subprocesses -- which do NOT
     inherit a runtime-set ``os.environ`` -- so setting it at runtime is too late. It must go in the
     proc's LAUNCH env (the spawn ``bootstrap_command``, or the MAST role.env). Without it the decorator no-ops
@@ -51,7 +51,7 @@ def breakable_cudagraph_env(generator_cfg) -> dict[str, str]:
     prompt -> coherent-but-unrelated output. FULL_DECODE_ONLY never captures prefill so it needs
     nothing. Shared so the OSS spawn path and the fbcode MAST launcher use one source of truth.
     """
-    cg = getattr(generator_cfg, "cudagraph", None)
+    cg = getattr(generator_cfg, "cuda_graph", None)
     if (
         cg is not None
         and getattr(cg, "enable", False)
@@ -294,7 +294,7 @@ async def main():
             per_generator_world_size,
             host_meshes=None,
             num_generators=config.num_generators,
-            generator_env=breakable_cudagraph_env(config.generator),
+            generator_env=breakable_cuda_graph_env(config.generator),
         )
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,

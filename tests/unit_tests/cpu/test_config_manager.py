@@ -13,14 +13,20 @@ from unittest import mock
 
 import pytest
 import tyro
-from torchtitan.config import ConfigManager, ParallelismConfig, TrainingConfig
+from torchtitan.config import (
+    ConfigManager,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )
 from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
 from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.trainer import Trainer, TrainingEngine
+from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 
 class TestConfigManager(unittest.TestCase):
@@ -225,10 +231,11 @@ class TestConfigManager(unittest.TestCase):
             ]
         )
         config.training.disable_cuda_graphs = False
+        config.parallelism.pipeline_parallel_schedule = "1F1B"
         config.validator.enable = True
 
         with pytest.raises(ValueError, match="do not support validation"):
-            config._validate_cuda_graphs()
+            config.__post_init__()
 
     def test_cuda_graphs_enabled_by_default(self):
         config = ConfigManager().parse_args(
@@ -320,6 +327,14 @@ class TestConfigManager(unittest.TestCase):
 
         config.training.num_tokens_per_microbatch_per_dp_rank = 16
         config.__post_init__()
+
+    def test_engine_rejects_spmd_typechecking_with_pipeline_parallelism(self):
+        with pytest.raises(ValueError, match="SPMD typechecking"):
+            TrainingEngine.Config(
+                debug=DebugConfig(spmd_typechecking=True),
+                training=TrainingConfig(disable_cuda_graphs=True),
+                parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+            )
 
     def test_sdc_replay_is_off_the_cli(self):
         hints = typing.get_type_hints(Trainer.Config, include_extras=True)

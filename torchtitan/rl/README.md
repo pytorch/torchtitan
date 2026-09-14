@@ -102,7 +102,7 @@ def my_experiment() -> Controller.Config:
         renderer=RenderersLibraryConfig(
             renderers_config=Qwen3RendererConfig(enable_thinking=False)
         ),
-        trainer=Trainer.Config(...),
+        trainer=Trainer.Config(loss=..., ...),
         generator=VLLMGenerator.Config(...),
     )
 ```

@@ -153,7 +153,7 @@ def _prepare_generation_request_metrics(
 
 
 # vLLM's default max_num_batched_tokens (vllm's per-step budget:
-# prefill + decode tokens summed over the batch). Used as the cudagraph capture
+# prefill + decode tokens summed over the batch). Used as the CUDA graph capture
 # cap for "FULL" / "FULL_AND_PIECEWISE" (which graph prefill / mixed batches, so
 # capture sizes must reach the per-step budget or those batches fall back to
 # eager) when ``Config.max_num_batched_tokens`` is unset; when that field is set,
@@ -162,14 +162,14 @@ _DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 
 
 @dataclass(kw_only=True, slots=True)
-class VLLMCudagraphConfig:
+class VLLMCudaGraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
     torch.compile is configured separately via ``CompileConfig`` at the
     ``Controller`` level, shared by both trainer and generator.  Only CUDA
     graph capture, which is vLLM-specific, is controlled here.
 
-    ``mode`` selects which vLLM cudagraph mode to capture; see that field and
+    ``mode`` selects which vLLM CUDA graph mode to capture; see that field and
     ``get_vllm_compilation_config`` for the per-mode trade-offs. The default,
     ``FULL``, graphs the whole forward (prefill included).
     """
@@ -178,7 +178,7 @@ class VLLMCudagraphConfig:
     """Whether to enable CUDA graph capture."""
 
     mode: Literal["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "FULL"] = "FULL"
-    """Which vLLM cudagraph mode to capture (when ``enable``):
+    """Which vLLM CUDA graph mode to capture (when ``enable``):
 
     - ``"FULL_DECODE_ONLY"``: graph pure-decode batches; prefill / mixed
       batches run eager. Cheap (no inductor compile).
@@ -193,7 +193,7 @@ class VLLMCudagraphConfig:
     """
 
     capture_sizes: list[int] | None = None
-    """Explicit cudagraph capture batch sizes. When ``None`` (default), sizes are
+    """Explicit CUDA graph capture batch sizes. When ``None`` (default), sizes are
     auto-derived: powers of 2 up to the cap, plus ``max_num_seqs`` and the cap as
     exact sizes. When set, these sizes are deduped and sorted. When expert
     sequence parallelism is enabled, capture sizes that are not multiples of
@@ -238,7 +238,7 @@ class VLLMCudagraphConfig:
 
         All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
         ``FULL_AND_PIECEWISE`` runs attention eager via vLLM's BREAKABLE
-        cudagraph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` (vLLM itself
+        CUDA graph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` (vLLM itself
         also forces ``mode=NONE`` when that env is set) (#3709).
         """
         if not self.enable:
@@ -258,16 +258,16 @@ class VLLMCudagraphConfig:
                 f"{expert_sequence_parallel_size}"
             )
         if max_num_batched_tokens is not None:
-            _max_cudagraph_capture_size = max_num_batched_tokens
+            _max_cuda_graph_capture_size = max_num_batched_tokens
         else:
-            _max_cudagraph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
+            _max_cuda_graph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
         if self.mode in ("FULL", "FULL_AND_PIECEWISE"):
-            cap = max(cap, _max_cudagraph_capture_size)
+            cap = max(cap, _max_cuda_graph_capture_size)
         if self.capture_sizes is not None:
             if not self.capture_sizes or any(s <= 0 for s in self.capture_sizes):
                 raise ValueError(
-                    "cudagraph.capture_sizes must be a non-empty list of positive "
+                    "cuda_graph.capture_sizes must be a non-empty list of positive "
                     f"ints, got {self.capture_sizes}"
                 )
             sizes = sorted(set(self.capture_sizes))
@@ -687,6 +687,12 @@ class VLLMGenerator(Configurable):
         max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
             is tight); also sets the CUDA-graph capture sizes.
         output_dir: Structured-logger output directory.
+        open_result_channel: Opens the asynchronous channel used to fan in
+            completions from nonzero data-parallel replicas to rank 0. It must
+            return the sending port and receiving endpoint. The Monarch actor
+            adapter supplies ``Channel.open``; standalone runtimes can supply
+            an equivalent transport. It is unused when data parallelism is
+            disabled.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -725,7 +731,7 @@ class VLLMGenerator(Configurable):
         (prefill + decode, summed over the batch). ``None`` (default) leaves
         vLLM's own engine default in place."""
 
-        cudagraph: VLLMCudagraphConfig = field(default_factory=VLLMCudagraphConfig)
+        cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
         checkpoint: CheckpointManager.Config = field(
@@ -810,7 +816,7 @@ class VLLMGenerator(Configurable):
         open_result_channel: Callable[[], tuple[Any, Any]] | None = None,
     ):
         init_logger()
-        # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
+        # TODO: Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
         logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
         sl.init_structured_logger(
             source="rl_generator",
@@ -836,7 +842,7 @@ class VLLMGenerator(Configurable):
         # @eager_break_during_capture decorator in rl/model/attention.py, which
         # reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time -- so the env must be
         # set before register_to_vllm imports that module (#3709).
-        if config.cudagraph.enable and config.cudagraph.mode == "FULL_AND_PIECEWISE":
+        if config.cuda_graph.enable and config.cuda_graph.mode == "FULL_AND_PIECEWISE":
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
         # Register TorchTitan model + parser with vLLM
@@ -894,7 +900,7 @@ class VLLMGenerator(Configurable):
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=not config.cudagraph.enable,
+            enforce_eager=not config.cuda_graph.enable,
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
@@ -916,7 +922,7 @@ class VLLMGenerator(Configurable):
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
         expert_sequence_parallel_size = config.parallelism.expert_sequence_parallel_size
-        vllm_compilation_config = config.cudagraph.get_vllm_compilation_config(
+        vllm_compilation_config = config.cuda_graph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
             max_num_batched_tokens=config.max_num_batched_tokens,
             expert_sequence_parallel_size=expert_sequence_parallel_size,

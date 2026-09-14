@@ -23,12 +23,6 @@ from torchtitan.tools import utils
 logger = logging.getLogger(__name__)
 
 
-ForwardBackwardFn = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]],
-    torch.Tensor,
-]
-
-
 @dataclass(frozen=True)
 class _BlockMaskInputSpec:
     num_leaves: int
@@ -37,7 +31,7 @@ class _BlockMaskInputSpec:
 
 # TODO(@jinsooihm): Remove this class and use standard pytree flattening after
 # attention mask creation moves into model code and BlockMask is no longer an input.
-class CUDAGraphInputSpec:
+class CudaGraphInputSpec:
     """Flatten structured inputs while exposing tensors stored in ``BlockMask``."""
 
     def __init__(self, tree: Any) -> None:
@@ -123,7 +117,7 @@ class CUDAGraphInputSpec:
         return pytree.tree_unflatten(outer_leaves, self._tree_spec)
 
 
-class _CUDAGraphManager:
+class _CudaGraphManager:
     """Singleton that owns a shared graph pool, stream, and annotations."""
 
     def __init__(self) -> None:
@@ -180,17 +174,28 @@ class _CUDAGraphManager:
         self._initialized = False
 
 
-_manager = _CUDAGraphManager()
+_manager = _CudaGraphManager()
 
 
-def cudagraph_teardown() -> None:
+def cuda_graph_teardown() -> None:
     """Destroy all CUDA graphs and release the shared memory pool."""
     _manager.teardown()
 
 
-def get_cudagraph_annotations() -> dict[int, list[Any]]:
+def get_cuda_graph_annotations() -> dict[int, list[Any]]:
     """Return all kernel annotations accumulated across CUDA graph captures."""
     return _manager.all_annotations
+
+
+def run_on_cuda_graph_stream(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run a callable eagerly on the stream reserved for CUDA graph capture."""
+    _manager.maybe_initialize()
+    current_stream = torch.cuda.current_stream()
+    _manager.stream.wait_stream(current_stream)
+    with torch.cuda.stream(_manager.stream):
+        output = fn(*args, **kwargs)
+    current_stream.wait_stream(_manager.stream)
+    return output
 
 
 class CUDAGraphWrapper:
@@ -207,11 +212,6 @@ class CUDAGraphWrapper:
         tensor_input_indices: Indices of inputs that should be copied before
             replay. When omitted, these are inferred from ``example_inputs``.
         num_warmup_iterations: Number of eager invocations before capture.
-        optimizer_steps_completed: Optional counter used to make warmup depend
-            on completed optimizer steps instead of invocation count.
-        num_warmup_steps: Number of optimizer steps required when
-            ``optimizer_steps_completed`` is provided.
-
     Raises:
         ValueError: If ``num_warmup_iterations`` is negative.
     """
@@ -224,19 +224,10 @@ class CUDAGraphWrapper:
         should_check_address: bool = False,
         tensor_input_indices: Sequence[int] | None = None,
         *,
-        num_warmup_iterations: int = 1,
-        optimizer_steps_completed: Callable[[], int] | None = None,
-        num_warmup_steps: int = 0,
+        num_warmup_iterations: int,
     ):
         if num_warmup_iterations < 0:
             raise ValueError("num_warmup_iterations must be non-negative")
-        if num_warmup_steps < 0:
-            raise ValueError("num_warmup_steps must be non-negative")
-        if optimizer_steps_completed is not None and num_warmup_iterations != 0:
-            raise ValueError(
-                "num_warmup_iterations must be zero when optimizer-step "
-                "warmup is used"
-            )
         self._fn = fn
         self._num_inputs = len(example_inputs)
         self._static_input_indices = set(static_input_indices or ())
@@ -271,12 +262,6 @@ class CUDAGraphWrapper:
         }
         self._graph: torch.cuda.CUDAGraph | None = None
         self._warmup_remaining = num_warmup_iterations
-        self._optimizer_steps_completed = optimizer_steps_completed
-        self._capture_after_optimizer_step = (
-            optimizer_steps_completed() + num_warmup_steps
-            if optimizer_steps_completed is not None
-            else None
-        )
         self._args: tuple | None = None
         self._output: Any = None
         self._should_check_address = should_check_address
@@ -334,19 +319,9 @@ class CUDAGraphWrapper:
     def __call__(self, *args):
         self._validate_inputs(args)
 
-        optimizer_warmup_active = (
-            self._optimizer_steps_completed is not None
-            and self._capture_after_optimizer_step is not None
-            and self._optimizer_steps_completed() < self._capture_after_optimizer_step
-        )
-        if self._warmup_remaining > 0 or optimizer_warmup_active:
-            self._warmup_remaining = max(0, self._warmup_remaining - 1)
-            current_stream = torch.cuda.current_stream()
-            _manager.stream.wait_stream(current_stream)
-            with torch.cuda.stream(_manager.stream):
-                output = self._fn(*args)
-            current_stream.wait_stream(_manager.stream)
-            return output
+        if self._warmup_remaining > 0:
+            self._warmup_remaining -= 1
+            return run_on_cuda_graph_stream(self._fn, *args)
 
         if self._graph is None:
             self._args = args
@@ -384,12 +359,6 @@ class CUDAGraphWrapper:
 # TODO: Unify PP and non-PP callable signatures to restore strict input typing.
 def wrap_with_cuda_graph(
     fn: Callable[..., torch.Tensor],
-    *,
-    gradient_accumulation_steps: int | None = None,
-    sdc_num_steps: int = 0,
-    sdc_num_replays: int = 0,
-    num_warmup_steps: int = 2,
-    optimizer_steps_completed: Callable[[], int] | None = None,
 ) -> Callable[..., torch.Tensor]:
     """Decorate a structured callable with CUDA graph capture and replay.
 
@@ -397,21 +366,8 @@ def wrap_with_cuda_graph(
     tensor metadata across calls. After capture, tensor outputs alias
     graph-owned storage that is overwritten by the next replay.
 
-    Two optimizer steps are a conservative warmup default, allowing an eager
-    step after lazy optimizer state initialization. One full step may suffice;
-    a fixed warmup count does not guarantee all lazy initialization is complete.
-
     Args:
         fn: Callable to capture.
-        gradient_accumulation_steps: Forward-backward calls per optimizer step.
-            Required for invocation-count warmup and unused when
-            ``optimizer_steps_completed`` is provided.
-        sdc_num_steps: Initial optimizer steps checked by SDC, or -1 for all.
-        sdc_num_replays: Additional calls for each SDC-checked optimizer step.
-        num_warmup_steps: Number of eager optimizer steps before capture.
-        optimizer_steps_completed: Optional completed-step counter. When
-            provided, warmup follows optimizer steps directly instead of
-            estimating them from forward/backward invocation counts.
     """
 
     if not (
@@ -425,35 +381,16 @@ def wrap_with_cuda_graph(
         )
         return fn
 
-    if optimizer_steps_completed is None:
-        if gradient_accumulation_steps is None:
-            raise ValueError(
-                "gradient_accumulation_steps is required for invocation-count "
-                "CUDA graph warmup"
-            )
-        # SDC checks only the first accumulation group of each checked step.
-        num_checked_steps = (
-            num_warmup_steps
-            if sdc_num_steps == -1
-            else min(num_warmup_steps, sdc_num_steps)
-        )
-        num_warmup_iterations = (
-            num_warmup_steps * gradient_accumulation_steps
-            + num_checked_steps * sdc_num_replays
-        )
-    else:
-        num_warmup_iterations = 0
-
     # Every wrapper is registered to the manager in this module and persists
-    # until cudagraph_teardown is called.
+    # until cuda_graph_teardown is called.
     graph_wrapper: CUDAGraphWrapper | None = None
-    input_spec: CUDAGraphInputSpec | None = None
+    input_spec: CudaGraphInputSpec | None = None
 
     def run(*args: Any, **kwargs: Any) -> torch.Tensor:
         nonlocal graph_wrapper, input_spec
 
         if graph_wrapper is None:
-            input_spec = CUDAGraphInputSpec((args, kwargs))
+            input_spec = CudaGraphInputSpec((args, kwargs))
 
             def flat_fn(*flat_inputs: Any) -> torch.Tensor:
                 assert input_spec is not None
@@ -464,9 +401,7 @@ def wrap_with_cuda_graph(
             graph_wrapper = CUDAGraphWrapper(
                 flat_fn,
                 flat_inputs,
-                num_warmup_iterations=num_warmup_iterations,
-                optimizer_steps_completed=optimizer_steps_completed,
-                num_warmup_steps=num_warmup_steps,
+                num_warmup_iterations=0,
             )
         else:
             assert input_spec is not None

@@ -68,7 +68,7 @@ def _measure_step(
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
-    loss = trainer._forward_backward_microbatch(
+    loss = trainer.engine.forward_backward_microbatch(
         microbatch_group=[
             TokenizedTrainingMicrobatch(
                 input=tokens,

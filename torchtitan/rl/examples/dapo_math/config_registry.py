@@ -23,7 +23,7 @@ from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrat
 from torchtitan.rl.examples.dapo_math.data import AIME2025Dataset, DapoMathDataset
 from torchtitan.rl.examples.dapo_math.env import DapoMathEnv
 from torchtitan.rl.examples.dapo_math.rubric import RewardMathVerify
-from torchtitan.rl.generator import SamplingConfig, VLLMCudagraphConfig, VLLMGenerator
+from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import DAPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.renderer import RenderersLibraryConfig
@@ -32,6 +32,9 @@ from torchtitan.rl.rollout.environment import TokenEnv
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
+
+# TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
+# verified.
 
 
 def _dapo_math_rollouter_config(
@@ -150,7 +153,7 @@ def _qwen3_4b_dapo_math_config(
                 data_parallel_degree=1,
                 tensor_parallel_degree=1,
             ),
-            cudagraph=VLLMCudagraphConfig(enable=True),
+            cuda_graph=VLLMCudaGraphConfig(enable=True),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 temperature=1.0,

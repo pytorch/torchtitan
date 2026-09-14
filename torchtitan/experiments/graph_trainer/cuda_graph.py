@@ -5,9 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-CUDAGraph pass for the graph trainer.
+CUDA graph pass for the graph trainer.
 
-This module provides a cudagraph pass that can be applied to graph modules
+This module provides a CUDA graph pass that can be applied to graph modules
 during compilation.
 """
 
@@ -17,7 +17,7 @@ from typing import Any
 
 import torch
 
-from torchtitan.distributed.cudagraph import CUDAGraphWrapper
+from torchtitan.distributed.cuda_graph import CUDAGraphWrapper
 from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
 
 
@@ -43,30 +43,32 @@ def _iter_tensors(val: Any) -> list[torch.Tensor]:
     return []
 
 
-def is_cudagraphable(
+def is_cuda_graph_node_compatible(
     node: torch.fx.Node, dyn_map: dict[torch.fx.Node, bool] | None = None
 ) -> bool:
     """Whether ``node`` can be captured by a CUDA graph.
 
-    Per-node predicate for the partitioner (:func:`cudagraph_pass`) and the
-    build-time gate (:func:`is_full_cudagraphable`). ``dyn_map``, when given, is a
+    Per-node predicate for the partitioner (:func:`cuda_graph_pass`) and the
+    build-time gate (:func:`is_cuda_graph_fully_compatible`). ``dyn_map``, when given, is a
     precomputed ``{node: has_dynamic_shape(out)}`` map so the shape check is an
     O(1) lookup instead of recomputing per consumer.
 
-    flex_attention HOPs count as cudagraphable: regional_inductor compiles them to
-    Triton kernels before cudagraph, so this never sees a flex HOP at capture time.
+    flex_attention HOPs count as cuda_graph_compatible: regional_inductor compiles them to
+    Triton kernels before CUDA graph, so this never sees a flex HOP at capture time.
     """
     if node.op != "call_function":
         return True
 
     # getitem only indexes a multi-output op's result, so it inherits its parent's
-    # cudagraph-ability rather than being judged on its own tensors (e.g. a getitem
+    # CUDA graph-ability rather than being judged on its own tensors (e.g. a getitem
     # of an eager dynamic-shape/CPU op must also be eager).
     if node.target is operator.getitem:
         parent = node.args[0]
-        return not isinstance(parent, torch.fx.Node) or is_cudagraphable(parent)
+        return not isinstance(parent, torch.fx.Node) or is_cuda_graph_node_compatible(
+            parent
+        )
 
-    # Cross-device copy from/to unpinned CPU memory: cudagraph requires the CPU
+    # Cross-device copy from/to unpinned CPU memory: CUDA graph requires the CPU
     # side to be pinned for the async H2D/D2H copy.
     if node.target in (
         torch.ops.aten.copy_.default,
@@ -90,7 +92,7 @@ def is_cudagraphable(
         if torch.cuda.get_device_capability() < (10, 0):
             return False
 
-    # .item()/.tolist() need a device-to-host sync a cudagraph replay can't redo.
+    # .item()/.tolist() need a device-to-host sync a CUDA graph replay can't redo.
     if node.target == torch.ops.aten._local_scalar_dense.default:
         return False
 
@@ -116,46 +118,46 @@ def is_cudagraphable(
     return True
 
 
-def is_full_cudagraphable(gm: torch.fx.GraphModule) -> bool:
-    """True if every node is cudagraphable (:func:`is_cudagraphable`), i.e. the
+def is_cuda_graph_fully_compatible(gm: torch.fx.GraphModule) -> bool:
+    """True if every node is cuda_graph_compatible (:func:`is_cuda_graph_node_compatible`), i.e. the
     graph can be captured as one full CUDA graph. Used to resolve
-    ``cudagraph_mode='auto'`` to full vs piecewise at pipeline-build time. Run on
-    the pre-inductor graph; flex counts as cudagraphable (compiled before capture),
+    CUDA graph mode ``'auto'`` to full vs piecewise at pipeline-build time. Run on
+    the pre-inductor graph; flex counts as cuda_graph_compatible (compiled before capture),
     matching the post-inductor reality."""
-    return all(is_cudagraphable(node) for node in gm.graph.nodes)
+    return all(is_cuda_graph_node_compatible(node) for node in gm.graph.nodes)
 
 
-def is_cudagraph_compatible(
+def is_cuda_graph_compatible(
     gm: torch.fx.GraphModule,
     *,
     skip_flex_attention_check: bool = False,
 ) -> bool:
-    """Whole-graph cudagraph gate: True iff the graph has no cudagraph-unsafe op.
+    """Whole-graph CUDA graph gate: True iff the graph has no CUDA graph-unsafe op.
 
-    Used by the all-or-nothing :func:`cudagraph_pass` and by
+    Used by the all-or-nothing :func:`cuda_graph_pass` and by
     ``full_inductor_compilation_pass`` (which stashes its pre-collapse verdict in
     ``gm.meta`` -- the collapse hides ops from the scan). Delegates to the per-node
-    predicate via :func:`is_full_cudagraphable`.
+    predicate via :func:`is_cuda_graph_fully_compatible`.
 
     TODO: ``skip_flex_attention_check`` is now a no-op (flex_attention HOPs are no
-    longer flagged -- regional_inductor compiles them before cudagraph). Remove the
+    longer flagged -- regional_inductor compiles them before CUDA graph). Remove the
     arg (and, once the all-or-nothing path is gone, this whole function) in a later
     PR.
     """
-    if gm.meta.get("cudagraph_compatible") is False:
+    if gm.meta.get("cuda_graph_compatible") is False:
         logger.warning(
-            "Skipping cudagraph: gm.meta['cudagraph_compatible'] is False "
+            "Skipping cuda_graph: gm.meta['cuda_graph_compatible'] is False "
             "(set by full_inductor_compilation_pass before the collapse)."
         )
         return False
-    return is_full_cudagraphable(gm)
+    return is_cuda_graph_fully_compatible(gm)
 
 
 def get_static_input_indices(gm: torch.fx.GraphModule, is_forward: bool) -> list[int]:
     """
     Get indices of gm inputs that are static input tensors whose tensor addresses do not
     change across runs. Example of static input tensors include weights, buffers, and
-    outputs of previous cudagraph wrapped functions.
+    outputs of previous CUDA graph wrapped functions.
     """
     from torch._inductor.utils import count_tangents
 
@@ -172,7 +174,7 @@ def get_static_input_indices(gm: torch.fx.GraphModule, is_forward: bool) -> list
 
     elif not is_forward:
         # for backward, we identify saved tensors as static inputs, since saved tensors
-        # are outputs of cudagraph-wrapped forward run. In PT2-generated backward gm,
+        # are outputs of CUDA graph-wrapped forward run. In PT2-generated backward gm,
         # saved tensors are always the leading args. So we can get the number of saved
         # tensors and generate static input indices.
         fixed = count_tangents(gm)
@@ -196,7 +198,7 @@ def insert_kernel_annotations_pass(
 
     Alternative approaches:
 
-    1. **fx.Interpreter**: During cudagraph capture, run the graph via an
+    1. **fx.Interpreter**: During CUDA graph capture, run the graph via an
        ``fx.Interpreter`` subclass that reads ``module_fqn`` metadata and
        calls ``mark_kernels`` enter/exit around each node — avoids mutating
        the graph.
@@ -261,7 +263,7 @@ def insert_kernel_annotations_pass(
     return gm
 
 
-def cudagraph_pass(
+def cuda_graph_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
     *,
@@ -270,13 +272,13 @@ def cudagraph_pass(
     tensor_input_indices: list[int] | None = None,
 ) -> torch.fx.GraphModule:
     """
-    Apply cudagraph.
+    Apply CUDA graph.
 
-    This pass wraps the forward function with cudagraph during compilation and does
-    not record cudagraph until runtime.
+    This pass wraps the forward function with CUDA graph during compilation and does
+    not record CUDA graph until runtime.
     - For the first run, it will warm up operators such as nccl.
-    - For the second run, it will record cudagraph and replay cudagraph.
-    - For the following runs, it will replay cudagraph.
+    - For the second run, it will record CUDA graph and replay CUDA graph.
+    - For the following runs, it will replay CUDA graph.
 
     Args:
         gm: The graph module to wrap.
@@ -290,20 +292,20 @@ def cudagraph_pass(
             addresses. When provided, ``is_forward`` is not used for inference.
         tensor_input_indices: Indices of graph inputs that are tensors (as
             opposed to opaque values like DeviceMesh). Used to compute which
-            inputs need copying for cudagraph replay. When not provided, this
+            inputs need copying for CUDA graph replay. When not provided, this
             is inferred from ``example_inputs``.
     """
     if not isinstance(gm, torch.fx.GraphModule):
         raise TypeError(
-            f"cudagraph_pass requires a GraphModule but got {type(gm).__name__}. "
-            f"Ensure cudagraph is not combined with passes that replace the "
+            f"cuda_graph_pass requires a GraphModule but got {type(gm).__name__}. "
+            f"Ensure CUDA graph is not combined with passes that replace the "
             f"GraphModule (e.g. full_inductor_compilation)."
         )
 
-    if not is_cudagraph_compatible(gm):
+    if not is_cuda_graph_compatible(gm):
         logger.warning(
-            "Skipping cudagraph: graph is not compatible after all preceding "
-            "passes. Use --compile.disable_passes cudagraph_pass to silence."
+            "Skipping cuda_graph: graph is not compatible after all preceding "
+            "passes. Use --compile.disable_passes cuda_graph_pass to silence."
         )
         return gm
 
@@ -314,6 +316,7 @@ def cudagraph_pass(
         example_inputs,
         static_input_indices,
         tensor_input_indices=tensor_input_indices,
+        num_warmup_iterations=1,
     )
-    logger.info("Applied cudagraph pass.")
+    logger.info("Applied CUDA graph pass.")
     return gm

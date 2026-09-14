@@ -21,8 +21,12 @@ from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
 )
-from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.trainer import Trainer, TrainingEngine
+from torchtitan.experiments.graph_trainer.trainer import (
+    GraphTrainer,
+    GraphTrainingEngine,
+)
+from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 
 @contextmanager
@@ -77,7 +81,8 @@ def build_minimal_trainer(
 ) -> Trainer:
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
-    trainer.engine = engine = object.__new__(TrainingEngine)
+    engine_cls = GraphTrainingEngine if trainer_cls is GraphTrainer else TrainingEngine
+    trainer.engine = engine = object.__new__(engine_cls)
     engine.model_parts = [model]
     engine.loss_fn = CrossEntropyLoss.Config().build()
     engine.parallel_dims = parallel_dims
@@ -133,11 +138,11 @@ def build_minimal_trainer(
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
             ),
         )
-        trainer._fwd_bwd_step_module = None
-        trainer._traced_step = None
-        trainer._graph_runner = None
-        trainer._trainable_params = None
-        trainer._graph_gradient_state = None
+        engine._traced_step = None
+        engine._graph_runner = None
+        engine._trainable_params = None
+        engine._graph_gradient_state = None
+        engine._pinned_pool_ctx = None
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),

@@ -15,6 +15,7 @@ from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
 from torchtitan.config import (
+    CompileConfig,
     Configurable,
     DebugConfig,
     ParallelismConfig,
@@ -24,7 +25,8 @@ from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.trainer import Trainer
 from torchtitan.rl.types import TrainingMicrobatch
-from torchtitan.trainer import Trainer as DatasetTrainer, TrainingEngine
+from torchtitan.trainer import Trainer as DatasetTrainer
+from torchtitan.training_engine import TrainingEngine
 
 
 def test_trainer_has_thin_actor_adapter() -> None:
@@ -37,8 +39,8 @@ def test_trainer_has_thin_actor_adapter() -> None:
     assert issubclass(TrainingMicrobatch, CoreTrainingMicrobatch)
 
 
-def test_rl_trainer_defaults_to_eager_execution() -> None:
-    assert Trainer.Config().training.disable_cuda_graphs
+def test_rl_trainer_uses_training_engine_config_defaults() -> None:
+    assert not Trainer.Config().training.disable_cuda_graphs
 
 
 def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> None:
@@ -56,6 +58,38 @@ def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
     assert isinstance(config.sdc_replayer, SDCReplayer.Config)
 
 
+def test_rl_trainer_validates_model_training_config_before_initialization() -> None:
+    class ValidationReachedError(Exception):
+        pass
+
+    config = Trainer.Config(training=TrainingConfig(disable_cuda_graphs=True))
+    model_config = MagicMock()
+    model_spec = SimpleNamespace(model=model_config)
+
+    with patch(
+        "torchtitan.rl.trainer.validate_model_training_config",
+        side_effect=ValidationReachedError,
+    ) as validate:
+        with pytest.raises(ValidationReachedError):
+            Trainer(
+                config,
+                model_spec=model_spec,
+                compile_config=CompileConfig(),
+                max_num_documents=None,
+                output_dir="",
+            )
+
+    validate.assert_called_once_with(
+        model_config,
+        parallelism=config.parallelism,
+        training=config.training,
+        debug=config.debug,
+        activation_checkpoint=config.activation_checkpoint,
+        compile_config=CompileConfig(),
+        max_num_documents=None,
+    )
+
+
 def test_aux_loss_denominator_uses_global_token_count() -> None:
     trainer = SimpleNamespace(
         device=torch.device("cpu"),
@@ -66,7 +100,9 @@ def test_aux_loss_denominator_uses_global_token_count() -> None:
         _deferred_cuda_graph_options=None,
     )
 
-    with patch("torchtitan.trainer.AuxLoss.set_step_denominator") as set_denominator:
+    with patch(
+        "torchtitan.training_engine.AuxLoss.set_step_denominator"
+    ) as set_denominator:
         denominator = TrainingEngine.prepare_step(trainer, 17, step=1)
 
     torch.testing.assert_close(denominator, torch.tensor(17, dtype=torch.int64))
@@ -104,11 +140,12 @@ def test_policy_version_is_restored_with_training_engine_state() -> None:
 def test_forward_backward_accumulates_microbatch_metrics() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
+        global_valid_tokens = torch.tensor(3)
         engine = SimpleNamespace(
             device=torch.device("cpu"),
             step=4,
             ntokens_seen=10,
-            prepare_step=MagicMock(return_value=torch.tensor(3)),
+            prepare_step=MagicMock(return_value=global_valid_tokens),
             sdc_replayer=None,
         )
         mean_metric = torch.tensor(0.0)
@@ -164,7 +201,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             for call in engine.forward_backward_microbatch.call_args_list
         )
         assert all(
-            call.kwargs["global_valid_tokens"] == 3
+            call.kwargs["global_valid_tokens"] is global_valid_tokens
             for call in engine.forward_backward_microbatch.call_args_list
         )
         assert trainer._reduce_forward_backward_metrics.call_count == 2
@@ -190,7 +227,9 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
         )
         engine = SimpleNamespace(
             lr_schedulers=SimpleNamespace(
-                schedulers=[SimpleNamespace(get_last_lr=lambda: [0.25])]
+                get_metrics=MagicMock(
+                    return_value={"lr/AdamW/0": 0.25, "lr/AdamW/1": 0.125}
+                )
             ),
             parallel_dims=SimpleNamespace(non_data_parallel_size=1),
             step=4,
@@ -225,7 +264,8 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
         assert result.policy_version == 5
         assert result.metrics == {
             "trainer/grad_norm/mean": 2.0,
-            "trainer/lr": 0.25,
+            "trainer/lr/AdamW/0": 0.25,
+            "trainer/lr/AdamW/1": 0.125,
             "trainer/policy_version": 5.0,
             "trainer/tokens_per_second": 10.0,
             "trainer/tflops": 2.0,

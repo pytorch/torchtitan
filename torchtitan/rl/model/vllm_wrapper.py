@@ -57,7 +57,7 @@ logger = init_logger(__name__)
 
 def _replace_vllm_layer_configs(model_config):
     """Replace inner-computation configs with vLLM generation variants."""
-    # These modules inspect the breakable-cudagraph environment at import time.
+    # These modules inspect the breakable-CUDA graph environment at import time.
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
     # models do not acquire its vLLM-specific dependencies.
@@ -161,7 +161,7 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
 # When TP is active some of those outputs are DTensors which fail with
 # ("The specified pointer resides on host memory").  to_local
 # converts the DTensor to a plain tensor. which succeeds with this
-# cudagraph implementation.
+# CUDA graph implementation.
 _original_weak_ref_tensor = _torch_utils.weak_ref_tensor
 
 
@@ -192,7 +192,7 @@ def _patch_vllm_all_reduce() -> None:
        wait_tensor is a no-op. Only sum reductions are routed (the custom AR is
        sum-only); others fall through to the original op. No-op at world_size 1.
 
-    2. Force the custom AR onto its registered=False path so cudagraph capture
+    2. Force the custom AR onto its registered=False path so CUDA graph capture
        works. registered=True records graph buffers and calls cudaIpcGetMemHandle
        on them, which fails for the expandable_segments (VMM) memory the RL stack
        enables for Monarch RDMA. registered=False reduces via the init-time
@@ -256,7 +256,7 @@ def _patch_vllm_all_reduce() -> None:
     _tp_all_reduce_patched = True
     logger.info(
         "vllm_allreduce: routed _c10d_functional.all_reduce (TP sum reductions) "
-        "through vLLM custom all-reduce (registered=False, cudagraph-safe)"
+        "through vLLM custom all-reduce (registered=False, CUDA-graph-safe)"
     )
 
 

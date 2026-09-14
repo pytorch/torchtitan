@@ -235,7 +235,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
-            loss = trainer._forward_backward_microbatch(
+            loss = trainer.engine.forward_backward_microbatch(
                 microbatch_group=[
                     TokenizedTrainingMicrobatch(
                         input=self.inputs,
@@ -334,7 +334,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 example_inputs=example_inputs,
             )
 
-        # Step 4: Apply load-time passes (cudagraph)
+        # Step 4: Apply load-time passes (CUDA graph)
         if enable_passes:
             load_config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),

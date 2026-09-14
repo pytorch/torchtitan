@@ -46,7 +46,7 @@ from torchtitan.rl.distributed.routing.strategies import (
 from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortDataset
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
-from torchtitan.rl.generator import SamplingConfig, VLLMCudagraphConfig, VLLMGenerator
+from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import GRPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.renderer import RenderersLibraryConfig
@@ -55,6 +55,9 @@ from torchtitan.rl.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
+
+# TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
+# verified.
 
 
 def _alphabet_sort_rollouter_config() -> Rollouter.Config:
@@ -643,7 +646,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             # Disable torch.compile + CUDA graph capture: the EP all-to-all
             # path issues an unpinned D2H copy of split sizes that the
             # piecewise/full graph capture rejects.
-            cudagraph=VLLMCudagraphConfig(enable=False),
+            cuda_graph=VLLMCudaGraphConfig(enable=False),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
@@ -660,7 +663,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
 
 
 def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
-    """Debug MoE config on the DeepEP v2 backend with a cudagraph-capturable generator
+    """Debug MoE config on the DeepEP v2 backend with a CUDA-graph-capturable generator
     (8 GPUs: 4 gen + 4 train).
 
     Same EP/TP/DP layout as ``rl_grpo_qwen3_moe_debug_varlen`` (trainer FSDP=2/TP=2/EP=4,
@@ -672,8 +675,8 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     Per-role config from ONE shared model_spec: the trainer uses it as-is (compact,
     host-synced, backward-able DeepEP path), while the generator applies per-actor
     overrides (``generator.override``) to its own copy (``fused_swiglu`` +
-    ``deepep_override`` with ``cudagraphable=True``) to switch its dispatchers to the
-    cudagraph-able EXPAND layout. The overrides touch only the generator's spec, so the
+    ``deepep_override`` with ``cuda_graph_compatible=True``) to switch its dispatchers to the
+    CUDA-graph-compatible EXPAND layout. The overrides touch only the generator's spec, so the
     trainer and weight sync are unaffected.
     """
     config = rl_grpo_qwen3_moe_debug_varlen()
@@ -683,17 +686,17 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
         attn_backend="varlen",
         moe_comm_backend="deepep",
     )
-    # Generator-only overrides -> cudagraph-able DeepEP EXPAND dispatch; trainer keeps compact.
+    # Generator-only overrides -> CUDA-graph-compatible DeepEP EXPAND dispatch; trainer keeps compact.
     config.generator.override = OverrideConfig(
         imports=[
             "torchtitan.overrides.fused_swiglu.fused_swiglu",
             (
                 "torchtitan.overrides.moe_token_dispatcher.deepep_override",
-                {"cudagraphable": True},
+                {"cuda_graph_compatible": True},
             ),
         ]
     )
-    config.generator.cudagraph = VLLMCudagraphConfig(
+    config.generator.cuda_graph = VLLMCudaGraphConfig(
         enable=True, mode="FULL_AND_PIECEWISE"
     )
     # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
@@ -778,7 +781,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cudagraph=VLLMCudagraphConfig(enable=False),
+            cuda_graph=VLLMCudaGraphConfig(enable=False),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
@@ -847,7 +850,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cudagraph=VLLMCudagraphConfig(enable=False),
+            cuda_graph=VLLMCudaGraphConfig(enable=False),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
@@ -1042,7 +1045,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             # GDN decode supports full capture; prefill breaks into eager pieces.
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            cuda_graph=VLLMCudaGraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
@@ -1126,7 +1129,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            cuda_graph=VLLMCudaGraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,

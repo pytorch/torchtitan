@@ -1215,6 +1215,11 @@ def test_text_collator_falls_back_to_pageable_without_accelerator(monkeypatch):
     assert not inputs.input.is_pinned()
     assert not inputs.labels.is_pinned()
     assert inputs.input[:3].tolist() == [1, 2, 3]
+    input_dict = inputs.as_input_dict()
+    assert input_dict["input"] is inputs.input
+    assert input_dict["labels"] is inputs.labels
+    assert input_dict["positions"] is inputs.positions
+    assert input_dict["padding_mask"] is inputs.padding_mask
 
 
 @pytest.mark.skipif(

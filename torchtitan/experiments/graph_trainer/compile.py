@@ -109,7 +109,7 @@ def apply_compile(
         # aot_fx_trace traces fwd+loss+bwd together inside a forward/backward microbatch,
         # so no model-level wrapping is needed here. If precompile_artifact_dir
         # is set, the precompiled artifact will be loaded lazily in
-        # GraphTrainer._make_fx_forward_backward_microbatch.
+        # GraphTrainingEngine._make_fx_forward_backward_microbatch.
         if compile_config.precompile_artifact_dir:
             logger.info(
                 "aot_fx_trace compile mode: precompiled artifact will be loaded "

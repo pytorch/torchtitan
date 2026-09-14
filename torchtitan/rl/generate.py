@@ -90,8 +90,8 @@ def generate() -> None:
     # FULL_AND_PIECEWISE reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time (the
     # @eager_break_during_capture decorator in rl/model/attention.py).
     if (
-        gen_config.cudagraph.enable
-        and gen_config.cudagraph.mode == "FULL_AND_PIECEWISE"
+        gen_config.cuda_graph.enable
+        and gen_config.cuda_graph.mode == "FULL_AND_PIECEWISE"
     ):
         os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
@@ -145,7 +145,7 @@ def generate() -> None:
         distributed_executor_backend=("external_launcher"),
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=not gen_config.cudagraph.enable,
+        enforce_eager=not gen_config.cuda_graph.enable,
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION
@@ -162,7 +162,7 @@ def generate() -> None:
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
-    vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
+    vllm_compilation_config = gen_config.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,

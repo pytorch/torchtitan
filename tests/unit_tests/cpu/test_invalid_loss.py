@@ -5,13 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.trainer import Trainer, TrainingEngine
+from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 
 class TestInvalidLoss(unittest.TestCase):
@@ -27,7 +29,18 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.lr_schedulers = MagicMock()
         trainer.lr_schedulers.get_metrics.return_value = {}
         trainer.checkpointer = MagicMock()
-        trainer.model_parts = []
+        trainer.model_parts = [
+            SimpleNamespace(
+                preprocess_inputs=lambda input_dict, **kwargs: (
+                    input_dict["input"],
+                    input_dict["labels"],
+                    {},
+                ),
+                parameters=lambda: iter(()),
+            )
+        ]
+        trainer.max_num_documents = None
+        trainer.preprocess_inputs_kwargs = {}
         trainer.config = MagicMock()
         trainer.config.training.max_norm = 1.0
         trainer.config.training.disable_cuda_graphs = True
@@ -55,16 +68,8 @@ class TestInvalidLoss(unittest.TestCase):
         loop.metrics_processor = MagicMock()
         loop.metrics_processor.should_log.return_value = should_log
 
-        compute_forward_backward = MagicMock(return_value=torch.tensor(loss_value))
+        trainer.fwd_bwd_fn = MagicMock(return_value=torch.tensor(loss_value))
 
-        def forward_backward_microbatch(**kwargs):
-            return TrainingEngine.forward_backward_microbatch(
-                trainer,
-                **kwargs,
-                compute_forward_backward=compute_forward_backward,
-            )
-
-        loop._forward_backward_microbatch = forward_backward_microbatch
         return loop
 
     def _data_iterator(self):
@@ -81,8 +86,8 @@ class TestInvalidLoss(unittest.TestCase):
     def _run_step(self, loss_value: float, should_log: bool) -> None:
         trainer = self._make_trainer(loss_value, should_log)
         # sl.* are logging side effects; clip_grad_norm_ needs real params.
-        with patch("torchtitan.trainer.sl", MagicMock()), patch(
-            "torchtitan.trainer.dist_utils.clip_grad_norm_",
+        with patch("torchtitan.training_engine.sl", MagicMock()), patch(
+            "torchtitan.training_engine.dist_utils.clip_grad_norm_",
             return_value=torch.tensor(1.0),
         ):
             trainer.train_step(self._data_iterator())

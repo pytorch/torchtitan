@@ -22,19 +22,14 @@ _MAX_LOG_RATIO = 10.0
 
 def _normalize(
     value: torch.Tensor,
-    global_valid_tokens: int | float | torch.Tensor | None,
+    global_valid_tokens: torch.Tensor | None,
 ) -> torch.Tensor:
-    if isinstance(global_valid_tokens, torch.Tensor):
-        # A tensor denominator is required when the token count is a mutable
-        # CUDA graph input. Multiplication keeps that path capture-friendly.
-        return value * global_valid_tokens.clamp_min(1).reciprocal()
-
-    loss_denominator = (
-        max(global_valid_tokens, 1) if global_valid_tokens is not None else 1
-    )
-    # Preserve the eager RL path's established scalar division exactly. On
-    # some GPU architectures this differs bitwise from reciprocal multiplication.
-    return value / loss_denominator
+    if global_valid_tokens is None:
+        return value
+    # A device tensor is required because the count is a mutable CUDA graph
+    # input. Multiplication also preserves the established CUDA scalar-division
+    # rounding for the float32 RL loss.
+    return value * global_valid_tokens.clamp_min(1).reciprocal()
 
 
 class DAPOLoss(BaseLoss):
@@ -43,7 +38,7 @@ class DAPOLoss(BaseLoss):
     The same PPO clip as GRPO, but the importance ratio's lower and upper bounds are
     set independently (https://arxiv.org/abs/2503.14476): a larger upper bound keeps
     more probability mass on up-weighted tokens, countering entropy collapse. A token
-    whose generator logprob is non-finite (vLLM under cudagraph) is dropped from the
+    whose generator logprob is non-finite (vLLM under CUDA graph) is dropped from the
     loss rather than trained as if it were on-policy.
 
     The scalar loss is the sum of per-token losses over positions with a finite
@@ -75,7 +70,7 @@ class DAPOLoss(BaseLoss):
         self,
         logits: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | float | None = None,
+        global_valid_tokens: torch.Tensor | None = None,
         *,
         generator_logprobs: torch.Tensor,
         advantages: torch.Tensor,
@@ -99,7 +94,7 @@ class DAPOLoss(BaseLoss):
         trainer_logprobs, token_entropy = compute_logprobs(
             logits, labels, return_entropy=True
         )
-        # A non-finite generator logprob (notably under cudagraph) has no valid
+        # A non-finite generator logprob (notably under CUDA graph) has no valid
         # old-policy reference, so DROP that token from the loss + denominator (cleaner
         # than nan->0, which trains it as if it were on-policy).
         effective_loss_mask = loss_mask & torch.isfinite(generator_logprobs)

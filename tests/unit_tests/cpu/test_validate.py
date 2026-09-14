@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -198,8 +198,24 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
     validator = _flux_validator(loader)
     validator.config.save_img_count = 1
     generated = {}
+    validation_context_entries = 0
+    validation_context_active = False
+
+    @contextmanager
+    def validation_context():
+        nonlocal validation_context_active, validation_context_entries
+        assert not validation_context_active
+        validation_context_active = True
+        validation_context_entries += 1
+        try:
+            yield
+        finally:
+            validation_context_active = False
+
+    validator.validation_context = validation_context
 
     def generate_image(**kwargs):
+        assert validation_context_active
         generated.update(kwargs)
         return torch.zeros(3, kwargs["img_height"], kwargs["img_width"])
 
@@ -228,3 +244,4 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
 
     assert generated["img_height"] == 6
     assert generated["img_width"] == 10
+    assert validation_context_entries == 2

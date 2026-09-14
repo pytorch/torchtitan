@@ -246,7 +246,7 @@ class BaseLoss(ABC, Configurable):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: int | torch.Tensor | None = None,
+        global_valid_tokens: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Return the scaled loss and any metrics computed by the loss."""
@@ -255,7 +255,7 @@ class BaseLoss(ABC, Configurable):
         # loss: V->P, annotate global_valid_tokens
         if current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            if isinstance(global_valid_tokens, torch.Tensor):
+            if global_valid_tokens is not None:
                 spmd.assert_type(
                     global_valid_tokens,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
@@ -282,7 +282,7 @@ class CrossEntropyLoss(BaseLoss):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: int | torch.Tensor | None = None,
+        global_valid_tokens: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del kwargs
@@ -290,7 +290,7 @@ class CrossEntropyLoss(BaseLoss):
         # loss: V->P, annotate global_valid_tokens
         if current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            if isinstance(global_valid_tokens, torch.Tensor):
+            if global_valid_tokens is not None:
                 spmd.assert_type(
                     global_valid_tokens,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
@@ -484,7 +484,7 @@ class ChunkedLossWrapper(BaseLoss):
         self,
         pred: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: int | torch.Tensor | None = None,
+        global_valid_tokens: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute chunked loss.

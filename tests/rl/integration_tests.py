@@ -58,7 +58,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--compile.no-enable",
-                    "--generator.cudagraph.no-enable",
+                    "--generator.cuda-graph.no-enable",
                     "--metrics.no-enable-wandb",
                 ],
             ],
@@ -112,7 +112,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.checkpoint.no-enable",  # use random-init weights
                     "--generator.checkpoint.no-enable",  # use random-init weights
                     "--compile.no-enable",
-                    "--generator.cudagraph.no-enable",
+                    "--generator.cuda-graph.no-enable",
                     "--metrics.no-enable-wandb",
                 ],
             ],

@@ -40,7 +40,7 @@ from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
-from torchtitan.rl.generator import SamplingConfig, VLLMCudagraphConfig, VLLMGenerator
+from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import DAPOLoss
 from torchtitan.rl.model.muse_glimmer.renderer import MuseGlimmerRendererConfig
 from torchtitan.rl.observability.metrics import MetricsProcessor
@@ -50,6 +50,9 @@ from torchtitan.rl.rollout.environment import TokenEnv
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
+
+# TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
+# verified.
 
 
 def _search_r1_rollouter_config() -> Rollouter.Config:
@@ -137,7 +140,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            cudagraph=VLLMCudagraphConfig(enable=True),
+            cuda_graph=VLLMCudaGraphConfig(enable=True),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -184,13 +187,13 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
 
 
 def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
-    """GRPO Search-R1 for Qwen3-30B-A3B MoE with a DeepEP v2 cudagraph generator.
+    """GRPO Search-R1 for Qwen3-30B-A3B MoE with a DeepEP v2 CUDA graph generator.
 
     DeepEP v2 runs multi-node on H100 (NVLink intra-node + IB/RoCE inter-node), so unlike
     a HybridEP generator (whose all-to-all is intra-node only) this generator may span
     nodes. Qwen3-30B-A3B has 4 KV heads, so the generator TP must be <=4. The trainer
     keeps the compact (host-synced, backward-able) DeepEP path; the generator applies the
-    ``deepep_override`` to switch its dispatchers to the cudagraph-able EXPAND
+    ``deepep_override`` to switch its dispatchers to the CUDA-graph-compatible EXPAND
     layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
     as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
     """
@@ -258,16 +261,16 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            cudagraph=VLLMCudagraphConfig(enable=True, mode="FULL"),
+            cuda_graph=VLLMCudaGraphConfig(enable=True, mode="FULL"),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
-            # Generator-only: DeepEP cudagraph EXPAND dispatch on top of the perf overrides.
+            # Generator-only: DeepEP CUDA graph EXPAND dispatch on top of the perf overrides.
             override=OverrideConfig(
                 imports=[
                     *perf_imports,
                     (
                         "torchtitan.overrides.moe_token_dispatcher.deepep_override",
-                        {"cudagraphable": True},
+                        {"cuda_graph_compatible": True},
                     ),
                 ]
             ),
@@ -355,7 +358,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,  # <= 2 KV heads
             ),
-            cudagraph=VLLMCudagraphConfig(enable=False),
+            cuda_graph=VLLMCudaGraphConfig(enable=False),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 temperature=1.0,

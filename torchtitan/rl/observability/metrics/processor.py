@@ -42,7 +42,9 @@ __all__ = [
 class MetricsProcessor(Configurable):
     """Aggregates Metric records and dispatches to backends and console.
 
-    TODO: unify with torchtitan/observability/metrics.py:MetricsProcessor.
+    TODO: Unify this with ``torchtitan.observability.metrics.MetricsProcessor``
+    so trainers share performance, device-memory, LR, auxiliary-loss, and
+    backend logging behavior while RL retains controller-side aggregation.
 
     Args:
         config: MetricsProcessor.Config with backend toggles and the

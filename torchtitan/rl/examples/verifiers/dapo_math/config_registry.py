@@ -33,12 +33,15 @@ from torchtitan.rl.examples.verifiers import (
 )
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
-from torchtitan.rl.generator import SamplingConfig, VLLMCudagraphConfig, VLLMGenerator
+from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import DAPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.renderer import RenderersLibraryConfig
 from torchtitan.rl.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
+
+# TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
+# verified.
 
 
 def _math_taskset_config(
@@ -162,7 +165,7 @@ def _qwen3_4b_verifiers_config(
                 data_parallel_degree=1,
                 tensor_parallel_degree=1,
             ),
-            cudagraph=VLLMCudagraphConfig(enable=True),
+            cuda_graph=VLLMCudaGraphConfig(enable=True),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
                 temperature=1.0,

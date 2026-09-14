@@ -136,7 +136,7 @@ class PyTorchVarlenInnerAttentionImpl(FlashAttentionImpl):
                 "fused output quantization is not yet supported for FlashAttentionImpl"
             )
 
-        # Breakable cudagraph: under VLLM_USE_BREAKABLE_CUDAGRAPH the recorded
+        # Breakable cuda_graph: under VLLM_USE_BREAKABLE_CUDAGRAPH the recorded
         # forward closure pins capture-time args (attn_metadata None, varlen metadata
         # absent). Re-read live per-layer metadata + kv_cache from the forward context
         # (vLLM refreshes them before each replay) BEFORE the None check, else replay
@@ -144,7 +144,7 @@ class PyTorchVarlenInnerAttentionImpl(FlashAttentionImpl):
         attn_metadata, _, kv_cache, _ = get_attention_context(layer.layer_name)
 
         if attn_metadata is None:
-            # Profiling / cudagraph dummy-capture run (no real metadata yet).
+            # Profiling / CUDA graph dummy-capture run (no real metadata yet).
             return output.fill_(0)
 
         attn_type = self.attn_type

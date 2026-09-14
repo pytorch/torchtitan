@@ -7,21 +7,20 @@
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 import torchstore as ts
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.components.loss import BaseLoss
 from torchtitan.config import (
     apply_overrides,
     CompileConfig,
     Configurable,
     TORCH_DTYPE_MAP,
-    TrainingConfig,
 )
+from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
@@ -31,11 +30,10 @@ from torchtitan.observability.metrics import (
     compute_training_performance_metrics,
 )
 from torchtitan.protocols.model_spec import ModelSpec
-from torchtitan.rl.losses import GRPOLoss
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
 from torchtitan.rl.types import OptimizerStepOutput, TrainingMicrobatch
 from torchtitan.tools import utils
-from torchtitan.trainer import TrainingEngine
+from torchtitan.training_engine import TrainingEngine
 
 logger = logging.getLogger(__name__)
 
@@ -60,18 +58,6 @@ class Trainer(Configurable):
     class Config(TrainingEngine.Config):
         """Trainer configuration for optimizer, training, and parallelism."""
 
-        training: TrainingConfig = field(
-            default_factory=lambda: TrainingConfig(disable_cuda_graphs=True)
-        )
-        """RL defaults to eager execution to preserve established numerics.
-
-        Set ``disable_cuda_graphs=False`` to use the shared engine's CUDA graph
-        execution path.
-        """
-        loss: BaseLoss.Config = field(default_factory=GRPOLoss.Config)
-        dump_folder: str = ""
-        """Folder for checkpoints, profiling traces, and debug artifacts."""
-
         def __post_init__(self) -> None:
             TrainingEngine.Config.__post_init__(self)
             if self.parallelism.pipeline_parallel_degree > 1:
@@ -95,8 +81,6 @@ class Trainer(Configurable):
         init_logger()
         # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
         logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
-        if not config.dump_folder:
-            config.dump_folder = output_dir
         sl.init_structured_logger(
             source="rl_trainer",
             output_dir=output_dir,
@@ -113,17 +97,21 @@ class Trainer(Configurable):
             apply_overrides(config.override, model_config)
         config.__post_init__()
 
-        if max_num_documents is None and not config.training.disable_cuda_graphs:
-            # CUDA graphs require fixed-shape varlen metadata. In eager mode,
-            # preserve the dynamic metadata path instead of padding it with
-            # empty document segments.
-            max_num_documents = config.training.num_tokens_per_microbatch_per_dp_rank
+        validate_model_training_config(
+            model_config,
+            parallelism=config.parallelism,
+            training=config.training,
+            debug=config.debug,
+            activation_checkpoint=config.activation_checkpoint,
+            compile_config=compile_config,
+            max_num_documents=max_num_documents,
+        )
 
         self.engine = TrainingEngine(
             config,
             model_config=model_config,
-            compile_config=compile_config,
             max_num_documents=max_num_documents,
+            output_dir=output_dir,
         )
         engine = self.engine
 
@@ -135,20 +123,15 @@ class Trainer(Configurable):
 
         engine.initialize_distributed_runtime()
 
-        # Initialize state dict adapter for HF checkpoint loading
-        if model_spec.state_dict_adapter is not None:
-            self.sd_adapter = model_spec.state_dict_adapter(
-                model_config, hf_assets_path
-            )
-        else:
-            self.sd_adapter = None
-
+        # TODO: Unify RL and dataset-driven trainer metrics so device-memory
+        # monitoring and performance metrics share one lifecycle and implementation.
         self.device_memory_monitor = build_device_memory_monitor()
         self.gpu_peak_flops = utils.get_peak_flops(
             self.device_memory_monitor.device_name
         )
         engine.initialize_model(
             model_spec,
+            compile_config=compile_config,
         )
         logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
@@ -164,7 +147,11 @@ class Trainer(Configurable):
         # When enable=False (CI/debug), load() is a no-op and random init stands.
         engine.initialize_checkpointer(
             dataloader=None,
-            sd_adapter=self.sd_adapter,
+            sd_adapter=(
+                model_spec.state_dict_adapter(model_config, hf_assets_path)
+                if model_spec.state_dict_adapter
+                else None
+            ),
         )
         engine.load_checkpoint()
         if not engine.checkpointer.enable:
@@ -173,9 +160,7 @@ class Trainer(Configurable):
                 "Set checkpoint.enable=True to load from a checkpoint."
             )
 
-        engine.initialize_forward_backward(
-            enable_cuda_graphs=not config.training.disable_cuda_graphs,
-        )
+        engine.initialize_forward_backward()
 
         engine.start_profiler()
         self.device_memory_monitor.reset_peak_stats()
@@ -191,10 +176,6 @@ class Trainer(Configurable):
         else:
             self.dp_size = 1
             self.dp_rank = 0
-
-        logger.debug(
-            f"Trainer initialized (dp_rank={self.dp_rank}, dp_size={self.dp_size})"
-        )
 
     @property
     def policy_version(self) -> int:
@@ -282,14 +263,6 @@ class Trainer(Configurable):
             num_global_valid_tokens, step=engine.step + 1
         )
         assert prepared_global_valid_tokens is not None
-        # Keep the established eager loss arithmetic exactly: a Python scalar
-        # and a device tensor can select different division kernels. CUDA graphs
-        # need the mutable device tensor because this count changes each step.
-        global_valid_tokens: int | torch.Tensor = (
-            num_global_valid_tokens
-            if self.config.training.disable_cuda_graphs
-            else prepared_global_valid_tokens
-        )
         microbatch_metrics: list[dict[str, float]] = []
         num_accumulation_steps = len(training_data)
 
@@ -302,7 +275,7 @@ class Trainer(Configurable):
 
             engine.forward_backward_microbatch(
                 microbatch_group=[local_batch],
-                global_valid_tokens=global_valid_tokens,
+                global_valid_tokens=prepared_global_valid_tokens,
                 loss_kwargs=loss_kwargs,
                 accumulation_index=microbatch_index,
                 num_accumulation_steps=num_accumulation_steps,
@@ -330,19 +303,16 @@ class Trainer(Configurable):
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules.
 
-        # capture LR before step
         engine = self.engine
-        current_lrs = engine.lr_schedulers.schedulers[0].get_last_lr()
-        if len(current_lrs) != 1:
-            raise ValueError(
-                "RL metrics only support a single optimizer LR for "
-                f"trainer/lr; got {current_lrs}"
-            )
-        current_lr = float(current_lrs[0])
+        # Capture the learning rates used by this optimizer update before the
+        # scheduler advances in engine.optimizer_step().
+        lr_metrics = engine.lr_schedulers.get_metrics()
 
         with sl.log_trace_span("optim"):
             grad_norm = engine.optimizer_step()
 
+        # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
+        # trainer metrics interface while preserving controller-side aggregation.
         performance = compute_training_performance_metrics(
             num_tokens=engine.ntokens_seen - self._step_start_ntokens,
             elapsed_time=time.perf_counter() - self._step_compute_start,
@@ -366,7 +336,7 @@ class Trainer(Configurable):
             policy_version=self.policy_version,
             metrics={
                 "trainer/grad_norm/mean": float(grad_norm.item()),
-                "trainer/lr": current_lr,
+                **{f"trainer/{key}": value for key, value in lr_metrics.items()},
                 "trainer/policy_version": float(self.policy_version),
                 "trainer/tokens_per_second": performance["tokens_per_second"],
                 "trainer/tflops": performance["tflops"],

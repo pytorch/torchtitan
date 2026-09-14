@@ -15,6 +15,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
+from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -32,12 +33,67 @@ from torchtitan.models.llama3.config_registry import (
     sft_debugmodel,
 )
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
+from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 from . import _set_spmd_typechecking
 
 
 logger = logging.getLogger(__name__)
+
+
+class SDCReplayMismatchTrainingEngine(TrainingEngine):
+    """Inject a gradient mismatch into the first SDC replay execution."""
+
+    def __init__(
+        self,
+        config: TrainingEngine.Config,
+        *,
+        model_config: BaseModel.Config,
+        max_num_documents: int | None,
+        output_dir: str,
+    ) -> None:
+        super().__init__(
+            config,
+            model_config=model_config,
+            max_num_documents=max_num_documents,
+            output_dir=output_dir,
+        )
+        self._num_forward_backward_calls = 0
+
+    def _forward_backward_body(
+        self,
+        *,
+        inputs: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        global_valid_tokens: torch.Tensor,
+        model_kwargs: dict[str, Any],
+        loss_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        loss = super()._forward_backward_body(
+            inputs=inputs,
+            labels=labels,
+            global_valid_tokens=global_valid_tokens,
+            model_kwargs=model_kwargs,
+            loss_kwargs=loss_kwargs,
+        )
+        self._num_forward_backward_calls += 1
+        if self._num_forward_backward_calls != 2 or dist.get_rank() != 0:
+            return loss
+
+        with torch.no_grad():
+            for model_part in self.model_parts:
+                for parameter in model_part.parameters():
+                    if parameter.grad is None:
+                        continue
+                    grad = parameter.grad
+                    local_grad = grad.to_local() if isinstance(grad, DTensor) else grad
+                    if local_grad.numel() > 0:
+                        # Corrupt the first replay before SDC captures its signature.
+                        local_grad[(0,) * local_grad.ndim].add_(1)
+                        return loss
+        raise AssertionError("Could not find a local gradient to corrupt.")
 
 
 class SDCReplayMismatchTrainer(Trainer):
@@ -47,41 +103,12 @@ class SDCReplayMismatchTrainer(Trainer):
     class Config(Trainer.Config):
         pass
 
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self._num_forward_backward_calls = 0
-
-    def _forward_backward_microbatch(
-        self,
-        *,
-        batch: dict[str, Any] | list[dict[str, Any]],
-        global_valid_tokens: torch.Tensor,
-    ) -> torch.Tensor:
-        loss = super()._forward_backward_microbatch(
-            batch=batch,
-            global_valid_tokens=global_valid_tokens,
-        )
-        self._num_forward_backward_calls += 1
-        if self._num_forward_backward_calls != 2 or dist.get_rank() != 0:
-            return loss
-
-        with torch.no_grad():
-            for model_part in self.engine.model_parts:
-                for parameter in model_part.parameters():
-                    if parameter.grad is None:
-                        continue
-                    grad = parameter.grad
-                    local_grad = grad.to_local() if isinstance(grad, DTensor) else grad
-                    if local_grad.numel() > 0:
-                        # Intentionally corrupt one local gradient element to verify
-                        # that SDC replay reports the injected mismatch.
-                        local_grad[(0,) * local_grad.ndim].add_(1)
-                        return loss
-        raise AssertionError("Could not find a local gradient to corrupt.")
+    engine_cls = SDCReplayMismatchTrainingEngine
+    engine: SDCReplayMismatchTrainingEngine
 
     def train_step(
         self,
-        data_iterator: Iterator[dict[str, Any]],
+        data_iterator: Iterator[TrainingMicrobatch],
     ) -> None:
         try:
             super().train_step(data_iterator)
@@ -118,7 +145,7 @@ def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_sdc_replay_cudagraph() -> Trainer.Config:
+def llama3_debugmodel_sdc_replay_cuda_graph() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     config.debug.deterministic = True
     config.debug.seed = 42

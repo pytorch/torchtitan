@@ -35,7 +35,7 @@ from attn_gym.linear import (
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.protocols.module import Module
 
-# The recurrence mutates paged state and must run eager at a breakable cudagraph
+# The recurrence mutates paged state and must run eager at a breakable CUDA graph
 # split point. This decorator is inert when breakable capture is disabled.
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config

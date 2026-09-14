@@ -156,7 +156,7 @@ def build_trainer_model(
         parallelism=parallelism,
         compile_config=config.compile,
         ac_config=trainer_config.activation_checkpoint,
-        dump_folder=trainer_config.dump_folder,
+        dump_folder=config.dump_folder,
     )
     model.to_empty(device=device)
     with torch.no_grad():
@@ -243,7 +243,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         worker_cls=TORCHTITAN_WORKER_CLS,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=not gen_config.cudagraph.enable,
+        enforce_eager=not gen_config.cuda_graph.enable,
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
@@ -268,7 +268,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
-    vllm_compilation_config = gen_config.cudagraph.get_vllm_compilation_config(
+    vllm_compilation_config = gen_config.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
@@ -662,8 +662,8 @@ class BitwiseParityTestBase(unittest.TestCase):
 
         # The graph-break decorator reads this env var at import time, and
         # register_to_vllm below triggers that import, so set it first.
-        gen_cudagraph = config.generator.cudagraph
-        if gen_cudagraph.enable and gen_cudagraph.mode == "FULL_AND_PIECEWISE":
+        gen_cuda_graph = config.generator.cuda_graph
+        if gen_cuda_graph.enable and gen_cuda_graph.mode == "FULL_AND_PIECEWISE":
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
         register_to_vllm(

@@ -185,23 +185,24 @@ class FluxValidator(Validator):
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if max_saved_images != -1 and image_idx >= max_saved_images:
                     break
-                image = generate_image(
-                    device=self.device,
-                    dtype=self._dtype,
-                    img_height=img_height,
-                    img_width=img_width,
-                    enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
-                    denoising_steps=self.config.sampling.denoising_steps,
-                    classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,
-                    # pyrefly: ignore [bad-argument-type]
-                    model=model,
-                    prompt=p,
-                    autoencoder=self.autoencoder,
-                    # pyrefly: ignore [bad-argument-type]
-                    tokenizer=self.tokenizer,
-                    t5_encoder=self.t5_encoder,
-                    clip_encoder=self.clip_encoder,
-                )
+                with self.validation_context():
+                    image = generate_image(
+                        device=self.device,
+                        dtype=self._dtype,
+                        img_height=img_height,
+                        img_width=img_width,
+                        enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
+                        denoising_steps=self.config.sampling.denoising_steps,
+                        classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,
+                        # pyrefly: ignore [bad-argument-type]
+                        model=model,
+                        prompt=p,
+                        autoencoder=self.autoencoder,
+                        # pyrefly: ignore [bad-argument-type]
+                        tokenizer=self.tokenizer,
+                        t5_encoder=self.t5_encoder,
+                        clip_encoder=self.clip_encoder,
+                    )
 
                 save_image(
                     name=(

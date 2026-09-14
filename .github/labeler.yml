@@ -8,7 +8,7 @@
   - torchtitan/trainer.py
   - torchtitan/components/checkpointer/**
   - torchtitan/components/data/**
-  - torchtitan/distributed/cudagraph.py
+  - torchtitan/distributed/cuda_graph.py
   - torchtitan/models/common/**
   - torchtitan/models/qwen3_5/**
   - torchtitan/models/qwen3_8/**
