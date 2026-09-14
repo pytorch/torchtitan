@@ -15,9 +15,10 @@ from unittest.mock import patch
 import torch
 import torch_remat as remat
 
-from torchtitan.config.transform import AsyncTensorParallelTransform
+from torchtitan.config.transform import convert_config_type
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.attention import GQAttention
+from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -327,8 +328,9 @@ class TestRematRegions(unittest.TestCase):
             "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
             side_effect=silu_and_mul,
         ):
-            async_config = deepcopy(feed_forward_config)
-            AsyncTensorParallelTransform().transform(async_config)
+            async_config = convert_config_type(
+                deepcopy(feed_forward_config), DistGEMMFeedForward
+            )
             fused_config = deepcopy(feed_forward_config)
             fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)
             fused_async_config = deepcopy(async_config)

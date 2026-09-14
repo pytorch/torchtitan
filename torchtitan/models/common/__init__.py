@@ -26,7 +26,6 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
 from .linear import (
-    AllGatherLinear,
     Linear,
     LinearReduceScatter,
     PartialBiasRowwiseLinear,
@@ -44,10 +43,10 @@ from .nn_modules import (
     SiLU,
 )
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
+from .tensor_parallel import TensorParallelFeedForward
 
 __all__ = [
     "AllGatherQKVLinear",
-    "AllGatherLinear",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
@@ -85,6 +84,7 @@ __all__ = [
     "SiTUGLU",
     "SwiGLU",
     "TransformerBlock",
+    "TensorParallelFeedForward",
     "VarlenInnerAttention",
     "VarlenMetadata",
     "compute_ffn_hidden_dim",

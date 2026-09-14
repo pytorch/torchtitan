@@ -4,33 +4,36 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Model transform selecting asynchronous tensor-parallel linears."""
+"""Model transform selecting asynchronous tensor-parallel implementations."""
 
 from dataclasses import dataclass
 
 from torchtitan.models.common.attention import AllGatherQKVLinear
 
 from torchtitan.models.common.dist_gemm import (
-    AsyncAllGatherLinear,
     AsyncAllGatherQKVLinear,
     AsyncLinearReduceScatter,
+    DistGEMMFeedForward,
 )
-from torchtitan.models.common.linear import AllGatherLinear, LinearReduceScatter
+from torchtitan.models.common.linear import LinearReduceScatter
 from torchtitan.protocols.module import Module
 
 from .base import convert_config_type, ModelConfigTransform
+from .tensor_parallel import TensorParallelFeedForwardTransform
 
 __all__ = ["AsyncTensorParallelTransform"]
 
 
 @dataclass(kw_only=True, slots=True)
 class AsyncTensorParallelTransform(ModelConfigTransform):
-    """Replace synchronous TP projection roles with async variants."""
+    """Select async attention projections and the dist-GEMM dense FFN."""
 
     def transform(self, model: Module.Config) -> Module.Config:
+        TensorParallelFeedForwardTransform(feed_forward=DistGEMMFeedForward).transform(
+            model
+        )
         for source, replacement in (
             (AllGatherQKVLinear, AsyncAllGatherQKVLinear),
-            (AllGatherLinear, AsyncAllGatherLinear),
             (LinearReduceScatter, AsyncLinearReduceScatter),
         ):
             for _, config, parent, attr in list(

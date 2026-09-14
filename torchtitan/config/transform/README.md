@@ -20,6 +20,17 @@ config = apply_transforms(
 )
 ```
 
+Tensor-parallel feed-forward implementations use the same pattern:
+
+```python
+config.parallelism.tensor_parallel_degree = 8
+config = apply_transforms(config, [TensorParallelFeedForwardTransform()])
+```
+
+The transformed feed-forward owns its input and output collectives. Pass
+``feed_forward=DistGEMMFeedForward`` to overlap those collectives with the
+adjacent GEMMs.
+
 `apply_transforms` deep-copies the trainer config. It orders and applies the
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.
