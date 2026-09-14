@@ -47,7 +47,12 @@ class Linear(nn.Linear, Module):
 
 
 class StackedLinearBase:
-    """Marker for projections whose weight contains stacked matrices."""
+    """Marker shared by native and torchao-backed stacked linears.
+
+    Quantized implementations inherit directly from their torchao linear class,
+    so inheriting from ``StackedLinear`` would introduce MRO conflicts.
+    Distributed code uses this base to recognize every stacked implementation.
+    """
 
     weight: nn.Parameter
     bias: nn.Parameter | None
@@ -106,13 +111,10 @@ class StackedLinear(StackedLinearBase, Module):
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
-    def _linear(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight = self.weight.flatten(0, -2)
         bias = None if self.bias is None else self.bias.flatten()
-        return F.linear(input, weight, bias)
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = self._linear(input)
+        output = F.linear(input, weight, bias)
         return output.unflatten(-1, self.weight.shape[:-1])
 
 
