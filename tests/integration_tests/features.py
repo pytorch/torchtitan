@@ -136,6 +136,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_pp2_max_outstanding_sends],
+            test_descr="FSDP+PP bounded outstanding sends",
+            test_name="fsdp_pp_max_outstanding_sends",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_fsdp2_pp2_optimizer_cuda_graph],
             test_descr="FSDP+PP forward-backward and optimizer CUDA graphs",
             test_name="fsdp_pp_optimizer_cuda_graph",
