@@ -23,6 +23,7 @@ from torch.distributed.pipelining.schedules import (
     PipelineScheduleMulti,
     PipelineScheduleSingle,
     ScheduleDualPipeV,
+    ScheduleInterleaved1F1B,
     ScheduleZBVZeroBubble,
 )
 
@@ -316,6 +317,21 @@ def _build_pipeline_schedule(
             "pipeline_parallel_defer_reduce_grad_wait requires at least one "
             "FSDP pipeline stage."
         )
+    max_outstanding_sends = parallelism.pipeline_parallel_max_outstanding_sends
+    if max_outstanding_sends is not None and (
+        not isinstance(max_outstanding_sends, int)
+        or isinstance(max_outstanding_sends, bool)
+        or max_outstanding_sends < 0
+    ):
+        raise ValueError(
+            "pipeline_parallel_max_outstanding_sends must be a non-negative integer"
+        )
+    if max_outstanding_sends is not None and not issubclass(
+        schedule_class, ScheduleInterleaved1F1B
+    ):
+        raise ValueError(
+            "pipeline_parallel_max_outstanding_sends requires Interleaved1F1B."
+        )
     # We expect that the number of local stages (`len(stages)`) is the same across all ranks
     num_total_stages = parallelism.pipeline_parallel_degree * len(stages)
     if num_microbatches < num_total_stages:
@@ -336,7 +352,7 @@ def _build_pipeline_schedule(
         return loss
 
     if looped_schedule:
-        # Runtime schedules accept this keyword, but the base class omits it.
+        # Runtime schedules accept these keywords, but the base class omits them.
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
             n_microbatches=num_microbatches,
@@ -345,6 +361,9 @@ def _build_pipeline_schedule(
             backward_requires_autograd=backward_requires_autograd,
             defer_reduce_grad_wait=(  # pyrefly: ignore [unexpected-keyword]
                 parallelism.pipeline_parallel_defer_reduce_grad_wait
+            ),
+            max_outstanding_sends=(  # pyrefly: ignore [unexpected-keyword]
+                max_outstanding_sends
             ),
         )
     else:
