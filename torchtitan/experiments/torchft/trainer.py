@@ -6,7 +6,6 @@
 
 import json
 import logging
-import os
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -435,19 +434,18 @@ class FaultTolerantTrainer(Trainer):
             global_ranks = list(range(first_rank, last_rank + 1))
 
         # init distributed and build meshes
-        dist_utils.init_distributed(
+        topology = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=config.dump_folder,
             ranks=global_ranks,
+            pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
 
         # FT addition: build TorchFTManager
         self.ft_manager = config.fault_tolerance.build()
 
-        world_size = int(os.environ["WORLD_SIZE"])
-
-        return ParallelDims.from_config(config.parallelism, world_size)
+        return ParallelDims.from_config(config.parallelism, topology)
 
     def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)

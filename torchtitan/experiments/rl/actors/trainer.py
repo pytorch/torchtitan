@@ -133,12 +133,13 @@ class PolicyTrainer(Actor, Configurable):
         set_batch_invariance(config.debug.batch_invariant)
 
         with sl.log_trace_span("torch_distributed_init"):
-            world_size = dist_utils.init_distributed(
+            topology = dist_utils.init_distributed(
                 config.comm,
                 base_folder=output_dir,
+                pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
 
-        self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, topology)
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=self.parallel_dims,
             spmd_typechecking=False,

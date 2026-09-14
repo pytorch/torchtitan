@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -53,6 +52,7 @@ class RoutedExperts(Module):
         w2: GroupedLinear.Config
         token_dispatcher: LocalTokenDispatcher.Config
         activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
+        expert_output_postprocess: Module.Config | None = None
 
         def __post_init__(self) -> None:
             if self.w13.group_size != self.w2.group_size:
@@ -72,6 +72,11 @@ class RoutedExperts(Module):
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
+        self.expert_output_postprocess = (
+            config.expert_output_postprocess.build()
+            if config.expert_output_postprocess is not None
+            else None
+        )
         self.token_dispatcher = config.token_dispatcher.build()
 
     def forward(
@@ -80,8 +85,6 @@ class RoutedExperts(Module):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
-        *,
-        expert_output_postprocess: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
@@ -93,9 +96,6 @@ class RoutedExperts(Module):
             topk_scores_TK: Router scores for the selected experts.
             topk_expert_ids_TK: Global IDs of the selected experts.
             num_local_tokens_per_expert_E: Token counts before expert dispatch.
-            expert_output_postprocess: Optional route-wise transformation applied
-                after expert computation and before dispatcher combine.
-
         Returns:
             Combined local expert output.
         """
@@ -124,8 +124,8 @@ class RoutedExperts(Module):
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E).type_as(routed_input_RD)
-            if expert_output_postprocess is not None:
-                routed_output_RD = expert_output_postprocess(routed_output_RD)
+            if self.expert_output_postprocess is not None:
+                routed_output_RD = self.expert_output_postprocess(routed_output_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,

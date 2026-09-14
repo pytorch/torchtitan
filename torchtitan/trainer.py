@@ -20,11 +20,6 @@ import torch.distributed.checkpoint.stateful
 import torch.distributed.config as dist_config
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
-from torch.distributed.pipelining.schedules import (
-    _PipelineScheduleRuntime,
-    get_schedule_class,
-    PipelineScheduleMulti,
-)
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
@@ -52,8 +47,10 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.cudagraph import cudagraph_teardown, wrap_with_cuda_graph
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
-from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.token_dispatcher import (
+    HybridEPTokenDispatcher,
+    LocalTokenDispatcher,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.observability.profiler import Profiler
@@ -189,21 +186,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     "pipeline schedule. Disable validation or CUDA graphs."
                 )
 
-            if pp_enabled:
-                pp_schedule_class = (
-                    _PipelineScheduleRuntime
-                    if self.parallelism.pipeline_parallel_schedule_csv
-                    else get_schedule_class(self.parallelism.pipeline_parallel_schedule)
-                )
-                if issubclass(pp_schedule_class, PipelineScheduleMulti):
-                    if not self.parallelism.pipeline_parallel_per_direction_p2p:
-                        raise ValueError(
-                            "Looped pipeline CUDA graphs require one process group "
-                            "per directed physical-rank edge. Set parallelism."
-                            "pipeline_parallel_per_direction_p2p=True or disable "
-                            "CUDA graphs."
-                        )
-
             if self.dataloader.max_num_documents is None:
                 for fqn, _, _, _ in self.model_spec.model.traverse(
                     VarlenInnerAttention.Config
@@ -219,13 +201,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             if self.parallelism.expert_parallel_degree == 1:
                 return
 
-            for _, experts_config, _, _ in self.model_spec.model.traverse(
-                RoutedExperts.Config
+            for _, dispatcher_config, _, _ in self.model_spec.model.traverse(
+                LocalTokenDispatcher.Config
             ):
-                assert isinstance(experts_config, RoutedExperts.Config)
-                if getattr(experts_config, "supports_cuda_graphs", False):
-                    continue
-                dispatcher_config = experts_config.token_dispatcher
                 if (
                     isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
                     and dispatcher_config.non_blocking_capacity_factor is not None
@@ -233,8 +211,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     continue
 
                 raise ValueError(
-                    "CUDA graphs support only routed-expert configurations "
-                    "without CPU synchronization or dynamic shapes. "
+                    "CUDA graphs support only expert parallel token dispatcher "
+                    "configurations without CPU synchronization. "
                     "Set HybridEP non_blocking_capacity_factor, or set "
                     "--training.disable_cuda_graphs. "
                     "Unsupported token "
@@ -721,23 +699,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     def init_distributed(self) -> ParallelDims:
         config = self.config
         dist_config.pipeline_per_direction_p2p = (
-            config.parallelism.pipeline_parallel_per_direction_p2p
+            config.parallelism.pipeline_parallel_degree > 1
         )
-        world_size = dist_utils.init_distributed(
+        topology = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=config.dump_folder,
+            pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
-        pp_mesh_override = (
-            dist_utils.get_real_pp_mesh(config.parallelism.pipeline_parallel_degree)
-            if config.comm.mode == "real_pp_fake_spmd_backend"
-            else None
-        )
-        return ParallelDims.from_config(
-            config.parallelism,
-            world_size,
-            pp_mesh_override=pp_mesh_override,
-        )
+        return ParallelDims.from_config(config.parallelism, topology)
 
     def batch_generator(
         self, data_iterable: Iterable[TrainerBatch]

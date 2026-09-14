@@ -223,20 +223,10 @@ def test_get_pipeline_metadata_requires_layers_attribute():
 
 
 @pytest.mark.parametrize(
-    "lookahead",
-    [None, True, 2, "adaptive", [1, 2], (1,), (1, 4), (1, False)],
+    ("configured_limit", "expected_limit"),
+    [(None, 2), (1, 1)],
 )
-def test_unshard_lookahead_rejects_invalid_values(lookahead):
-    with pytest.raises(ValueError, match="pipeline_parallel_unshard_lookahead"):
-        ParallelismConfig(
-            pipeline_parallel_degree=2,
-            pipeline_parallel_max_active_stages=3,
-            pipeline_parallel_unshard_lookahead=lookahead,
-        )
-
-
-@pytest.mark.parametrize("lookahead", ["default", "auto", (1, 3)])
-def test_unshard_lookahead_is_forwarded_to_multistage_schedule(monkeypatch, lookahead):
+def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_limit):
     class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
         __slots__ = ("kwargs",)
 
@@ -249,7 +239,62 @@ def test_unshard_lookahead_is_forwarded_to_multistage_schedule(monkeypatch, look
     parallelism = ParallelismConfig(
         pipeline_parallel_degree=2,
         pipeline_parallel_schedule="Interleaved1F1B",
-        pipeline_parallel_max_active_stages=3,
+        pipeline_parallel_max_param_unsharded_stages=configured_limit,
+    )
+
+    schedule = pipeline_parallel._build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda: None,
+    )
+
+    assert schedule.kwargs["max_active_stages"] == expected_limit
+    assert schedule.kwargs["reuse_recv_buffers"] is True
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_pipeline_param_residency_limit_must_be_positive(limit):
+    with pytest.raises(
+        ValueError,
+        match="pipeline_parallel_max_param_unsharded_stages must be positive",
+    ):
+        ParallelismConfig(pipeline_parallel_max_param_unsharded_stages=limit)
+
+
+@pytest.mark.parametrize(
+    "lookahead",
+    [None, True, 2, "adaptive", [1, 2], (1,), (1, 4), (1, False)],
+)
+def test_unshard_lookahead_rejects_invalid_values(lookahead):
+    with pytest.raises(ValueError, match="pipeline_parallel_unshard_lookahead"):
+        ParallelismConfig(
+            pipeline_parallel_degree=2,
+            pipeline_parallel_max_param_unsharded_stages=3,
+            pipeline_parallel_unshard_lookahead=lookahead,
+        )
+
+
+@pytest.mark.parametrize(
+    ("lookahead", "expected"),
+    [("auto", "auto"), ("full", "default"), ((1, 3), (1, 3))],
+)
+def test_unshard_lookahead_is_forwarded_to_multistage_schedule(
+    monkeypatch, lookahead, expected
+):
+    class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
+        __slots__ = ("kwargs",)
+
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        pipeline_parallel, "get_schedule_class", lambda _: CapturingSchedule
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_max_param_unsharded_stages=3,
         pipeline_parallel_unshard_lookahead=lookahead,
     )
 
@@ -261,11 +306,10 @@ def test_unshard_lookahead_is_forwarded_to_multistage_schedule(monkeypatch, look
     )
 
     assert schedule.kwargs["max_active_stages"] == 3
-    assert schedule.kwargs["unshard_lookahead"] == lookahead
+    assert schedule.kwargs["unshard_lookahead"] == expected
 
 
-@pytest.mark.parametrize("lookahead", ["auto", (1, 3)])
-def test_unshard_lookahead_rejects_single_stage_schedule(monkeypatch, lookahead):
+def test_per_rank_unshard_lookahead_rejects_single_stage_schedule(monkeypatch):
     class CapturingSchedule(pipeline_parallel.PipelineScheduleSingle):
         pass
 
@@ -275,7 +319,7 @@ def test_unshard_lookahead_rejects_single_stage_schedule(monkeypatch, lookahead)
     parallelism = ParallelismConfig(
         pipeline_parallel_degree=2,
         pipeline_parallel_schedule="1F1B",
-        pipeline_parallel_unshard_lookahead=lookahead,
+        pipeline_parallel_unshard_lookahead=(1, 2),
     )
 
     with pytest.raises(ValueError, match="only by multi-stage"):
