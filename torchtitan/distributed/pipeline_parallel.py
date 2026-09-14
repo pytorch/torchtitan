@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
@@ -303,6 +304,18 @@ def _build_pipeline_schedule(
         schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
 
     looped_schedule = issubclass(schedule_class, PipelineScheduleMulti)
+    if parallelism.pipeline_parallel_defer_reduce_grad_wait and not looped_schedule:
+        raise ValueError(
+            "pipeline_parallel_defer_reduce_grad_wait requires a multi-stage "
+            "pipeline schedule."
+        )
+    if parallelism.pipeline_parallel_defer_reduce_grad_wait and not any(
+        isinstance(stage.submod, FSDPModule) for stage in stages
+    ):
+        raise ValueError(
+            "pipeline_parallel_defer_reduce_grad_wait requires at least one "
+            "FSDP pipeline stage."
+        )
     # We expect that the number of local stages (`len(stages)`) is the same across all ranks
     num_total_stages = parallelism.pipeline_parallel_degree * len(stages)
     if num_microbatches < num_total_stages:
@@ -323,12 +336,16 @@ def _build_pipeline_schedule(
         return loss
 
     if looped_schedule:
+        # Runtime schedules accept this keyword, but the base class omits it.
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
             n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
+            defer_reduce_grad_wait=(  # pyrefly: ignore [unexpected-keyword]
+                parallelism.pipeline_parallel_defer_reduce_grad_wait
+            ),
         )
     else:
         schedule = schedule_class(
