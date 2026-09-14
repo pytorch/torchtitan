@@ -430,7 +430,7 @@ class FaultTolerantTrainer(Trainer):
         return ParallelDims.from_config(config.parallelism, world_size)
 
     def train_step(self, data_iterator: Iterator[dict[str, Any]]):
-        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+        self.optimizers.zero_grad(set_to_none=True)
         # Save the current step learning rate for logging
         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
         should_log = self.metrics_processor.should_log(self.step)
