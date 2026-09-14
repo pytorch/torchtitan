@@ -358,6 +358,7 @@ def _build_pipeline_schedule(
             "max_active_stages": (
                 parallelism.pipeline_parallel_max_param_unsharded_stages or len(stages)
             ),
+            "unshard_lookahead": parallelism.pipeline_parallel_unshard_lookahead,
         }
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
@@ -368,6 +369,11 @@ def _build_pipeline_schedule(
             **schedule_kwargs,
         )
     else:
+        if isinstance(parallelism.pipeline_parallel_unshard_lookahead, tuple):
+            raise ValueError(
+                "Per-rank pipeline_parallel_unshard_lookahead is supported "
+                "only by multi-stage pipeline schedules"
+            )
         schedule = schedule_class(
             stages[0],
             n_microbatches=num_microbatches,
