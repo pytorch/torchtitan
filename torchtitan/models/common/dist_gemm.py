@@ -15,10 +15,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
-from torchtitan.distributed.linear import (
-    AsyncAllGatherLinear as AsyncAllGatherLinearFunction,
-    AsyncLinearReduceScatter as AsyncLinearReduceScatterFunction,
-)
+from torchtitan.distributed.linear import AsyncAllGatherLinear, AsyncLinearReduceScatter
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.linear import AllGatherLinear, LinearReduceScatter
 
@@ -75,7 +72,7 @@ def validate_async_tp_preconditions(*, enable_sp: bool) -> None:
         )
 
 
-class AsyncAllGatherLinear(AllGatherLinear):
+class AsyncColumnParallelLinear(AllGatherLinear):
     """Overlap an input all-gather with a column-parallel GEMM."""
 
     @dataclass(kw_only=True, slots=True)
@@ -83,15 +80,15 @@ class AsyncAllGatherLinear(AllGatherLinear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if type(self) is not AsyncAllGatherLinear:
+        if type(self) is not AsyncColumnParallelLinear:
             raise RuntimeError(
-                "AsyncAllGatherLinear does not support converted linear modules"
+                "AsyncColumnParallelLinear does not support converted linear modules"
             )
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
             return super().forward(input)
-        return AsyncAllGatherLinearFunction.apply(
+        return AsyncAllGatherLinear.apply(
             input,
             self.weight,
             self.bias,
@@ -100,7 +97,7 @@ class AsyncAllGatherLinear(AllGatherLinear):
         )
 
 
-class AsyncLinearReduceScatter(LinearReduceScatter):
+class AsyncRowParallelLinear(LinearReduceScatter):
     """Overlap a row-parallel GEMM with its output reduce-scatter."""
 
     @dataclass(kw_only=True, slots=True)
@@ -108,15 +105,15 @@ class AsyncLinearReduceScatter(LinearReduceScatter):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if type(self) is not AsyncLinearReduceScatter:
+        if type(self) is not AsyncRowParallelLinear:
             raise RuntimeError(
-                "AsyncLinearReduceScatter does not support converted linear modules"
+                "AsyncRowParallelLinear does not support converted linear modules"
             )
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
             return super().forward(input)
-        return AsyncLinearReduceScatterFunction.apply(
+        return AsyncLinearReduceScatter.apply(
             input,
             self.weight,
             self.bias,
@@ -126,7 +123,7 @@ class AsyncLinearReduceScatter(LinearReduceScatter):
 
 
 __all__ = [
-    "AsyncAllGatherLinear",
-    "AsyncLinearReduceScatter",
+    "AsyncColumnParallelLinear",
+    "AsyncRowParallelLinear",
     "validate_async_tp_preconditions",
 ]

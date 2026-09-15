@@ -45,8 +45,8 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_attention_sharding,
 )
 from torchtitan.models.common.dist_gemm import (
-    AsyncAllGatherLinear,
-    AsyncLinearReduceScatter,
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
@@ -79,14 +79,14 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         for layer in model.layers:
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIsInstance(
-                layer.attention.qkv_linear.wqkv, AsyncAllGatherLinear.Config
+                layer.attention.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
             )
-            self.assertIsInstance(layer.attention.wo, AsyncLinearReduceScatter.Config)
+            self.assertIsInstance(layer.attention.wo, AsyncRowParallelLinear.Config)
             self.assertIsInstance(layer.feed_forward, TensorParallelFeedForward.Config)
-            self.assertIsInstance(layer.feed_forward.w13, AsyncAllGatherLinear.Config)
             self.assertIsInstance(
-                layer.feed_forward.w2, AsyncLinearReduceScatter.Config
+                layer.feed_forward.w13, AsyncColumnParallelLinear.Config
             )
+            self.assertIsInstance(layer.feed_forward.w2, AsyncRowParallelLinear.Config)
 
     def test_stock_parameter_shapes_survive(self):
         """Fused modules keep the stock layouts, or checkpoints stop loading."""
@@ -275,7 +275,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
             head_dim=head_dim,
             n_heads=num_heads,
             n_kv_heads=num_kv_heads,
-            wqkv=AsyncAllGatherLinear.Config(
+            wqkv=AsyncColumnParallelLinear.Config(
                 in_features=dim,
                 out_features=out_features,
             ),
@@ -440,8 +440,8 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
         async_config.activation_fn = fused_swiglu(async_config.activation_fn)
         fused = async_config.build().to(dev)
         self.assertIsInstance(fused, TensorParallelFeedForward)
-        self.assertIsInstance(fused.w13, AsyncAllGatherLinear)
-        self.assertIsInstance(fused.w2, AsyncLinearReduceScatter)
+        self.assertIsInstance(fused.w13, AsyncColumnParallelLinear)
+        self.assertIsInstance(fused.w2, AsyncRowParallelLinear)
 
         with torch.no_grad():
             for w in (native.w13.weight, native.w2.weight):
