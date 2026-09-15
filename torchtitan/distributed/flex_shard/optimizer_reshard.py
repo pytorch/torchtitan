@@ -160,12 +160,40 @@ class ComputeLayout:
                     "dp_shard": BlockShard(dim=0, block_size=4),
                 }
             )
+
+        Shard complete five-row blocks that each hold a three-row and a
+        two-row matrix, e.g. a per-head ``[K_nope; V]`` stack::
+
+            ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_size=5),
+                },
+                num_rows_per_segment=(3, 2),
+            )
+
+    ``num_rows_per_segment`` splits every ``BlockShard`` block into contiguous
+    segments along tensor dimension 0, and Muon treats each segment as one
+    matrix. The block size must equal the sum of the segments. Without it,
+    each block is one matrix.
     """
 
     shardings_by_mesh_axis: Mapping[str, _ComputeSharding]
     shard_order_by_tensor_dim: Mapping[int, tuple[str, ...]] = _DEFAULT_SHARD_ORDER
+    num_rows_per_segment: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
+        if self.num_rows_per_segment is not None and (
+            type(self.num_rows_per_segment) is not tuple
+            or len(self.num_rows_per_segment) < 2
+            or any(
+                isinstance(rows, bool) or not isinstance(rows, int) or rows <= 0
+                for rows in self.num_rows_per_segment
+            )
+        ):
+            raise ValueError(
+                "ComputeLayout.num_rows_per_segment must be a tuple of at least "
+                "two positive integers"
+            )
         shardings_by_mesh_axis = dict(self.shardings_by_mesh_axis)
         if not shardings_by_mesh_axis:
             raise ValueError("ComputeLayout must declare a compute sharding")
