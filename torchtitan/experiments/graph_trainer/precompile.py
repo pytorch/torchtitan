@@ -19,7 +19,7 @@ from typing import Any, NewType, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from torchtitan.components.loss import BaseLoss
-    from torchtitan.config import ParallelismConfig
+    from torchtitan.config import ParallelismConfig, TrainingConfig
     from torchtitan.distributed import ParallelDims
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
     from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
@@ -42,6 +42,16 @@ from torchtitan.experiments.graph_trainer.storage import StorageAdapter
 from torchtitan.tools.logging import logger
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
+
+_GRAPH_AFFECTING_TRAINING_FIELDS = (
+    "num_tokens_per_microbatch_per_dp_rank",
+    "num_tokens_per_train_step",
+    "max_context_length",
+    "enable_cpu_offload",
+    "dtype",
+    "mixed_precision_param",
+    "mixed_precision_reduce",
+)
 
 
 def _qualified_name(value: object) -> str:
@@ -143,6 +153,7 @@ def compute_config_fingerprint(
     loss_config: BaseLoss.Config | None = None,
     model_config: BaseModel.Config | None = None,
     parallelism_config: ParallelismConfig | None = None,
+    training_config: TrainingConfig | None = None,
 ) -> ConfigFingerprint:
     """
     Compute a fingerprint that captures everything affecting the compiled output:
@@ -202,6 +213,18 @@ def compute_config_fingerprint(
                 _canonical_config_value(parallelism_config),
                 sort_keys=True,
                 separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
+    if training_config is not None:
+        training_fields = {
+            name: getattr(training_config, name)
+            for name in _GRAPH_AFFECTING_TRAINING_FIELDS
+        }
+        h.update(
+            b"training_config:"
+            + json.dumps(
+                training_fields, sort_keys=True, separators=(",", ":")
             ).encode()
             + b"\n"
         )

@@ -8,14 +8,14 @@ import os
 import pickle
 import tempfile
 import unittest
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
@@ -280,6 +280,60 @@ class TestConfigFingerprint(unittest.TestCase):
         fp_tp2 = compute_config_fingerprint(model, cfg, dims_tp2)
         fp_tp4 = compute_config_fingerprint(_make_stub_model(), cfg, dims_tp4)
         self.assertNotEqual(fp_tp2, fp_tp4)
+
+    def test_graph_training_config_sensitivity(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        cfg = _StubCompileConfig()
+        dims = _StubParallelDims()
+        training = TrainingConfig()
+        baseline = compute_config_fingerprint(
+            _make_stub_model(), cfg, dims, training_config=training
+        )
+
+        for field_name, value in (
+            ("num_tokens_per_microbatch_per_dp_rank", 1024),
+            ("num_tokens_per_train_step", 4096),
+            ("max_context_length", 4096),
+            ("enable_cpu_offload", True),
+            ("dtype", "bfloat16"),
+            ("mixed_precision_param", "float32"),
+        ):
+            with self.subTest(field_name=field_name):
+                changed = replace(training, **{field_name: value})
+                self.assertNotEqual(
+                    baseline,
+                    compute_config_fingerprint(
+                        _make_stub_model(), cfg, dims, training_config=changed
+                    ),
+                )
+
+    def test_runtime_only_training_config_is_ignored(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        cfg = _StubCompileConfig()
+        dims = _StubParallelDims()
+        training = TrainingConfig()
+        runtime_changed = replace(
+            training,
+            steps=20,
+            max_norm=2.0,
+            disable_cuda_graphs=True,
+            gc_freq=10,
+        )
+
+        self.assertEqual(
+            compute_config_fingerprint(
+                _make_stub_model(), cfg, dims, training_config=training
+            ),
+            compute_config_fingerprint(
+                _make_stub_model(), cfg, dims, training_config=runtime_changed
+            ),
+        )
 
     def test_compile_config_sensitivity(self):
         from torchtitan.experiments.graph_trainer.precompile import (

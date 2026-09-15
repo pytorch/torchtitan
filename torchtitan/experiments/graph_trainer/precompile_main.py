@@ -340,6 +340,7 @@ def _precompile_aot_fx_trace(
         loss_config=config.loss,
         model_config=model_config,
         parallelism_config=config.parallelism,
+        training_config=config.training,
     )
 
     precompile_graph_pp_stage_save(

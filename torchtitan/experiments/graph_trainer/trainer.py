@@ -168,6 +168,7 @@ class GraphTrainer(Trainer):
         self.pp_schedule = make_pp1_vpp1_graph_pipeline_runtime(
             self.model_parts[0],
             num_microbatches=num_microbatches,
+            training=self.config.training,
             parallel_dims=self.parallel_dims,
             parallelism=self.config.parallelism,
             compile_config=self.config.compile,
