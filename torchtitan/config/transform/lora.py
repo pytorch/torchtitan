@@ -5,19 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import math
 from dataclasses import dataclass, fields
-from typing import ClassVar, Protocol
+from typing import Any, cast, ClassVar, Protocol
 
-import spmd_types as spmd
-
-import torch
-import torch.nn as nn
-
-from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.lora import specialize_lora_linear
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import ShardingConfig
 
 from .base import ModelConfigTransform
 from .context_parallel import ContextParallelTransform
@@ -73,84 +66,6 @@ class _LoRAHandler(Protocol):
 class _LinearLoRAHandler:
     config_type = Linear.Config
 
-    def __init__(self) -> None:
-        self._class_cache: dict[type, type] = {}
-
-    @staticmethod
-    def _adapter_sharding(
-        base_sharding: ShardingConfig | None,
-    ) -> tuple[ShardingConfig | None, ShardingConfig | None]:
-        """Derive adapter sharding from the base linear's TP sharding."""
-        base_weight_sharding = (
-            base_sharding.state_shardings.get("weight") if base_sharding else None
-        )
-        if base_weight_sharding is None:
-            return None, None
-
-        replicated_weight = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        )
-        if base_weight_sharding == dense_param_placement(tp=spmd.S(0)):
-            lora_b_sharding = ShardingConfig(
-                state_shardings={"weight": base_weight_sharding},
-            )
-            return replicated_weight, lora_b_sharding
-        else:
-            assert base_weight_sharding == dense_param_placement(tp=spmd.S(1))
-            lora_a_sharding = ShardingConfig(
-                state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
-            )
-            return lora_a_sharding, replicated_weight
-
-    def _get_lora_cls(self, parent_cls: type) -> type:
-        """Get or create a LoRA subclass for a linear implementation."""
-        if parent_cls in self._class_cache:
-            return self._class_cache[parent_cls]
-
-        parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
-        adapter_sharding = type(self)._adapter_sharding
-
-        class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
-            @dataclass(kw_only=True, slots=True)
-            class Config(parent_config_cls):  # type: ignore[misc]
-                rank: int
-                alpha: float
-
-            def __init__(self, config: Config) -> None:
-                super().__init__(config)
-                for param in nn.Module.parameters(self):
-                    param.requires_grad_(False)
-                self._lora_scaling = config.alpha / config.rank
-                lora_a_sharding, lora_b_sharding = adapter_sharding(
-                    config.sharding_config
-                )
-                self.lora_a = Linear.Config(
-                    in_features=config.in_features,
-                    out_features=config.rank,
-                    bias=False,
-                    sharding_config=lora_a_sharding,
-                    param_init={
-                        "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
-                    },
-                ).build()
-                self.lora_b = Linear.Config(
-                    in_features=config.rank,
-                    out_features=config.out_features,
-                    bias=False,
-                    sharding_config=lora_b_sharding,
-                    param_init={"weight": nn.init.zeros_},
-                ).build()
-
-            def forward(self, input: torch.Tensor) -> torch.Tensor:
-                base_out = super().forward(input)
-                lora_out = self.lora_b(self.lora_a(input))
-                return base_out + self._lora_scaling * lora_out
-
-        LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
-        LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
-        self._class_cache[parent_cls] = LoRALinear
-        return LoRALinear
-
     def make_config(
         self,
         cfg: Module.Config,
@@ -159,8 +74,9 @@ class _LinearLoRAHandler:
         alpha: float,
     ) -> Module.Config:
         assert cfg._owner is not None
-        lora_cls = self._get_lora_cls(cfg._owner)
-        return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
+        lora_cls = specialize_lora_linear(cast(type[Module], cfg._owner))
+        lora_config_cls = cast(Any, lora_cls.Config)
+        return lora_config_cls(
             **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
             rank=rank,
             alpha=alpha,
