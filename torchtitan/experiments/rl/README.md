@@ -71,9 +71,7 @@ def my_experiment() -> Controller.Config:
     return Controller.Config(
         model_spec=...,
         rollouter=MyRollouter.Config(),
-        renderer=RenderersLibraryConfig(
-            renderers_config=Qwen3RendererConfig(enable_thinking=False)
-        ),
+        renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         trainer=PolicyTrainer.Config(...),
         generator=VLLMGenerator.Config(...),
     )

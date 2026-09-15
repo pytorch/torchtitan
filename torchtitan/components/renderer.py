@@ -21,7 +21,7 @@ from torchtitan.config import Configurable
 class RendererConfig(Configurable.Config):
     """Base config of a renderer; `build` returns a `renderers.Renderer` on TorchTitan's tokenizer.
 
-    Subclasses: `RenderersLibraryConfig` for a renderer from the `renderers` library, and
+    Subclasses: `RenderersConfigAdapter` for a renderer from the `renderers` library, and
     in-tree renderers such as `MuseGlimmerRendererConfig`.
     """
 
@@ -31,18 +31,18 @@ class RendererConfig(Configurable.Config):
 
 
 @dataclass(kw_only=True, slots=True)
-class RenderersLibraryConfig(RendererConfig):
-    """Builds one of the `renderers` library's renderers on TorchTitan's tokenizer.
+class RenderersConfigAdapter(RendererConfig):
+    """TorchTitan config adapter for a `renderers` library config.
 
     Example:
 
         from renderers import Qwen3RendererConfig
 
+        from torchtitan.components.renderer import from_renderers
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
-        from torchtitan.components.renderer import RenderersLibraryConfig
 
-        renderer = RenderersLibraryConfig(
-            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        renderer = from_renderers(
+            Qwen3RendererConfig(enable_thinking=False)
         ).build(tokenizer=HuggingFaceTokenizer(tokenizer_path="./Qwen3-0.6B"))
         prompt_ids = renderer.render_ids(
             [{"role": "user", "content": "hi"}],
@@ -74,6 +74,11 @@ class RenderersLibraryConfig(RendererConfig):
         return create_renderer(
             tokenizer=RendererTokenizerWrapper(tokenizer), config=self.renderers_config
         )
+
+
+def from_renderers(config: PrimeRendererConfig) -> RendererConfig:
+    """Adapt a `renderers` config to TorchTitan's renderer config interface."""
+    return RenderersConfigAdapter(renderers_config=config)
 
 
 class RendererTokenizerWrapper:

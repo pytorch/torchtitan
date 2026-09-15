@@ -306,7 +306,7 @@ class Controller(Configurable):
 
         renderer: RendererConfig
         """The model's chat template; renders messages to token ids and parses completions
-        back. E.g. `RenderersLibraryConfig(renderers_config=Qwen3RendererConfig(enable_thinking=False))`."""
+        back. E.g. `from_renderers(Qwen3RendererConfig(enable_thinking=False))`."""
 
         rollout_recorder: RolloutSampleRecorder.Config = field(
             default_factory=RolloutSampleRecorder.Config

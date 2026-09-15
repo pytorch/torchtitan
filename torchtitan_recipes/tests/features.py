@@ -21,7 +21,7 @@ from torchtitan.components.data import (
     GrainDataLoader,
     SingleDatasetConfig,
 )
-from torchtitan.components.renderer import RenderersLibraryConfig
+from torchtitan.components.renderer import from_renderers
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -585,7 +585,7 @@ def llama3_debugmodel_sft_multiturn() -> Trainer.Config:
     dataset = cast(SingleDatasetConfig, packing.dataset)
     processor = cast(ChatProcessor.Config, dataset.processor)
     processor.messages_fn = messages
-    processor.renderer = RenderersLibraryConfig(renderers_config=Qwen3RendererConfig())
+    processor.renderer = from_renderers(Qwen3RendererConfig())
     return config
 
 
