@@ -621,6 +621,7 @@ class GraphPipelineRuntime:
 
         args, kwargs, target = _prepare_fwd_user_args(fw_stage, fw_mb_index, ctx)
         fw_graphs = self.stage_graphs[fw_stage.stage_index]
+        bw_graphs = self.stage_graphs[bw_stage.stage_index]
         _ensure_unsharded_param_values(fw_stage, fw_graphs)
         pair = (fw_action.stage_index, bw_action.stage_index)
         # The multiplexed graph is runtime-owned state because it is built once
