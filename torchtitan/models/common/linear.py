@@ -30,6 +30,14 @@ from torchtitan.protocols.module import Module
 #   T = num tokens, D = model dimension, E = num experts
 
 
+def _linear_parameters_2d(
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Flatten stacked projection dimensions into one linear output dimension."""
+    return weight.flatten(0, -2), None if bias is None else bias.flatten()
+
+
 class Linear(nn.Linear, Module):
     """Configurable linear with optional stacked output projections.
 
@@ -47,20 +55,6 @@ class Linear(nn.Linear, Module):
         out_features: int
         num_linears: int = 1
         bias: bool = False
-
-        def __post_init__(self) -> None:
-            if self.in_features <= 0:
-                raise ValueError(
-                    f"in_features must be positive, got {self.in_features}"
-                )
-            if self.out_features <= 0:
-                raise ValueError(
-                    f"out_features must be positive, got {self.out_features}"
-                )
-            if self.num_linears <= 0:
-                raise ValueError(
-                    f"num_linears must be positive, got {self.num_linears}"
-                )
 
     def __init__(self, config: Config):
         super().__init__(
@@ -86,6 +80,8 @@ class Linear(nn.Linear, Module):
             )
 
     def reset_parameters(self) -> None:
+        # nn.Linear.__init__ calls this override before self.num_linears is set,
+        # so select the initialization path from the physical weight shape.
         if self.weight.ndim == 2:
             nn.Linear.reset_parameters(self)
             return
@@ -99,8 +95,7 @@ class Linear(nn.Linear, Module):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight = self.weight.flatten(0, -2)
-        bias = None if self.bias is None else self.bias.flatten()
+        weight, bias = _linear_parameters_2d(self.weight, self.bias)
         output = F.linear(input, weight, bias)
         return output.unflatten(-1, self.weight.shape[:-1])
 
@@ -131,11 +126,14 @@ class CastLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # The optimizer updates the weight each step, so training cannot cache
         # the upcast copy. Inference may be able to cache it between syncs.
-        bias = None if self.bias is None else self.bias.to(self.compute_dtype)
+        weight, bias = _linear_parameters_2d(
+            self.weight.to(self.compute_dtype),
+            None if self.bias is None else self.bias.to(self.compute_dtype),
+        )
         output = F.linear(
             input.to(self.compute_dtype),
-            self.weight.to(self.compute_dtype).flatten(0, -2),
-            None if bias is None else bias.flatten(),
+            weight,
+            bias,
         )
         return output.unflatten(-1, self.weight.shape[:-1])
 
@@ -232,10 +230,10 @@ class RouterGateLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight = self.weight.flatten(0, -2)
+        weight, bias = _linear_parameters_2d(self.weight, self.bias)
         output_TE = _RouterGateLinearFunction.apply(input, weight)
-        if self.bias is not None:
-            output_TE = output_TE + self.bias.flatten().float()
+        if bias is not None:
+            output_TE = output_TE + bias.float()
         return output_TE.unflatten(-1, self.weight.shape[:-1])
 
 
@@ -263,7 +261,9 @@ class PartialBiasRowwiseLinear(Linear):
                 dst=spmd.P,
                 expert_mode=True,
             )
-        output = F.linear(input, self.weight.flatten(0, -2), bias.flatten())
+        weight, bias = _linear_parameters_2d(self.weight, bias)
+        assert bias is not None
+        output = F.linear(input, weight, bias)
         return output.unflatten(-1, self.weight.shape[:-1])
 
 
