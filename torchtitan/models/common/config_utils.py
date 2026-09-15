@@ -50,12 +50,11 @@ DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
 
 
 def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
-    """Build an initializer for an interleaved 2D gate/up linear weight."""
+    """Build an initializer for a stacked gate/up linear weight."""
 
     def _init(t: torch.Tensor) -> None:
-        gate_up = t.unflatten(0, (-1, 2))
-        gate_init(gate_up[:, 0])
-        up_init(gate_up[:, 1])
+        gate_init(t[0])
+        up_init(t[1])
 
     return _init
 
@@ -258,7 +257,8 @@ def make_ffn_config(
     return FeedForward.Config(
         w13=Linear.Config(
             in_features=dim,
-            out_features=2 * hidden_dim,
+            out_features=hidden_dim,
+            num_linears=2,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
         w2=Linear.Config(
