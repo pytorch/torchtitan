@@ -13,16 +13,10 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
     """Build integration tests that require B200-class hardware."""
     return [
         OverrideDefinitions(
-            configs=[recipes.kimi_k3_debugmodel_mm_fsdp2],
-            test_descr="Kimi K3 multimodal SPMD-typed FSDP",
-            test_name="kimi_k3_mm_fsdp",
-            ngpu=2,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.kimi_k3_debugmodel_mm_tp2],
-            test_descr="Kimi K3 multimodal SPMD-typed tensor parallel with sequence parallel",
-            test_name="kimi_k3_mm_tp2",
-            ngpu=2,
+            configs=[recipes.kimi_k3_debugmodel_mm],
+            test_descr="Kimi K3 multimodal SPMD-typed FSDP, TP and EP",
+            test_name="kimi_k3_mm",
+            ngpu=4,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_mxfp8_fsdp2],
