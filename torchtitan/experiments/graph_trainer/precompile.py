@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import dataclasses
+import enum
+import functools
 import hashlib
 import json
 import os
 import pickle
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, NewType, TYPE_CHECKING
 
@@ -21,6 +24,7 @@ if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
         GraphTrainerStageGraphs,
     )
+    from torchtitan.protocols.model import BaseModel
 
 import torch
 import torch.utils._pytree as pytree
@@ -37,6 +41,62 @@ from torchtitan.experiments.graph_trainer.storage import StorageAdapter
 from torchtitan.tools.logging import logger
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
+
+
+def _qualified_name(value: object) -> str:
+    value_type = value if isinstance(value, type) else type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
+
+
+def _canonical_config_value(value: Any) -> Any:
+    """Convert model configuration to deterministic JSON-compatible values."""
+    if dataclasses.is_dataclass(value):
+        return {
+            "type": _qualified_name(value),
+            "fields": {
+                field.name: _canonical_config_value(getattr(value, field.name))
+                for field in dataclasses.fields(value)
+                if not field.name.startswith("_")
+            },
+        }
+    if isinstance(value, enum.Enum):
+        return {"enum": _qualified_name(value), "name": value.name}
+    if isinstance(value, functools.partial):
+        return {
+            "partial": _canonical_config_value(value.func),
+            "args": _canonical_config_value(value.args),
+            "keywords": _canonical_config_value(value.keywords or {}),
+        }
+    if callable(value):
+        module = getattr(value, "__module__", None)
+        qualname = getattr(value, "__qualname__", None)
+        if module is None or qualname is None:
+            raise TypeError(f"Cannot fingerprint callable config value {value!r}")
+        return {"callable": f"{module}.{qualname}"}
+    if isinstance(value, Mapping):
+        items = [
+            (_canonical_config_value(key), _canonical_config_value(item))
+            for key, item in value.items()
+        ]
+        items.sort(key=lambda pair: json.dumps(pair[0], sort_keys=True))
+        return {"mapping": items}
+    if isinstance(value, (list, tuple)):
+        return {
+            "sequence_type": type(value).__name__,
+            "items": [_canonical_config_value(item) for item in value],
+        }
+    if isinstance(value, (set, frozenset)):
+        items = [_canonical_config_value(item) for item in value]
+        items.sort(key=lambda item: json.dumps(item, sort_keys=True))
+        return {"set": items}
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    if isinstance(value, (torch.dtype, torch.device)):
+        return {"type": _qualified_name(value), "value": str(value)}
+    raise TypeError(
+        "Cannot fingerprint model config value of type "
+        f"{_qualified_name(value)}: {value!r}"
+    )
 
 
 def flatten_runtime_inputs(
@@ -81,6 +141,7 @@ def compute_config_fingerprint(
     parallel_dims: ParallelDims,
     *,
     loss_config: BaseLoss.Config | None = None,
+    model_config: BaseModel.Config | None = None,
 ) -> ConfigFingerprint:
     """
     Compute a fingerprint that captures everything affecting the compiled output:
@@ -115,6 +176,16 @@ def compute_config_fingerprint(
             b"loss_config:"
             + json.dumps(
                 dataclasses.asdict(loss_config),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
+    if model_config is not None:
+        h.update(
+            b"model_config:"
+            + json.dumps(
+                _canonical_config_value(model_config),
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()

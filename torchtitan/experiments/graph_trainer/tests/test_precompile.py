@@ -106,6 +106,12 @@ class _StubParallelDims:
     ep: int = 1
 
 
+@dataclass
+class _StubModelConfig:
+    attention_backend: str = "sdpa"
+    norm_eps: float = 1e-5
+
+
 def _make_stub_model(params=None, buffers=None):
     """
     Build a mock model with controlled named_parameters() and
@@ -328,6 +334,36 @@ class TestConfigFingerprint(unittest.TestCase):
 
         self.assertNotEqual(cross_entropy, chunked)
         self.assertNotEqual(chunked, different_chunks)
+
+    def test_model_config_sensitivity(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        model = _make_stub_model()
+        compile_config = _StubCompileConfig()
+        dims = _StubParallelDims()
+        sdpa = compute_config_fingerprint(
+            model,
+            compile_config,
+            dims,
+            model_config=_StubModelConfig(attention_backend="sdpa"),
+        )
+        flex_attention = compute_config_fingerprint(
+            model,
+            compile_config,
+            dims,
+            model_config=_StubModelConfig(attention_backend="flex_attention"),
+        )
+        different_norm = compute_config_fingerprint(
+            model,
+            compile_config,
+            dims,
+            model_config=_StubModelConfig(norm_eps=1e-6),
+        )
+
+        self.assertNotEqual(sdpa, flex_attention)
+        self.assertNotEqual(sdpa, different_norm)
 
     def test_all_compilation_settings_are_fingerprinted(self):
         from torchtitan.experiments.graph_trainer.precompile import (
