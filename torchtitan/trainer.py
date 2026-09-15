@@ -879,7 +879,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             # then release the original tensors and their autograd graphs.
             detached_losses = [loss.detach() for loss in losses]
             losses.clear()
-            return torch.sum(torch.stack(detached_losses)).to(self.device)
+            accumulated_loss = detached_losses[0].clone()
+            for loss in detached_losses[1:]:
+                accumulated_loss.add_(loss)
+            return accumulated_loss.to(self.device)
         return self._pp_loss_sentinel_on_non_last_stage
 
     def train_step(self, data_iterator: Iterator[dict[str, Any]]):

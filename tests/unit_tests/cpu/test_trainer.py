@@ -145,14 +145,16 @@ def test_pp_forward_backward_step_releases_consumed_loss_graphs() -> None:
     )
     _bind_pp_forward_backward_body(trainer)
 
-    reporting_loss = Trainer.forward_backward_step(
-        trainer,
-        input_dict=[
-            {"input": torch.ones(1), "labels": torch.ones(1)},
-            {"input": torch.ones(1), "labels": torch.ones(1)},
-        ],
-        global_valid_tokens=torch.tensor(2),
-    )
+    # Match the Trainer's left-to-right loss accumulation order.
+    with patch("torchtitan.trainer.torch.stack", side_effect=AssertionError):
+        reporting_loss = Trainer.forward_backward_step(
+            trainer,
+            input_dict=[
+                {"input": torch.ones(1), "labels": torch.ones(1)},
+                {"input": torch.ones(1), "labels": torch.ones(1)},
+            ],
+            global_valid_tokens=torch.tensor(2),
+        )
 
     torch.testing.assert_close(reporting_loss, torch.tensor(5.0))
     torch.testing.assert_close(torch.stack(gradients), torch.tensor([2.0, 4.0]))
