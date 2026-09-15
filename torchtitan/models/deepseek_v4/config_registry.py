@@ -986,3 +986,45 @@ def deepseek_v4_flash_pr18_bs3(seq_len: int | None = 8192) -> Trainer.Config:
 def deepseek_v4_flash_pr18_bs4(seq_len: int | None = 8192) -> Trainer.Config:
     """S4c. 4x microbatch (32768 tokens/rank). Run only if bs3 fits."""
     return _pr18_batch(4, seq_len)
+
+
+def deepseek_v4_flash_pr18_asyncep(seq_len: int | None = 8192) -> Trainer.Config:
+    """S2. MoE token dispatch via MinimalAsyncEP instead of the blocking all-to-all.
+
+    The dispatcher is chosen when the model_spec is built, so the spec is
+    rebuilt with ``moe_comm_backend="minimal_async_ep"`` and the GB300 flex
+    tile pin and block_size 32 are re-applied to the new spec (the pin is a
+    correctness requirement at head_dim=512). ``num_max_tokens_per_rank`` is
+    filled at config time from the microbatch shape by the shared token
+    dispatcher capacity code, and it requires EP > 1 (EP=4 here).
+
+    NCCL SendRecv -- the MoE all-to-all -- is the largest NCCL kernel in the
+    PR #18 profile (2,664 ms, 13 %), and 17.5 % of the window is exposed comm.
+    On Kimi this dispatcher carried a large buffer-memory overhead; the tuned
+    config sits at 76 GiB of 276, so there is room to find out.
+    """
+    config = _pr18_tuned(seq_len)
+    config.model_spec = model_registry(
+        "deepseek_v4_flash", seq_len=seq_len, moe_comm_backend="minimal_async_ep"
+    )
+    _pin_gb300_flex_tiles(config)
+    for layer in config.model_spec.model.layers:
+        inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.block_size = 32
+    return config
+
+
+def deepseek_v4_flash_pr18_compile(seq_len: int | None = 8192) -> Trainer.Config:
+    """S3. torch.compile the model (and loss), the recipe's default components.
+
+    The PR #18 profile has 25.8 % of kernel time in ~153k elementwise launches
+    at ~34 us each -- the HC-branch fp32 upcasts and their backward, RMS
+    norms, casts -- all unfused because the flash recipe ships with
+    ``compile.enable=False``. FlexAttention already compiles its own kernel;
+    torchtitan scopes that region separately when the model is compiled. There
+    is no MoE-only compile knob in this tree; ``components`` is model/loss.
+    """
+    config = _pr18_tuned(seq_len)
+    config.compile = CompileConfig(enable=True)
+    return config
