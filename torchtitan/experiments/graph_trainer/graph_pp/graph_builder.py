@@ -28,6 +28,7 @@ from typing import Any, cast
 import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining.schedules import (
     _PipelineContext,
     _PipelineScheduleRuntime,
@@ -192,11 +193,13 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
         modules: Stage-local FX graph modules after GraphPP graph passes.
         meta: GraphTrainer calling-convention metadata for those modules.
         compiled: Whether the FX modules have already been compiled.
+        runtime_meshes: Runtime meshes bound to a CooR-precompiled stage.
     """
 
     modules: _StageGraphModules
     meta: _StageGraphMeta
     compiled: bool = False
+    runtime_meshes: tuple[DeviceMesh, ...] = ()
 
     def __post_init__(self) -> None:
         num_param_inputs = self.meta.num_fw_param_inputs
@@ -326,6 +329,7 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
         flat_inputs = [
             *unsharded_param_values,
             *flat_buffer_values,
+            *self.runtime_meshes,
             *flat_user_inputs,
         ]
         # Forward placeholders are a prefix of parameter-derived values
@@ -930,6 +934,7 @@ def _build_stage_graphs(
     compile_graphs: bool = True,
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
+    precompile_meshes: list[DeviceMesh] | None = None,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     maybe_register_blockmask_pytree_node()
@@ -993,7 +998,11 @@ def _build_stage_graphs(
                 tuple(grads[len(grad_params) :]),
             )
 
-        traced = minimal_fx_tracer(stage_step, module=stage.submod)(
+        traced = minimal_fx_tracer(
+            stage_step,
+            module=stage.submod,
+            precompile_meshes=precompile_meshes,
+        )(
             stage_args,
             stage_kwargs,
             target,
@@ -1028,7 +1037,11 @@ def _build_stage_graphs(
                 tuple(grads[len(grad_params) :]),
             )
 
-        traced = minimal_fx_tracer(stage_step, module=stage.submod)(
+        traced = minimal_fx_tracer(
+            stage_step,
+            module=stage.submod,
+            precompile_meshes=precompile_meshes,
+        )(
             stage_args,
             stage_kwargs,
             output_grads,
@@ -1303,6 +1316,7 @@ class GraphTrainerStageGraphProvider:
             from forward into a separately scheduled graph.
         extract_fsdp_grad_reduction: Whether to extract FSDP synchronization
             from backward into a separately scheduled graph.
+        precompiled_stage_graphs: Precompiled graphs to bind instead of tracing.
     """
 
     loss_fn: Callable
@@ -1311,6 +1325,7 @@ class GraphTrainerStageGraphProvider:
     parallelism: ParallelismConfig | None
     extract_fsdp_param_unshard: bool = True
     extract_fsdp_grad_reduction: bool = True
+    precompiled_stage_graphs: GraphTrainerStageGraphs | None = None
     _warned_cudagraph: bool = False
     _overlap_graphs: dict[tuple[int, int], GraphPPOverlapGraphs] | None = None
 
@@ -1341,6 +1356,10 @@ class GraphTrainerStageGraphProvider:
         graph_stages = [
             cast(GraphPipelineStage, stage) for stage in schedule._stages
         ]
+        if self.precompiled_stage_graphs is not None:
+            if len(graph_stages) != 1:
+                raise ValueError("Precompiled GraphPP graphs require one local stage")
+            graph_stages[0].graphs = self.precompiled_stage_graphs
         maybe_register_blockmask_pytree_node()
         trace_ctx = ctx
         if ctx.arg_mbs is not None or ctx.kwarg_mbs is not None:

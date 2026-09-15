@@ -29,15 +29,11 @@ import torch.distributed as dist
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.experiments.graph_trainer.common_utils import (
-    maybe_register_blockmask_pytree_node,
-)
-from torchtitan.experiments.graph_trainer.configs import trace_input_preparer_keys
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
 from torchtitan.experiments.graph_trainer.precompile import (
-    _FX_TRACE_ARTIFACT_KEY,
+    _GRAPH_PP_STAGE_ARTIFACT_KEY,
     _register_coor_ops,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
@@ -218,19 +214,26 @@ def _precompile_aot_fx_trace(
     device,
     tokenizer,
 ):
-    """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
-    from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
+    """Precompile the PP=1 GraphPP stage callables."""
+    from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
+        _build_stage_graphs,
+    )
+    from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
+        resolve_graph_pp_runtime_policy,
+    )
+    from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
+    from torchtitan.experiments.graph_trainer.make_fx_tracer import extract_module_state
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
         get_spmd_precompile_meshes,
-        precompile_fx_trace_save,
+        precompile_graph_pp_stage_save,
     )
-    from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
+
+    if parallel_dims.pp_enabled:
+        raise ValueError("GraphPP precompile currently supports only PP=1")
 
     loss_fn = config.loss.build(compile_config=compile_config)
     _prepare_loss_for_precompile(model, loss_fn)
-
-    fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
     num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
     vocab_size = model_config.vocab_size
@@ -253,6 +256,13 @@ def _precompile_aot_fx_trace(
     if isinstance(model_config, Decoder.Config) and model_config.layers:
         attn_config = model_config.layers[0].attention
         inner_attention = attn_config.inner_attention
+
+        if isinstance(inner_attention, FlexAttention.Config):
+            raise NotImplementedError(
+                "GraphPP precompile does not yet support FlexAttention. "
+                "The compiled mask_mod would specialize the precompile batch's "
+                "document boundaries. Use the SDPA test backend for precompile."
+            )
 
         positions = (
             torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
@@ -285,81 +295,60 @@ def _precompile_aot_fx_trace(
         parallel_dims=parallel_dims,
         spmd_typechecking=False,
     )
-
-    maybe_register_blockmask_pytree_node()
-
-    from torchtitan.experiments.graph_trainer.registry import (
-        TRACE_CALL_INPUT_PREPARERS,
-        TRACE_INPUT_PREPARERS,
+    runtime_policy = resolve_graph_pp_runtime_policy(
+        compile_config,
+        pp_enabled=False,
+        fsdp_enabled=parallel_dims.fsdp_enabled,
     )
-
-    def prepare_trace_inputs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
-        for pass_name in trace_input_preparer_keys(config.compile):
-            prepare = TRACE_INPUT_PREPARERS.get(pass_name)
-            if prepare is not None:
-                prepare(config.compile, args, kwargs)
-
-    def prepare_trace_call_inputs(
-        args: tuple[Any, ...], kwargs: dict[str, Any]
-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        for pass_name in trace_input_preparer_keys(config.compile):
-            prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
-            if prepare is not None:
-                prepared = prepare(config.compile, args, kwargs)
-                if prepared is not None:
-                    args, kwargs = prepared
-        return args, kwargs
-
-    logger.info("Tracing fwd+loss+bwd via make_fx...")
+    pp_mesh = parallel_dims.get_optional_mesh("pp", include_singleton_axes=True)
+    assert pp_mesh is not None
+    stage = GraphPipelineStage(
+        model,
+        stage_index=0,
+        num_stages=1,
+        device=device,
+        group=pp_mesh.get_group("pp"),
+    )
+    precompile_meshes = (
+        get_spmd_precompile_meshes(parallel_dims)
+        if config.parallelism.spmd_backend == "spmd_types"
+        else None
+    )
+    logger.info("Tracing and compiling PP=1 GraphPP stage callables...")
     with trace_context(), loss_parallel_ctx:
-        traced_result = minimal_fx_tracer(
-            fwd_bwd_fn,
-            module=model,
-            precompile_meshes=(
-                get_spmd_precompile_meshes(parallel_dims)
-                if config.parallelism.spmd_backend == "spmd_types"
-                else None
-            ),
-            prepare_inputs=prepare_trace_inputs,
-            prepare_call_inputs=prepare_trace_call_inputs,
-        )(dummy_inputs, dummy_labels, dummy_global_valid_tokens, extra_kwargs)
-    logger.info(
-        f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
-        f"{len(traced_result.state_fqns)} state entries"
-    )
-
-    # Apply precompile-time graph passes (cleanup + regional_inductor)
-    # so compiled Triton kernels are baked into the serialized artifact.
-    # cudagraph is excluded — it runs at load time on each rank.
-    from torchtitan.experiments.graph_trainer.passes import (
-        apply_graph_passes,
-        compile_time_passes,
-    )
-
-    passes = compile_time_passes(traced_result, config, parallel_dims=parallel_dims)
-
-    traced_result.gm = apply_graph_passes(
-        traced_result.gm, traced_result.example_inputs, passes
-    )
-    logger.info(
-        f"Applied {len(passes)} precompile graph passes, "
-        f"graph now has {len(list(traced_result.gm.graph.nodes))} nodes"
-    )
+        _build_stage_graphs(
+            stage,
+            (dummy_inputs,),
+            extra_kwargs,
+            dummy_labels,
+            {"global_valid_tokens": dummy_global_valid_tokens},
+            loss_fn=loss_fn,
+            compile_config=compile_config,
+            model_config=model_config,
+            parallelism=config.parallelism,
+            extract_fsdp_param_unshard=(runtime_policy.extract_fsdp_param_unshard),
+            extract_fsdp_grad_reduction=(runtime_policy.extract_fsdp_grad_reduction),
+            precompile_meshes=precompile_meshes,
+        )
+    assert stage.graphs is not None
 
     storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
     config_fingerprint = compute_config_fingerprint(
         model, compile_config, parallel_dims
     )
 
-    precompile_fx_trace_save(
-        traced_result,
+    precompile_graph_pp_stage_save(
+        stage.graphs,
         storage,
+        state_fqns=list(extract_module_state(model)),
+        num_runtime_mesh_inputs=len(precompile_meshes or ()),
         config_fingerprint=config_fingerprint,
     )
 
     logger.info(
         f"Precompile complete. Artifact saved to "
-        f"{compile_config.precompile_artifact_dir}/{_FX_TRACE_ARTIFACT_KEY}.bin"
+        f"{compile_config.precompile_artifact_dir}/"
+        f"{_GRAPH_PP_STAGE_ARTIFACT_KEY}.bin"
     )
 
 

@@ -131,13 +131,6 @@ def _validate_pp1_vpp1_graph_pipeline_compile_config(
 ) -> None:
     if compile_config.mode != "aot_fx_trace":
         raise ValueError("GraphPipelineRuntime requires --compile.mode aot_fx_trace")
-    if compile_config.precompile_artifact_dir:
-        raise ValueError(
-            "GraphPipelineRuntime does not support "
-            "--compile.precompile_artifact_dir yet. Existing precompiled "
-            "artifacts contain one monolithic train-step graph, while the "
-            "runtime requires separately bound forward, backward, and FSDP graphs."
-        )
     if compile_config.ep_overlap.enabled:
         raise ValueError(
             "GraphPipelineRuntime does not support --compile.ep_overlap.enabled "
@@ -278,6 +271,32 @@ def make_pp1_vpp1_graph_pipeline_runtime(
         extract_fsdp_param_unshard=extract_fsdp_param_unshard,
         extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
     )
+    if compile_config.precompile_artifact_dir:
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            extract_module_state,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+            get_spmd_precompile_meshes,
+            precompile_graph_pp_stage_load,
+        )
+        from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+
+        runtime_meshes = (
+            get_spmd_precompile_meshes(parallel_dims)
+            if parallelism.spmd_backend == "spmd_types"
+            else []
+        )
+        graph_provider.precompiled_stage_graphs = precompile_graph_pp_stage_load(
+            DiskStorageAdapter(compile_config.precompile_artifact_dir),
+            expected_fingerprint=compute_config_fingerprint(
+                model,
+                compile_config,
+                parallel_dims,
+            ),
+            expected_state_fqns=list(extract_module_state(model)),
+            runtime_meshes=runtime_meshes,
+        )
     return register_graph_pp_schedule(
         schedule,
         graph_provider=graph_provider,

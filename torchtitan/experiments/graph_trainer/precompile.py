@@ -16,6 +16,9 @@ from typing import Any, NewType, TYPE_CHECKING
 if TYPE_CHECKING:
     from torchtitan.distributed import ParallelDims
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+    from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
+        GraphTrainerStageGraphs,
+    )
 
 import torch
 import torch.utils._pytree as pytree
@@ -116,6 +119,18 @@ def compute_config_fingerprint(
         "compile:ep_overlap:disable_early_grad_accumulation:"
         f"{compile_config.ep_overlap.disable_early_grad_accumulation}\n".encode()
     )
+    h.update(
+        "compile:fsdp_param_unshard_mode:"
+        f"{compile_config.fsdp_param_unshard_mode}\n".encode()
+    )
+    h.update(
+        "compile:fsdp_gradient_sync_mode:"
+        f"{compile_config.fsdp_gradient_sync_mode}\n".encode()
+    )
+    h.update(
+        "compile:gradient_accumulation_mode:"
+        f"{compile_config.gradient_accumulation_mode}\n".encode()
+    )
     h.update(f"torch_version:{torch.__version__}\n".encode())
 
     if torch.cuda.is_available():
@@ -185,6 +200,7 @@ def _validate_config_fingerprint(
 
 
 _FX_TRACE_ARTIFACT_KEY = "fx_trace_default"
+_GRAPH_PP_STAGE_ARTIFACT_KEY = "graph_pp_stage_default"
 
 
 @dataclass
@@ -305,6 +321,88 @@ class PrecompiledFxTraceArtifact:
         )
 
 
+@dataclass
+class PrecompiledGraphPPStageArtifact:
+    """Serialized GraphPP callables and metadata for one PP=1 stage."""
+
+    serialized_modules: dict[str, bytes | None]
+    meta: Any
+    state_fqns: list[str]
+    num_runtime_mesh_inputs: int
+    config_fingerprint: ConfigFingerprint
+
+    @classmethod
+    def from_stage_graphs(
+        cls,
+        stage_graphs: GraphTrainerStageGraphs,
+        *,
+        state_fqns: list[str],
+        num_runtime_mesh_inputs: int,
+        config_fingerprint: ConfigFingerprint,
+    ) -> "PrecompiledGraphPPStageArtifact":
+        from torch.fx._graph_pickler import GraphPickler, Options
+
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            _node_metadata_key_filter_distributed,
+        )
+
+        options = Options(
+            ops_filter=None,
+            node_metadata_key_filter=_node_metadata_key_filter_distributed,
+        )
+        return cls(
+            serialized_modules={
+                name: None if gm is None else GraphPickler.dumps(gm, options)
+                for name, gm in (
+                    (field.name, getattr(stage_graphs.modules, field.name))
+                    for field in dataclasses.fields(stage_graphs.modules)
+                )
+            },
+            meta=stage_graphs.meta,
+            state_fqns=state_fqns,
+            num_runtime_mesh_inputs=num_runtime_mesh_inputs,
+            config_fingerprint=config_fingerprint,
+        )
+
+    def to_stage_graphs(
+        self,
+        *,
+        runtime_meshes: list[DeviceMesh],
+    ) -> GraphTrainerStageGraphs:
+        from torch._subclasses import FakeTensorMode
+        from torch.fx._graph_pickler import GraphPickler
+
+        from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
+            _StageGraphModules,
+            GraphTrainerStageGraphs,
+        )
+
+        if len(runtime_meshes) != self.num_runtime_mesh_inputs:
+            raise ValueError(
+                "GraphPP precompile runtime mesh count mismatch: "
+                f"expected {self.num_runtime_mesh_inputs}, got {len(runtime_meshes)}"
+            )
+        _register_coor_ops()
+        fake_mode = FakeTensorMode(
+            allow_non_fake_inputs=True,
+            shape_env=ShapeEnv(),
+        )
+        modules = {}
+        for name, serialized_gm in self.serialized_modules.items():
+            if serialized_gm is None:
+                modules[name] = None
+                continue
+            gm = GraphPickler.loads(serialized_gm, fake_mode)
+            gm.recompile()
+            modules[name] = gm
+        return GraphTrainerStageGraphs(
+            modules=_StageGraphModules(**modules),
+            meta=self.meta,
+            compiled=True,
+            runtime_meshes=tuple(runtime_meshes),
+        )
+
+
 def precompile_fx_trace_save(
     traced_result: TracedResult,
     storage: StorageAdapter,
@@ -361,3 +459,54 @@ def precompile_fx_trace_load(
     )
 
     return artifact.to_traced_result(example_inputs)
+
+
+def precompile_graph_pp_stage_save(
+    stage_graphs: GraphTrainerStageGraphs,
+    storage: StorageAdapter,
+    *,
+    state_fqns: list[str],
+    num_runtime_mesh_inputs: int,
+    config_fingerprint: ConfigFingerprint,
+) -> str:
+    """Serialize one compiled PP=1 GraphPP stage."""
+    artifact = PrecompiledGraphPPStageArtifact.from_stage_graphs(
+        stage_graphs,
+        state_fqns=state_fqns,
+        num_runtime_mesh_inputs=num_runtime_mesh_inputs,
+        config_fingerprint=config_fingerprint,
+    )
+    data = pickle.dumps(artifact)
+    path = storage.save(_GRAPH_PP_STAGE_ARTIFACT_KEY, data)
+    logger.info(
+        "GraphPP stage precompile artifact saved: "
+        f"state_fqns={len(state_fqns)}, size={len(data)} bytes, path={path}"
+    )
+    return path
+
+
+def precompile_graph_pp_stage_load(
+    storage: StorageAdapter,
+    *,
+    expected_fingerprint: ConfigFingerprint,
+    expected_state_fqns: list[str],
+    runtime_meshes: list[DeviceMesh],
+) -> GraphTrainerStageGraphs:
+    """Load and bind one compiled PP=1 GraphPP stage."""
+    data = storage.load(_GRAPH_PP_STAGE_ARTIFACT_KEY)
+    artifact: PrecompiledGraphPPStageArtifact = pickle.loads(data)
+    _validate_config_fingerprint(
+        artifact.config_fingerprint,
+        expected_fingerprint,
+    )
+    if artifact.state_fqns != expected_state_fqns:
+        raise ValueError(
+            "GraphPP precompile model state differs from the runtime model: "
+            f"artifact={artifact.state_fqns}, runtime={expected_state_fqns}"
+        )
+    logger.info(
+        "GraphPP stage precompile artifact loaded: "
+        f"state_fqns={len(artifact.state_fqns)}, "
+        f"fingerprint={artifact.config_fingerprint}"
+    )
+    return artifact.to_stage_graphs(runtime_meshes=runtime_meshes)
