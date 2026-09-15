@@ -40,6 +40,7 @@ from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
 )
 from torchtitan.experiments.rl.routing.strategies import LeastLoadedRoutingStrategy
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -54,14 +55,15 @@ def _qwen3_4b_dapo_math_config(
     validation_dataset = AIME2025Dataset.Config(
         num_samples=num_validation_samples,
     )
+    model_spec = model_registry(
+        "4B",
+        seq_len=max_total_tokens,
+        attn_backend="varlen",
+        # Compute vocabulary logits in fp32; the rest of the forward uses bf16.
+        converters=[LMHeadCastConverter.Config()],
+    )
     return Controller.Config(
-        model_spec=model_registry(
-            "4B",
-            seq_len=max_total_tokens,
-            attn_backend="varlen",
-            # Compute vocabulary logits in fp32; the rest of the forward uses bf16.
-            converters=[LMHeadCastConverter.Config()],
-        ),
+        model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-4B-Base",
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
@@ -129,6 +131,7 @@ def _qwen3_4b_dapo_math_config(
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
+                    global_vocab_size=decoder_vocab_size(model_spec),
                 ),
             ),
         ),

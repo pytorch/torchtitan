@@ -53,6 +53,7 @@ from torchtitan.experiments.rl.models.muse_glimmer.renderer import (
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.muse_glimmer import model_registry as muse_glimmer_model_registry
 from torchtitan.models.muse_glimmer.state_dict_adapter import (
     MuseGlimmerStateDictAdapter,
@@ -68,8 +69,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
     data; see ``README.md``.
     """
     seq_len = 4096
+    model_spec = model_registry("1.7B", seq_len=seq_len, attn_backend="varlen")
     return Controller.Config(
-        model_spec=model_registry("1.7B", seq_len=seq_len, attn_backend="varlen"),
+        model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
@@ -113,6 +115,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
+                    global_vocab_size=decoder_vocab_size(model_spec),
                 ),
             ),
         ),
@@ -148,8 +151,18 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
         attn_backend="varlen",
     )
     config.hf_assets_path = "torchtitan/experiments/rl/example_checkpoint/Qwen3-8B"
+    loss_config = config.trainer.loss
+    assert isinstance(loss_config, ChunkedLossWrapper.Config)
+    assert isinstance(loss_config.loss_fn, DAPOLoss.Config)
     config.trainer = dataclasses.replace(
         config.trainer,
+        loss=dataclasses.replace(
+            loss_config,
+            loss_fn=dataclasses.replace(
+                loss_config.loss_fn,
+                global_vocab_size=decoder_vocab_size(config.model_spec),
+            ),
+        ),
         parallelism=dataclasses.replace(
             config.trainer.parallelism, tensor_parallel_degree=4
         ),
@@ -234,7 +247,11 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 last_save_model_only=False,
                 keep_latest_k=3,
             ),
-            loss=DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
+            loss=DAPOLoss.Config(
+                ratio_clip_low=0.2,
+                ratio_clip_high=0.28,
+                global_vocab_size=decoder_vocab_size(model_spec),
+            ),
             override=OverrideConfig(imports=list(perf_imports)),
         ),
         generator=VLLMGenerator.Config(
@@ -335,6 +352,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
+                    global_vocab_size=decoder_vocab_size(model_spec),
                 ),
             ),
         ),
