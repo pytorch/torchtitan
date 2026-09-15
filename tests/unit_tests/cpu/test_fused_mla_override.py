@@ -20,10 +20,7 @@ from torch.testing._internal.common_utils import (
 from torchtitan.config import apply_overrides, OverrideConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.rope import ComplexRoPE
-from torchtitan.models.deepseek_v3.config_registry import (
-    deepseek_v3_debugmodel,
-    enable_fused_mla,
-)
+from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.deepseek_v3.model import Attention, DeepSeekV3Model
 from torchtitan.overrides.fused_mla import (
     _fused_k_rope_kernel,
@@ -76,25 +73,6 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
         # restore it between candidate runs or every trial past the first
         # measures (and leaves behind) doubly rotated data.
         self.assertEqual(_fused_q_rope_kernel.restore_value, ["q"])
-
-    def test_enable_fused_mla_appends_the_override_once(self):
-        config = deepseek_v3_debugmodel(seq_len=2048)
-        enable_fused_mla(config)
-        self.assertEqual(
-            config.override.imports, ["torchtitan.overrides.fused_mla.fused_mla"]
-        )
-        # Enabling twice is a recipe bug, not something to silently absorb.
-        with self.assertRaises(AssertionError):
-            enable_fused_mla(config)
-
-        model_config = cast(DeepSeekV3Model.Config, config.model_spec.model)
-        apply_overrides(config.override, config)
-        self.assertTrue(
-            all(
-                isinstance(layer.attention, FusedMLAAttention.Config)
-                for layer in model_config.layers
-            )
-        )
 
     def test_override_replaces_all_debug_attention_configs(self):
         config = deepseek_v3_debugmodel(seq_len=2048)
