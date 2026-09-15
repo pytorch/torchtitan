@@ -388,6 +388,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             num_pp_microbatches=1,
             device=torch.device("cpu"),
             forward_backward_step=forward_backward_step,
+            _clip_grad_norm=MagicMock(return_value=torch.tensor(4.0)),
             sdc_replayer=None,
             model_parts=[],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
@@ -398,11 +399,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     )
     data_iterator = iter([_batch() for _ in range(3)])
 
-    with patch(
-        "torchtitan.trainer.dist_utils.clip_grad_norm_",
-        return_value=torch.tensor(4.0),
-    ):
-        Trainer.train_step(trainer, data_iterator)
+    Trainer.train_step(trainer, data_iterator)
 
     metrics_processor.log.assert_called_once_with(
         1,
@@ -414,14 +411,10 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
 
     metrics_processor.should_log.return_value = False
     metrics_processor.log.reset_mock()
-    with patch(
-        "torchtitan.trainer.dist_utils.clip_grad_norm_",
-        return_value=torch.tensor(4.0),
-    ):
-        Trainer.train_step(
-            trainer,
-            data_iterator=iter([_batch() for _ in range(3)]),
-        )
+    Trainer.train_step(
+        trainer,
+        data_iterator=iter([_batch() for _ in range(3)]),
+    )
 
     metrics_processor.log.assert_not_called()
 
@@ -450,6 +443,7 @@ def test_train_step_replay_checks_only_first_forward_backward():
             num_pp_microbatches=1,
             device=torch.device("cpu"),
             forward_backward_step=forward_backward_step,
+            _clip_grad_norm=MagicMock(return_value=torch.tensor(1.0)),
             sdc_replayer=replayer,
             model_parts=[],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
@@ -459,14 +453,10 @@ def test_train_step_replay_checks_only_first_forward_backward():
         ),
     )
 
-    with patch(
-        "torchtitan.trainer.dist_utils.clip_grad_norm_",
-        return_value=torch.tensor(1.0),
-    ):
-        Trainer.train_step(
-            trainer,
-            iter([_batch() for _ in range(2)]),
-        )
+    Trainer.train_step(
+        trainer,
+        iter([_batch() for _ in range(2)]),
+    )
 
     replayer.run_fwd_bwd.assert_called_once()
     assert replayer.run_fwd_bwd.call_args.kwargs == {"step": 1}
@@ -609,6 +599,7 @@ def _run_train_step_recording_all_reduce(
             num_pp_microbatches=1,
             device=torch.device("cpu"),
             forward_backward_step=MagicMock(return_value=torch.tensor(1.0)),
+            _clip_grad_norm=MagicMock(return_value=torch.tensor(1.0)),
             sdc_replayer=None,
             model_parts=[part],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
@@ -617,14 +608,10 @@ def _run_train_step_recording_all_reduce(
             ntokens_seen=0,
         ),
     )
-    with patch(
-        "torchtitan.trainer.dist_utils.clip_grad_norm_",
-        return_value=torch.tensor(1.0),
-    ):
-        Trainer.train_step(
-            trainer,
-            iter([_batch() for _ in range(gradient_accumulation_steps)]),
-        )
+    Trainer.train_step(
+        trainer,
+        iter([_batch() for _ in range(gradient_accumulation_steps)]),
+    )
     return part.requires_all_reduce_calls
 
 
