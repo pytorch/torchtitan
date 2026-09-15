@@ -52,6 +52,7 @@ from torchtitan.tools.utils import round_up
 
 
 __all__ = [
+    "apply_attention_sink_rescale",
     "FlexAttention",
     "BaseQKVLinear",
     "FusedQKVLinear",
@@ -218,6 +219,15 @@ class VarlenAttention(Module):
         out_THV = out_THV.to(q_THK.dtype)
         lse_TH = lse_HT.transpose(0, 1)
         return out_transform(out_THV, lse_TH)
+
+
+def apply_attention_sink_rescale(
+    out: torch.Tensor, lse: torch.Tensor, sinks: torch.Tensor
+) -> torch.Tensor:
+    """Rescale attention output by the learned per-head sink term."""
+    sinks = sinks.view(*([1] * (lse.ndim - 1)), -1)
+    sink_scale = torch.sigmoid(lse - sinks).unsqueeze(-1)
+    return out * sink_scale.to(out.dtype)
 
 
 class FlexAttention(Module):

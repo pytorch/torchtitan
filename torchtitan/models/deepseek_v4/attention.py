@@ -11,7 +11,11 @@ import torch
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.utils import get_spmd_backend
-from torchtitan.models.common.attention import BaseAttention, FlexAttention
+from torchtitan.models.common.attention import (
+    apply_attention_sink_rescale,
+    BaseAttention,
+    FlexAttention,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -30,18 +34,21 @@ def _assert_spmd_attention_type(tensor, *, tp):
 class DSV4FlexAttention(FlexAttention):
     """DeepSeek sparse attention core for DeepSeek-V4.
 
-    The core attends over the concatenated KV sequence ``[0, L + n_cmp + 1)``,
+    The core attends over the concatenated KV sequence ``[0, L + n_cmp)``,
     where the first ``L`` positions are the uncompressed sliding-window KV
-    (``swa_k``), the next ``n_cmp`` positions are the compressed KV
-    (``cmp_k``), and the last position is a learned attention sink token:
+    (``swa_k``) and the next ``n_cmp`` positions are the compressed KV
+    (``cmp_k``):
 
     - sliding window: fixed pattern over ``swa_k``, expressed as a
       ``mask_mod`` predicate (no indices);
     - compressed blocks: for HCA (``compress_ratio=128``) all causal blocks
       are attendable, also a fixed ``mask_mod`` pattern; for CSA
       (``compress_ratio=4``) each query attends only its top-k selected
-      compressed positions, which is the only dynamic (index-based) part;
-    - attention sink: always attendable via ``score_mod``.
+      compressed positions, which is the only dynamic (index-based) part.
+    The learned per-head attention sink is applied to the output as
+    ``out * sigmoid(lse - sink)`` -- identical to a zero-valued sink token in
+    the softmax denominator, without a sink column in the kernel or a
+    ``score_mod`` (PR #18, C. Lowman).
 
     The ``mask_mod`` is evaluated at token granularity inside flex_attention;
     the per-query-block KV block listing (``BlockMask.from_kv_blocks``) only
@@ -211,15 +218,12 @@ class DSV4FlexAttention(FlexAttention):
         if attn_sink is None:
             raise ValueError("DSV4FlexAttention requires attn_sink")
 
-        seqlen, _, head_dim = q.size()
+        seqlen = q.size(0)
         n_cmp = 0 if cmp_k is None else cmp_k.size(0)
-        sink_idx = seqlen + n_cmp
 
         kv = swa_k.unsqueeze(1)
         if cmp_k is not None:
             kv = torch.cat([kv, cmp_k.unsqueeze(1)], dim=0)
-        sink_kv = kv.new_zeros((1, 1, head_dim))
-        kv = torch.cat([kv, sink_kv], dim=0)
         kv = kv.expand(-1, q.size(1), -1)
 
         with spmd.no_typecheck():
@@ -254,26 +258,22 @@ class DSV4FlexAttention(FlexAttention):
                         bsz=1, seqlen=seqlen, n_cmp=n_cmp, device=q.device
                     )
                 )
-            sink_indices = torch.full(
-                (1, seqlen, 1), sink_idx, dtype=torch.int64, device=q.device
-            )
-            selected_indices.append(sink_indices)
             selected_indices = torch.cat(selected_indices, dim=-1)
 
             block_mask = self._build_block_mask(
                 1, seqlen, kv.size(0), selected_indices, q.device
             )
 
-            def v4_sink_score_mod(score, b, h, q_idx, kv_idx):
-                return torch.where(kv_idx == sink_idx, attn_sink[h], score)
+            def apply_sink(out_THV, lse_TH):
+                return apply_attention_sink_rescale(out_THV, lse_TH, attn_sink)
 
             return super().forward(
                 q,
                 kv,
                 kv,
                 attention_masks=block_mask,
-                score_mod=v4_sink_score_mod,
                 scale=self.softmax_scale,
+                out_transform=apply_sink,
             )
 
 
