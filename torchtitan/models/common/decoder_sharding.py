@@ -14,7 +14,10 @@ from torchtitan.models.common.dist_gemm import (
     AsyncRowParallelLinear,
     validate_async_tp_preconditions,
 )
-from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
+from torchtitan.models.common.tensor_parallel import (
+    TensorParallelFeedForward,
+    TensorParallelGQAttention,
+)
 from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
@@ -215,7 +218,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    common_gqa = attention_cfg._owner is GQAttention
+    tensor_parallel = isinstance(attention_cfg, TensorParallelGQAttention.Config)
     async_qkv = isinstance(
         attention_cfg.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
     )
@@ -227,7 +230,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     if async_qkv:
         validate_async_tp_preconditions(enable_sp=enable_sp)
 
-    if common_gqa:
+    if tensor_parallel:
         # The projection leaves own the TP redistributions. The attention
         # wrapper only validates its external input and output layouts.
         attention_cfg.sharding_config = ShardingConfig(
@@ -235,10 +238,9 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
             out_src_shardings=attn_x_layout,
         )
     else:
-        # TODO: Muse Glimmer's GQAttention subclass shares the gathered input
-        # between qkv and o_gate. Moving redistribution to both projection
-        # leaves would duplicate the all-gather. Migrate this path once shared-
-        # input communication has an explicit model boundary.
+        # Untransformed attention keeps its redistribution at the enclosing
+        # module boundary. This also covers model-specific subclasses such as
+        # Muse Glimmer, which shares the gathered input between qkv and o_gate.
         attention_cfg.sharding_config = ShardingConfig(
             in_src_shardings={
                 "x_TD": attn_x_layout,
@@ -252,7 +254,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
 
-    if common_gqa:
+    if tensor_parallel:
         # The qkv projection now owns the input all-gather. Attaching the
         # redistribution here makes it part of the qkv module boundary.
         attention_cfg.qkv_linear.sharding_config = ShardingConfig(

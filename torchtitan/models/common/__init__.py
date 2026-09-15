@@ -52,7 +52,7 @@ from .nn_modules import (
     SiLU,
 )
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
-from .tensor_parallel import TensorParallelFeedForward
+from .tensor_parallel import TensorParallelFeedForward, TensorParallelGQAttention
 
 __all__ = [
     "Conv1d",
@@ -99,6 +99,7 @@ __all__ = [
     "TransformerBlock",
     "UnaryActivationFn",
     "TensorParallelFeedForward",
+    "TensorParallelGQAttention",
     "VarlenInnerAttention",
     "VarlenMetadata",
     "compute_ffn_hidden_dim",

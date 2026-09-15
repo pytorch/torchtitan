@@ -28,7 +28,10 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
-from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
+from torchtitan.models.common.tensor_parallel import (
+    TensorParallelFeedForward,
+    TensorParallelGQAttention,
+)
 from torchtitan.protocols.module import Module
 
 
@@ -233,6 +236,7 @@ class TestTensorParallelTransform(unittest.TestCase):
         result = apply_transforms(config, [TensorParallelTransform()])
 
         for layer in result.model_spec.model.layers:
+            self.assertIsInstance(layer.attention, TensorParallelGQAttention.Config)
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
             self.assertIsInstance(layer.feed_forward, TensorParallelFeedForward.Config)
@@ -241,6 +245,7 @@ class TestTensorParallelTransform(unittest.TestCase):
             self.assertIsNone(layer.feed_forward.w13.sharding_config)
             self.assertIsNone(layer.feed_forward.w2.sharding_config)
         for layer in config.model_spec.model.layers:
+            self.assertNotIsInstance(layer.attention, TensorParallelGQAttention.Config)
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIs(type(layer.attention.wo), Linear.Config)
             self.assertNotIsInstance(
@@ -260,6 +265,14 @@ class TestTensorParallelTransform(unittest.TestCase):
             transformed.feed_forward, TensorParallelFeedForward.Config
         )
         self.assertIs(type(transformed.shared_experts), FeedForward.Config)
+
+    def test_transforms_root_attention(self):
+        config = copy.deepcopy(self._config().model_spec.model.layers[0].attention)
+
+        transformed = TensorParallelTransform().transform(config)
+
+        self.assertIsInstance(transformed, TensorParallelGQAttention.Config)
+        self.assertIsInstance(transformed.wo, RowParallelLinear.Config)
 
     def test_sync_transform_preserves_converted_projection(self):
         config = copy.deepcopy(self._config().model_spec.model.layers[0].feed_forward)

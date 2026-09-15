@@ -8,7 +8,16 @@
 
 from dataclasses import dataclass
 
+from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
+
+
+class TensorParallelGQAttention(GQAttention):
+    """Common GQA whose projection modules own the TP collectives."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(GQAttention.Config):
+        pass
 
 
 class TensorParallelFeedForward(FeedForward):
@@ -25,4 +34,4 @@ class TensorParallelFeedForward(FeedForward):
         pass
 
 
-__all__ = ["TensorParallelFeedForward"]
+__all__ = ["TensorParallelFeedForward", "TensorParallelGQAttention"]

@@ -49,7 +49,10 @@ from torchtitan.models.common.dist_gemm import (
     AsyncRowParallelLinear,
 )
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
+from torchtitan.models.common.tensor_parallel import (
+    TensorParallelFeedForward,
+    TensorParallelGQAttention,
+)
 
 DIM = 256
 N_HEADS = 8
@@ -77,6 +80,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             [AsyncTensorParallelTransform()],
         )
         for layer in model.layers:
+            self.assertIsInstance(layer.attention, TensorParallelGQAttention.Config)
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIsInstance(
                 layer.attention.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
