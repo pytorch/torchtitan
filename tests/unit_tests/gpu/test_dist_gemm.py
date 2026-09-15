@@ -35,16 +35,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.common.decoder_sharding import (
-    dense_sequence_parallel_placement,
-    set_dense_ffn_sharding,
-    set_gqa_attention_sharding,
-)
-from torchtitan.models.common.dist_gemm import (
-    AllGatherFusedQKVLinear,
-    DistGEMMFeedForward,
-    RowParallelLinear,
-)
+from torchtitan.models.common.attention import QKVLinear
+from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
+from torchtitan.models.common.dist_gemm import ColumnParallelLinear, RowParallelLinear
+from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
@@ -60,7 +55,8 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         spec = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
         for layer in spec.model.layers:
             attn = layer.attention
-            self.assertIsInstance(attn.qkv_linear, AllGatherFusedQKVLinear.Config)
+            self.assertIs(type(attn.qkv_linear), QKVLinear.Config)
+            self.assertIsInstance(attn.qkv_linear.wqkv, ColumnParallelLinear.Config)
             self.assertIsInstance(attn.wo, RowParallelLinear.Config)
 
     def test_default_tp_gemm_backend_is_untouched(self):
@@ -183,29 +179,86 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
+
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
+)
+class TestDistGEMMQKVNumerics(DTensorTestBase):
+    """The composed column-parallel projection must preserve QKV behavior."""
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
     @with_comms
-    def test_w13_tp_shards_the_matrix_row_dimension(self):
-        from torchtitan.models.common.config_utils import make_ffn_config
+    def test_matches_standard_qkv_linear(self):
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 
-        hidden_dim = 128
-        init = {"weight": torch.nn.init.zeros_}
-        ffn_config = make_ffn_config(
-            dim=DIM,
-            hidden_dim=hidden_dim,
-            w1_param_init=init,
-            w2w3_param_init=init,
-        )
-        set_dense_ffn_sharding(
-            ffn_config,
-            attn_x_layout=dense_sequence_parallel_placement(),
-            enable_sp=True,
-        )
-        feed_forward = ffn_config.build().to(self.device_type)
-        feed_forward.parallelize(self._parallel_dims())
+        R = self.world_size
+        device = self.device_type
+        dim, head_dim, num_heads, num_kv_heads = 64, 16, 8, 4
+        num_tokens = 8 * R
+        out_features = (num_heads + 2 * num_kv_heads) * head_dim
 
-        self.assertEqual(
-            feed_forward.w13.weight.shape,
-            (2, hidden_dim // self.world_size, DIM),
+        stock_config = QKVLinear.Config(
+            head_dim=head_dim,
+            n_heads=num_heads,
+            n_kv_heads=num_kv_heads,
+            wqkv=Linear.Config(in_features=dim, out_features=out_features),
+        )
+        fused_config = QKVLinear.Config(
+            head_dim=head_dim,
+            n_heads=num_heads,
+            n_kv_heads=num_kv_heads,
+            wqkv=ColumnParallelLinear.Config(
+                in_features=dim,
+                out_features=out_features,
+            ),
+        )
+        stock = stock_config.build().to(device=device, dtype=torch.bfloat16)
+        fused = fused_config.build().to(device=device, dtype=torch.bfloat16)
+
+        torch.manual_seed(0)
+        with torch.no_grad():
+            stock.wqkv.weight.copy_(torch.randn_like(stock.wqkv.weight))
+            fused.wqkv.weight = torch.nn.Parameter(
+                stock.wqkv.weight.chunk(R, 0)[self.rank].contiguous()
+            )
+
+        x_TD = torch.randn(
+            num_tokens,
+            dim,
+            device=device,
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        expected = stock(x_TD)
+        torch.stack([output.sum() for output in expected]).sum().backward()
+
+        x_local_TD = x_TD.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()
+        mesh = init_device_mesh(device, (R,), mesh_dim_names=("tp",))
+        with set_current_spmd_mesh(mesh):
+            actual = fused(x_local_TD)
+            torch.stack([output.sum() for output in actual]).sum().backward()
+
+        for actual_projection, expected_projection in zip(actual, expected):
+            torch.testing.assert_close(
+                actual_projection,
+                expected_projection.chunk(R, -2)[self.rank],
+                atol=2e-2,
+                rtol=2e-2,
+            )
+        torch.testing.assert_close(
+            x_local_TD.grad,
+            x_TD.grad.chunk(R, 0)[self.rank],
+            atol=2e-2,
+            rtol=2e-2,
+        )
+        torch.testing.assert_close(
+            fused.wqkv.weight.grad,
+            stock.wqkv.weight.grad.chunk(R, 0)[self.rank],
+            atol=2e-2,
+            rtol=2e-2,
         )
 
 
@@ -267,7 +320,7 @@ class TestDistGEMMFeedForwardNumerics(DTensorTestBase):
         # Shard the dist-GEMM module's weights: w13 colwise, w2 rowwise.
         with torch.no_grad():
             dist_gemm.w13.weight = torch.nn.Parameter(
-                standard.w13.weight.chunk(R, 1)[self.rank].contiguous()
+                standard.w13.weight.chunk(R, 0)[self.rank].contiguous()
             )
             dist_gemm.w2.weight = torch.nn.Parameter(
                 standard.w2.weight.chunk(R, 1)[self.rank].contiguous()
@@ -275,9 +328,10 @@ class TestDistGEMMFeedForwardNumerics(DTensorTestBase):
 
         # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
-        with set_current_spmd_mesh(mesh):
-            x_shard = x.chunk(R, 0)[self.rank].contiguous()
-            out_shard = dist_gemm(x_shard)
+        with use_spmd_backend("spmd_types"):
+            with set_current_spmd_mesh(mesh):
+                x_shard = x.chunk(R, 0)[self.rank].contiguous()
+                out_shard = dist_gemm(x_shard)
 
         # DistGEMM returns this rank's sequence shard of the full result.
         torch.testing.assert_close(
@@ -325,7 +379,9 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
         fused_config = make(tp_gemm_backend="dist_gemm")
         fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)
         fused = fused_config.build().to(dev)
-        self.assertIsInstance(fused, DistGEMMFeedForward)
+        self.assertIs(type(fused), FeedForward)
+        self.assertIsInstance(fused.w13, ColumnParallelLinear)
+        self.assertIsInstance(fused.w2, RowParallelLinear)
 
         with torch.no_grad():
             for w in (native.w13.weight, native.w2.weight):
@@ -335,11 +391,11 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
         x = torch.randn(num_tokens, dim, device=dev)
         ref = native(x)
 
-        # w13.weight is (2, hidden/R, dim), with this rank's colwise slice of
-        # both projections.
+        # w13.weight is (2 * hidden/R, dim), with this rank's interleaved
+        # colwise slice of both halves.
         with torch.no_grad():
             fused.w13.weight = torch.nn.Parameter(
-                native.w13.weight.chunk(R, 1)[self.rank].contiguous()
+                native.w13.weight.chunk(R, 0)[self.rank].contiguous()
             )
             fused.w2.weight = torch.nn.Parameter(
                 native.w2.weight.chunk(R, 1)[self.rank].contiguous()

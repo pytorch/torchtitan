@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import torch
 
 from torchtitan.models.common.activation import SwiGLU
-from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
+from torchtitan.models.common.dist_gemm import ColumnParallelLinear, RowParallelLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import llama3_configs
@@ -43,18 +43,18 @@ def _build_fused() -> FeedForward:
     fused.activation_fn = fused_swiglu(fused.activation_fn)
     fused = fused.build()
     with torch.no_grad():
-        fused.w13.weight.copy_(torch.randn(2, _HIDDEN, _DIM))
+        fused.w13.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
         fused.w2.weight.copy_(torch.randn(_DIM, _HIDDEN))
     return fused
 
 
 def _logical_w13(feed_forward: FeedForward) -> torch.Tensor:
-    return feed_forward.w13.weight
+    return feed_forward.w13.weight.unflatten(0, (_HIDDEN, 2))
 
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w13=Linear.Config(in_features=_DIM, out_features=_HIDDEN, num_linears=2),
+        w13=Linear.Config(in_features=_DIM, out_features=2 * _HIDDEN),
         w2=Linear.Config(in_features=_HIDDEN, out_features=_DIM),
     )
 
@@ -76,7 +76,7 @@ class TestFusedSwiGLU(unittest.TestCase):
     def test_gate_up_projection_is_linear(self):
         fused = _build_fused()
         self.assertIsInstance(fused.w13, Linear)
-        self.assertEqual(tuple(fused.w13.weight.shape), (2, _HIDDEN, _DIM))
+        self.assertEqual(tuple(fused.w13.weight.shape), (2 * _HIDDEN, _DIM))
         self.assertEqual(
             {name for name, _ in fused.named_parameters()},
             {"w13.weight", "w2.weight"},
@@ -84,9 +84,7 @@ class TestFusedSwiGLU(unittest.TestCase):
 
     def test_preserves_converted_linear_config(self):
         cfg = FeedForward.Config(
-            w13=_ConvertedLinear.Config(
-                in_features=_DIM, out_features=_HIDDEN, num_linears=2
-            ),
+            w13=_ConvertedLinear.Config(in_features=_DIM, out_features=2 * _HIDDEN),
             w2=Linear.Config(in_features=_HIDDEN, out_features=_DIM),
         )
 
@@ -101,16 +99,20 @@ class TestFusedSwiGLU(unittest.TestCase):
         sd = fused.state_dict()
         self.assertEqual(set(sd), {"w1.weight", "w2.weight", "w3.weight"})
         logical_w13 = _logical_w13(fused)
-        self.assertTrue(torch.equal(sd["w1.weight"], logical_w13[0]))
-        self.assertTrue(torch.equal(sd["w3.weight"], logical_w13[1]))
+        self.assertTrue(torch.equal(sd["w1.weight"], logical_w13[:, 0]))
+        self.assertTrue(torch.equal(sd["w3.weight"], logical_w13[:, 1]))
 
     @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_triton_checkpoint_loads_into_native(self):
         fused = _build_fused().cuda()
         native = _build_native().cuda()
         native.load_state_dict(fused.state_dict())
-        self.assertTrue(torch.equal(_logical_w13(native)[0], _logical_w13(fused)[0]))
-        self.assertTrue(torch.equal(_logical_w13(native)[1], _logical_w13(fused)[1]))
+        self.assertTrue(
+            torch.equal(_logical_w13(native)[:, 0], _logical_w13(fused)[:, 0])
+        )
+        self.assertTrue(
+            torch.equal(_logical_w13(native)[:, 1], _logical_w13(fused)[:, 1])
+        )
         self.assertTrue(torch.equal(native.w2.weight, fused.w2.weight))
         x = torch.randn(4, _DIM, device="cuda")
         self.assertTrue(torch.allclose(fused(x), native(x), atol=1e-4, rtol=1e-5))
@@ -120,8 +122,12 @@ class TestFusedSwiGLU(unittest.TestCase):
         native = _build_native().cuda()
         fused = _build_fused().cuda()
         fused.load_state_dict(native.state_dict())
-        self.assertTrue(torch.equal(_logical_w13(fused)[0], _logical_w13(native)[0]))
-        self.assertTrue(torch.equal(_logical_w13(fused)[1], _logical_w13(native)[1]))
+        self.assertTrue(
+            torch.equal(_logical_w13(fused)[:, 0], _logical_w13(native)[:, 0])
+        )
+        self.assertTrue(
+            torch.equal(_logical_w13(fused)[:, 1], _logical_w13(native)[:, 1])
+        )
         self.assertTrue(torch.equal(fused.w2.weight, native.w2.weight))
         x = torch.randn(4, _DIM, device="cuda")
         self.assertTrue(torch.allclose(fused(x), native(x), atol=1e-4, rtol=1e-5))
@@ -162,7 +168,9 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         config = _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
-        self.assertIsInstance(fused, DistGEMMFeedForward)
+        self.assertIs(type(fused), FeedForward)
+        self.assertIsInstance(fused.w13, ColumnParallelLinear)
+        self.assertIsInstance(fused.w2, RowParallelLinear)
         self.assertIsInstance(fused.activation_fn, FusedSwiGLU)
 
     def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
@@ -170,7 +178,7 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
         with torch.no_grad():
-            fused.w13.weight.copy_(torch.randn(2, _HIDDEN, _DIM))
+            fused.w13.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
         state_dict = fused.state_dict()
         self.assertEqual(set(state_dict), {"w1.weight", "w2.weight", "w3.weight"})
 

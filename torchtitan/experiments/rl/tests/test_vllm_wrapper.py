@@ -23,11 +23,8 @@ def test_state_dict_layouts_include_split_feed_forward_weights():
     config = FeedForward.Config(
         w13=Linear.Config(
             in_features=16,
-            out_features=32,
-            num_linears=2,
-            sharding_config=ShardingConfig(
-                state_shardings={"weight": dense_param_placement(tp=spmd.S(1))}
-            ),
+            out_features=64,
+            sharding_config=ShardingConfig(state_shardings={"weight": colwise}),
         ),
         w2=Linear.Config(
             in_features=32,
