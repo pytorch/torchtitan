@@ -26,7 +26,7 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import _linear_parameters_2d, Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 
@@ -253,7 +253,8 @@ try:
                     "Linear out_features or TP degree so quantization blocks "
                     "do not span projection boundaries."
                 )
-            weight, bias = _linear_parameters_2d(self.weight, self.bias)
+            weight = self.weight.flatten(0, -2)
+            bias = None if self.bias is None else self.bias.flatten()
             output = nvfp4_linear(
                 x,
                 weight,
