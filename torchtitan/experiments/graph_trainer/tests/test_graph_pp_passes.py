@@ -784,6 +784,33 @@ def _make_forward_graph_with_direct_unshard() -> fx.GraphModule:
     return _make_graph_module(graph)
 
 
+def _make_forward_graph_with_dead_bucketed_all_gather() -> fx.GraphModule:
+    gm = _make_forward_graph_with_direct_unshard()
+    graph = gm.graph
+    param = graph.find_nodes(op="placeholder")[0]
+    wait = graph.find_nodes(
+        op="call_function",
+        target=torch.ops._c10d_functional.wait_tensor.default,
+    )[0]
+    with graph.inserting_before(wait):
+        bucket = graph.call_function(
+            torch.ops.bucketing._pre_bucket_all_gather.default,
+            args=([param], 1, torch.float32, [0], 0),
+        )
+        shard = graph.call_function(
+            torch.ops.aten.slice.Tensor,
+            args=(bucket, 0, 0, 4),
+        )
+        graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+            args=(shard, 1, _FAKE_PG),
+            kwargs={"out": bucket},
+        )
+    graph.lint()
+    gm.recompile()
+    return gm
+
+
 def _make_forward_graph_without_fsdp() -> fx.GraphModule:
     graph = fx.Graph()
     param = graph.placeholder("param")
@@ -833,6 +860,35 @@ def _make_backward_graph_with_reduce_grad_epilogues() -> fx.GraphModule:
         args=(all_reduce,),
     )
     graph.output((reduce_scatter_wait, all_reduce_wait, None, input_grad))
+    return _make_graph_module(graph)
+
+
+def _make_backward_graph_with_dead_bucketed_all_gather() -> fx.GraphModule:
+    graph = fx.Graph()
+    fsdp_grad = graph.placeholder("fsdp_grad")
+    sharded_param = graph.placeholder("sharded_param")
+    bucket = graph.call_function(
+        torch.ops.bucketing._pre_bucket_all_gather.default,
+        args=([sharded_param], 1, torch.float32, [0], 0),
+    )
+    shard = graph.call_function(
+        torch.ops.aten.slice.Tensor,
+        args=(bucket, 0, 0, 4),
+    )
+    graph.call_function(
+        torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+        args=(shard, 1, _FAKE_PG),
+        kwargs={"out": bucket},
+    )
+    reduce_scatter = graph.call_function(
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        args=(fsdp_grad, "sum", 1, _FAKE_PG),
+    )
+    reduce_scatter_wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(reduce_scatter,),
+    )
+    graph.output((reduce_scatter_wait,))
     return _make_graph_module(graph)
 
 
@@ -1143,6 +1199,20 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
                 fwd_flat_input_indices=(0, 1),
             )
 
+    def test_forward_split_removes_dead_bucketed_all_gather(self) -> None:
+        gm = _make_forward_graph_with_dead_bucketed_all_gather()
+        split = split_forward_fsdp_collectives(
+            gm,
+            num_params=1,
+            fwd_input_names=("sharded_param", "x"),
+            fwd_flat_input_indices=(0, 1),
+        )
+
+        self.assertNotIn(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+            _call_targets(split.fw_no_fsdp_module),
+        )
+
     def test_backward_split_extracts_reduce_grad_epilogues(self) -> None:
         split = split_backward_fsdp_collectives(
             _make_backward_graph_with_reduce_grad_epilogues(),
@@ -1178,6 +1248,17 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         )
         self.assertEqual(len(split.bw_no_fsdp_output_names), 4)
         self.assertEqual(split.bw_no_fsdp_output_names[-1], "input_grad")
+
+    def test_backward_split_removes_dead_bucketed_all_gather(self) -> None:
+        split = split_backward_fsdp_collectives(
+            _make_backward_graph_with_dead_bucketed_all_gather(),
+            num_param_grads=1,
+        )
+
+        self.assertNotIn(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+            _call_targets(split.bw_no_fsdp_module),
+        )
 
     def test_backward_split_no_fsdp_is_noop_and_validates_grad_count(self) -> None:
         gm = _make_backward_graph_without_fsdp()

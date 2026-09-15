@@ -90,7 +90,12 @@ def _remove_dead_all_gather_launches(graph: fx.Graph) -> None:
     """Remove all-gather branches whose waits were excluded from a subgraph."""
     removable_inputs = set()
     for node in reversed(list(graph.nodes)):
-        if not is_all_gather_into_tensor(node) or node.users:
+        is_all_gather = is_all_gather_into_tensor(node) or (
+            node.op == "call_function"
+            and node.target
+            == torch.ops._c10d_functional.all_gather_into_tensor_out.default
+        )
+        if not is_all_gather or node.users:
             continue
         pending = list(node.all_input_nodes)
         while pending:
@@ -266,6 +271,8 @@ def split_forward_fsdp_collectives(
             ignore_must_be_in_fw_bw=True,
         )
 
+    _remove_dead_all_gather_launches(fw_no_fsdp_graph)
+    fw_no_fsdp_graph.lint()
     unshard_module = _make_graph_module(fw_module, unshard_graph)
     fw_no_fsdp_module = _make_graph_module(fw_module, fw_no_fsdp_graph)
     trace_graph_pp_graph("graph_pp_fsdp_unshard", unshard_module)
