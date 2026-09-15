@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from math_verify import parse, verify
@@ -17,6 +18,8 @@ from torchtitan.experiments.rl.examples.dapo_math.thread_timeout import (
 )
 from torchtitan.experiments.rl.rollout import Rollout
 from torchtitan.experiments.rl.rubrics import RewardFn
+
+logger = logging.getLogger(__name__)
 
 _BOXED_START = r"\boxed{"
 # Match the default timeout used by Math-Verify 0.9.0.
@@ -57,13 +60,17 @@ def score_math_response(response: str, ground_truth: str) -> float:
         # worker threads. Apply the same deadline with a thread-targeted timeout.
         with ThreadTimeout(_MATH_VERIFY_TIMEOUT_SECONDS):
             gold = parse(ground_truth, parsing_timeout=None)
-        with ThreadTimeout(_MATH_VERIFY_TIMEOUT_SECONDS):
             prediction = parse(prediction, parsing_timeout=None)
-        with ThreadTimeout(_MATH_VERIFY_TIMEOUT_SECONDS):
             return float(bool(gold) and verify(gold, prediction, timeout_seconds=None))
-    except (Exception, ThreadTimeoutError):
-        # Model output is untrusted; malformed LaTeX and ThreadTimeoutError both
-        # produce a zero reward rather than failing the training loop.
+    except ThreadTimeoutError:
+        logger.warning(
+            "Math-Verify timed out after %s seconds; assigning zero reward",
+            _MATH_VERIFY_TIMEOUT_SECONDS,
+        )
+        return 0.0
+    except Exception:
+        # Model output is untrusted; malformed LaTeX produces a zero reward
+        # rather than failing the training loop.
         return 0.0
 
 

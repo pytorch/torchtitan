@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -139,8 +140,9 @@ def test_math_verifier_works_in_rollout_worker_thread() -> None:
         assert result.result() == 1.0
 
 
-def test_math_verifier_times_out_in_rollout_worker_thread(monkeypatch) -> None:
+def test_math_verifier_times_out_in_rollout_worker_thread(monkeypatch, caplog) -> None:
     verify_called = False
+    caplog.set_level(logging.WARNING, logger=math_rubric.__name__)
 
     def busy_verify(*args, **kwargs) -> bool:
         nonlocal verify_called
@@ -160,6 +162,7 @@ def test_math_verifier_times_out_in_rollout_worker_thread(monkeypatch) -> None:
         assert result.result(timeout=1) == 0.0
 
     assert verify_called
+    assert "Math-Verify timed out after 0.01 seconds" in caplog.text
 
 
 def test_reward_handles_equivalent_latex_and_units() -> None:
