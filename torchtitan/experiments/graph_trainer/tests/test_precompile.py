@@ -111,6 +111,7 @@ class _StubParallelDims:
 class _StubModelConfig:
     attention_backend: str = "sdpa"
     norm_eps: float = 1e-5
+    _debug_force_load_balance: bool = False
 
 
 def _make_stub_model(params=None, buffers=None):
@@ -362,9 +363,16 @@ class TestConfigFingerprint(unittest.TestCase):
             dims,
             model_config=_StubModelConfig(norm_eps=1e-6),
         )
+        force_load_balance = compute_config_fingerprint(
+            model,
+            compile_config,
+            dims,
+            model_config=_StubModelConfig(_debug_force_load_balance=True),
+        )
 
         self.assertNotEqual(sdpa, flex_attention)
         self.assertNotEqual(sdpa, different_norm)
+        self.assertNotEqual(sdpa, force_load_balance)
 
     def test_parallelism_config_sensitivity(self):
         from torchtitan.experiments.graph_trainer.precompile import (

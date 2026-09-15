@@ -57,7 +57,6 @@ def _canonical_config_value(value: Any) -> Any:
             "fields": {
                 field.name: _canonical_config_value(getattr(value, field.name))
                 for field in dataclasses.fields(value)
-                if not field.name.startswith("_")
             },
         }
     if isinstance(value, enum.Enum):
