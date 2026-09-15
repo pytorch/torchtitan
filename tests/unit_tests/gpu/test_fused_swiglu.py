@@ -20,7 +20,10 @@ from dataclasses import dataclass
 import torch
 
 from torchtitan.models.common.activation import SwiGLU
-from torchtitan.models.common.dist_gemm import ColumnParallelLinear, RowParallelLinear
+from torchtitan.models.common.dist_gemm import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import llama3_configs
@@ -169,8 +172,8 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
         self.assertIs(type(fused), FeedForward)
-        self.assertIsInstance(fused.w13, ColumnParallelLinear)
-        self.assertIsInstance(fused.w2, RowParallelLinear)
+        self.assertIsInstance(fused.w13, AsyncColumnParallelLinear)
+        self.assertIsInstance(fused.w2, AsyncRowParallelLinear)
         self.assertIsInstance(fused.activation_fn, FusedSwiGLU)
 
     def test_overlapping_variant_keeps_w13_checkpoint_layout(self):

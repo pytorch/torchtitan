@@ -6,11 +6,11 @@
 
 """Model components that fold the TP collectives into their GEMMs.
 
-:class:`ColumnParallelLinear` and :class:`RowParallelLinear` are drop-in
+:class:`AsyncColumnParallelLinear` and :class:`AsyncRowParallelLinear` are drop-in
 replacements for stock linear projections. They move the TP collective into
 the GEMM over the autograd Functions in ``torchtitan/distributed/linear.py``.
-``RowParallelLinear`` serves both attention's ``wo`` and the FFN's ``w2``;
-``ColumnParallelLinear`` serves both attention's ``wqkv`` and the FFN's
+``AsyncRowParallelLinear`` serves both attention's ``wo`` and the FFN's ``w2``;
+``AsyncColumnParallelLinear`` serves both attention's ``wqkv`` and the FFN's
 ``w13``. Nothing about the primitives is attention-specific, and MoE
 projections could use the same pair.
 
@@ -102,7 +102,7 @@ def validate_dist_gemm_preconditions(*, enable_sp: bool) -> None:
         )
 
 
-class ColumnParallelLinear(Linear):
+class AsyncColumnParallelLinear(Linear):
     """Column-parallel linear that all-gathers its TP sequence shard."""
 
     @dataclass(kw_only=True, slots=True)
@@ -124,7 +124,7 @@ class ColumnParallelLinear(Linear):
         )
 
 
-class RowParallelLinear(Linear):
+class AsyncRowParallelLinear(Linear):
     """Attention output projection: matmul fused with the TP reduce-scatter.
 
     Named for the role it fills rather than the collective it performs, so it does
@@ -156,6 +156,6 @@ class RowParallelLinear(Linear):
 
 __all__ = [
     "validate_dist_gemm_preconditions",
-    "ColumnParallelLinear",
-    "RowParallelLinear",
+    "AsyncColumnParallelLinear",
+    "AsyncRowParallelLinear",
 ]
