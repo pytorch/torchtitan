@@ -198,7 +198,7 @@ def _linear_config(in_features: int, out_features: int) -> Linear.Config:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w13=_linear_config(4, 16),
+        w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=_linear_config(8, 4),
     )
 

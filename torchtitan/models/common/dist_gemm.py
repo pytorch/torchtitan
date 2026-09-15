@@ -88,13 +88,19 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
         if tp_group is None:
             _warn_once_no_tp_overlap()
             return super().forward(input)
-        return AsyncAllGatherLinear.apply(
+
+        weight = self.weight.flatten(0, -2)
+        bias = None if self.bias is None else self.bias.flatten()
+        output = AsyncAllGatherLinear.apply(
             input,
-            self.weight,
-            self.bias,
+            weight,
+            bias,
             tp_group,
             tp_group.group_name,
         )
+        if self.num_linears == 1:
+            return output
+        return output.unflatten(-1, self.weight.shape[:-1])
 
 
 class AsyncRowParallelLinear(RowParallelLinear):

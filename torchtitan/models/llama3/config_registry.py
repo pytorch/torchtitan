@@ -164,7 +164,7 @@ def llama3_debugmodel_mxfp8(
     config = llama3_debugmodel(seq_len=seq_len)
     config.compile = CompileConfig(enable=True, components=["model"])
     config.model_spec = model_registry(
-        "debugmodel",
+        "debugmodel_mxfp8",
         seq_len=seq_len,
         converters=[
             llama3_mxfp8_linear_converter_config(model_compile_enabled=True),

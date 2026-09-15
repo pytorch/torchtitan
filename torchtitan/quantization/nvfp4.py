@@ -93,6 +93,7 @@ try:
             """Drop-in replacement for Linear.Config that builds NVFP4Linear."""
 
             def __post_init__(self) -> None:
+                Linear.Config.__post_init__(self)
                 # NVFP4's Triton kernels need every GEMM dim to be a multiple of
                 # 128. in_features / out_features are known at config-build time
                 # (the TP degree is not), so reject the model-dim violations up
@@ -118,7 +119,11 @@ try:
                 if instance._sharding_config is not None:
                     sc = instance._sharding_config
                     weight_tp = sc.state_shardings["weight"].local_type.get(TP)
-                    rowwise = isinstance(weight_tp, spmd.Shard) and weight_tp.dim == 1
+                    rowwise = (
+                        self.num_linears == 1
+                        and isinstance(weight_tp, spmd.Shard)
+                        and weight_tp.dim == 1
+                    )
                     if rowwise:
                         in_layout = dense_activation_placement(
                             tp=spmd.S(-1), cp=spmd.S(0)
@@ -153,9 +158,25 @@ try:
             TorchAONVFP4Linear.__init__(
                 self,
                 config.in_features,
-                config.out_features,
+                config.num_linears * config.out_features,
                 bias=config.bias,
             )
+            self.out_features = config.out_features
+            self.num_linears = config.num_linears
+            if config.num_linears > 1:
+                self.weight = torch.nn.Parameter(
+                    self.weight.detach().unflatten(
+                        0, (config.num_linears, config.out_features)
+                    ),
+                    requires_grad=self.weight.requires_grad,
+                )
+                if self.bias is not None:
+                    self.bias = torch.nn.Parameter(
+                        self.bias.detach().unflatten(
+                            0, (config.num_linears, config.out_features)
+                        ),
+                        requires_grad=self.bias.requires_grad,
+                    )
             # TorchAO created the runtime buffers on the (meta) build device.
             # Re-register them as None so ``_distribute_states`` skips them and
             # ``_init_self_buffers`` materializes them on the real device, per
@@ -225,13 +246,34 @@ try:
             self._refresh_rht_sign_vector_tuple()
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            return nvfp4_linear(
+            local_out_features = self.weight.shape[-2]
+            if local_out_features % _NVFP4_BLOCK:
+                raise ValueError(
+                    "NVFP4 requires local out_features divisible by "
+                    f"{_NVFP4_BLOCK}; got {local_out_features}. Adjust the "
+                    "Linear out_features or TP degree so quantization blocks "
+                    "do not span projection boundaries."
+                )
+            output = nvfp4_linear(
                 x,
-                self.weight,
-                self.bias,
+                (self.weight if self.num_linears == 1 else self.weight.flatten(0, -2)),
+                (
+                    self.bias
+                    if self.bias is None or self.num_linears == 1
+                    else self.bias.flatten()
+                ),
                 sr_seed=self._sr_seed,
                 sign_vector=self.rht_sign_vector,
             )
+            if self.num_linears == 1:
+                return output
+            return output.unflatten(-1, self.weight.shape[:-1])
+
+        def reset_parameters(self) -> None:
+            if self.weight.ndim == 2:
+                TorchAONVFP4Linear.reset_parameters(self)
+            else:
+                Linear.reset_parameters(self)
 
 except ImportError:
     NVFP4Linear = None

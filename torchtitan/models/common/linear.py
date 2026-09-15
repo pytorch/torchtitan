@@ -8,11 +8,12 @@
 
 ``Linear`` uses diamond inheritance (``nn.Linear`` + ``Module``) so that:
 - The module hierarchy stays flat (no extra wrapper layer).
-- All ``nn.Linear`` logic (forward, state_dict, etc.) is reused as-is.
+- Standard ``nn.Linear`` parameter and state-dict behavior is retained.
 - The ``Module`` protocol is satisfied and ``build()`` is inherited
   from ``Configurable.Config``.
 """
 
+import math
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -30,20 +31,86 @@ from torchtitan.protocols.module import Module
 
 
 class Linear(nn.Linear, Module):
-    """Configurable nn.Linear."""
+    """Configurable linear with optional stacked output projections.
+
+    With ``num_linears == 1``, the parameter and output use the standard
+    ``[out_features, in_features]`` and ``[..., out_features]`` shapes. With
+    ``num_linears > 1``, they use ``[num_linears, out_features, in_features]``
+    and ``[..., num_linears, out_features]``. The stacked parameter is flattened
+    without a copy for the GEMM, so each projection remains contiguous for
+    blockwise weight quantization.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         in_features: int
         out_features: int
+        num_linears: int = 1
         bias: bool = False
+
+        def __post_init__(self) -> None:
+            if self.in_features <= 0:
+                raise ValueError(
+                    f"in_features must be positive, got {self.in_features}"
+                )
+            if self.out_features <= 0:
+                raise ValueError(
+                    f"out_features must be positive, got {self.out_features}"
+                )
+            if self.num_linears <= 0:
+                raise ValueError(
+                    f"num_linears must be positive, got {self.num_linears}"
+                )
 
     def __init__(self, config: Config):
         super().__init__(
             config.in_features,
-            config.out_features,
+            config.num_linears * config.out_features,
             bias=config.bias,
         )
+        self.out_features = config.out_features
+        self.num_linears = config.num_linears
+        if config.num_linears > 1:
+            self.weight = nn.Parameter(
+                self.weight.detach().unflatten(
+                    0, (config.num_linears, config.out_features)
+                ),
+                requires_grad=self.weight.requires_grad,
+            )
+        if config.num_linears > 1 and self.bias is not None:
+            self.bias = nn.Parameter(
+                self.bias.detach().unflatten(
+                    0, (config.num_linears, config.out_features)
+                ),
+                requires_grad=self.bias.requires_grad,
+            )
+
+    def reset_parameters(self) -> None:
+        if self.weight.ndim == 2:
+            nn.Linear.reset_parameters(self)
+            return
+        # init_states() calls this after meta materialization, when a stacked
+        # weight is already 3D. Flatten first so fan-in remains in_features;
+        # PyTorch's generic 3D fan calculation would incorrectly use
+        # out_features * in_features.
+        nn.init.kaiming_uniform_(self.weight.flatten(0, -2), a=math.sqrt(5))
+        if self.bias is not None:
+            bound = 1 / math.sqrt(self.in_features)
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if self.num_linears == 1:
+            return F.linear(input, self.weight, self.bias)
+        weight = self.weight.flatten(0, -2)
+        bias = None if self.bias is None else self.bias.flatten()
+        output = F.linear(input, weight, bias)
+        return output.unflatten(-1, self.weight.shape[:-1])
+
+    def extra_repr(self) -> str:
+        result = nn.Linear.extra_repr(self)
+        if self.num_linears > 1:
+            result += f", num_linears={self.num_linears}"
+        return result
 
 
 class CastLinear(Linear):
@@ -164,10 +231,14 @@ class RouterGateLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output_TE = _RouterGateLinearFunction.apply(input, self.weight)
+        weight = self.weight if self.num_linears == 1 else self.weight.flatten(0, -2)
+        output_TE = _RouterGateLinearFunction.apply(input, weight)
         if self.bias is not None:
-            output_TE = output_TE + self.bias.float()
-        return output_TE
+            bias = self.bias if self.num_linears == 1 else self.bias.flatten()
+            output_TE = output_TE + bias.float()
+        if self.num_linears == 1:
+            return output_TE
+        return output_TE.unflatten(-1, self.weight.shape[:-1])
 
 
 class PartialBiasRowwiseLinear(Linear):
@@ -194,7 +265,10 @@ class PartialBiasRowwiseLinear(Linear):
                 dst=spmd.P,
                 expert_mode=True,
             )
-        return F.linear(input, self.weight, bias)
+        if self.num_linears == 1:
+            return F.linear(input, self.weight, bias)
+        output = F.linear(input, self.weight.flatten(0, -2), bias.flatten())
+        return output.unflatten(-1, self.weight.shape[:-1])
 
 
 __all__ = [

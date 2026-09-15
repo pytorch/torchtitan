@@ -6,12 +6,17 @@
 
 from dataclasses import dataclass
 
+import torch
+
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 
 try:
-    from torchao.float8.float8_linear import Float8Linear as TorchAOFloat8Linear
+    from torchao.float8.float8_linear import (
+        Float8Linear as TorchAOFloat8Linear,
+        matmul_with_hp_or_float8_args,
+    )
 
     class Float8Linear(TorchAOFloat8Linear, Module):
         """Inherits from Module (not Linear) to satisfy the Module protocol
@@ -30,10 +35,47 @@ try:
             TorchAOFloat8Linear.__init__(
                 self,
                 config.in_features,
-                config.out_features,
+                config.num_linears * config.out_features,
                 bias=config.bias,
                 config=config._torchao_config,
             )
+            self.out_features = config.out_features
+            self.num_linears = config.num_linears
+            if config.num_linears > 1:
+                self.weight = torch.nn.Parameter(
+                    self.weight.detach().unflatten(
+                        0, (config.num_linears, config.out_features)
+                    ),
+                    requires_grad=self.weight.requires_grad,
+                )
+                if self.bias is not None:
+                    self.bias = torch.nn.Parameter(
+                        self.bias.detach().unflatten(
+                            0, (config.num_linears, config.out_features)
+                        ),
+                        requires_grad=self.bias.requires_grad,
+                    )
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            if self.num_linears == 1:
+                return TorchAOFloat8Linear.forward(self, input)
+            if torch.is_autocast_enabled():
+                input = input.to(torch.get_autocast_gpu_dtype())
+            output = matmul_with_hp_or_float8_args.apply(
+                input,
+                self.weight.flatten(0, -2).t(),
+                self.linear_mm_config,
+                self.config,
+            )
+            if self.bias is not None:
+                output = output + self.bias.flatten().to(output.dtype)
+            return output.unflatten(-1, self.weight.shape[:-1])
+
+        def reset_parameters(self) -> None:
+            if self.weight.ndim == 2:
+                TorchAOFloat8Linear.reset_parameters(self)
+            else:
+                Linear.reset_parameters(self)
 
 except ImportError:
     Float8Linear = None
