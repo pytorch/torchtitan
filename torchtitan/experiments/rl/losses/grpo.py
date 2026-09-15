@@ -9,11 +9,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated
 
-import tyro
-
-from torchtitan.components.loss import BaseLoss
 from torchtitan.experiments.rl.losses.dapo import DAPOLoss
 
 
@@ -25,13 +21,9 @@ class GRPOLoss(DAPOLoss):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(DAPOLoss.Config):
         clip_eps: float = 0.2
         """Symmetric PPO clip: the ratio is clamped to ``[1 - clip_eps, 1 + clip_eps]``."""
-
-        global_vocab_size: Annotated[int | None, tyro.conf.Suppress] = None
-        """Full vocabulary size from the model spec, set when building RL configs.
-        Leave unset for batch-invariant mode to retain the full-gather path."""
 
     def __init__(self, config: Config, **kwargs) -> None:
         super().__init__(

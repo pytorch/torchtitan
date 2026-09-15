@@ -19,6 +19,7 @@ import torch.nn.functional as F
 
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 # PyTorch's default ignore index for cross-entropy loss
 logger = logging.getLogger(__name__)
@@ -384,9 +385,12 @@ def compute_logprobs(
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
-    ``[T]``. When ``global_vocab_size`` is provided for vocab-parallel logits,
-    both values are computed from local shards and small per-token reductions;
-    otherwise the existing full-vocab gather path is retained.
+    ``[T]``. In a TP SPMD context, ``global_vocab_size`` selects the
+    vocab-parallel path: it must be the full vocabulary size while ``logits``
+    holds this rank's local vocab shard. Without it, logits are gathered before
+    the replicated computation. Batch-invariant mode always uses that gather
+    path so trainer and vLLM generator perform the same operation sequence,
+    even if a recipe mistakenly supplies ``global_vocab_size``.
     Entropy is a metric only, so it is computed under ``no_grad``: it never
     contributes gradient and must not build an autograd graph over the logits
     softmax.
@@ -395,7 +399,16 @@ def compute_logprobs(
     ``(logprobs, entropy)``.
     """
     tp_size = spmd_mesh_size("tp")
-    if tp_size > 1 and global_vocab_size is not None:
+    batch_invariant = is_in_batch_invariant_mode()
+    if tp_size > 1 and batch_invariant and global_vocab_size is not None:
+        logger.warning(
+            "Ignoring global_vocab_size in batch-invariant mode; using the "
+            "full-vocabulary gather path for trainer/generator parity"
+        )
+    use_vocab_parallel = (
+        tp_size > 1 and global_vocab_size is not None and not batch_invariant
+    )
+    if use_vocab_parallel:
         logprobs = -cross_entropy_loss(
             logits,
             labels,

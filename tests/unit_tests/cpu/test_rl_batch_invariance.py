@@ -10,8 +10,44 @@ from pathlib import Path
 from types import ModuleType
 
 import torch
+import torch.nn.functional as F
 
 import torchtitan.components.loss as loss_module
+
+
+def test_batch_invariance_ignores_vocab_parallel_config(monkeypatch):
+    full_logits = torch.tensor([[2.0, -1.0, 0.5, 3.0], [-2.0, 0.25, 1.0, 0.0]])
+    local_logits = full_logits[:, :2]
+    labels = torch.tensor([3, 1])
+    calls = []
+    warnings = []
+
+    monkeypatch.setattr(loss_module, "spmd_mesh_size", lambda _dim: 2)
+    monkeypatch.setattr(loss_module, "is_in_batch_invariant_mode", lambda: True)
+
+    def gather(logits, *args, **kwargs):
+        calls.append((logits, args, kwargs))
+        return full_logits
+
+    monkeypatch.setattr(loss_module.spmd, "redistribute", gather)
+    monkeypatch.setattr(loss_module.logger, "warning", warnings.append)
+
+    logprobs, entropy = loss_module.compute_logprobs(
+        local_logits,
+        labels,
+        return_entropy=True,
+        global_vocab_size=full_logits.shape[-1],
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0] is local_logits
+    assert len(warnings) == 1
+    expected_logprobs = -F.cross_entropy(full_logits, labels, reduction="none")
+    expected_entropy = torch.logsumexp(full_logits, dim=-1) - (
+        torch.softmax(full_logits, dim=-1) * full_logits
+    ).sum(dim=-1)
+    torch.testing.assert_close(logprobs, expected_logprobs)
+    torch.testing.assert_close(entropy, expected_entropy)
 
 
 def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
