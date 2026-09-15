@@ -970,13 +970,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                     accumulated_loss.add_(detached_loss)
 
         with sl.log_trace_span("optim"):
-            grad_norm = dist_utils.clip_grad_norm_(
-                [p for m in self.model_parts for p in m.parameters()],
-                self.config.training.max_norm,
-                foreach=True,
-                pp_mesh=parallel_dims.get_optional_mesh("pp"),
-                ep_enabled=parallel_dims.ep_enabled,
-            )
+            grad_norm = self._clip_grad_norm()
             # Only the last PP stage owns the loss. First combine its DP/CP
             # replicas, then propagate the result across PP. TP replicas have
             # identical loss values, and grad_norm is already world-reduced by
@@ -1059,6 +1053,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             global_max_loss,
             float(grad_norm.item()),
             extra_metrics=extra_metrics,
+        )
+
+    def _clip_grad_norm(self) -> torch.Tensor:
+        return dist_utils.clip_grad_norm_(
+            [p for m in self.model_parts for p in m.parameters()],
+            self.config.training.max_norm,
+            foreach=True,
+            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
+            ep_enabled=self.parallel_dims.ep_enabled,
         )
 
     @record
