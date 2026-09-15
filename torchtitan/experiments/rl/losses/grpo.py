@@ -30,7 +30,8 @@ class GRPOLoss(DAPOLoss):
         """Symmetric PPO clip: the ratio is clamped to ``[1 - clip_eps, 1 + clip_eps]``."""
 
         global_vocab_size: Annotated[int | None, tyro.conf.Suppress] = None
-        """Full vocabulary size injected by the trainer for TP policy statistics."""
+        """Full vocabulary size from the model spec, set when building RL configs.
+        Leave unset for batch-invariant mode to retain the full-gather path."""
 
     def __init__(self, config: Config, **kwargs) -> None:
         super().__init__(

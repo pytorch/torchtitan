@@ -47,7 +47,8 @@ class DAPOLoss(BaseLoss):
         than ``ratio_clip_low`` for DAPO "clip-higher" (e.g. 0.28)."""
 
         global_vocab_size: Annotated[int | None, tyro.conf.Suppress] = None
-        """Full vocabulary size injected by the trainer for TP policy statistics."""
+        """Full vocabulary size from the model spec, set when building RL configs.
+        Leave unset for batch-invariant mode to retain the full-gather path."""
 
     def __init__(
         self,
