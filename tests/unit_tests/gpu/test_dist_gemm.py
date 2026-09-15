@@ -133,14 +133,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             enable_sp=True,
         )
 
-        self.assertIsNone(stock_layer.attention.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(stock_layer.attention.sharding_config.in_dst_shardings)
         self.assertIsNone(stock_layer.attention.sharding_config.out_dst_shardings)
         self.assertIsNone(async_layer.attention.sharding_config.in_dst_shardings)
         self.assertIsNone(async_layer.attention.sharding_config.out_dst_shardings)
 
-        self.assertIsNotNone(
-            stock_layer.attention.qkv_linear.sharding_config.in_dst_shardings
-        )
+        self.assertIsNone(stock_layer.attention.qkv_linear.sharding_config)
         self.assertIsNone(
             async_layer.attention.qkv_linear.sharding_config.in_dst_shardings
         )
@@ -178,6 +176,21 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         )
         self.assertIsNone(layer.feed_forward.sharding_config.in_dst_shardings)
         self.assertIsNotNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
+
+    def test_qkv_converter_is_rejected(self):
+        """Async QKV does not support a converter-defined projection."""
+        model = self._model_config()
+        qkv = model.layers[0].attention.qkv_linear
+        qkv.wqkv = (
+            LoRAConverter.Config(
+                rank=2,
+                alpha=4,
+            )
+            .build()
+            .convert(qkv.wqkv)
+        )
+        with self.assertRaisesRegex(ValueError, "converted QKV projections"):
+            transform_model_config_(model, [AsyncTensorParallelTransform()])
 
 
 class TestAsyncTensorParallelSharding(DTensorTestBase):
@@ -229,21 +242,6 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         self.assertIsNotNone(attn.wo._sharding_config.out_src_shardings)
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
-
-    def test_qkv_converter_is_rejected(self):
-        """Async QKV does not support a converter-defined projection."""
-        model = TestAsyncTensorParallelConfig._model_config()
-        model = (
-            LoRAConverter.Config(
-                rank=2,
-                alpha=4,
-                target_modules=["wqkv"],
-            )
-            .build()
-            .convert(model)
-        )
-        with self.assertRaisesRegex(ValueError, "converted QKV projections"):
-            transform_model_config_(model, [AsyncTensorParallelTransform()])
 
 
 @unittest.skipUnless(
