@@ -69,9 +69,9 @@ def build_dist_muon(
     target tensor dimension 0 with ``block_size=R``; the leading dimension
     must be nonzero and divisible by ``R``. Each consecutive ``R`` rows forms
     one independent ``[R, C]`` matrix for local Muon compute. A native
-    batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
-    complete matrices. A single 2D matrix without ``BlockShard`` uses
-    whole-matrix compute such as ``Owned``.
+    batch-first 3D ``[M, R, C]`` parameter can use ``Shard(0)`` to distribute
+    complete matrices or ``Owned`` for whole-batch compute. A single 2D matrix
+    without ``BlockShard`` uses whole-matrix compute such as ``Owned``.
     """
     return DistMuon(
         _normalize_param_groups(params),
@@ -1044,10 +1044,11 @@ def _estimate_muon_compute_cost(
     matrix_shape: torch.Size,
     ns_steps: int,
 ) -> int:
-    rows, columns = matrix_shape
+    num_matrices = math.prod(matrix_shape[:-2])
+    rows, columns = matrix_shape[-2:]
     short_dim, long_dim = sorted((rows, columns))
     # Each NS step has two s^2 * l matmuls and one s^3 matmul.
-    return ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
+    return num_matrices * ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
 
 
 def _balance_loads_across_partitions(
@@ -1691,12 +1692,6 @@ def _resolve_storage_to_compute_transition(
 
     resolved_compute_layout_signature = tuple(resolved_target_signature)
     compute_shard_dims = [*resolved_shard_dims, *declared_shard_dims]
-    if applicable_owned_storage_mesh_axes and (
-        len(global_compute_shape) != 2 or param.ndim != 2
-    ):
-        raise ValueError(
-            f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
-        )
     if active_owned_storage_mesh_axes:
         compute_sharding: _ResolvedComputeSharding = Owned()
     elif compute_shard_dims:
