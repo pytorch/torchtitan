@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import _linear_parameters_2d, Linear
 from torchtitan.protocols.module import Module
 
 
@@ -59,14 +59,15 @@ try:
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             if torch.is_autocast_enabled():
                 input = input.to(torch.get_autocast_gpu_dtype())
+            weight, bias = _linear_parameters_2d(self.weight, self.bias)
             output = matmul_with_hp_or_float8_args.apply(
                 input,
-                self.weight.flatten(0, -2).t(),
+                weight.t(),
                 self.linear_mm_config,
                 self.config,
             )
-            if self.bias is not None:
-                output = output + self.bias.flatten().to(output.dtype)
+            if bias is not None:
+                output = output + bias.to(output.dtype)
             return output.unflatten(-1, self.weight.shape[:-1])
 
         def reset_parameters(self) -> None:

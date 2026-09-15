@@ -17,7 +17,11 @@ import torch.distributed as dist
 
 from torchtitan.distributed.linear import AsyncAllGatherLinear, AsyncLinearReduceScatter
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
+from torchtitan.models.common.linear import (
+    _linear_parameters_2d,
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -89,8 +93,7 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
-        weight = self.weight.flatten(0, -2)
-        bias = None if self.bias is None else self.bias.flatten()
+        weight, bias = _linear_parameters_2d(self.weight, self.bias)
         output = AsyncAllGatherLinear.apply(
             input,
             weight,

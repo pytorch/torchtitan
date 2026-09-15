@@ -317,7 +317,6 @@ class MXFP8Linear(Linear):
         """
 
         def __post_init__(self) -> None:
-            Linear.Config.__post_init__(self)
             if (
                 self.input_activation_format_for_backward
                 not in _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD
