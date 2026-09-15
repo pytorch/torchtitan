@@ -11,6 +11,7 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
@@ -401,6 +402,191 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         )
         compute_ready_layout = compute_ready_optimizer._parameter_compute_layouts[0]
         self.assertTrue(compute_ready_layout.storage_is_compute_ready)
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistMuonTensorParallel(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_owned_rejects_omitted_sharded_axis(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_shard", "tp"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        parameter = torch.nn.Parameter(
+            distribute_tensor(
+                torch.ones(4, 4, device=device),
+                mesh,
+                (Shard(0), Shard(1)),
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "non-replicated axes:.*tp"):
+            build_dist_muon(
+                [{"params": [parameter], "param_names": ["matrix"]}],
+                compute_sharding_by_fqn={
+                    "matrix": ComputeLayout(
+                        shardings_by_mesh_axis={"dp_shard": Owned()}
+                    )
+                },
+                bucket_configs=(BucketConfig(patterns=("matrix",)),),
+            )
+
+    @with_comms
+    def test_dp_tp_storage_matches_unsharded_update(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_shard", "tp"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        lr = 0.03
+        weight_decay = 0.2
+        matrix_rows = 2
+
+        values = {
+            "layers.0.per_head": (
+                torch.arange(24, device=device).reshape(8, 3).float().div_(13)
+            ),
+            "layers.0.whole": (
+                torch.arange(16, device=device).reshape(4, 4).float().div_(11)
+            ),
+            "layers.0.experts": (
+                torch.arange(24, device=device).reshape(4, 3, 2).float().div_(7)
+            ),
+        }
+        placements = {
+            "layers.0.per_head": (
+                _StridedShard(0, split_factor=mesh["tp"].size()),
+                Shard(0),
+            ),
+            "layers.0.whole": (Shard(0), Shard(1)),
+            "layers.0.experts": (Shard(0), Shard(1)),
+        }
+        parameters = {
+            fqn: torch.nn.Parameter(
+                distribute_tensor(value.clone(), mesh, placements[fqn])
+            )
+            for fqn, value in values.items()
+        }
+        gradients = {
+            fqn: value.clone().mul_(0.37).add_(0.2).sin_()
+            for fqn, value in values.items()
+        }
+        for fqn, parameter in parameters.items():
+            parameter.grad = distribute_tensor(
+                gradients[fqn].clone(),
+                mesh,
+                placements[fqn],
+            )
+
+        optimizer = build_dist_muon(
+            [
+                {
+                    "params": list(parameters.values()),
+                    "param_names": list(parameters),
+                }
+            ],
+            compute_sharding_by_fqn={
+                "layers.0.per_head": ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": BlockShard(0, matrix_rows),
+                        "tp": BlockShard(0, matrix_rows),
+                    }
+                ),
+                "layers.0.whole": ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": Owned(),
+                        "tp": Owned(),
+                    }
+                ),
+                "layers.0.experts": ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": Shard(0),
+                        "tp": Shard(0),
+                    }
+                ),
+            },
+            bucket_configs=[
+                BucketConfig(patterns=("layers.0.per_head", "layers.0.whole")),
+                BucketConfig(patterns=("layers.0.experts",)),
+            ],
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.0,
+            nesterov=False,
+            ns_steps=2,
+        )
+
+        captured_compute_by_fqn: dict[str, torch.Tensor] = {}
+
+        def matrix_dependent_direction(tensor, matrix_shape):
+            matrices = tensor.reshape(-1, *matrix_shape)
+            return matrices.cumsum(dim=-2).cumsum(dim=-1).reshape_as(tensor)
+
+        def make_direction(compute_layout, compute):
+            matrix_shape = tuple(compute_layout.global_compute_shape[-2:])
+            captured_compute_by_fqn[compute_layout.fqn] = compute.detach().clone()
+            compute.copy_(matrix_dependent_direction(compute, matrix_shape))
+
+        with mock.patch.object(
+            optimizer,
+            "_compute_update",
+            side_effect=make_direction,
+        ):
+            optimizer.step()
+
+        compute_shapes = {
+            "layers.0.per_head": (matrix_rows, values["layers.0.per_head"].shape[1]),
+            "layers.0.whole": values["layers.0.whole"].shape,
+            "layers.0.experts": values["layers.0.experts"].shape[1:],
+        }
+        for fqn, matrix_shape in compute_shapes.items():
+            expected_matrices = gradients[fqn].reshape(-1, *matrix_shape)
+            matrix_match_counts = torch.zeros(
+                expected_matrices.shape[0],
+                dtype=torch.int64,
+                device=device,
+            )
+            captured_compute = captured_compute_by_fqn.get(fqn)
+            if captured_compute is not None and captured_compute.numel():
+                captured_matrices = captured_compute.reshape(-1, *matrix_shape)
+                matches = (
+                    captured_matrices.flatten(1)[:, None]
+                    == expected_matrices.flatten(1)[None]
+                ).all(dim=-1)
+                self.assertTrue(matches.any(dim=1).all())
+                matrix_match_counts.add_(matches.sum(dim=0))
+            dist.all_reduce(matrix_match_counts)
+            torch.testing.assert_close(
+                matrix_match_counts,
+                torch.ones_like(matrix_match_counts),
+            )
+
+        for fqn, parameter in parameters.items():
+            expected = values[fqn].mul(1 - lr * weight_decay)
+            expected_direction = matrix_dependent_direction(
+                gradients[fqn], compute_shapes[fqn]
+            )
+            expected.add_(
+                expected_direction,
+                alpha=-_adjust_muon_learning_rate(lr, None, compute_shapes[fqn]),
+            )
+            torch.testing.assert_close(
+                parameter.full_tensor(),
+                expected,
+                rtol=0,
+                atol=0,
+            )
 
 
 if __name__ == "__main__":

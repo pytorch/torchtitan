@@ -33,9 +33,13 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   transitions.
 
 Storage placements describe persistent ownership only; they do not define
-Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
-most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
-`Replicate`; every other non-unit storage mesh axis must be replicated.
+Muon matrix boundaries. Flat matrix-batch compute may use `BlockShard` on one
+or more non-unit mesh axes. FlexShard combines those axes into one optimizer
+transport group, routes complete matrices across the group, and restores the
+original DTensor storage layout after the update. This supports combined DP
+and TP storage, including the strided shards produced when TP and FSDP shard
+the same tensor dimension. Non-transport mesh axes retain their storage
+placement.
 
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,
