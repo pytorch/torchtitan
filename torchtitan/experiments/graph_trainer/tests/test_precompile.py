@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
@@ -297,6 +298,36 @@ class TestConfigFingerprint(unittest.TestCase):
                 dims,
             ),
         )
+
+    def test_loss_config_sensitivity(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        model = _make_stub_model()
+        compile_config = _StubCompileConfig()
+        dims = _StubParallelDims()
+        cross_entropy = compute_config_fingerprint(
+            model,
+            compile_config,
+            dims,
+            loss_config=CrossEntropyLoss.Config(global_vocab_size=2048),
+        )
+        chunked = compute_config_fingerprint(
+            model,
+            compile_config,
+            dims,
+            loss_config=ChunkedLossWrapper.Config(num_chunks=4),
+        )
+        different_chunks = compute_config_fingerprint(
+            model,
+            compile_config,
+            dims,
+            loss_config=ChunkedLossWrapper.Config(num_chunks=8),
+        )
+
+        self.assertNotEqual(cross_entropy, chunked)
+        self.assertNotEqual(chunked, different_chunks)
 
     def test_all_compilation_settings_are_fingerprinted(self):
         from torchtitan.experiments.graph_trainer.precompile import (

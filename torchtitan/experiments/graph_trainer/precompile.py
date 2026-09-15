@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any, NewType, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from torchtitan.components.loss import BaseLoss
     from torchtitan.distributed import ParallelDims
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
     from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
@@ -78,6 +79,8 @@ def compute_config_fingerprint(
     model: torch.nn.Module,
     compile_config: GraphTrainerCompileConfig,
     parallel_dims: ParallelDims,
+    *,
+    loss_config: BaseLoss.Config | None = None,
 ) -> ConfigFingerprint:
     """
     Compute a fingerprint that captures everything affecting the compiled output:
@@ -103,6 +106,20 @@ def compute_config_fingerprint(
         + json.dumps(compile_fields, sort_keys=True, separators=(",", ":")).encode()
         + b"\n"
     )
+    if loss_config is not None:
+        loss_type = type(loss_config)
+        h.update(
+            f"loss_type:{loss_type.__module__}.{loss_type.__qualname__}\n".encode()
+        )
+        h.update(
+            b"loss_config:"
+            + json.dumps(
+                dataclasses.asdict(loss_config),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
     h.update(
         "torch:deterministic_algorithms:"
         f"{torch.are_deterministic_algorithms_enabled()}\n".encode()

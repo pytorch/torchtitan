@@ -334,7 +334,10 @@ def _precompile_aot_fx_trace(
 
     storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
     config_fingerprint = compute_config_fingerprint(
-        model, compile_config, parallel_dims
+        model,
+        compile_config,
+        parallel_dims,
+        loss_config=config.loss,
     )
 
     precompile_graph_pp_stage_save(

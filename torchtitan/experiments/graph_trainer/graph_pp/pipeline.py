@@ -19,7 +19,7 @@ from torch.distributed.pipelining.schedules import (
     UNSHARD,
 )
 
-from torchtitan.components.loss import LossFunction
+from torchtitan.components.loss import BaseLoss, LossFunction
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
@@ -169,6 +169,7 @@ def make_pp1_vpp1_graph_pipeline_runtime(
     device: torch.device,
     model_config: BaseModel.Config | None,
     loss_fn: LossFunction,
+    loss_config: BaseLoss.Config,
 ) -> GraphPipelineRuntime:
     """Build the PP=1/VPP=1 runtime to reuse GraphPipelineRuntime,
     to express Gradient Accumulation and Deferred FSDP gradient sync.
@@ -293,6 +294,7 @@ def make_pp1_vpp1_graph_pipeline_runtime(
                 model,
                 compile_config,
                 parallel_dims,
+                loss_config=loss_config,
             ),
             expected_state_fqns=list(extract_module_state(model)),
             runtime_meshes=runtime_meshes,
