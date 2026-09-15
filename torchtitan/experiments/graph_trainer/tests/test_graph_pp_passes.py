@@ -43,7 +43,10 @@ from torchtitan.experiments.graph_trainer.graph_pp import (
     split_forward_fsdp_collectives,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import GraphMeta
-from torchtitan.experiments.graph_trainer.graph_pp.utils import flatten_graph_values
+from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+    flatten_graph_values,
+    output_names,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     extract_module_state,
     minimal_fx_tracer,
@@ -272,6 +275,55 @@ def _assert_tensor_sequence_equal(
 
 
 class GraphPPPartitionTest(unittest.TestCase):
+    def test_device_values_are_recomputed_in_backward(self) -> None:
+        from torchtitan.experiments.graph_trainer.precompile import _register_coor_ops
+
+        _register_coor_ops()
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        device = graph.call_function(torch.ops.coor.current_device.default)
+        device.meta["val"] = torch.device("cuda")
+        forward_output = graph.call_function(
+            torch.ops.aten._to_copy.default,
+            (x,),
+            {"device": device},
+        )
+        backward_output = graph.call_function(
+            torch.ops.aten._to_copy.default,
+            (forward_output,),
+            {"device": device},
+        )
+        graph.output([forward_output, backward_output])
+        traced = TracedResult(
+            gm=torch.fx.GraphModule(torch.nn.Module(), graph),
+            example_inputs=(torch.ones(1),),
+            num_flat_inputs=1,
+            input_subclass_layouts={},
+            user_inputs_spec=torch.utils._pytree.tree_flatten(((torch.ones(1),), {}))[
+                1
+            ],
+            tensor_input_indices=[0],
+            num_flat_outputs=2,
+            output_subclass_layouts={},
+            output_spec=torch.utils._pytree.tree_flatten([torch.ones(1)] * 2)[1],
+            state_fqns=[],
+        )
+
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced,
+            num_fwd_outputs=1,
+        )
+
+        self.assertNotIn(device.name, meta.saved_for_backward_names)
+        self.assertNotIn(device.name, output_names(fw_module))
+        self.assertTrue(
+            any(
+                node.target == torch.ops.coor.current_device.default
+                for node in bw_module.graph.nodes
+                if node.op == "call_function"
+            )
+        )
+
     def test_real_dsv3_moe_block_partition_matches_joint_graph(self) -> None:
         traced_block = _trace_dsv3_moe_block_stage()
 
