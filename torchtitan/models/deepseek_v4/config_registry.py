@@ -1028,3 +1028,18 @@ def deepseek_v4_flash_pr18_compile(seq_len: int | None = 8192) -> Trainer.Config
     config = _pr18_tuned(seq_len)
     config.compile = CompileConfig(enable=True)
     return config
+
+
+def deepseek_v4_flash_pr18_asyncep_bf16reduce(
+    seq_len: int | None = 8192,
+) -> Trainer.Config:
+    """R2a. The two confirmed comm levers stacked: MinimalAsyncEP + bf16 reduce.
+
+    Round 1 on the 92.15 config: asyncep 96.66 (+4.9 %), bf16reduce 95.54
+    (+3.7 %). They hit different collectives -- the MoE all-to-all (overlap)
+    and FSDP's gradient reduce-scatter (bytes) -- so they should compose;
+    multiplicative would be ~100.4.
+    """
+    config = deepseek_v4_flash_pr18_asyncep(seq_len)
+    config.training.mixed_precision_reduce = "bfloat16"
+    return config
