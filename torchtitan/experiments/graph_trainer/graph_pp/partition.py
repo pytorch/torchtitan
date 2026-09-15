@@ -70,6 +70,7 @@ import copy
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
+import torch
 import torch.fx as fx
 from torch._functorch.partitioners import (
     _extract_fwd_bwd_outputs,
@@ -260,6 +261,8 @@ def _saved_values_for_backward(
     saved: list[fx.Node] = []
     for node in joint.graph.nodes:
         if node not in forward_nodes or node.name in backward_only_names:
+            continue
+        if isinstance(node.meta.get("val"), torch.device):
             continue
         if any(
             user in backward_nodes and user not in forward_nodes for user in node.users
