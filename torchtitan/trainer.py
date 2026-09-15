@@ -909,6 +909,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # Auxiliary losses normalize by the same per-step token count as the
         # main loss, so their scale is independent of parallelism degrees.
+        # TODO(sdmyzlp): Each MTP depth can have a different valid-token count
+        # after shifting and should use its own auxiliary-loss denominator.
         AuxLoss.set_step_denominator(global_valid_tokens)
 
         # Process each gradient accumulation step, then free its inputs.

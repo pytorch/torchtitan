@@ -18,13 +18,14 @@ import torch._inductor.config
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls, Float8Linear
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
 from torchtitan.quantization.nvfp4 import NVFP4Linear
 from torchtitan.quantization.utils import module_filter_fn, swap_token_dispatcher
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
+
+from .converter import ModelConfigConverter
 
 
 logger = logging.getLogger(__name__)
