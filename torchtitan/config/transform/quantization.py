@@ -15,6 +15,7 @@ from typing import Literal
 import torch
 import torch._inductor.config
 
+from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.model import ModelConfigConverter
@@ -330,6 +331,15 @@ class MXFP8LinearConverter(QuantizationConverter):
             assert isinstance(config, Linear.Config)
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
                 targets.append((fqn, config, parent, attr))
+
+        block_size = MXFP8Linear.WEIGHT_BLOCK_SIZE
+        for fqn, _config, parent, _attr in targets:
+            if isinstance(parent, QKVLinear.Config) and parent.head_dim % block_size:
+                raise ValueError(
+                    "MXFP8 quantization of fused QKV requires head_dim divisible "
+                    f"by {block_size} so weight scale blocks do not span Q, K, "
+                    f"or V; got {fqn!r} with head_dim={parent.head_dim}."
+                )
 
         quantized_router_fqns = [
             fqn

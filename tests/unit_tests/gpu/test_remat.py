@@ -17,7 +17,7 @@ import torch_remat as remat
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.attention import GQAttention
-from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
+from torchtitan.models.common.dist_gemm import ColumnParallelLinear, RowParallelLinear
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -324,9 +324,13 @@ class TestRematRegions(unittest.TestCase):
             "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
             side_effect=silu_and_mul,
         ):
-            dist_gemm_config = DistGEMMFeedForward.Config(
-                w13=feed_forward_config.w13,
-                w2=feed_forward_config.w2,
+            dist_gemm_config = FeedForward.Config(
+                w13=ColumnParallelLinear.Config(
+                    in_features=4,
+                    out_features=8,
+                    num_linears=2,
+                ),
+                w2=RowParallelLinear.Config(in_features=8, out_features=4),
             )
             fused_config = deepcopy(feed_forward_config)
             fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)
