@@ -11,7 +11,6 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
     AsyncAllGatherLinear,
-    AsyncAllGatherQKVLinear,
     AsyncLinearReduceScatter,
     validate_async_tp_preconditions,
 )
@@ -229,7 +228,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     common_gqa = attention_cfg._owner is GQAttention
-    async_qkv = isinstance(attention_cfg.qkv_linear, AsyncAllGatherQKVLinear.Config)
+    async_qkv = isinstance(attention_cfg.qkv_linear.wqkv, AsyncAllGatherLinear.Config)
     async_wo = isinstance(attention_cfg.wo, AsyncLinearReduceScatter.Config)
     if async_qkv != async_wo:
         raise ValueError(

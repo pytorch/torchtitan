@@ -20,8 +20,7 @@ from torchtitan.distributed.linear import (
     AsyncLinearReduceScatter as AsyncLinearReduceScatterFunction,
 )
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.models.common.attention import QKVLinear
-from torchtitan.models.common.linear import AllGatherLinear, Linear, LinearReduceScatter
+from torchtitan.models.common.linear import AllGatherLinear, LinearReduceScatter
 
 
 logger = logging.getLogger(__name__)
@@ -101,42 +100,6 @@ class AsyncAllGatherLinear(AllGatherLinear):
         )
 
 
-class AsyncAllGatherQKVLinear(QKVLinear):
-    """Overlap the input all-gather with a fused QKV projection."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(QKVLinear.Config):
-        pass
-
-    def forward(  # pyrefly: ignore[bad-override]
-        self, x: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if type(self) is not AsyncAllGatherQKVLinear or type(self.wqkv) is not Linear:
-            raise RuntimeError(
-                "AsyncAllGatherQKVLinear does not support converted QKV projections"
-            )
-        tp_group = _tp_group_from_context()
-        if tp_group is None:
-            _warn_once_no_tp_overlap()
-            return super().forward(x)
-
-        qkv = AsyncAllGatherLinearFunction.apply(
-            x,
-            self.wqkv.weight,
-            self.wqkv.bias,
-            tp_group,
-            tp_group.group_name,
-        )
-        num_tokens = qkv.shape[0]
-        qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
-        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
-        return (
-            xq.reshape(num_tokens, -1, self.head_dim).contiguous(),
-            xk.reshape(num_tokens, -1, self.head_dim).contiguous(),
-            xv.reshape(num_tokens, -1, self.head_dim).contiguous(),
-        )
-
-
 class AsyncLinearReduceScatter(LinearReduceScatter):
     """Overlap a row-parallel GEMM with its output reduce-scatter."""
 
@@ -164,7 +127,6 @@ class AsyncLinearReduceScatter(LinearReduceScatter):
 
 __all__ = [
     "AsyncAllGatherLinear",
-    "AsyncAllGatherQKVLinear",
     "AsyncLinearReduceScatter",
     "validate_async_tp_preconditions",
 ]

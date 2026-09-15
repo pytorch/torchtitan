@@ -46,7 +46,6 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.dist_gemm import (
     AsyncAllGatherLinear,
-    AsyncAllGatherQKVLinear,
     AsyncLinearReduceScatter,
 )
 from torchtitan.models.common.linear import Linear
@@ -78,8 +77,9 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             [AsyncTensorParallelTransform()],
         )
         for layer in model.layers:
+            self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIsInstance(
-                layer.attention.qkv_linear, AsyncAllGatherQKVLinear.Config
+                layer.attention.qkv_linear.wqkv, AsyncAllGatherLinear.Config
             )
             self.assertIsInstance(layer.attention.wo, AsyncLinearReduceScatter.Config)
             self.assertIsInstance(layer.feed_forward, TensorParallelFeedForward.Config)
@@ -243,6 +243,88 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         )
         with self.assertRaisesRegex(ValueError, "converted QKV projections"):
             transform_model_config_(model, [AsyncTensorParallelTransform()])
+
+
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
+)
+class TestAsyncQKVNumerics(DTensorTestBase):
+    """The async inner projection must preserve fused QKV behavior."""
+
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @with_comms
+    def test_matches_standard_qkv_linear(self):
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+
+        R = self.world_size
+        device = self.device_type
+        dim, head_dim, num_heads, num_kv_heads = 64, 16, 8, 4
+        num_tokens = 8 * R
+        out_features = (num_heads + 2 * num_kv_heads) * head_dim
+
+        stock_config = QKVLinear.Config(
+            head_dim=head_dim,
+            n_heads=num_heads,
+            n_kv_heads=num_kv_heads,
+            wqkv=Linear.Config(in_features=dim, out_features=out_features),
+        )
+        async_config = QKVLinear.Config(
+            head_dim=head_dim,
+            n_heads=num_heads,
+            n_kv_heads=num_kv_heads,
+            wqkv=AsyncAllGatherLinear.Config(
+                in_features=dim,
+                out_features=out_features,
+            ),
+        )
+        stock = stock_config.build().to(device=device, dtype=torch.bfloat16)
+        async_qkv = async_config.build().to(device=device, dtype=torch.bfloat16)
+
+        torch.manual_seed(0)
+        with torch.no_grad():
+            stock.wqkv.weight.copy_(torch.randn_like(stock.wqkv.weight))
+            async_qkv.wqkv.weight = torch.nn.Parameter(
+                stock.wqkv.weight.chunk(R, 0)[self.rank].contiguous()
+            )
+
+        x_TD = torch.randn(
+            num_tokens,
+            dim,
+            device=device,
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        expected = stock(x_TD)
+        torch.stack([output.sum() for output in expected]).sum().backward()
+
+        x_local_TD = x_TD.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()
+        mesh = init_device_mesh(device, (R,), mesh_dim_names=("tp",))
+        with set_current_spmd_mesh(mesh):
+            actual = async_qkv(x_local_TD)
+            torch.stack([output.sum() for output in actual]).sum().backward()
+
+        for actual_projection, expected_projection in zip(actual, expected):
+            torch.testing.assert_close(
+                actual_projection,
+                expected_projection.chunk(R, -2)[self.rank],
+                atol=2e-2,
+                rtol=2e-2,
+            )
+        torch.testing.assert_close(
+            x_local_TD.grad,
+            x_TD.grad.chunk(R, 0)[self.rank],
+            atol=2e-2,
+            rtol=2e-2,
+        )
+        torch.testing.assert_close(
+            async_qkv.wqkv.weight.grad,
+            stock.wqkv.weight.grad.chunk(R, 0)[self.rank],
+            atol=2e-2,
+            rtol=2e-2,
+        )
 
 
 @unittest.skipUnless(
