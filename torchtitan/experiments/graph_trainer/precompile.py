@@ -152,7 +152,10 @@ def compute_config_fingerprint(
     h = hashlib.sha256()
 
     for name, param in model.named_parameters():
-        h.update(f"param:{name}:{list(param.shape)}:{param.dtype}\n".encode())
+        h.update(
+            f"param:{name}:{list(param.shape)}:{param.dtype}:"
+            f"requires_grad={param.requires_grad}\n".encode()
+        )
     for name, buf in model.named_buffers():
         h.update(f"buffer:{name}:{list(buf.shape)}:{buf.dtype}\n".encode())
 

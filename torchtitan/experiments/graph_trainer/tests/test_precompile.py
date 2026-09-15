@@ -250,6 +250,23 @@ class TestConfigFingerprint(unittest.TestCase):
         fp_b = compute_config_fingerprint(model_b, cfg, dims)
         self.assertNotEqual(fp_a, fp_b)
 
+    def test_parameter_trainability_sensitivity(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        cfg = _StubCompileConfig()
+        dims = _StubParallelDims()
+        trainable = _make_stub_model(
+            params=[("w", torch.zeros(4, 4, requires_grad=True))], buffers=[]
+        )
+        frozen = _make_stub_model(params=[("w", torch.zeros(4, 4))], buffers=[])
+
+        self.assertNotEqual(
+            compute_config_fingerprint(trainable, cfg, dims),
+            compute_config_fingerprint(frozen, cfg, dims),
+        )
+
     def test_parallelism_sensitivity(self):
         from torchtitan.experiments.graph_trainer.precompile import (
             compute_config_fingerprint,
