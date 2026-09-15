@@ -99,8 +99,6 @@ class Linear(nn.Linear, Module):
             nn.init.uniform_(self.bias, -bound, bound)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if self.num_linears == 1:
-            return F.linear(input, self.weight, self.bias)
         weight = self.weight.flatten(0, -2)
         bias = None if self.bias is None else self.bias.flatten()
         output = F.linear(input, weight, bias)
@@ -134,9 +132,12 @@ class CastLinear(Linear):
         # The optimizer updates the weight each step, so training cannot cache
         # the upcast copy. Inference may be able to cache it between syncs.
         bias = None if self.bias is None else self.bias.to(self.compute_dtype)
-        return F.linear(
-            input.to(self.compute_dtype), self.weight.to(self.compute_dtype), bias
+        output = F.linear(
+            input.to(self.compute_dtype),
+            self.weight.to(self.compute_dtype).flatten(0, -2),
+            None if bias is None else bias.flatten(),
         )
+        return output.unflatten(-1, self.weight.shape[:-1])
 
 
 class ColumnParallelLinear(Linear):
@@ -231,13 +232,10 @@ class RouterGateLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight = self.weight if self.num_linears == 1 else self.weight.flatten(0, -2)
+        weight = self.weight.flatten(0, -2)
         output_TE = _RouterGateLinearFunction.apply(input, weight)
         if self.bias is not None:
-            bias = self.bias if self.num_linears == 1 else self.bias.flatten()
-            output_TE = output_TE + bias.float()
-        if self.num_linears == 1:
-            return output_TE
+            output_TE = output_TE + self.bias.flatten().float()
         return output_TE.unflatten(-1, self.weight.shape[:-1])
 
 
@@ -265,8 +263,6 @@ class PartialBiasRowwiseLinear(Linear):
                 dst=spmd.P,
                 expert_mode=True,
             )
-        if self.num_linears == 1:
-            return F.linear(input, self.weight, bias)
         output = F.linear(input, self.weight.flatten(0, -2), bias.flatten())
         return output.unflatten(-1, self.weight.shape[:-1])
 

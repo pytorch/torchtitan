@@ -256,17 +256,11 @@ try:
                 )
             output = nvfp4_linear(
                 x,
-                (self.weight if self.num_linears == 1 else self.weight.flatten(0, -2)),
-                (
-                    self.bias
-                    if self.bias is None or self.num_linears == 1
-                    else self.bias.flatten()
-                ),
+                self.weight.flatten(0, -2),
+                None if self.bias is None else self.bias.flatten(),
                 sr_seed=self._sr_seed,
                 sign_vector=self.rht_sign_vector,
             )
-            if self.num_linears == 1:
-                return output
             return output.unflatten(-1, self.weight.shape[:-1])
 
         def reset_parameters(self) -> None:
