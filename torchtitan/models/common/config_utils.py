@@ -26,7 +26,10 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.dist_gemm import ColumnParallelLinear, RowParallelLinear
+from torchtitan.models.common.dist_gemm import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
@@ -238,8 +241,8 @@ def make_gqa_config(
     # fused output split for both implementations.
     qkv_projection_cls, wo_cls = Linear, Linear
     if tp_gemm_backend == "dist_gemm":
-        qkv_projection_cls = ColumnParallelLinear
-        wo_cls = RowParallelLinear
+        qkv_projection_cls = AsyncColumnParallelLinear
+        wo_cls = AsyncRowParallelLinear
 
     qkv = QKVLinear.Config(
         head_dim=per_head_dim,
@@ -290,8 +293,8 @@ def make_ffn_config(
     """
     w13_cls, w2_cls = Linear, Linear
     if tp_gemm_backend == "dist_gemm":
-        w13_cls = ColumnParallelLinear
-        w2_cls = RowParallelLinear
+        w13_cls = AsyncColumnParallelLinear
+        w2_cls = AsyncRowParallelLinear
     return FeedForward.Config(
         w13=w13_cls.Config(
             in_features=dim,

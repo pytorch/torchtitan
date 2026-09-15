@@ -37,7 +37,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
-from torchtitan.models.common.dist_gemm import ColumnParallelLinear, RowParallelLinear
+from torchtitan.models.common.dist_gemm import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
@@ -56,15 +59,17 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         for layer in spec.model.layers:
             attn = layer.attention
             self.assertIs(type(attn.qkv_linear), QKVLinear.Config)
-            self.assertIsInstance(attn.qkv_linear.wqkv, ColumnParallelLinear.Config)
-            self.assertIsInstance(attn.wo, RowParallelLinear.Config)
+            self.assertIsInstance(
+                attn.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
+            )
+            self.assertIsInstance(attn.wo, AsyncRowParallelLinear.Config)
 
     def test_default_tp_gemm_backend_is_untouched(self):
         """The default must stay stock, or every model silently changes."""
         from torchtitan.models.llama3 import model_registry
 
         for layer in model_registry("debugmodel").model.layers:
-            self.assertNotIsInstance(layer.attention.wo, RowParallelLinear.Config)
+            self.assertNotIsInstance(layer.attention.wo, AsyncRowParallelLinear.Config)
 
     def test_stock_parameter_shapes_survive(self):
         """Fused modules keep the stock layouts, or checkpoints stop loading."""
@@ -210,7 +215,7 @@ class TestDistGEMMQKVNumerics(DTensorTestBase):
             head_dim=head_dim,
             n_heads=num_heads,
             n_kv_heads=num_kv_heads,
-            wqkv=ColumnParallelLinear.Config(
+            wqkv=AsyncColumnParallelLinear.Config(
                 in_features=dim,
                 out_features=out_features,
             ),
@@ -380,8 +385,8 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
         fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)
         fused = fused_config.build().to(dev)
         self.assertIs(type(fused), FeedForward)
-        self.assertIsInstance(fused.w13, ColumnParallelLinear)
-        self.assertIsInstance(fused.w2, RowParallelLinear)
+        self.assertIsInstance(fused.w13, AsyncColumnParallelLinear)
+        self.assertIsInstance(fused.w2, AsyncRowParallelLinear)
 
         with torch.no_grad():
             for w in (native.w13.weight, native.w2.weight):
