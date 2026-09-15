@@ -110,6 +110,11 @@ class ContextParallelLoadBalancer(Configurable):
             seq_len=seq_len,
         )
 
+    @property
+    def cp_mesh(self) -> DeviceMesh:
+        """Device mesh whose CP axis owns this partition."""
+        return self._cp_mesh
+
     def _build_load_balancer_impl(
         self,
         *,
