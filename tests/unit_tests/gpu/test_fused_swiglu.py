@@ -21,8 +21,8 @@ from torchtitan.config.transform import AsyncTensorParallelTransform
 
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.dist_gemm import (
-    AsyncAllGatherLinear,
-    AsyncLinearReduceScatter,
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
@@ -171,8 +171,8 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         config = AsyncTensorParallelTransform().transform(_dist_gemm_ffn_config())
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
-        self.assertIsInstance(fused.w13, AsyncAllGatherLinear)
-        self.assertIsInstance(fused.w2, AsyncLinearReduceScatter)
+        self.assertIsInstance(fused.w13, AsyncColumnParallelLinear)
+        self.assertIsInstance(fused.w2, AsyncRowParallelLinear)
         self.assertIsInstance(fused.activation_fn, FusedSwiGLU)
 
     def test_overlapping_variant_keeps_w13_checkpoint_layout(self):

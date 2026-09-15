@@ -10,8 +10,8 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
-    AsyncAllGatherLinear,
-    AsyncLinearReduceScatter,
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
     validate_async_tp_preconditions,
 )
 from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
@@ -216,8 +216,10 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     common_gqa = attention_cfg._owner is GQAttention
-    async_qkv = isinstance(attention_cfg.qkv_linear.wqkv, AsyncAllGatherLinear.Config)
-    async_wo = isinstance(attention_cfg.wo, AsyncLinearReduceScatter.Config)
+    async_qkv = isinstance(
+        attention_cfg.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
+    )
+    async_wo = isinstance(attention_cfg.wo, AsyncRowParallelLinear.Config)
     if async_qkv != async_wo:
         raise ValueError(
             "Async tensor parallelism must configure both qkv and wo projections"
@@ -314,8 +316,8 @@ def set_dense_ffn_sharding(
     a no-op redistribute when placements already agree.
     """
     tensor_parallel = isinstance(feed_forward_cfg, TensorParallelFeedForward.Config)
-    async_w13 = isinstance(feed_forward_cfg.w13, AsyncAllGatherLinear.Config)
-    async_w2 = isinstance(feed_forward_cfg.w2, AsyncLinearReduceScatter.Config)
+    async_w13 = isinstance(feed_forward_cfg.w13, AsyncColumnParallelLinear.Config)
+    async_w2 = isinstance(feed_forward_cfg.w2, AsyncRowParallelLinear.Config)
     if async_w13 != async_w2:
         raise ValueError(
             "Async tensor parallelism must configure both w13 and w2 projections"

@@ -13,8 +13,8 @@ from typing import cast
 from torchtitan.models.common.attention import GQAttention, QKVLinear
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.dist_gemm import (
-    AsyncAllGatherLinear,
-    AsyncLinearReduceScatter,
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import AllGatherLinear, Linear, LinearReduceScatter
@@ -47,7 +47,7 @@ def _convert_linear(
 
 
 def _transform_attention(model: Module.Config, *, async_tp: bool) -> int:
-    output_linear = AsyncLinearReduceScatter if async_tp else LinearReduceScatter
+    output_linear = AsyncRowParallelLinear if async_tp else LinearReduceScatter
     num_replaced = 0
 
     for _, traversed, _, _ in model.traverse(GQAttention.Config):
@@ -71,7 +71,7 @@ def _transform_attention(model: Module.Config, *, async_tp: bool) -> int:
                 )
             attention.qkv_linear.wqkv = _convert_linear(
                 attention.qkv_linear.wqkv,
-                AsyncAllGatherLinear,
+                AsyncColumnParallelLinear,
                 async_tp=True,
                 projection_name="QKV",
             )
@@ -91,8 +91,8 @@ def _transform_feed_forward(
     *,
     async_tp: bool,
 ) -> tuple[Module.Config, int]:
-    input_linear = AsyncAllGatherLinear if async_tp else AllGatherLinear
-    output_linear = AsyncLinearReduceScatter if async_tp else LinearReduceScatter
+    input_linear = AsyncColumnParallelLinear if async_tp else AllGatherLinear
+    output_linear = AsyncRowParallelLinear if async_tp else LinearReduceScatter
     num_replaced = 0
 
     for _, traversed, parent, attr in model.traverse(FeedForward.Config):
