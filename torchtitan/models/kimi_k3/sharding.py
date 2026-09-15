@@ -231,7 +231,6 @@ def _set_latent_moe_sharding(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)}
     )
     if enable_ep:
-        # Like the router, routed_down runs on the rank's token shard under EP.
         token_shard = dense_sequence_parallel_placement()
         routed_down.in_src_shardings = {
             "input": token_shard
