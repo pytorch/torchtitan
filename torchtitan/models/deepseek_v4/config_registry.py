@@ -1110,3 +1110,25 @@ def deepseek_v4_flash_pr18_bs3_det(seq_len: int | None = 8192) -> Trainer.Config
     config.debug.deterministic = True
     config.debug.deterministic_warn_only = True
     return config
+
+
+def deepseek_v4_flash_pr18_bs2_cublas(seq_len: int | None = 8192) -> Trainer.Config:
+    """S4a''. 2x microbatch, cuBLAS preferred over cuBLASLt, no deterministic mode.
+
+    Bisecting the routing flip. 2x crashed twice on FullAC's CheckpointError
+    (MoE routed-token count differing by 1-2 between forward and recompute);
+    ``CUBLAS_WORKSPACE_CONFIG`` alone did not fix it (job 400), full
+    ``debug.deterministic`` did (job 402). No float scatter/index op exists in
+    the block forward, so the flag fixed something else -- and ATen routes
+    ``addmm`` away from cuBLASLt under deterministic algorithms because Lt
+    does not guarantee determinism, while the workspace config governs only
+    classic cuBLAS. If preferring cuBLAS is sufficient, that is the fix without
+    the whole-model deterministic-mode tax.
+
+    Set here because the registry runs inside every rank's process; there is
+    no torchtitan config field for it.
+    """
+    import torch
+
+    torch.backends.cuda.preferred_blas_library("cublas")
+    return _pr18_batch(2, seq_len)
