@@ -64,10 +64,10 @@ check optional TileLang's TVM-FFI requirements: TileLang 0.1.12 requires FFI
 when the model does not use TileLang kernels. Use compatible dependency builds
 or omit the unused TileLang package in a Qwen-only environment.
 
-CPU contracts:
+CPU metadata check (run in the RL environment):
 
 ```sh
-pytest tests/unit_tests/cpu/test_gdn_graph_metadata.py -v
+pytest torchtitan/experiments/rl/tests/test_gdn_graph_metadata.py -v
 ```
 
 GPU capture/replay (requires vLLM and Attention Gym's linear dependencies):
