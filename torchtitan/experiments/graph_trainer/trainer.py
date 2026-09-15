@@ -174,6 +174,7 @@ class GraphTrainer(Trainer):
             device=self.device,
             model_config=self.model_config,
             loss_fn=self.loss_fn,
+            loss_config=self.config.loss,
         )
         self.pp_has_last_stage = True
         if runtime_policy.accumulate_in_schedule:
