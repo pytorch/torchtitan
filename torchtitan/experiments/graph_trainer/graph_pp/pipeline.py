@@ -296,6 +296,7 @@ def make_pp1_vpp1_graph_pipeline_runtime(
                 parallel_dims,
                 loss_config=loss_config,
                 model_config=model_config,
+                parallelism_config=parallelism,
             ),
             expected_state_fqns=list(extract_module_state(model)),
             runtime_meshes=runtime_meshes,
