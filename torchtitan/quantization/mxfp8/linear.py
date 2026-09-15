@@ -302,6 +302,8 @@ spmd.register_local_autograd_function(_MXFP8LinearFunction)
 class MXFP8Linear(Linear):
     """Linear using 1D activations and cached 32x32 weight quantization."""
 
+    WEIGHT_BLOCK_SIZE = _MXFP8_BLOCK_SIZE
+
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         """Drop-in replacement for ``Linear.Config``."""
