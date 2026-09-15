@@ -137,13 +137,6 @@ def _validate_pp1_vpp1_graph_pipeline_compile_config(
             "yet. GraphPP stage tracing does not apply the EP-overlap trace-input "
             "preparers."
         )
-    if compile_config.memory_policy == "sac_and_offload":
-        raise ValueError(
-            "GraphPipelineRuntime does not support "
-            "--compile.memory_policy sac_and_offload yet. The GraphPP partition "
-            "must preserve offload and reload pairs across the forward/backward "
-            "boundary."
-        )
     if compile_config.pass_pipeline in PASS_PIPELINE_REGISTRY:
         raise ValueError(
             "GraphPipelineRuntime does not support custom pass pipelines yet"

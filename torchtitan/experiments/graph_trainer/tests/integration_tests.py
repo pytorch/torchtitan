@@ -269,9 +269,6 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_sac_and_offload",
             ngpu=8,
             skip_rocm_test=True,
-            # GraphPipelineRuntime must preserve offload/reload pairs when it
-            # partitions the joint graph into forward and backward graphs.
-            disabled=True,
         ),
         OverrideDefinitions(
             [
