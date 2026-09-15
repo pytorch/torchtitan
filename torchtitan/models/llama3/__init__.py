@@ -109,9 +109,9 @@ def _debugmodel(
     attn_backend: str,
     *,
     seq_len: int,
+    n_heads: int = 16,
 ) -> Llama3Model.Config:
     dim = 256
-    n_heads = 16
     n_layers = 6
     return Llama3Model.Config(
         dim=dim,
@@ -352,6 +352,9 @@ def _405b(
 
 llama3_configs = {
     "debugmodel": (_debugmodel, 131072),
+    # Preserve the debug model's dimensions and QKV GEMM shape, but use
+    # 32-wide heads so MXFP8 weight-scale tiles align with head boundaries.
+    "debugmodel_mxfp8": (partial(_debugmodel, n_heads=8), 131072),
     "1B": (_1b, 131072),
     "3B": (_3b, 131072),
     "8B": (_8b, 131072),
