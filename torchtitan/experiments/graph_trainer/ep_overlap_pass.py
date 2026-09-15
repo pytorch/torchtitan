@@ -23,6 +23,9 @@ For each selected forward/backward region:
 * ``custom[_EP_TOKEN_EXCHANGE]`` marks true token-exchange all-to-all launches;
   waits may inherit the annotation from traceback and are normalized to
   ``custom[_EP_TOKEN_EXCHANGE_WAIT]``;
+* ``aten.sym_size.int`` queries on token-exchange outputs may also inherit the
+  launch annotation while binding an unbacked output size; the inherited
+  token-exchange annotation is removed before marker validation;
 * marker counts and labels must match across chunks;
 * forward emits marker pairs in chunk order 0 then 1, backward emits 1 then 0;
 * MoE-root chunking pairs both chunks' first-marker setup before launching the
@@ -194,6 +197,22 @@ def _is_wait_for_token_exchange(node: fx.Node, node_set: set[fx.Node]) -> bool:
     )
 
 
+def _is_token_exchange_shape_query(node: fx.Node, node_set: set[fx.Node]) -> bool:
+    """Return whether a node queries the size of an in-body token exchange."""
+    if (
+        node.op != "call_function"
+        or node.target != torch.ops.aten.sym_size.int
+        or len(node.args) != 2
+    ):
+        return False
+    producer = node.args[0]
+    return (
+        isinstance(producer, fx.Node)
+        and producer in node_set
+        and _is_token_exchange_launch(producer)
+    )
+
+
 def _collect_token_exchanges(
     body: ChunkBody,
     *,
@@ -206,6 +225,11 @@ def _collect_token_exchanges(
         if not _is_token_exchange_launch(node):
             phase = _custom_meta(node).get(_EP_TOKEN_EXCHANGE)
             if phase is None:
+                continue
+            if _is_token_exchange_shape_query(node, node_set):
+                custom = dict(_custom_meta(node))
+                custom.pop(_EP_TOKEN_EXCHANGE, None)
+                node.meta["custom"] = custom
                 continue
             if _is_wait_for_token_exchange(node, node_set):
                 custom = dict(_custom_meta(node))
