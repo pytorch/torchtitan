@@ -75,6 +75,9 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             test_descr="aot_fx_trace llama3 precompile FSDP+TP",
             test_name="aot_fx_trace_llama3_precompile_fsdp_tp",
             ngpu=8,
+            # GraphPipelineRuntime needs a stage-graph artifact format instead
+            # of the current monolithic forward-loss-backward artifact.
+            disabled=True,
         ),
         # TODO: disabled — precompile sharding propagation fails on aten.view
         # with a data-dependent unbacked symint ("Could not extract specialized

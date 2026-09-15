@@ -243,6 +243,23 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
+                    "--compile.fsdp_gradient_sync_mode scheduled",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
+                    "--training.num_tokens_per_train_step 16384",
+                ],
+            ],
+            "aot_fx_trace llama3 deferred FSDP GraphPipelineRuntime accumulation",
+            "aot_fx_trace_llama3_deferred_fsdp_accumulation",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
                     "--compile.memory_policy sac_and_offload",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -252,6 +269,9 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_sac_and_offload",
             ngpu=8,
             skip_rocm_test=True,
+            # GraphPipelineRuntime must preserve offload/reload pairs when it
+            # partitions the joint graph into forward and backward graphs.
+            disabled=True,
         ),
         OverrideDefinitions(
             [

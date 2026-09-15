@@ -45,6 +45,10 @@ class GraphPPStageGraphs(Protocol):
             accumulate unsharded parameter gradients across microbatches.
         """
 
+    @property
+    def requires_grad_reduction(self) -> bool:
+        """Return whether backward gradients require ``reduce_grads``."""
+
     def unshard_params(
         self,
         flat_param_values: list[Any],

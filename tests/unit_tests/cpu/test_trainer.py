@@ -426,6 +426,48 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     metrics_processor.log.assert_not_called()
 
 
+def test_non_pp_trainer_can_delegate_a_microbatch_group() -> None:
+    forward_backward_step = MagicMock(return_value=torch.tensor(1.0))
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                training=SimpleNamespace(disable_cuda_graphs=True, max_norm=1.0),
+            ),
+            optimizers=MagicMock(),
+            lr_schedulers=SimpleNamespace(get_metrics=lambda: {}, step=MagicMock()),
+            parallel_dims=SimpleNamespace(
+                dp_enabled=False,
+                pp_enabled=False,
+                dp_cp_enabled=False,
+                ep_enabled=False,
+                dp_replicate_enabled=False,
+                get_optional_mesh=lambda name: None,
+            ),
+            gradient_accumulation_steps=1,
+            num_pp_microbatches=3,
+            device=torch.device("cpu"),
+            forward_backward_step=forward_backward_step,
+            sdc_replayer=None,
+            model_parts=[],
+            checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
+            metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
+            step=1,
+            ntokens_seen=0,
+        ),
+    )
+
+    with patch(
+        "torchtitan.trainer.dist_utils.clip_grad_norm_",
+        return_value=torch.tensor(1.0),
+    ):
+        Trainer.train_step(trainer, iter([_batch() for _ in range(3)]))
+
+    input_dict = forward_backward_step.call_args.kwargs["input_dict"]
+    assert isinstance(input_dict, list)
+    assert len(input_dict) == 3
+
+
 def test_train_step_replay_checks_only_first_forward_backward():
     forward_backward_step = MagicMock(return_value=torch.tensor(1.0))
     replayer = SimpleNamespace(

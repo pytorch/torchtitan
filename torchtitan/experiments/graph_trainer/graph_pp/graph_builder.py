@@ -217,7 +217,12 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
 
     @property
     def num_unsharded_param_grad_values(self) -> int:
+        """Return the number of values accumulated before FSDP reduction."""
         return self.meta.num_param_grad_values
+
+    @property
+    def requires_grad_reduction(self) -> bool:
+        return self.modules.reduce_grad is not None
 
     def unshard_params(
         self,
@@ -923,9 +928,19 @@ def _build_stage_graphs(
     model_config: BaseModel.Config | None = None,
     parallelism: ParallelismConfig | None = None,
     compile_graphs: bool = True,
+    extract_fsdp_param_unshard: bool = True,
+    extract_fsdp_grad_reduction: bool = True,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     maybe_register_blockmask_pytree_node()
+    if (
+        extract_fsdp_grad_reduction
+        and compile_config.enable_fsdp_dense_region_overlap
+    ):
+        raise ValueError(
+            "FSDP dense-region overlap requires gradient reduction to remain "
+            "inside FULL_BACKWARD"
+        )
 
     # 1. Prepare representative trace inputs. ``minimal_fx_tracer`` fakeifies
     # these tensors before running the stage function, so this must not execute
@@ -1088,11 +1103,21 @@ def _build_stage_graphs(
         num_params=num_state_param_values,
         fwd_input_names=partition_meta.fwd_input_names,
         fwd_flat_input_indices=partition_meta.fwd_flat_input_indices,
+        extract_fsdp_param_unshard=extract_fsdp_param_unshard,
     )
     fsdp_bw = split_backward_fsdp_collectives(
         bw_module,
         num_param_grads=num_param_grad_values,
+        extract_grad_reduction=extract_fsdp_grad_reduction,
     )
+    if fsdp_bw.reduction_node_names:
+        # The forward partition can retain a dead copy of the mutation-only
+        # reduction tail. The backward graph owns those operations.
+        for node in reversed(list(fsdp_fw.fw_no_fsdp_module.graph.nodes)):
+            if node.name in fsdp_bw.reduction_node_names and not node.users:
+                fsdp_fw.fw_no_fsdp_module.graph.erase_node(node)
+        fsdp_fw.fw_no_fsdp_module.graph.lint()
+        fsdp_fw.fw_no_fsdp_module.recompile()
     didw_split: GraphPPDiDwSplit | None = split_di_dw_graph(
         fsdp_bw.bw_no_fsdp_module,
         num_param_grads=num_param_grad_values,
@@ -1274,12 +1299,18 @@ class GraphTrainerStageGraphProvider:
             ``None`` when compile passes are disabled in tests.
         parallelism: Parallelism config consumed by GraphTrainer compile passes,
             or ``None`` when compile passes are disabled in tests.
+        extract_fsdp_param_unshard: Whether to extract FSDP parameter all-gathers
+            from forward into a separately scheduled graph.
+        extract_fsdp_grad_reduction: Whether to extract FSDP synchronization
+            from backward into a separately scheduled graph.
     """
 
     loss_fn: Callable
     compile_config: GraphTrainerCompileConfig
     model_config: BaseModel.Config | None
     parallelism: ParallelismConfig | None
+    extract_fsdp_param_unshard: bool = True
+    extract_fsdp_grad_reduction: bool = True
     _warned_cudagraph: bool = False
     _overlap_graphs: dict[tuple[int, int], GraphPPOverlapGraphs] | None = None
 
@@ -1366,9 +1397,10 @@ class GraphTrainerStageGraphProvider:
                 model_config=self.model_config,
                 parallelism=self.parallelism,
                 compile_graphs=False,
+                extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
+                extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
             )
 
-        self._warn_if_cudagraph_pass_requested()
         required_overlap_pairs = _required_multiplex_pairs(schedule)
         if not required_overlap_pairs:
             self._overlap_graphs = {}

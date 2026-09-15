@@ -294,15 +294,15 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
-    def test_loaded_artifact_supports_graph_runner(self):
+    def test_loaded_artifact_supports_traced_execution(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
             minimal_fx_tracer,
+            run_traced,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             flatten_runtime_inputs,
             PrecompiledFxTraceArtifact,
         )
-        from torchtitan.experiments.graph_trainer.runner import GraphRunner
 
         model = torch.nn.Linear(3, 2, dtype=torch.float64)
         inputs = torch.randn(4, 3, dtype=torch.float64)
@@ -315,9 +315,9 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         loaded = PrecompiledFxTraceArtifact.from_traced_result(traced).to_traced_result(
             example_inputs
         )
-        runner = GraphRunner(loaded, module=model)
+        run = run_traced(loaded, module=model)
 
-        self.assertTrue(torch.equal(model(inputs), runner(inputs)))
+        self.assertTrue(torch.equal(model(inputs), run(inputs)))
 
     def test_rejects_trainer_owned_gradient_state(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (

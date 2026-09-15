@@ -4,17 +4,26 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import (
+    _Action,
     _PipelineScheduleRuntime,
+    FORWARD,
+    FULL_BACKWARD,
     get_schedule_class,
+    REDUCE_GRAD,
+    RESHARD,
+    UNSHARD,
 )
 
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
     _build_pipeline_schedule,
@@ -23,7 +32,10 @@ from torchtitan.distributed.pipeline_parallel import (
     _get_pp_rank_to_stage_indices_mapping,
     _split_module,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
+    trace_input_preparer_keys,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
     GraphTrainerStageGraphProvider,
 )
@@ -32,9 +44,244 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     register_graph_pp_schedule,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
+from torchtitan.experiments.graph_trainer.registry import (
+    PASS_PIPELINE_REGISTRY,
+    TRACE_CALL_INPUT_PREPARERS,
+    TRACE_INPUT_PREPARERS,
+)
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.tools.logging import logger
+
+
+@dataclass(frozen=True)
+class GraphPPRuntimePolicy:
+    extract_fsdp_param_unshard: bool
+    extract_fsdp_grad_reduction: bool
+    accumulate_in_schedule: bool
+
+
+def resolve_graph_pp_runtime_policy(
+    compile_config: GraphTrainerCompileConfig,
+    *,
+    pp_enabled: bool,
+    fsdp_enabled: bool,
+) -> GraphPPRuntimePolicy:
+    """Resolve topology-dependent GraphPP execution modes."""
+    modes = {
+        "fsdp_param_unshard_mode": compile_config.fsdp_param_unshard_mode,
+        "fsdp_gradient_sync_mode": compile_config.fsdp_gradient_sync_mode,
+        "gradient_accumulation_mode": compile_config.gradient_accumulation_mode,
+    }
+    if compile_config.mode != "aot_fx_trace":
+        explicit_modes = [name for name, value in modes.items() if value != "auto"]
+        if explicit_modes:
+            raise ValueError(
+                "GraphPP execution modes require --compile.mode aot_fx_trace: "
+                f"{explicit_modes}"
+            )
+        return GraphPPRuntimePolicy(False, False, False)
+
+    extract_fsdp_param_unshard = (
+        pp_enabled
+        if compile_config.fsdp_param_unshard_mode == "auto"
+        else compile_config.fsdp_param_unshard_mode == "scheduled"
+    )
+    extract_fsdp_grad_reduction = (
+        pp_enabled
+        if compile_config.fsdp_gradient_sync_mode == "auto"
+        else compile_config.fsdp_gradient_sync_mode == "scheduled"
+    )
+    accumulate_in_schedule = (
+        not pp_enabled
+        if compile_config.gradient_accumulation_mode == "auto"
+        else compile_config.gradient_accumulation_mode == "scheduled"
+    )
+
+    if not fsdp_enabled:
+        if compile_config.fsdp_param_unshard_mode == "scheduled":
+            raise ValueError("Scheduled FSDP parameter unsharding requires FSDP")
+        if compile_config.fsdp_gradient_sync_mode == "scheduled":
+            raise ValueError("Scheduled FSDP gradient synchronization requires FSDP")
+        extract_fsdp_param_unshard = False
+        extract_fsdp_grad_reduction = False
+    elif pp_enabled:
+        if not extract_fsdp_param_unshard:
+            raise ValueError(
+                "PP>1 GraphPP requires scheduled FSDP parameter unsharding"
+            )
+        if not extract_fsdp_grad_reduction:
+            raise ValueError("PP>1 GraphPP requires scheduled FSDP gradient sync")
+
+    if pp_enabled and accumulate_in_schedule:
+        raise ValueError(
+            "PP>1 GraphPP does not yet support folding Trainer gradient "
+            "accumulation into the pipeline schedule"
+        )
+
+    return GraphPPRuntimePolicy(
+        extract_fsdp_param_unshard=extract_fsdp_param_unshard,
+        extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
+        accumulate_in_schedule=accumulate_in_schedule,
+    )
+
+
+def _validate_pp1_vpp1_graph_pipeline_compile_config(
+    compile_config: GraphTrainerCompileConfig,
+) -> None:
+    if compile_config.mode != "aot_fx_trace":
+        raise ValueError("GraphPipelineRuntime requires --compile.mode aot_fx_trace")
+    if compile_config.precompile_artifact_dir:
+        raise ValueError(
+            "GraphPipelineRuntime does not support "
+            "--compile.precompile_artifact_dir yet. Existing precompiled "
+            "artifacts contain one monolithic train-step graph, while the "
+            "runtime requires separately bound forward, backward, and FSDP graphs."
+        )
+    if compile_config.ep_overlap.enabled:
+        raise ValueError(
+            "GraphPipelineRuntime does not support --compile.ep_overlap.enabled "
+            "yet. GraphPP stage tracing does not apply the EP-overlap trace-input "
+            "preparers."
+        )
+    if compile_config.memory_policy == "sac_and_offload":
+        raise ValueError(
+            "GraphPipelineRuntime does not support "
+            "--compile.memory_policy sac_and_offload yet. The GraphPP partition "
+            "must preserve offload and reload pairs across the forward/backward "
+            "boundary."
+        )
+    if compile_config.pass_pipeline in PASS_PIPELINE_REGISTRY:
+        raise ValueError(
+            "GraphPipelineRuntime does not support custom pass pipelines yet"
+        )
+    trace_preparer_names = set(trace_input_preparer_keys(compile_config))
+    unsupported_preparers = trace_preparer_names.intersection(
+        TRACE_INPUT_PREPARERS.keys() | TRACE_CALL_INPUT_PREPARERS.keys()
+    )
+    if unsupported_preparers:
+        raise ValueError(
+            "GraphPipelineRuntime does not support trace-input preparers yet: "
+            f"{sorted(unsupported_preparers)}"
+        )
+
+
+def make_pp1_vpp1_graph_pipeline_runtime(
+    model: nn.Module,
+    *,
+    num_microbatches: int,
+    parallel_dims: ParallelDims,
+    parallelism: ParallelismConfig,
+    compile_config: GraphTrainerCompileConfig,
+    device: torch.device,
+    model_config: BaseModel.Config | None,
+    loss_fn: LossFunction,
+) -> GraphPipelineRuntime:
+    """Build the PP=1/VPP=1 runtime to reuse GraphPipelineRuntime,
+    to express Gradient Accumulation and Deferred FSDP gradient sync.
+
+    The pipeline runtime represents gradient accumulation as N schedule
+    microbatches. With FSDP, ``FULL_BACKWARD`` either keeps its reduction or
+    has it extracted according to ``fsdp_gradient_sync_mode``:
+
+    ``fsdp_gradient_sync_mode="in_graph"``::
+
+        FWD(0)
+        -> FULL_BACKWARD(0, with FSDP reduce)
+        -> ...
+        -> FWD(N-1)
+        -> FULL_BACKWARD(N - 1, with FSDP reduce)
+
+    ``fsdp_gradient_sync_mode="scheduled"``::
+
+        FWD(0)
+        -> FULL_BACKWARD(0, without FSDP reduce)
+        -> ...
+        -> FWD(N-1)
+        -> FULL_BACKWARD(N-1, without FSDP reduce)
+        -> REDUCE_GRAD
+
+    FSDP parameter all-gathers remain in each ``FWD`` graph or are represented
+    by ``UNSHARD`` actions according to ``fsdp_param_unshard_mode``.
+    """
+    _validate_pp1_vpp1_graph_pipeline_compile_config(compile_config)
+    if num_microbatches < 1:
+        raise ValueError(
+            "GraphPipelineRuntime requires at least one microbatch, got "
+            f"{num_microbatches}"
+        )
+    runtime_policy = resolve_graph_pp_runtime_policy(
+        compile_config,
+        pp_enabled=False,
+        fsdp_enabled=parallel_dims.fsdp_enabled,
+    )
+    extract_fsdp_param_unshard = runtime_policy.extract_fsdp_param_unshard
+    extract_fsdp_grad_reduction = runtime_policy.extract_fsdp_grad_reduction
+    fsdp_reshard_after_forward = (
+        get_fsdp_reshard_after_forward_policy(
+            parallelism.fsdp_reshard_after_forward,
+            pp_enabled=False,
+        )
+        if parallel_dims.fsdp_enabled
+        else None
+    )
+
+    pp_mesh = parallel_dims.get_optional_mesh("pp", include_singleton_axes=True)
+    assert pp_mesh is not None
+    stage = GraphPipelineStage(
+        model,
+        stage_index=0,
+        num_stages=1,
+        device=device,
+        group=pp_mesh.get_group("pp"),
+    )
+
+    def scalar_loss_fn(*args: object, **kwargs: object) -> torch.Tensor:
+        loss = loss_fn(*args, **kwargs)
+        return loss[0] if isinstance(loss, tuple) else loss
+
+    schedule = _PipelineScheduleRuntime(
+        [stage],
+        n_microbatches=num_microbatches,
+        loss_fn=scalar_loss_fn,
+        scale_grads=False,
+        backward_requires_autograd=False,
+    )
+    reuse_unsharded_parameters = (
+        extract_fsdp_param_unshard and fsdp_reshard_after_forward is False
+    )
+    actions = []
+    if reuse_unsharded_parameters:
+        actions.append(_Action(0, UNSHARD))
+    for microbatch_index in range(num_microbatches):
+        if extract_fsdp_param_unshard and not reuse_unsharded_parameters:
+            actions.append(_Action(0, UNSHARD))
+        actions.extend(
+            (
+                _Action(0, FORWARD, microbatch_index),
+                _Action(0, FULL_BACKWARD, microbatch_index),
+            )
+        )
+        if extract_fsdp_param_unshard and not reuse_unsharded_parameters:
+            actions.append(_Action(0, RESHARD))
+    if extract_fsdp_grad_reduction:
+        actions.append(_Action(0, REDUCE_GRAD))
+    if reuse_unsharded_parameters:
+        actions.append(_Action(0, RESHARD))
+    schedule._prepare_schedule_with_comms({0: actions}, format="compute_comms")
+
+    graph_provider = GraphTrainerStageGraphProvider(
+        loss_fn=loss_fn,
+        compile_config=compile_config,
+        model_config=model_config,
+        parallelism=parallelism,
+        extract_fsdp_param_unshard=extract_fsdp_param_unshard,
+        extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
+    )
+    return register_graph_pp_schedule(
+        schedule,
+        graph_provider=graph_provider,
+    )
 
 
 def _validate_graph_pp_config(
@@ -98,6 +345,11 @@ def graph_pipeline_llm(
     _validate_graph_pp_config(
         compile_config=compile_config,
         parallelism=parallelism,
+    )
+    runtime_policy = resolve_graph_pp_runtime_policy(
+        compile_config,
+        pp_enabled=True,
+        fsdp_enabled=parallel_dims.fsdp_enabled,
     )
     pp_mesh = parallel_dims.get_mesh("pp")
 
@@ -169,12 +421,18 @@ def graph_pipeline_llm(
         compile_config=compile_config,
         model_config=model_config,
         parallelism=parallelism,
+        extract_fsdp_param_unshard=runtime_policy.extract_fsdp_param_unshard,
+        extract_fsdp_grad_reduction=runtime_policy.extract_fsdp_grad_reduction,
     )
+    graph_provider._warn_if_cudagraph_pass_requested()
     graph_pipeline_runtime = register_graph_pp_schedule(
         schedule,
         graph_provider=graph_provider,
     )
 
-    has_first_stage = any(stage.is_first for stage in stages)
-    has_last_stage = any(stage.is_last for stage in stages)
-    return graph_pipeline_runtime, model_parts, has_first_stage, has_last_stage
+    return (
+        graph_pipeline_runtime,
+        model_parts,
+        any(stage.is_first for stage in stages),
+        any(stage.is_last for stage in stages),
+    )

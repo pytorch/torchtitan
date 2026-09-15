@@ -4,49 +4,30 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import torch
 import torch.nn as nn
 
-from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.cudagraph import cudagraph_teardown, CUDAGraphWrapper
+from torchtitan.distributed.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.common_utils import (
-    accumulate_param_grads_,
     compute_annotated_loss,
     compute_parameter_gradients,
-    log_timer,
-    maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import (
-    GraphTrainerCompileConfig,
-    trace_input_preparer_keys,
-)
-from torchtitan.experiments.graph_trainer.gradient_accumulation import (
-    GraphGradientState,
-)
-from torchtitan.experiments.graph_trainer.make_fx_tracer import (
-    minimal_fx_tracer,
-    TracedResult,
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
+    make_pp1_vpp1_graph_pipeline_runtime,
+    resolve_graph_pp_runtime_policy,
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
-from torchtitan.experiments.graph_trainer.passes import (
-    apply_graph_passes,
-    construct_default_graph_passes,
-    construct_mandatory_graph_passes,
-)
 from torchtitan.experiments.graph_trainer.registry import (
-    PASS_PIPELINE_REGISTRY,
     POST_INIT_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
-    TRACE_CALL_INPUT_PREPARERS,
-    TRACE_INPUT_PREPARERS,
 )
-from torchtitan.experiments.graph_trainer.runner import GraphRunner
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.tools.logging import logger
@@ -143,15 +124,6 @@ class GraphTrainer(Trainer):
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
-        # Lazy state for aot_fx_trace mode
-        self._traced_step: TracedResult | None = None
-        self._graph_runner: GraphRunner | None = None
-        self._trainable_params: tuple[torch.Tensor, ...] | None = None
-        self._graph_gradient_state: GraphGradientState | None = None
-        self._validate_inplace_graph_gradient_accumulation_config()
-        if self.config.compile.enable_inplace_graph_gradient_accumulation:
-            self._ensure_graph_gradient_state(self.model_parts[0])
-
         if self.config.compile.memory_policy == "sac_and_offload":
             from torch._functorch._activation_offloading.offload_ops import (
                 pinned_memory_pool,
@@ -165,6 +137,51 @@ class GraphTrainer(Trainer):
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
+    def _select_fwd_bwd_fn(
+        self, default: Callable[..., torch.Tensor]
+    ) -> Callable[..., torch.Tensor]:
+        runtime_policy = resolve_graph_pp_runtime_policy(
+            self.config.compile,
+            pp_enabled=self.parallel_dims.pp_enabled,
+            fsdp_enabled=self.parallel_dims.fsdp_enabled,
+        )
+        if self.config.compile.mode != "aot_fx_trace":
+            return default
+
+        if self.parallel_dims.pp_enabled:
+            return default
+
+        if (
+            runtime_policy.extract_fsdp_grad_reduction
+            and not runtime_policy.accumulate_in_schedule
+            and self.gradient_accumulation_steps > 1
+        ):
+            raise ValueError(
+                "Scheduled FSDP gradient synchronization requires scheduled "
+                "gradient accumulation"
+            )
+        num_microbatches = (
+            self.gradient_accumulation_steps
+            if runtime_policy.accumulate_in_schedule
+            else 1
+        )
+        self.pp_schedule = make_pp1_vpp1_graph_pipeline_runtime(
+            self.model_parts[0],
+            num_microbatches=num_microbatches,
+            parallel_dims=self.parallel_dims,
+            parallelism=self.config.parallelism,
+            compile_config=self.config.compile,
+            device=self.device,
+            model_config=self.model_config,
+            loss_fn=self.loss_fn,
+        )
+        self.pp_has_last_stage = True
+        if runtime_policy.accumulate_in_schedule:
+            self.num_pp_microbatches = num_microbatches
+            self.gradient_accumulation_steps = 1
+
+        return self._pp_forward_backward_body
+
     def forward_backward_step(
         self,
         *,
@@ -177,10 +194,28 @@ class GraphTrainer(Trainer):
                 global_valid_tokens=global_valid_tokens,
             )
 
-        assert isinstance(input_dict, dict)
-        assert len(self.model_parts) == 1
         model = self.model_parts[0]
+        microbatches = input_dict if isinstance(input_dict, list) else [input_dict]
+        prepared = [
+            self._preprocess_fwd_bwd_inputs(model, microbatch)
+            for microbatch in microbatches
+        ]
+        return self.fwd_bwd_fn(
+            [(inputs,) for inputs, _labels, _kwargs in prepared],
+            [kwargs for _inputs, _labels, kwargs in prepared],
+            [labels for _inputs, labels, _kwargs in prepared],
+            global_valid_tokens,
+        )
 
+    def _preprocess_fwd_bwd_inputs(
+        self,
+        model: nn.Module,
+        input_dict: dict[str, Any],
+    ) -> tuple[
+        torch.Tensor | tuple[torch.Tensor, ...],
+        torch.Tensor | tuple[torch.Tensor, ...],
+        dict[str, Any],
+    ]:
         with sl.log_trace_span("preprocess_inputs"):
             inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
                 input_dict,
@@ -192,258 +227,12 @@ class GraphTrainer(Trainer):
             self.ntokens_seen += (
                 labels[0].numel() if isinstance(labels, tuple) else labels.numel()
             )
-        # remove_duplicate=False to preserve duplicate parameter entries
-        # from weight tying (e.g. shared embedding/output weights).
-        params = self._get_trainable_parameters(model)
-        return self._make_fx_forward_backward_step(
-            model,
-            inputs,
-            labels,
-            global_valid_tokens,
-            params,
-            extra_kwargs,
-        )
-
-    def _load_precompiled_fx_trace(
-        self,
-        model: nn.Module,
-        runtime_args: tuple[Any, ...],
-    ) -> None:
-        """Load a precompiled aot_fx_trace artifact from disk."""
-        from torchtitan.experiments.graph_trainer.precompile import (
-            _FX_TRACE_ARTIFACT_KEY,
-            compute_config_fingerprint,
-            flatten_runtime_inputs,
-            get_spmd_precompile_meshes,
-            precompile_fx_trace_load,
-        )
-        from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-
-        compile_config = self.config.compile
-        storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
-
-        if not storage.exists(_FX_TRACE_ARTIFACT_KEY):
-            raise ValueError(
-                f"Precompiled fx_trace artifact not found at "
-                f"'{compile_config.precompile_artifact_dir}/{_FX_TRACE_ARTIFACT_KEY}'. "
-                f"Run precompile_main with --compile.mode aot_fx_trace first."
-            )
-
-        config_fingerprint = compute_config_fingerprint(
-            model, compile_config, self.parallel_dims
-        )
-        precompile_meshes = (
-            get_spmd_precompile_meshes(self.parallel_dims)
-            if self.config.parallelism.spmd_backend == "spmd_types"
-            else None
-        )
-
-        self._traced_step = precompile_fx_trace_load(
-            storage,
-            expected_fingerprint=config_fingerprint,
-            example_inputs=flatten_runtime_inputs(
-                model,
-                runtime_args,
-                {},
-                precompile_meshes=precompile_meshes,
-            ),
-        )
-
-    def _make_fx_forward_backward_step(
-        self,
-        model: nn.Module,
-        inputs: torch.Tensor | tuple[torch.Tensor, ...],
-        labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor,
-        params: tuple[torch.Tensor, ...],
-        extra_kwargs: dict[str, Any],
-    ) -> torch.Tensor:
-        maybe_register_blockmask_pytree_node()
-        gradient_state = self._graph_gradient_state
-        if gradient_state is not None:
-            gradient_state.prepare_for_backward()
-        if self._traced_step is None:
-            if self.config.compile.precompile_artifact_dir:
-                self._load_precompiled_fx_trace(
-                    model,
-                    (inputs, labels, global_valid_tokens, extra_kwargs),
-                )
-            else:
-                fwd_bwd_fn = make_fwd_bwd_step(
-                    model,
-                    self.loss_fn,
-                    accumulate_gradients=gradient_state is not None,
-                )
-                trace_context = dist_utils.get_spmd_context(
-                    parallel_dims=self.parallel_dims,
-                    spmd_typechecking=False,
-                )
-                with trace_context(), log_timer("minimal_fx_tracer"):
-                    self._traced_step = minimal_fx_tracer(
-                        fwd_bwd_fn,
-                        module=model,
-                        graph_state=(
-                            gradient_state.graph_state
-                            if gradient_state is not None
-                            else None
-                        ),
-                        prepare_inputs=self._prepare_trace_inputs,
-                        prepare_call_inputs=self._prepare_trace_call_inputs,
-                    )(
-                        inputs,
-                        labels,
-                        global_valid_tokens,
-                        extra_kwargs,
-                    )
-            if self.config.compile.enable_passes:
-                pipeline_fn = PASS_PIPELINE_REGISTRY.get(
-                    self.config.compile.pass_pipeline,
-                    construct_default_graph_passes,
-                )
-                passes = pipeline_fn(
-                    self._traced_step,
-                    self.config,
-                    parallel_dims=self.parallel_dims,
-                )
-            else:
-                passes = construct_mandatory_graph_passes()
-            self._traced_step.gm = apply_graph_passes(
-                self._traced_step.gm,
-                self._traced_step.example_inputs,
-                passes,
-                compile_config=self.config.compile,
-                respect_disable_passes=self.config.compile.enable_passes,
-            )
-        assert self._traced_step is not None
-        if self._graph_runner is None:
-            runtime_meshes = ()
-            if (
-                self.config.compile.precompile_artifact_dir
-                and self.config.parallelism.spmd_backend == "spmd_types"
-            ):
-                from torchtitan.experiments.graph_trainer.precompile import (
-                    get_spmd_precompile_meshes,
-                )
-
-                runtime_meshes = tuple(get_spmd_precompile_meshes(self.parallel_dims))
-            self._graph_runner = GraphRunner(
-                self._traced_step,
-                module=model,
-                graph_state=(
-                    gradient_state.graph_state if gradient_state is not None else None
-                ),
-                runtime_meshes=runtime_meshes,
-            )
-        with self.train_context():
-            outputs = self._graph_runner(
-                inputs,
-                labels,
-                global_valid_tokens,
-                extra_kwargs,
-            )
-        if gradient_state is None:
-            loss = outputs[0]
-            grads = outputs[1:]
-            accumulate_param_grads_(
-                params,
-                grads,
-                clone_grads_to_initialize_param_grad=isinstance(
-                    self._traced_step.gm.forward, CUDAGraphWrapper
-                ),
-            )
-            return loss
-
-        if len(outputs) != 1:
-            raise RuntimeError(
-                "GraphTrainer directly traced gradient accumulation expected a "
-                f"loss-only output, got {len(outputs)} outputs"
-            )
-        return outputs[0]
-
-    def _ensure_graph_gradient_state(
-        self,
-        model: nn.Module,
-    ) -> GraphGradientState:
-        if self._graph_gradient_state is None:
-            self._graph_gradient_state = GraphGradientState.create(
-                model,
-                self.optimizers,
-            )
-        return self._graph_gradient_state
-
-    def _get_trainable_parameters(
-        self,
-        model: nn.Module,
-    ) -> tuple[torch.Tensor, ...]:
-        if self._graph_gradient_state is not None:
-            return self._graph_gradient_state.parameters
-        if self._trainable_params is None:
-            # remove_duplicate=False preserves duplicate parameter entries from
-            # weight tying (for example, shared embedding/output weights).
-            self._trainable_params = tuple(
-                parameter
-                for _, parameter in model.named_parameters(remove_duplicate=False)
-                if parameter.requires_grad
-            )
-        return self._trainable_params
-
-    def _validate_inplace_graph_gradient_accumulation_config(self) -> None:
-        if not self.config.compile.enable_inplace_graph_gradient_accumulation:
-            return
-        if self.config.compile.mode != "aot_fx_trace":
-            raise ValueError(
-                "GraphTrainer in-graph gradient accumulation requires "
-                "compile.mode='aot_fx_trace'"
-            )
-        if self.parallel_dims.pp_enabled:
-            raise ValueError(
-                "GraphTrainer in-graph gradient accumulation does not yet "
-                "support pipeline parallelism"
-            )
-        if len(self.model_parts) != 1:
-            raise ValueError(
-                "GraphTrainer in-graph gradient accumulation requires one model"
-            )
-        if self.config.compile.precompile_artifact_dir:
-            raise ValueError(
-                "GraphTrainer in-graph gradient accumulation does not yet "
-                "support precompiled artifacts"
-            )
-        if self.config.compile.pass_pipeline in PASS_PIPELINE_REGISTRY:
-            raise ValueError(
-                "GraphTrainer in-graph gradient accumulation does not yet "
-                "support custom pass pipelines"
-            )
-
-    def _prepare_trace_inputs(
-        self,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> None:
-        for pass_name in trace_input_preparer_keys(self.config.compile):
-            prepare = TRACE_INPUT_PREPARERS.get(pass_name)
-            if prepare is not None:
-                prepare(self.config.compile, args, kwargs)
-
-    def _prepare_trace_call_inputs(
-        self,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        for pass_name in trace_input_preparer_keys(self.config.compile):
-            prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
-            if prepare is not None:
-                prepared = prepare(self.config.compile, args, kwargs)
-                if prepared is not None:
-                    args, kwargs = prepared
-        return args, kwargs
+        return inputs, labels, extra_kwargs
 
     def train_step(self, data_iterator: Iterator[dict[str, Any]]):
         PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
             self
         )
-        if self._graph_gradient_state is not None:
-            self._graph_gradient_state.validate_grad_bindings()
         super().train_step(data_iterator)
 
     def close(self) -> None:
@@ -453,8 +242,7 @@ class GraphTrainer(Trainer):
 
         super().close()
 
-        self._graph_runner = None
-        self._trainable_params = None
+        self._graph_pipeline_runtime = None
 
         # See Note [explicit cudagraph teardown] in cudagraph.py
         cudagraph_teardown()
