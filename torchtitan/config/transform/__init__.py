@@ -18,13 +18,16 @@ from .quantization import (
     NVFP4LinearConverter,
     QuantizationConverter,
 )
+from .tensor_parallel import AsyncTensorParallelTransform, TensorParallelTransform
 
 __all__ = [
     "ModelConfigTransform",
+    "AsyncTensorParallelTransform",
     "apply_transforms",
     "transform_model_config_",
     "convert_config_type",
     "ContextParallelTransform",
+    "TensorParallelTransform",
     "LoRAConverter",
     "Float8GroupedExpertsConverter",
     "Float8LinearConverter",
