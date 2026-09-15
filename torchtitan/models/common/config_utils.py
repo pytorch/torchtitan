@@ -12,6 +12,7 @@ fields set at config creation time.
 
 import dataclasses
 from collections.abc import Callable
+from typing import Literal
 
 import torch
 from torch.distributed.tensor import DTensor
