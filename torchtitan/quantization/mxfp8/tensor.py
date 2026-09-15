@@ -17,6 +17,7 @@ from torchao.prototype.mx_formats.kernels import (
 )
 
 from .._fsdp_tensor import _ShardedFSDPTensor
+from .._weight_sync_tensor import _WeightSyncTensor
 
 
 # Everything here is internal to the MXFP8 component; nothing is re-exported.
@@ -51,8 +52,12 @@ class _MXFP8LinearOperands:
         return self.weight_qdata_dgrad_NK.t()
 
 
-def _quantize_mxfp8_weight(weight_NK: torch.Tensor) -> _MXFP8LinearOperands:
-    """Quantize a BF16 weight using fixed square 32x32 scale tiles."""
+def _quantize_mxfp8_weight(
+    weight_NK: torch.Tensor,
+    *,
+    out: _MXFP8LinearOperands | None = None,
+) -> _MXFP8LinearOperands:
+    """Quantize a BF16 weight, optionally refilling existing operands."""
     if weight_NK.ndim != 2:
         raise ValueError(
             "MXFP8 32x32 weight quantization requires a 2D weight, "
@@ -73,11 +78,28 @@ def _quantize_mxfp8_weight(weight_NK: torch.Tensor) -> _MXFP8LinearOperands:
         weight_scale_fprop_swizzled,
         weight_scale_dgrad_swizzled,
     ) = triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale(weight_NK)
-    return _MXFP8LinearOperands(
+    operands = _MXFP8LinearOperands(
         weight_qdata_dgrad_NK=weight_qdata_dgrad_NK,
         weight_scale_fprop_swizzled=weight_scale_fprop_swizzled,
         weight_scale_dgrad_swizzled=weight_scale_dgrad_swizzled,
     )
+    if out is None:
+        return operands
+    out.weight_qdata_dgrad_NK.copy_(operands.weight_qdata_dgrad_NK)
+    out.weight_scale_fprop_swizzled.copy_(operands.weight_scale_fprop_swizzled)
+    out.weight_scale_dgrad_swizzled.copy_(operands.weight_scale_dgrad_swizzled)
+    return out
+
+
+class _MXFP8WeightSyncTensor(_WeightSyncTensor):
+    """Weight-sync tensor backed by MXFP8 linear operands."""
+
+    def _build_operands(
+        self,
+        logical_tensor: torch.Tensor,
+        out: _MXFP8LinearOperands | None = None,
+    ) -> _MXFP8LinearOperands:
+        return _quantize_mxfp8_weight(logical_tensor, out=out)
 
 
 class _LinearShardedTensorWithMXFP8Compute(_ShardedFSDPTensor):
@@ -94,10 +116,4 @@ class _LinearShardedTensorWithMXFP8Compute(_ShardedFSDPTensor):
         logical_tensor: torch.Tensor,
         out: _MXFP8LinearOperands | None = None,
     ) -> _MXFP8LinearOperands:
-        operands = _quantize_mxfp8_weight(logical_tensor)
-        if out is None:
-            return operands
-        out.weight_qdata_dgrad_NK.copy_(operands.weight_qdata_dgrad_NK)
-        out.weight_scale_fprop_swizzled.copy_(operands.weight_scale_fprop_swizzled)
-        out.weight_scale_dgrad_swizzled.copy_(operands.weight_scale_dgrad_swizzled)
-        return out
+        return _quantize_mxfp8_weight(logical_tensor, out=out)
