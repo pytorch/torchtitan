@@ -63,11 +63,7 @@ def set_kimi_k3_sharding_config(
     enable_sp: bool,
     enable_ep: bool,
 ) -> None:
-    """Fill ``sharding_config`` on all Kimi K3 sub-configs.
-
-    Populated unconditionally, as in DeepSeek V3: ``Module.parallelize``
-    filters disabled axes at runtime.
-    """
+    """Fill ``sharding_config`` on all Kimi K3 sub-configs."""
     set_decoder_sharding_config(config, enable_sp=enable_sp)
     layer_input_layout = (
         dense_sequence_parallel_placement()
@@ -75,12 +71,10 @@ def set_kimi_k3_sharding_config(
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     if config.vision_encoder is not None:
-        _shard_decoder_after_embedding_scatter(
+        _set_multimodal_decoder_boundary_sharding(
             config, layer_input_layout, enable_sp=enable_sp
         )
         set_moonvit_sharding_config(config.vision_encoder, projector_norm="post_norm")
-    config.output_res_norm.sharding_config = _stream_weight_config(enable_sp=enable_sp)
-    config.output_res_proj.sharding_config = _stream_weight_config(enable_sp=enable_sp)
     for layer_cfg in config.layers:
         _set_kimi_k3_layer_sharding(
             layer_cfg,
@@ -88,6 +82,12 @@ def set_kimi_k3_sharding_config(
             enable_sp=enable_sp,
             enable_ep=enable_ep,
         )
+    config.output_res_norm.sharding_config = _tp_unsharded_weight_config(
+        enable_sp=enable_sp
+    )
+    config.output_res_proj.sharding_config = _tp_unsharded_weight_config(
+        enable_sp=enable_sp
+    )
 
 
 def _set_kimi_k3_layer_sharding(
@@ -109,7 +109,7 @@ def _set_kimi_k3_layer_sharding(
         layer_cfg.ffn_res_proj,
     ):
         if res_cfg is not None:
-            res_cfg.sharding_config = _stream_weight_config(enable_sp=enable_sp)
+            res_cfg.sharding_config = _tp_unsharded_weight_config(enable_sp=enable_sp)
 
     if layer_cfg.attention is not None:
         _set_mla_sharding(
@@ -139,7 +139,6 @@ def _set_mla_sharding(
     attn_x_layout: SpmdType,
     enable_sp: bool,
 ) -> None:
-    """DeepSeek V3's MLA plan, without RoPE and with a colwise output ``gate``."""
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x_TD": attn_x_layout},
         in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
@@ -231,14 +230,14 @@ def _set_latent_moe_sharding(
     # Replicated when the experts are TP-sharded; under EP they are whole on
     # every tp rank, so routed_down follows the stream's rule.
     moe_cfg.routed_down.sharding_config = (
-        _stream_weight_config(enable_sp=enable_sp)
+        _tp_unsharded_weight_config(enable_sp=enable_sp)
         if enable_ep
         else ShardingConfig(
             state_shardings={"weight": dense_param_placement(tp=spmd.R)}
         )
     )
     routed_norm = norm_config(enable_sp=enable_sp)
-    routed_up = _stream_weight_config(enable_sp=enable_sp)
+    routed_up = _tp_unsharded_weight_config(enable_sp=enable_sp)
     if not enable_sp:
         # The experts' Partial output is reduced at the norm's boundary;
         # routed_up re-enters Partial so the MoE exit reduces it once.
@@ -258,8 +257,8 @@ def _set_latent_moe_sharding(
     moe_cfg.routed_up.sharding_config = routed_up
 
 
-def _stream_weight_config(*, enable_sp: bool) -> ShardingConfig:
-    """Weight on the token stream, state only, with the norms' TP rule."""
+def _tp_unsharded_weight_config(*, enable_sp: bool) -> ShardingConfig:
+    """Keep the weight TP-unsharded: R with SP for gradient reduction, otherwise I."""
     return ShardingConfig(
         state_shardings=norm_config(enable_sp=enable_sp).state_shardings
     )
@@ -277,11 +276,11 @@ def _block_residual_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdType:
     )
 
 
-def _shard_decoder_after_embedding_scatter(
+def _set_multimodal_decoder_boundary_sharding(
     config: "KimiK3Model.Config", layer_input_layout: SpmdType, *, enable_sp: bool
 ) -> None:
-    """Keep ``tok_embeddings`` TP-replicated for the vision scatter; layer 0's
-    input boundary restores the decoder's layout for the stream and the stack.
+    """Keep the output of ``tok_embeddings`` TP-replicated for the vision scatter;
+    Decoder's layer 0's input boundary restores the decoder's layout for the stream and the stack.
     """
     replicated = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     config.tok_embeddings.sharding_config = ShardingConfig(
