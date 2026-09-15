@@ -63,7 +63,9 @@ class _LoRAHandler(Protocol):
         ...
 
 
-class _LinearLoRAHandler:
+class LinearLoRAHandler:
+    """Convert ``Linear.Config`` instances to LoRA-enabled configs."""
+
     config_type = Linear.Config
 
     def make_config(
@@ -87,10 +89,10 @@ class _LinearLoRAHandler:
 class LoRATransform(ModelConfigTransform):
     """Apply LoRA adapters to supported projection layers in a model.
 
-    The base transform supports ``Linear.Config``. Subclasses may extend
-    ``handlers`` for other projection types. Non-target modules are replaced
-    with dynamic frozen config subclasses that freeze direct parameters at
-    build time.
+    ``handlers`` defines the projection config types supported by this
+    transform. Include ``LinearLoRAHandler`` to adapt ``Linear.Config``
+    instances. Non-target modules are replaced with dynamic frozen config
+    subclasses that freeze direct parameters at build time.
 
     When ``target_modules`` is None (default), every supported projection is
     converted. When specified, only configs whose FQN's last segment matches
@@ -104,7 +106,9 @@ class LoRATransform(ModelConfigTransform):
     run_after: ClassVar[tuple[type[ModelConfigTransform], ...]] = (
         ContextParallelTransform,
     )
-    handlers: ClassVar[tuple[_LoRAHandler, ...]] = (_LinearLoRAHandler(),)
+
+    handlers: tuple[_LoRAHandler, ...]
+    """Handlers for the projection config types that support LoRA."""
 
     rank: int = 8
     """Rank of the LoRA matrices."""
@@ -122,12 +126,13 @@ class LoRATransform(ModelConfigTransform):
     def __post_init__(self) -> None:
         for index, handler in enumerate(self.handlers):
             for earlier in self.handlers[:index]:
-                assert not issubclass(handler.config_type, earlier.config_type), (
-                    f"{type(handler).__qualname__} for "
-                    f"{handler.config_type.__qualname__} is shadowed by earlier "
-                    f"handler {type(earlier).__qualname__} for "
-                    f"{earlier.config_type.__qualname__}."
-                )
+                if issubclass(handler.config_type, earlier.config_type):
+                    raise ValueError(
+                        f"{type(handler).__qualname__} for "
+                        f"{handler.config_type.__qualname__} is shadowed by earlier "
+                        f"handler {type(earlier).__qualname__} for "
+                        f"{earlier.config_type.__qualname__}."
+                    )
         if self.rank <= 0:
             raise ValueError(f"LoRA rank must be positive, got {self.rank}")
         if self.target_modules is None:

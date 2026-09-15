@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from torchtitan.config import Configurable
 from torchtitan.protocols.module import Module
 
-__all__ = ["ModelConfigConverter", "validate_converter_order"]
+__all__ = ["ModelConfigConverter", "validate_converter_compatibility"]
 
 
 class ModelConfigConverter(Configurable):
@@ -34,7 +34,7 @@ class ModelConfigConverter(Configurable):
         raise NotImplementedError
 
 
-def validate_converter_order(
+def validate_converter_compatibility(
     converters: list[ModelConfigConverter.Config],
 ) -> None:
     """Validate converter compatibility before model conversion."""

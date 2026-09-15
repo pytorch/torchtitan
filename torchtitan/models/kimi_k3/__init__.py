@@ -12,7 +12,10 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
 from torchtitan.models.common import (
     Conv1d,
     Embedding,
@@ -584,7 +587,7 @@ def model_registry(
         )
     config = get_config(attn_backend=attn_backend, moe_comm_backend=moe_comm_backend)
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for converter in converters:
             config = converter.build().convert(config)
     return ModelSpec(

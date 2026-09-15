@@ -11,8 +11,8 @@ from .base import convert_config_type, ModelConfigTransform
 from .batch_invariance import BatchInvariantFlexConverter
 from .cast_linear import LMHeadCastConverter
 from .context_parallel import ContextParallelTransform
-from .converter import ModelConfigConverter, validate_converter_order
-from .lora import LoRATransform
+from .converter import ModelConfigConverter, validate_converter_compatibility
+from .lora import LinearLoRAHandler, LoRATransform
 from .quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
@@ -31,6 +31,7 @@ __all__ = [
     "ContextParallelTransform",
     "BatchInvariantFlexConverter",
     "LMHeadCastConverter",
+    "LinearLoRAHandler",
     "LoRATransform",
     "Float8GroupedExpertsConverter",
     "Float8LinearConverter",
@@ -38,5 +39,5 @@ __all__ = [
     "MXFP8LinearConverter",
     "NVFP4LinearConverter",
     "QuantizationConverter",
-    "validate_converter_order",
+    "validate_converter_compatibility",
 ]

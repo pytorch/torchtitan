@@ -23,6 +23,7 @@ from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
     Float8LinearConverter,
+    LinearLoRAHandler,
     LoRATransform,
     MXFP8LinearConverter,
     NVFP4LinearConverter,
@@ -237,7 +238,14 @@ def llama3_debugmodel_float8_emulate_lora(
     )
     return apply_transforms(
         config,
-        [LoRATransform(rank=8, alpha=16.0, target_modules=["wqkv", "wo"])],
+        [
+            LoRATransform(
+                handlers=(LinearLoRAHandler(),),
+                rank=8,
+                alpha=16.0,
+                target_modules=["wqkv", "wo"],
+            )
+        ],
     )
 
 
