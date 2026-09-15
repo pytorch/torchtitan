@@ -181,11 +181,6 @@ Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), th
 
 For background, see [train/inference mismatch in asynchronous RL](https://yichuan-w.github.io/blog/GDN-train-inference-mismatch-asyncRL/) and [Defeating Nondeterminism in LLM Inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/).
 
-## GDN CUDA graphs
-
-For Qwen3.5 GDN prefill capture, metadata staging, and preserved decode paths,
-see the [GDN CUDA graph guide](./docs/gdn_cuda_graphs.md).
-
 ## Observability
 
 TitanRL exposes four complementary views of a run:
