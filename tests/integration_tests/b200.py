@@ -24,4 +24,11 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
             test_name="mxfp8_linear_fsdp",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_mxfp8_fsdp2_pp2_ep2_loss_compile],
+            test_descr="DeepSeek V3 MXFP8 FSDP+PP+EP+loss compile",
+            test_name="deepseek_v3_mxfp8_fsdp+pp+ep+loss_compile",
+            ngpu=4,
+            use_real_pg=True,
+        ),
     ]

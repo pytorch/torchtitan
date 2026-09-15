@@ -5,60 +5,55 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# --- This script is optimized for AWS with EFA
-# --- adjust NCCL_BUFFSIZE if you encounter memory
-# --- constraint issues or to tune for improved performance.
-# ---
-
+# Example allocation. Override these with sbatch command-line options for your
+# cluster, including partition, account, and QoS when they are required.
 #SBATCH --job-name=torchtitan_multi_node
-
-#SBATCH --ntasks=4
-
 #SBATCH --nodes=4
-
-#SBATCH --gpus-per-task=8
-
+# Run one Slurm task per node; torchrun launches one worker per GPU.
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=8
 #SBATCH --cpus-per-task=96
 
-#SBATCH --partition=train
+set -euo pipefail
 
+# Use the first allocated node for rendezvous. Slurm hostnames should resolve on
+# every compute node.
+mapfile -t nodes < <(scontrol show hostnames "${SLURM_JOB_NODELIST}")
+head_node=${nodes[0]}
 
-nodes=( $( scontrol show hostnames $SLURM_JOB_NODELIST ) )
-nodes_array=($nodes)
-head_node=${nodes_array[0]}
-head_node_ip=$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address)
+RUN_ID=${RUN_ID:-"${SLURM_JOB_ID}"}
+OUTPUT_DIR=${OUTPUT_DIR:-"outputs/${RUN_ID}"}
+NPROC_PER_NODE=${NPROC_PER_NODE:-"gpu"}
 
-echo Node IP: $head_node_ip
-export LOGLEVEL=INFO
-# Enable for A100
-export FI_PROVIDER="efa"
-# Ensure that P2P is available
-# export NCCL_P2P_DISABLE=1
-# export NCCL_IB_DISABLE=1
+mkdir -p "${OUTPUT_DIR}"
 
 # debugging flags (optional)
-export NCCL_DEBUG=WARN
-export PYTHONFAULTHANDLER=1
+export NCCL_DEBUG=${NCCL_DEBUG:-"WARN"}
+export PYTHONFAULTHANDLER=${PYTHONFAULTHANDLER:-"1"}
 # optional debug settings
 # export NCCL_DEBUG=INFO
 # NCCL_DEBUG_SUBSYS=INIT,GRAPH,ENV
 
-export LD_LIBRARY_PATH=/opt/amazon/efa/lib:$LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=/usr/local/lib/:$LD_LIBRARY_PATH
-export CUDA_LAUNCH_BLOCKING=0
-
-# on your cluster you might need these:
-# set the network interface
-export NCCL_SOCKET_IFNAME="eth0,en,eth,em,bond"
-export NCCL_BUFFSIZE=2097152
-#export TORCH_DIST_INIT_BARRIER=1
-export FI_EFA_SET_CUDA_SYNC_MEMOPS=0
-
+# Select any registered TorchTitan model and configuration at submission time,
+# for example: MODULE=llama3 CONFIG=llama3_8b sbatch ...
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_debugmodel"}
 
-dcgmi profile --pause
-# adjust sbatch --ntasks and sbatch --nodes above and --nnodes below
-# to your specific node count, and update target launch file.
-srun torchrun --nnodes 4 --nproc_per_node 8 --rdzv_id 101 --rdzv_backend c10d --rdzv_endpoint "$head_node_ip:29500" -m torchtitan.train --module ${MODULE} --config ${CONFIG} "$@"
-dcgmi profile --resume
+if [[ "${TORCHTITAN_COLLECT_ENVIRONMENT:-0}" == "1" ]]; then
+    python3 scripts/collect_environment.py \
+        --output "${OUTPUT_DIR}/environment.json"
+fi
+
+# "gpu" launches one worker for each GPU that Slurm makes visible to the task.
+# Set NPROC_PER_NODE to an integer when a job intentionally uses fewer workers.
+srun --kill-on-bad-exit=1 \
+    python3 -m torch.distributed.run \
+    --nnodes "${SLURM_NNODES}" \
+    --nproc-per-node "${NPROC_PER_NODE}" \
+    --rdzv-id "${SLURM_JOB_ID}" \
+    --rdzv-backend c10d \
+    --rdzv-endpoint "${head_node}:29500" \
+    -m torchtitan.train \
+    --module "${MODULE}" \
+    --config "${CONFIG}" \
+    "$@" 2>&1 | tee "${OUTPUT_DIR}/training.log"
