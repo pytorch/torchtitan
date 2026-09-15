@@ -98,8 +98,6 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             tp_group,
             tp_group.group_name,
         )
-        if self.num_linears == 1:
-            return output
         return output.unflatten(-1, self.weight.shape[:-1])
 
 

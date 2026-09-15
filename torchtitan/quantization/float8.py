@@ -57,8 +57,6 @@ try:
                     )
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            if self.num_linears == 1:
-                return TorchAOFloat8Linear.forward(self, input)
             if torch.is_autocast_enabled():
                 input = input.to(torch.get_autocast_gpu_dtype())
             output = matmul_with_hp_or_float8_args.apply(
