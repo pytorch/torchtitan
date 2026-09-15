@@ -1084,3 +1084,29 @@ def deepseek_v4_flash_pr18_stack_bs2(seq_len: int | None = 8192) -> Trainer.Conf
     config = deepseek_v4_flash_pr18_asyncep_bf16reduce(seq_len)
     config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 8192
     return config
+
+
+def deepseek_v4_flash_pr18_det(seq_len: int | None = 8192) -> Trainer.Config:
+    """S0-det. The 92.15 config at 1x under torch deterministic mode.
+
+    Baseline for the deterministic-mode tax. Job 402 (2x, deterministic)
+    reached steps at 80.90 TFLOP/s, but that number is the 2x batch effect
+    and the deterministic-mode cost combined; this run isolates the latter so
+    bs2_det - det is the pure batch effect.
+    """
+    config = _pr18_tuned(seq_len)
+    config.debug.deterministic = True
+    config.debug.deterministic_warn_only = True
+    return config
+
+
+def deepseek_v4_flash_pr18_bs3_det(seq_len: int | None = 8192) -> Trainer.Config:
+    """S4b'. 3x microbatch (24576 tokens/rank) under deterministic mode.
+
+    2x measured 101.04 GiB; 3x should land near 126 GiB of 276. Extends the
+    batch curve under the only setting in which >1x has reached step 1.
+    """
+    config = _pr18_batch(3, seq_len)
+    config.debug.deterministic = True
+    config.debug.deterministic_warn_only = True
+    return config
