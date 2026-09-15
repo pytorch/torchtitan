@@ -5,11 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
 
 import spmd_types as spmd
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from spmd_types.checker import typecheck
@@ -104,6 +106,53 @@ class TestEmbedding(DTensorTestBase):
     @property
     def world_size(self):
         return 4
+
+    @with_comms
+    def test_vocab_parallel_padding_forward_backward(self):
+        """Preserve nn.Embedding padding semantics on every vocabulary shard."""
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        for vocab_size in (128, 131):
+            for padding_idx in (None, 0, 32, 33, 64, -1):
+                with self.subTest(vocab_size=vocab_size, padding_idx=padding_idx):
+                    torch.manual_seed(42)
+                    reference = nn.Embedding(
+                        vocab_size,
+                        32,
+                        padding_idx=padding_idx,
+                        device=self.device_type,
+                    )
+                    # Nonzero padding weights must still be returned by forward.
+                    with torch.no_grad():
+                        reference.weight.normal_()
+                    tokens = (
+                        torch.arange(vocab_size, device=self.device_type)
+                        .repeat(2)
+                        .unsqueeze(0)
+                    )
+                    expected = reference(tokens)
+                    expected.sum().backward()
+
+                    # HF module conversion preserves nn.Embedding attributes.
+                    embedding = deepcopy(reference)
+                    embedding.__class__ = Embedding
+                    embedding.weight = nn.Parameter(
+                        distribute_tensor(
+                            reference.weight.detach(), mesh, (Shard(0),)
+                        ).to_local()
+                    )
+                    with set_current_spmd_mesh(mesh):
+                        partial_output = embedding(tokens)
+                    partial_output.sum().backward()
+                    output = partial_output.detach().clone()
+                    dist.all_reduce(output, group=mesh.get_group("tp"))
+
+                    expected_grad = distribute_tensor(
+                        reference.weight.grad, mesh, (Shard(0),)
+                    ).to_local()
+                    self.assertEqual(output, expected, atol=0, rtol=0)
+                    self.assertEqual(
+                        embedding.weight.grad, expected_grad, atol=0, rtol=0
+                    )
 
     @with_comms
     def test_vocab_parallel_embedding_parity(self):
