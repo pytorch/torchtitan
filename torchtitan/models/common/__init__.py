@@ -32,7 +32,14 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
-from .linear import CastLinear, Linear, PartialBiasRowwiseLinear, RouterGateLinear
+from .linear import (
+    AllGatherLinear,
+    CastLinear,
+    Linear,
+    LinearReduceScatter,
+    PartialBiasRowwiseLinear,
+    RouterGateLinear,
+)
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .nn_modules import (
     Conv1d,
@@ -45,8 +52,10 @@ from .nn_modules import (
     SiLU,
 )
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
+from .tensor_parallel import TensorParallelFeedForward
 
 __all__ = [
+    "AllGatherLinear",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
@@ -72,6 +81,7 @@ __all__ = [
     "InnerAttention",
     "LayerNorm",
     "Linear",
+    "LinearReduceScatter",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "PartialBiasRowwiseLinear",
@@ -88,6 +98,7 @@ __all__ = [
     "SwiGLU",
     "TransformerBlock",
     "UnaryActivationFn",
+    "TensorParallelFeedForward",
     "VarlenInnerAttention",
     "VarlenMetadata",
     "compute_ffn_hidden_dim",
