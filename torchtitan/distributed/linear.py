@@ -44,7 +44,7 @@ def ensure_symm_mem_ops():
     return symm_mem
 
 
-class AllGatherLinear(torch.autograd.Function):
+class AsyncAllGatherLinear(torch.autograd.Function):
     """All-gather the sequence shard, then apply a column-parallel linear.
 
     Over ``R`` ranks, with ``M`` rows of sequence-major tokens:
@@ -182,10 +182,10 @@ class AllGatherLinear(torch.autograd.Function):
         return grad_x_shard_m, grad_w_shard_n, grad_bias, None, None
 
 
-class LinearReduceScatter(torch.autograd.Function):
+class AsyncLinearReduceScatter(torch.autograd.Function):
     """Apply a row-parallel linear, then reduce-scatter over the sequence.
 
-    The mirror image of :class:`AllGatherLinear`:
+    The mirror image of :class:`AsyncAllGatherLinear`:
 
         x_shard_k  [M, K / R]   full sequence, features sharded
         w_shard_k  [N, K / R]   weight sharded over its input features
@@ -220,7 +220,7 @@ class LinearReduceScatter(torch.autograd.Function):
         completes it and shards rows instead. Non-TP axes pass through from x.
         """
         spmd.assert_type(x_shard_k, {group_name: spmd.S(1)})
-        # S(1), the mirror of AllGatherLinear's S(0): torch stores the weight as
+        # S(1), the mirror of AsyncAllGatherLinear's S(0): torch stores the weight as
         # [N, K] while the mental model of the GEMM is [K, N], so sharding the
         # input features K -- the row-parallel direction -- is dim 1 of what is
         # actually stored.
