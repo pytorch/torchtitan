@@ -41,7 +41,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     MOE_BLOCK_FQN,
     validate_ep_overlap_config,
 )
-
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
@@ -91,6 +90,7 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_parameter_gradient_markers_pass,
 )
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+    functionalize_recompute_mutations_pass,
     selective_activation_remat_pass,
 )
 
@@ -271,6 +271,7 @@ def compile_time_passes(
                 tag_with_memory_policy_pass,
                 config=config,
             ),
+            functionalize_recompute_mutations_pass,
             functools.partial(
                 apply_cpu_offload_pass,
                 prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,

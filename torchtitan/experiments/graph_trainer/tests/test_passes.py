@@ -3733,6 +3733,13 @@ class TestChunkPasses(TestCase):
             names.index("apply_cpu_offload_pass"),
             names.index("selective_activation_remat_pass"),
         )
+        mutation_pass_idx = names.index("functionalize_recompute_mutations_pass")
+        if not (
+            names.index("tag_with_memory_policy_pass")
+            < mutation_pass_idx
+            < names.index("apply_cpu_offload_pass")
+        ):
+            raise RuntimeError("Mutation functionalization must precede CPU offload.")
         self.assertLess(
             names.index("selective_activation_remat_pass"),
             names.index("populate_chunk_dim_metadata_pass"),
@@ -6693,6 +6700,7 @@ class TestSelectiveActivationRematPass(TestCase):
             bwd = e + e            # autograd_backward
         """
         from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            functionalize_recompute_mutations_pass,
             selective_activation_remat_pass,
         )
 
@@ -6736,6 +6744,143 @@ class TestSelectiveActivationRematPass(TestCase):
         for inp in bwd.all_input_nodes:
             self.assertEqual(inp.name, e_name + "_recomputed")
         self.assertNotIn(e_name, [n.name for n in nodes])
+
+        from copy import deepcopy
+
+        from torch.distributed.device_mesh import DeviceMesh
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        lib = torch.library.Library("sar_remat_behavior", "DEF")
+        lib.define("affine_(Tensor(a!) x, float scale, float shift) -> ()")
+        lib.impl(
+            "affine_",
+            lambda x, scale, shift: (x.mul_(scale).add_(shift), None)[1],
+            "CPU",
+        )
+        lib.impl("affine_", lambda x, scale, shift: None, "Meta")
+        lib.define("pair_(Tensor(a!) x, Tensor(b!) y) -> ()")
+        lib.impl("pair_", lambda x, y: (x.add_(1), y.mul_(3), None)[-1], "CPU")
+        lib.impl("pair_", lambda x, y: None, "Meta")
+        lib.define("state_(Tensor(a!) x, Tensor(b!) state) -> ()")
+        lib.impl(
+            "state_", lambda x, state: (x.add_(state), state.add_(1), None)[-1], "CPU"
+        )
+        lib.impl("state_", lambda x, state: None, "Meta")
+        effect_calls = []
+        lib.define("effect(Tensor x) -> Tensor")
+        lib.impl("effect", lambda x: (effect_calls.append(None), x.clone())[1], "CPU")
+        lib.impl("effect", lambda x: torch.empty_like(x), "Meta")
+        torch.library._register_effectful_op(
+            torch.ops.sar_remat_behavior.effect.default,
+            torch.library.EffectType.ORDERED,
+        )
+
+        mesh = DeviceMesh(
+            "cpu", [0], mesh_dim_names=("dp",), _init_backend=False, _rank=0
+        )
+
+        for scenario in [
+            "private",
+            "view",
+            "strided_view",
+            "aliased_targets",
+            "ordered_effect",
+            "sequence",
+            "write_only",
+            "multiple_targets",
+            "state",
+        ]:
+
+            class Transform(torch.autograd.Function):
+                @staticmethod
+                def forward(ctx, x, state):
+                    y = x.clone()
+                    if scenario == "private":
+                        torch.ops.sar_remat_behavior.affine_(y, 1.0, 1.0)
+                    elif scenario == "view":
+                        torch.ops.sar_remat_behavior.affine_(y[1:], 1.0, 1.0)
+                    elif scenario == "strided_view":
+                        torch.ops.sar_remat_behavior.affine_(
+                            y.view(2, 2).t()[0], 1.0, 1.0
+                        )
+                    elif scenario == "aliased_targets":
+                        torch.ops.sar_remat_behavior.pair_(y, y.view_as(y))
+                    elif scenario == "ordered_effect":
+                        y = torch.ops.sar_remat_behavior.effect(y)
+                        torch.ops.sar_remat_behavior.affine_(y, 1.0, 1.0)
+                    elif scenario == "sequence":
+                        torch.ops.sar_remat_behavior.affine_(y, 1.0, 1.0)
+                        torch.ops.sar_remat_behavior.affine_(y, 2.0, 0.0)
+                    elif scenario == "write_only":
+                        torch.ops.sar_remat_behavior.affine_(y, 0.0, 4.0)
+                    elif scenario == "multiple_targets":
+                        z = x.clone()
+                        torch.ops.sar_remat_behavior.pair_(y, z)
+                        y = y + z
+                    elif scenario == "state":
+                        torch.ops.sar_remat_behavior.state_(y, state)
+                    return y
+
+                @staticmethod
+                def backward(ctx, grad):
+                    scale = {
+                        "aliased_targets": 3.0,
+                        "sequence": 2.0,
+                        "write_only": 0.0,
+                        "multiple_targets": 4.0,
+                    }.get(scenario, 1.0)
+                    return grad * scale, None
+
+            def joint(x, state, runtime_mesh):
+                y = Transform.apply(x, state)
+                loss = y.square().sum()
+                (grad,) = torch.autograd.grad(loss, x)
+                return loss, grad
+
+            x = torch.arange(2.0, 6.0, requires_grad=True)
+            traced = make_fx(joint)(x, torch.ones(4), mesh)
+            in_backward = False
+            for node in traced.graph.nodes:
+                if in_backward and node.op != "output":
+                    node.meta["autograd_backward"] = True
+                if node.target == torch.ops.aten.sum.default:
+                    in_backward = True
+                if not in_backward and node.op == "call_function":
+                    node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+                if node.target is torch.ops.sar_remat_behavior.effect.default:
+                    node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+            baseline = deepcopy(traced)
+            compile_state = torch.ones(4)
+            before_compile_effects = len(effect_calls)
+            candidate = functionalize_recompute_mutations_pass(
+                traced, (x, compile_state, mesh)
+            )
+            if not torch.equal(compile_state, torch.ones(4)) or (
+                len(effect_calls) != before_compile_effects
+            ):
+                raise RuntimeError(
+                    "Compilation must preserve runtime state and effects."
+                )
+            candidate = selective_activation_remat_pass(candidate)
+            candidate.graph.lint()
+            state_ref, state_candidate = torch.ones(4), torch.ones(4)
+            for step in range(3):
+                before_effects = len(effect_calls)
+                expected = baseline(x, state_ref, mesh)
+                actual = candidate(x, state_candidate, mesh)
+                if (
+                    scenario == "ordered_effect"
+                    and len(effect_calls) - before_effects != 2
+                ):
+                    raise RuntimeError(
+                        "Each graph execution must retain one ordered effect."
+                    )
+                if any(
+                    not torch.equal(a, b) for a, b in zip(expected, actual)
+                ) or not torch.equal(state_ref, state_candidate):
+                    raise RuntimeError(
+                        f"{scenario} step {step}: {expected}, {actual}, {state_ref}, {state_candidate}"
+                    )
 
     def test_loss_region_excluded_from_remat(self):
         # Two disjoint backward regions, each consuming a must_recompute forward
