@@ -28,7 +28,7 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
+from torchtitan.components.loss import ChunkedLossWrapper, Loss, LossConfig
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
@@ -124,7 +124,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # (config.sdc_replayer = SDCReplayer.Config()). None disables replay.
         sdc_replayer: Annotated[SDCReplayer.Config | None, tyro.conf.Suppress] = None
         override: OverrideConfig = field(default_factory=OverrideConfig)
-        loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
+        loss: LossConfig = field(default_factory=LossConfig)
 
         def __post_init__(self):
             if self.debug.batch_invariant:
@@ -309,7 +309,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     # TODO: we should make this list[BaseModel / Decoder] but this will affect many components.
     # will do this in a separate PR
     model_parts: list[torch.nn.Module]
-    loss_fn: BaseLoss
+    loss_fn: Loss[Any]
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
     validator: BaseValidator
@@ -828,7 +828,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 loss_kwargs["positions"] = extra_kwargs["positions"]
             loss, _ = self.loss_fn(
                 pred,
-                labels,  # pyrefly: ignore[bad-argument-type]
+                labels,
                 global_valid_tokens,
                 **loss_kwargs,
             )

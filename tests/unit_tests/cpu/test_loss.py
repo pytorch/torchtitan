@@ -7,6 +7,7 @@
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import spmd_types as spmd
@@ -24,14 +25,16 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
-    BaseLoss,
     ChunkedLossWrapper,
     compute_logprobs,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
     IGNORE_INDEX,
+    Loss,
+    LossConfig,
 )
+from torchtitan.config import Configurable
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder, MTPLoss, roll_mtp_sequence
 
@@ -139,7 +142,7 @@ class TestLoss(unittest.TestCase):
         labels = torch.zeros(1, 4, dtype=torch.long)
 
         with self.assertRaisesRegex(ValueError, "expects prediction and labels tuples"):
-            loss_fn(pred, labels)
+            cast(Any, loss_fn)(pred, labels)
 
     def test_ignore_index_equal_per_token_contribution(self):
         """Test that each valid token contributes equally to the loss.
@@ -495,11 +498,11 @@ class _FakeMTPDecoder(MTPDecoder):
         self.config = SimpleNamespace(first_full_attention_backend=None)
 
 
-class _WeightedTwoOutputLoss(BaseLoss):
+class _WeightedTwoOutputLoss(Configurable, Loss[tuple[torch.Tensor, ...]]):
     """Two-output objective used to exercise generic chunked-loss plumbing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseLoss.Config):
+    class Config(LossConfig):
         pass
 
     auxiliary_weight = 0.25
