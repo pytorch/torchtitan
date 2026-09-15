@@ -11,7 +11,7 @@ from typing import Annotated, Any
 
 import tyro
 from renderers import create_renderer, Renderer
-from renderers.configs import RendererConfig as LibraryRendererConfig
+from renderers.configs import RendererConfig as PrimeRendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
@@ -50,7 +50,7 @@ class RenderersLibraryConfig(RendererConfig):
         )
     """
 
-    renderers_config: Annotated[LibraryRendererConfig, tyro.conf.Suppress]
+    renderers_config: Annotated[PrimeRendererConfig, tyro.conf.Suppress]
     """The library's typed config for the model, e.g. `Qwen3RendererConfig(enable_thinking=False)`.
     Renderers and their options:
     https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.11/docs/renderer-config.md"""
