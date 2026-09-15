@@ -26,7 +26,7 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import _linear_parameters_2d, Linear
 from torchtitan.protocols.module import Module
 
 
@@ -93,7 +93,6 @@ try:
             """Drop-in replacement for Linear.Config that builds NVFP4Linear."""
 
             def __post_init__(self) -> None:
-                Linear.Config.__post_init__(self)
                 # NVFP4's Triton kernels need every GEMM dim to be a multiple of
                 # 128. in_features / out_features are known at config-build time
                 # (the TP degree is not), so reject the model-dim violations up
@@ -254,10 +253,11 @@ try:
                     "Linear out_features or TP degree so quantization blocks "
                     "do not span projection boundaries."
                 )
+            weight, bias = _linear_parameters_2d(self.weight, self.bias)
             output = nvfp4_linear(
                 x,
-                self.weight.flatten(0, -2),
-                None if self.bias is None else self.bias.flatten(),
+                weight,
+                bias,
                 sr_seed=self._sr_seed,
                 sign_vector=self.rht_sign_vector,
             )
