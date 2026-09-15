@@ -1064,3 +1064,23 @@ def deepseek_v4_flash_pr18_bs2_det(seq_len: int | None = 8192) -> Trainer.Config
     config.debug.deterministic = True
     config.debug.deterministic_warn_only = True
     return config
+
+
+# --- round 3: three-lever stacks, queued only if the solo lever passed ------
+
+
+def deepseek_v4_flash_pr18_stack_compile(seq_len: int | None = 8192) -> Trainer.Config:
+    """R3a. asyncep + bf16 reduce (100.09) + torch.compile. Queue only if
+    `pr18_compile` reaches steps (attempt 3, fullgraph=False, job 401)."""
+    config = deepseek_v4_flash_pr18_asyncep_bf16reduce(seq_len)
+    config.compile = CompileConfig(enable=True)
+    return config
+
+
+def deepseek_v4_flash_pr18_stack_bs2(seq_len: int | None = 8192) -> Trainer.Config:
+    """R3b. asyncep + bf16 reduce (100.09) + 2x microbatch. Queue only if a 2x
+    run reaches steps -- and with whatever determinism setting made it pass
+    (job 402 tests debug.deterministic)."""
+    config = deepseek_v4_flash_pr18_asyncep_bf16reduce(seq_len)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 8192
+    return config
