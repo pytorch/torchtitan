@@ -360,10 +360,7 @@ class MXFP8Linear(Linear):
 
         # Always a plain tensor: spmd_types carries TP and EP as annotations
         # instead of wrapping the weight as a model-parallel DTensor.
-        # Avoid creating a no-op view of the 2D FSDP tensor subclass. Dynamo
-        # cannot access its quantized operands through that view. Stacked
-        # weights still need their leading projection dimensions flattened.
-        weight_NK = self.weight if self.weight.ndim == 2 else self.weight.flatten(0, -2)
+        weight_NK, bias_N = self._flatten_weight_and_bias()
         # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
         # not what forward usually sees. Under FSDP the post-all-gather hook has
         # already replaced it for this unshard lifetime with the storage-free
@@ -393,7 +390,6 @@ class MXFP8Linear(Linear):
             # the weight changes each optimizer step; inference does not.
             # TODO(anijain2305): key the operands on the parameter's
             # version counter so a frozen weight is quantized once.
-        bias_N = None if self.bias is None else self.bias.flatten()
         output = _MXFP8LinearFunction.apply(
             input,
             weight_NK,
@@ -404,4 +400,4 @@ class MXFP8Linear(Linear):
             bias_N,
             self.input_activation_format_for_backward,
         )
-        return output.unflatten(-1, self.weight.shape[:-1])
+        return self._unflatten_output(output)
