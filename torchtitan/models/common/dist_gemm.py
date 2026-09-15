@@ -31,10 +31,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
-from torchtitan.distributed.linear import (
-    AllGatherLinear as AllGatherLinearFunction,
-    LinearReduceScatter,
-)
+from torchtitan.distributed.linear import AsyncAllGatherLinear, AsyncLinearReduceScatter
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.linear import Linear
@@ -115,7 +112,7 @@ class AsyncColumnParallelLinear(Linear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
-        return AllGatherLinearFunction.apply(
+        return AsyncAllGatherLinear.apply(
             input,
             self.weight,
             self.bias,
@@ -128,9 +125,9 @@ class AsyncRowParallelLinear(Linear):
     """Attention output projection: matmul fused with the TP reduce-scatter.
 
     Named for the role it fills rather than the collective it performs, so it does
-    not read like the :class:`LinearReduceScatter` autograd Function it calls. The
-    class itself is a plain rowwise linear and would work for any row-parallel
-    projection; today it is only wired in as ``wo``.
+    not read like the :class:`AsyncLinearReduceScatter` autograd Function it
+    calls. The class itself is a plain rowwise linear and would work for any
+    row-parallel projection; today it is only wired in as ``wo``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -145,7 +142,7 @@ class AsyncRowParallelLinear(Linear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
-        return LinearReduceScatter.apply(
+        return AsyncLinearReduceScatter.apply(
             input,
             self.weight,
             self.bias,
