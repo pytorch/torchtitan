@@ -17,12 +17,20 @@ from torch._functorch.partitioners import (
     has_recomputable_rng_ops,
     must_recompute,
 )
+from torch._guards import detect_fake_mode
+from torch._higher_order_ops.effects import _get_effect, has_effects
+from torch._subclasses import FakeTensorMode
+from torch._subclasses.functional_tensor import (
+    dispatch_functionalize,
+    FunctionalTensorMode,
+)
+from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.traceback import preserve_node_meta
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_module_fqn,
     _is_backward_node,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +104,51 @@ def _collect_backward_regions(
         regions.append((bwd_start, len(all_nodes), needs_remat))
 
     return regions
+
+
+def functionalize_recompute_mutations_pass(
+    gm: fx.GraphModule,
+    example_inputs: Any,
+) -> fx.GraphModule:
+    """Expose forward mutation results as dataflow before activation rematerialization."""
+    if not has_recomputable_ops(gm) or not any(
+        isinstance(node.target, torch._ops.OpOverload)
+        and node.target._schema.is_mutable
+        and not _is_backward_node(node)
+        for node in gm.graph.nodes
+    ):
+        return gm
+    effect_types = {
+        _get_effect(node.target)
+        for module in gm.modules()
+        if isinstance(module, fx.GraphModule)
+        for node in module.graph.nodes
+        if has_effects(node.target)
+    }
+    mode = FunctionalTensorMode()
+
+    def functionalize(*args):
+        mode._tokens = {
+            effect: torch.ops.prims._make_token.default() for effect in effect_types
+        }
+        result = fx.Interpreter(gm).run(*args)
+        if mode._tokens:
+            torch.ops.prims._sink_tokens.default(list(mode._tokens.values()))
+        return result
+
+    fake_mode = detect_fake_mode(example_inputs) or FakeTensorMode(
+        allow_non_fake_inputs=True
+    )
+    fake_inputs = tuple(
+        fake_mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
+        for value in example_inputs
+    )
+    with fake_mode, preserve_node_meta():
+        functional_gm = make_fx(
+            dispatch_functionalize(functionalize, mode, propagate_input_mutations=True),
+        )(*fake_inputs)
+    functional_gm.meta.update(gm.meta)
+    return functional_gm
 
 
 def selective_activation_remat_pass(
