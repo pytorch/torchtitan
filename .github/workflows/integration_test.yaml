@@ -116,7 +116,9 @@ jobs:
           "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
+        GPU_ARCH="a10g"
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
+          GPU_ARCH="mi350x"
           HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
           if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
             export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
@@ -143,6 +145,7 @@ jobs:
         fi
         python -m tests.integration_tests.run_tests \
           --gpu_arch_type ${{ matrix.gpu-arch-type }} \
+          --gpu_arch "$GPU_ARCH" \
           --test_suite features,models --execution_mode fake_pg --ngpu 1 \
           $EXPORT_ARG $TEST_NAME_ARG \
           "$RUNNER_ARTIFACT_DIR"
@@ -186,7 +189,9 @@ jobs:
           "${TORCH_SPEC}" torchvision --index-url ${{ matrix.runner_config['index-url'] }}
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.runner_config['index-url'] }}
 
+        GPU_ARCH="a10g"
         if [[ "${{ matrix.runner_config['gpu-arch-type'] }}" == "rocm" ]]; then
+          GPU_ARCH="mi350x"
           HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
           if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
             export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
@@ -220,6 +225,7 @@ jobs:
         fi
         python -m tests.integration_tests.run_tests \
           --gpu_arch_type ${{ matrix.runner_config['gpu-arch-type'] }} \
+          --gpu_arch "$GPU_ARCH" \
           --test_suite ${{ matrix.test_suite }} --execution_mode real_pg --ngpu 8 \
           $EXPORT_ARG $TEST_NAME_ARG $TEST_SCOPE_ARG \
           "$RUNNER_ARTIFACT_DIR"

@@ -324,7 +324,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="sft",
             ngpu=2,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/sft_{gpu_arch}.txt"
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/sft.txt"
             ),
         ),
         OverrideDefinitions(
