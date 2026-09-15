@@ -71,10 +71,14 @@ class ParamGroupConfig:
 T = TypeVar("T", bound=Optimizer)
 
 
+class _MoERouterLike(Protocol):
+    tokens_per_expert_E: torch.Tensor  # noqa: N815
+
+
 class _MoELike(Protocol):
     load_balance_coeff: float | None
-    tokens_per_expert_E: torch.Tensor  # noqa: N815
     expert_bias_E: torch.Tensor  # noqa: N815
+    router: _MoERouterLike
 
 
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
@@ -121,7 +125,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - 'fused_opt_states_bf16': Like 'fused', but initialize Adam/AdamW
           momentum and variance in bfloat16 via a step pre-hook so the fused
           CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
-          Only supported for Adam/AdamW. See docs/bf16_optimizer_states.md.
+          Only supported for Adam/AdamW. See
+          torchtitan/components/optimizer/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
@@ -476,7 +481,7 @@ def register_moe_load_balancing_hook(
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
         for transformer_block, moe in _iter_moe_layers(model_parts):
-            tokens_per_expert_E = moe.tokens_per_expert_E
+            tokens_per_expert_E = moe.router.tokens_per_expert_E
             if _is_recomputation_enabled(transformer_block):
                 # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
                 # This does not affect to expert choice, but affects the experts usage metrics.
@@ -519,7 +524,7 @@ def register_moe_load_balancing_hook(
                 )
                 expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
                 moe.expert_bias_E.add_(expert_bias_delta_E)
-                moe.tokens_per_expert_E.zero_()
+                moe.router.tokens_per_expert_E.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(

@@ -125,7 +125,7 @@ def parallelize_muse_glimmer(
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
         dp_mesh_dims=dp_mesh_dims,
-        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
+        symm_mem_scope=parallelism.fsdp_symm_mem_scope,
     )
 
     logger.info("Applied fully_shard to the model")

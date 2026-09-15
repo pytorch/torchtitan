@@ -12,6 +12,7 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
@@ -22,8 +23,10 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    SqrtSoftplus,
 )
 from torchtitan.models.common.config_utils import (
+    fused_gate_up_param_init,
     make_ffn_config,
     make_routed_experts_config,
 )
@@ -31,8 +34,6 @@ from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.deepseek_v3.parallelize import (
     parallelize_deepseekv3 as parallelize_deepseek_v4,
 )
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .attention import (
@@ -341,7 +342,7 @@ def _make_v4_moe_config(
                 param_init=_depth_init(layer_id),
             ),
             top_k=top_k,
-            score_func="sqrtsoftplus",
+            score_func=SqrtSoftplus.Config(),
             route_scale=route_scale,
             route_norm=route_norm,
             vocab_size=vocab_size,
@@ -559,7 +560,9 @@ def _build_mtp_layers(
             if block_cfg.moe.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
                 block_cfg.moe.shared_experts.w2.param_init = depth_init
-                block_cfg.moe.shared_experts.w3.param_init = depth_init
+                block_cfg.moe.shared_experts.w13.param_init = fused_gate_up_param_init(
+                    _LINEAR_INIT, depth_init
+                )
         mtp_layers.append(
             MTPBlock.Config(
                 attention=block_cfg.attention,

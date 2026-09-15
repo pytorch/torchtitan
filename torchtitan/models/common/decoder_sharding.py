@@ -8,7 +8,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import FusedQKVLinear, GQAttention, QKVLinear
+from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
     DistGEMMFeedForward,
     RowParallelLinear,
@@ -61,31 +61,18 @@ def dense_activation_placement(
     )
 
 
-def token_id_placement() -> SpmdType:
-    """Placement for decoder token IDs with shape ``(tokens,)``."""
-    return SpmdType(
-        {
-            DP: spmd.V,
-            CP: spmd.V,
-            TP: spmd.R,
-        },
-        partition_spec=spmd.PartitionSpec((DP, CP)),
-    )
+def token_id_placement(*, enable_sp: bool = False) -> SpmdType:
+    """Placement for decoder token IDs with shape ``(tokens,)``.
 
-
-def token_id_sequence_parallel_placement() -> SpmdType:
-    """Sequence-parallel token IDs with shape ``(tokens,)``.
-
-    Same token-axis mesh as ``dense_sequence_parallel_placement()``, but the
-    tensor is 1D so there is no trailing replicated feature dim.
+    When sequence parallelism is enabled, TP also shards the token dimension.
     """
     return SpmdType(
         {
             DP: spmd.V,
             CP: spmd.V,
-            TP: spmd.V,
+            TP: spmd.V if enable_sp else spmd.R,
         },
-        partition_spec=spmd.PartitionSpec((DP, CP, TP)),
+        partition_spec=spmd.PartitionSpec((DP, CP, TP) if enable_sp else (DP, CP)),
     )
 
 
@@ -128,6 +115,7 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
     return {
         "input": token_id_placement(),
         "positions": token_id_placement(),
+        "padding_mask": token_id_placement(),
         "labels": SpmdType(
             {DP: spmd.V, CP: spmd.V, TP: spmd.I},
             partition_spec=spmd.PartitionSpec((DP, CP)),
@@ -207,24 +195,6 @@ def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def set_qkv_linear_sharding(qkv_linear_cfg) -> None:
-    """Colwise-shard each Q/K/V projection of a ``BaseQKVLinear``.
-
-    Handles both ``QKVLinear`` (separate ``wq`` + ``wkv``) and
-    ``FusedQKVLinear`` (single ``wqkv``).
-    """
-    if isinstance(qkv_linear_cfg, FusedQKVLinear.Config):
-        qkv_linear_cfg.wqkv.sharding_config = colwise_config()
-    elif isinstance(qkv_linear_cfg, QKVLinear.Config):
-        qkv_linear_cfg.wq.sharding_config = colwise_config()
-        qkv_linear_cfg.wkv.sharding_config = colwise_config()
-    else:
-        raise TypeError(
-            f"set_qkv_linear_sharding requires QKVLinear.Config or "
-            f"FusedQKVLinear.Config, got {type(qkv_linear_cfg).__name__}"
-        )
-
-
 def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
@@ -270,7 +240,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
-    set_qkv_linear_sharding(attention_cfg.qkv_linear)
+    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
 
     wo_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
@@ -322,13 +292,13 @@ def set_dense_ffn_sharding(
     attn_x_layout: SpmdType,
     enable_sp: bool,
 ) -> None:
-    """Standard dense FFN (``w1``/``w2``/``w3``) TP sharding.
+    """Standard dense FFN (physical ``w13``/``w2``) TP sharding.
 
     Shared by llama3, qwen3, and deepseek_v3. ``attn_x_layout`` should match
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    # Same two differences as the dist-GEMM attention block: the fused w1/w3
+    # Same two differences as the dist-GEMM attention block: the fused w13
     # consume the sequence shard directly, so there is no boundary all-gather to
     # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
     # See set_gqa_attention_sharding; both branches collapse once redistribute
@@ -344,8 +314,7 @@ def set_dense_ffn_sharding(
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         )
     )
-    feed_forward_cfg.w1.sharding_config = colwise_config()
-    feed_forward_cfg.w3.sharding_config = colwise_config()
+    feed_forward_cfg.w13.sharding_config = colwise_config()
     w2_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
         w2_config = ShardingConfig(state_shardings=w2_config.state_shardings)

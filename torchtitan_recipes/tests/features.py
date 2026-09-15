@@ -30,6 +30,7 @@ from torchtitan.hf_datasets.text_datasets import ChatProcessor
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
+    UlyssesCPVarlenInnerAttention,
 )
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
@@ -39,6 +40,7 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel_varlen_attn,
     sft_debugmodel,
 )
+from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 
@@ -364,9 +366,10 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_optimizer_bf16_states() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
+    config.training.mixed_precision_reduce = "float32"
     config.optimizer.implementation = "fused_opt_states_bf16"
     return config
 
@@ -407,6 +410,20 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     return apply_transforms(
         config,
         [ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention)],
+    )
+
+
+def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
+    """Llama 3 with varlen Ulysses CP."""
+    config = llama3_debugmodel_varlen_attn()
+    # Packed varlen metadata lacks SPMD annotations.
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.context_parallel_degree = 2
+    # Ulysses does not support token reordering.
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
     )
 
 
@@ -519,8 +536,7 @@ def deepseek_v3_debugmodel_fused_grouped_experts_tp2_ep4() -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
     config.override.imports = [
-        "torchtitan.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan.overrides.fused_swiglu.fused_grouped_experts",
+        "torchtitan.overrides.fused_swiglu.fused_grouped_experts"
     ]
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4

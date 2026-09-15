@@ -4,95 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""SiTU feed-forward and latent MoE modules for Kimi K3."""
+"""Latent MoE modules for Kimi K3."""
 
 from dataclasses import dataclass
 
 import torch
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.moe import GroupedExperts, MoE
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, E = experts,
 # F = expert hidden dimension, R = routed tokens, K = selected experts per token.
-
-
-def _situ_glu(
-    gate: torch.Tensor,
-    up: torch.Tensor,
-    beta: float,
-    linear_beta: float | None,
-) -> torch.Tensor:
-    """Kimi's SiTU-GLU activation, evaluated in FP32."""
-    input_dtype = gate.dtype
-    gate = gate.float()
-    up = up.float()
-    gate = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
-    if linear_beta is not None:
-        up = linear_beta * torch.tanh(up / linear_beta)
-    return (gate * up).to(input_dtype)
-
-
-class KimiFeedForward(FeedForward):
-    """FeedForward with Kimi's SiTU activation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
-        beta: float = 1.0
-        linear_beta: float | None = None
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.beta = config.beta
-        self.linear_beta = config.linear_beta
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(
-            _situ_glu(self.w1(x), self.w3(x), self.beta, self.linear_beta),
-        )
-
-
-class KimiGroupedExperts(GroupedExperts):
-    """``common/moe.py::GroupedExperts`` with Kimi's SiTU activation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(GroupedExperts.Config):
-        beta: float = 1.0
-        linear_beta: float | None = None
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.beta = config.beta
-        self.linear_beta = config.linear_beta
-
-    def forward(
-        self,
-        x_RD: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
-    ) -> torch.Tensor:
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-
-        gate_RF = self._grouped_mm(
-            A=x_RD.bfloat16(),
-            weight_EOI=self.w1_EFD,
-            offs=offsets_E,
-        )
-        up_RF = self._grouped_mm(
-            A=x_RD.bfloat16(),
-            weight_EOI=self.w3_EFD,
-            offs=offsets_E,
-        )
-
-        h_RF = _situ_glu(gate_RF, up_RF, self.beta, self.linear_beta)
-
-        return self._grouped_mm(
-            A=h_RF,
-            weight_EOI=self.w2_EDF,
-            offs=offsets_E,
-        ).type_as(x_RD)
 
 
 class KimiLatentMoE(MoE):
@@ -110,14 +34,20 @@ class KimiLatentMoE(MoE):
         self.routed_norm = config.routed_norm.build()
         self.routed_up = config.routed_up.build()
 
-    def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
-            x_TD, self.expert_bias_E, **router_kwargs
+            x_TD,
+            self.expert_bias_E,
+            padding_mask_T=padding_mask_T,
+            **router_kwargs,
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
-        if self.training:
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
         routed_TD = self.routed_experts(
             self.routed_down(x_TD),

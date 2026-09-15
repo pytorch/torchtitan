@@ -29,6 +29,7 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
     _hf_activation_placement,
     _hf_sequence_parallel_placement,
 )
+from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_moe_config,
@@ -555,7 +556,9 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_experts=params["num_experts"],
         gate_param_init=_LINEAR_INIT,
         top_k=params["top_k"],
-        score_func=params["score_func"],
+        score_func=(
+            Sigmoid.Config() if params["score_func"] == "sigmoid" else Softmax.Config()
+        ),
         route_norm=params["route_norm"],
         route_scale=params["route_scale"],
         **router_kwargs,
@@ -581,13 +584,9 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
-            # SigmoidGatedFeedForward is a FeedForward subclass, so w1/w2/w3 stay flat
-            # (no nested ``ffn.`` level) and are directly shardable by
-            # set_moe_sharding_config.
             shared_experts = SigmoidGatedFeedForward.Config(
-                w1=ffn_config.w1,
+                w13=ffn_config.w13,
                 w2=ffn_config.w2,
-                w3=ffn_config.w3,
                 gate=Linear.Config(
                     in_features=shared_info["dim"],
                     out_features=1,

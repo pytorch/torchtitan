@@ -235,6 +235,8 @@ class Decoder(BaseModel):
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         # positions is listed before attention_masks so AutoParallel's input_fn,
         # which returns (tokens, positions) and binds them positionally, maps
@@ -244,7 +246,7 @@ class Decoder(BaseModel):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
-            h = layer(h, attention_masks, positions)
+            h = layer(h, attention_masks, positions, padding_mask=padding_mask)
 
         h = self.norm(h) if self.norm is not None else h
 
@@ -313,7 +315,7 @@ class Decoder(BaseModel):
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions", None)
-        padding_mask = batch.pop("padding_mask", None)
+        padding_mask = batch.get("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
