@@ -29,6 +29,10 @@ class ContextParallelTransform(ModelConfigTransform):
     inner_attention: dict[type[Module.Config], type[Module]]
     """Map each local config type to its CP backend implementation."""
 
+    exclude_fqn_prefixes: tuple[str, ...] = ()
+    """Subtrees that keep their local attention, e.g. a vision tower whose
+    tokens are not sharded on the cp axis."""
+
     def __post_init__(self) -> None:
         for config_type, replacement in self.inner_attention.items():
             if not issubclass(config_type, Module.Config):
@@ -42,7 +46,12 @@ class ContextParallelTransform(ModelConfigTransform):
 
     def transform(self, model: Module.Config) -> Module.Config:
         for config_type, replacement in self.inner_attention.items():
-            for _, traversed, parent, field_name in model.traverse(config_type):
+            for fqn, traversed, parent, field_name in model.traverse(config_type):
+                if any(
+                    fqn == prefix or fqn.startswith(prefix + ".")
+                    for prefix in self.exclude_fqn_prefixes
+                ):
+                    continue
                 converted = convert_config_type(
                     cast(Module.Config, traversed), replacement
                 )

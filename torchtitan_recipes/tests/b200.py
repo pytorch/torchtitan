@@ -48,7 +48,9 @@ def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
                 inner_attention={
                     FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention,
                     InnerKDA.Config: ContextParallelInnerKDA,
-                }
+                },
+                # The tower encodes whole images on every cp rank.
+                exclude_fqn_prefixes=("vision_encoder",),
             ),
         ],
     )
@@ -74,7 +76,9 @@ def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
                 inner_attention={
                     FlexInnerAttention.Config: UlyssesCPFlexInnerAttention,
                     InnerKDA.Config: ContextParallelInnerKDA,
-                }
+                },
+                # The tower encodes whole images on every cp rank.
+                exclude_fqn_prefixes=("vision_encoder",),
             ),
         ],
     )
