@@ -33,6 +33,7 @@ export PYTHONPATH="$WORKTREE"
 
 BRANCH=$(git -C "$WORKTREE" rev-parse --abbrev-ref HEAD)
 COMMIT=$(git -C "$WORKTREE" rev-parse --short HEAD)
+echo "###### env: CUBLAS_WORKSPACE_CONFIG=${CUBLAS_WORKSPACE_CONFIG:-unset} ######"
 echo "###### $TAG  branch=$BRANCH  commit=$COMMIT  steps=$STEPS  job=$SLURM_JOB_ID  $(date -u +%H:%M:%S) ######"
 
 # The venv installs torchtitan editable; fail loudly rather than silently

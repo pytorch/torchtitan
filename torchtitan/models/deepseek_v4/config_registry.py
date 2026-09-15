@@ -1043,3 +1043,24 @@ def deepseek_v4_flash_pr18_asyncep_bf16reduce(
     config = deepseek_v4_flash_pr18_asyncep(seq_len)
     config.training.mixed_precision_reduce = "bfloat16"
     return config
+
+
+def deepseek_v4_flash_pr18_bs2_det(seq_len: int | None = 8192) -> Trainer.Config:
+    """S4a'. 2x microbatch under torch.use_deterministic_algorithms.
+
+    Jobs 397 and 400 (the latter with CUBLAS_WORKSPACE_CONFIG=:4096:8) both died
+    at step 0 with FullAC's CheckpointError: the MoE routed-token count differed
+    by 1-2 tokens between the forward and the recompute ([67898] vs [67896],
+    then [105470] vs [105469]). Deterministic cuBLAS alone did not fix it, so
+    the flip comes from something else -- cuBLASLt algorithm choice, a Triton
+    kernel, the bf16x9 fp32-emulation path, or an unlisted op. This run casts
+    the widest net torchtitan offers: ``debug.deterministic`` sets
+    ``torch.use_deterministic_algorithms(True)`` (warn-only, so ops without a
+    deterministic implementation warn rather than abort) plus cuDNN
+    determinism. Pass if it reaches steps; if not, batch is blocked on a
+    per-rank routing dump, not on more runs.
+    """
+    config = _pr18_batch(2, seq_len)
+    config.debug.deterministic = True
+    config.debug.deterministic_warn_only = True
+    return config
