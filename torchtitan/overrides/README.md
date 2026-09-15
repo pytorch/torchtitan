@@ -437,11 +437,12 @@ One thing worth stating plainly:
 
 - **Fusion under TP.** Fusing weights can interact subtly with tensor
   parallelism -- the fused tensor's row order must admit a correct shard.
-  The default `FeedForward` stores a `Linear` weight
-  `(2, hidden, dim)`. Sharding dimension 1 gives each TP rank matching feature
-  slices of the gate and up projections while keeping their rows in separate
-  contiguous slabs. The output retains the same `(2, hidden)` structure. This
-  also keeps block-quantization scales from spanning the two projections.
+  The default `FeedForward` stores a standard Linear weight `(2*hidden, dim)`
+  with gate/up rows interleaved. Sharding row axis 0 therefore gives each TP
+  rank matching slices of both projections (the Megatron column-parallel
+  layout). The output unflattens to `(hidden, 2)` to recover gate and up. This
+  composes with FSDP and TP through the ordinary `Linear` `ShardingConfig`; no
+  model-specific code.
 
 ## Custom kernels and `torch.compile`
 

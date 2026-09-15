@@ -10,7 +10,7 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
-    DistGEMMFeedForward,
+    ColumnParallelLinear,
     RowParallelLinear,
     validate_dist_gemm_preconditions,
 )
@@ -146,31 +146,6 @@ def colwise_config() -> ShardingConfig:
     )
 
 
-def stacked_colwise_config() -> ShardingConfig:
-    """Shard each ``[F, D]`` matrix in a ``[N, F, D]`` weight over ``F``.
-
-    The input is ``[T, D]`` and the output is ``[T, N, F]``. DP and CP shard
-    tokens while TP shards the per-matrix output features.
-    """
-    input_TD_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    weight_NFD_layout = dense_param_placement(tp=spmd.S(1))
-    bias_NF_layout = dense_param_placement(tp=spmd.S(1))
-    output_TNF_layout = SpmdType(
-        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
-        partition_spec=spmd.PartitionSpec((DP, CP), None, TP),
-    )
-    return ShardingConfig(
-        state_shardings={
-            "weight": weight_NFD_layout,
-            "bias": bias_NF_layout,
-        },
-        in_src_shardings={"input": input_TD_layout},
-        in_dst_shardings={"input": input_TD_layout},
-        out_src_shardings=output_TNF_layout,
-        local_spmd=True,
-    )
-
-
 def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     """
     RowwiseParallel: weight S(1), bias I (no-op if bias absent).
@@ -259,8 +234,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    # dist-GEMM: AllGatherFusedQKVLinear consumes the sequence shard directly, so
-    # there is no attention-boundary all-gather left for the block to declare.
+    # dist-GEMM: the ColumnParallelLinear inside QKVLinear consumes the sequence
+    # shard directly, so there is no attention-boundary all-gather to declare.
     attention_cfg.sharding_config = (
         None
         if dist_gemm
@@ -340,7 +315,7 @@ def set_dense_ffn_sharding(
     # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
     # See set_gqa_attention_sharding; both branches collapse once redistribute
     # collectives move inside the modules.
-    dist_gemm = isinstance(feed_forward_cfg, DistGEMMFeedForward.Config)
+    dist_gemm = isinstance(feed_forward_cfg.w13, ColumnParallelLinear.Config)
     if dist_gemm:
         validate_dist_gemm_preconditions(enable_sp=enable_sp)
     feed_forward_cfg.sharding_config = (
@@ -351,10 +326,7 @@ def set_dense_ffn_sharding(
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         )
     )
-    w13_sharding = stacked_colwise_config()
-    if dist_gemm:
-        w13_sharding = ShardingConfig(state_shardings=w13_sharding.state_shardings)
-    feed_forward_cfg.w13.sharding_config = w13_sharding
+    feed_forward_cfg.w13.sharding_config = colwise_config()
     w2_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
         w2_config = ShardingConfig(state_shardings=w2_config.state_shardings)

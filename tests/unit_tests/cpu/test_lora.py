@@ -88,9 +88,7 @@ def test_lora_targets_fused_feed_forward_projection():
     """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w13=Linear.Config(
-            in_features=4, out_features=8, num_linears=2, param_init=init
-        ),
+        w13=Linear.Config(in_features=4, out_features=16, param_init=init),
         w2=Linear.Config(in_features=8, out_features=4, param_init=init),
     )
     config = LoRAConverter(
@@ -124,9 +122,10 @@ def test_lora_targets_fused_feed_forward_projection():
             adapter.weight.copy_(torch.randn_like(adapter.weight))
 
     x = torch.randn(3, 4)
-    gate_up = F.linear(x, feed_forward.w13.weight.flatten(0, -2)).unflatten(-1, (2, 8))
+    gate_up = F.linear(x, feed_forward.w13.weight)
     gate_up = gate_up + 2 * feed_forward.w13.lora_b(feed_forward.w13.lora_a(x))
-    gate, up = gate_up.unbind(-2)
+    gate_up = gate_up.unflatten(-1, (8, 2))
+    gate, up = gate_up.unbind(-1)
     expected = feed_forward.w2(F.silu(gate) * up)
     torch.testing.assert_close(feed_forward(x), expected)
 
@@ -146,9 +145,7 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w13=Linear.Config(
-            in_features=16, out_features=32, num_linears=2, param_init=init
-        ),
+        w13=Linear.Config(in_features=16, out_features=64, param_init=init),
         w2=Linear.Config(in_features=32, out_features=16, param_init=init),
     )
     config = Float8LinearConverter(

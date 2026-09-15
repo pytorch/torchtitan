@@ -315,7 +315,6 @@ class MXFP8Linear(Linear):
         """
 
         def __post_init__(self) -> None:
-            Linear.Config.__post_init__(self)
             if (
                 self.input_activation_format_for_backward
                 not in _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD
@@ -348,18 +347,9 @@ class MXFP8Linear(Linear):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        local_out_features = self.weight.shape[-2]
-        if local_out_features % _MXFP8_BLOCK_SIZE:
-            raise ValueError(
-                "MXFP8 requires local out_features divisible by "
-                f"{_MXFP8_BLOCK_SIZE}; got {local_out_features}. Adjust the "
-                "Linear out_features or TP degree so quantization blocks do "
-                "not span projection boundaries."
-            )
-
         # Always a plain tensor: spmd_types carries TP and EP as annotations
         # instead of wrapping the weight as a model-parallel DTensor.
-        weight_NK = self.weight if self.num_linears == 1 else self.weight.flatten(0, -2)
+        weight_NK = self.weight
         # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
         # not what forward usually sees. Under FSDP the post-all-gather hook has
         # already replaced it for this unshard lifetime with the storage-free
@@ -389,21 +379,13 @@ class MXFP8Linear(Linear):
             # the weight changes each optimizer step; inference does not.
             # TODO(anijain2305): key the operands on the parameter's
             # version counter so a frozen weight is quantized once.
-        bias_N = (
-            self.bias
-            if self.bias is None or self.num_linears == 1
-            else self.bias.flatten()
-        )
-        output = _MXFP8LinearFunction.apply(
+        return _MXFP8LinearFunction.apply(
             input,
             weight_NK,
             operands.weight_qdata_fprop_KN,
             operands.weight_scale_fprop_swizzled,
             operands.weight_qdata_dgrad_NK,
             operands.weight_scale_dgrad_swizzled,
-            bias_N,
+            self.bias,
             self.input_activation_format_for_backward,
         )
-        if self.num_linears == 1:
-            return output
-        return output.unflatten(-1, self.weight.shape[:-1])
