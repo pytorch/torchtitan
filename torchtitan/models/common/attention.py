@@ -56,6 +56,7 @@ __all__ = [
     "InnerAttention",
     "QKVLinear",
     "ScaledDotProductInnerAttention",
+    "TensorParallelGQAttention",
     "VarlenInnerAttention",
     "VarlenMetadata",
     "create_attention_mask",
@@ -754,11 +755,11 @@ class QKVLinear(Module):
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_tokens = x.shape[0]
         # Fused QKV: single matmul, then reshape and split along R dim.
         # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
         qkv = self.wqkv(x)
+        num_tokens = qkv.shape[0]
         with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
             qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
             if spmd.is_type_checking():
@@ -949,3 +950,11 @@ class GQAttention(BaseAttention):
         )(out_TD)
         remat.recompute_needs_tensor(out_TD)
         return out_TD
+
+
+class TensorParallelGQAttention(GQAttention):
+    """Common GQA whose projection modules own the TP collectives."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(GQAttention.Config):
+        pass

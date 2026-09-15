@@ -8,12 +8,13 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import GQAttention
+from torchtitan.models.common.attention import GQAttention, TensorParallelGQAttention
 from torchtitan.models.common.dist_gemm import (
-    DistGEMMFeedForward,
-    RowParallelLinear,
-    validate_dist_gemm_preconditions,
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+    validate_async_tp_preconditions,
 )
+from torchtitan.models.common.feed_forward import TensorParallelFeedForward
 from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
@@ -209,25 +210,35 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         f"set_gqa_attention_sharding requires GQAttention.Config, "
         f"got {type(attention_cfg).__name__}"
     )
-    # The dist-GEMM attention block runs both TP collectives inside its own
-    # GEMMs, so it declares different activation contracts from the stock block.
-    # SP and spmd_types are preconditions for dist-GEMM, enforced in
-    # validate_dist_gemm_preconditions; this branch only declares the contracts.
-    dist_gemm = isinstance(attention_cfg.wo, RowParallelLinear.Config)
-    if dist_gemm:
-        validate_dist_gemm_preconditions(enable_sp=enable_sp)
-
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    # dist-GEMM: AllGatherFusedQKVLinear consumes the sequence shard directly, so
-    # there is no attention-boundary all-gather left for the block to declare.
-    attention_cfg.sharding_config = (
-        None
-        if dist_gemm
-        else ShardingConfig(
+    tensor_parallel = isinstance(attention_cfg, TensorParallelGQAttention.Config)
+    async_qkv = isinstance(
+        attention_cfg.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
+    )
+    async_wo = isinstance(attention_cfg.wo, AsyncRowParallelLinear.Config)
+    if async_qkv != async_wo:
+        raise ValueError(
+            "Async tensor parallelism must configure both qkv and wo projections"
+        )
+    if async_qkv:
+        validate_async_tp_preconditions(enable_sp=enable_sp)
+
+    if tensor_parallel:
+        # The projection leaves own the TP redistributions. The attention
+        # wrapper only validates its external input and output layouts.
+        attention_cfg.sharding_config = ShardingConfig(
+            in_src_shardings={"x_TD": attn_x_layout},
+            out_src_shardings=attn_x_layout,
+        )
+    else:
+        # Untransformed attention keeps its redistribution at the enclosing
+        # module boundary. This also covers model-specific subclasses such as
+        # Muse Glimmer, which shares the gathered input between qkv and o_gate.
+        attention_cfg.sharding_config = ShardingConfig(
             in_src_shardings={
                 "x_TD": attn_x_layout,
             },
@@ -235,27 +246,32 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
                 "x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
             },
         )
-    )
     if attention_cfg.rope is not None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
-    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
 
-    wo_config = rowwise_config(output_sp=enable_sp)
-    if dist_gemm:
-        # A stock rowwise linear emits a Partial over its slice of K and lets the
-        # framework reduce-scatter it. RowParallelLinear collapses those two
-        # steps -- the reduce-scatter happens inside the fused op -- so it returns
-        # the final Shard(1) directly and never produces a Partial. Keep only the
-        # parameter shardings: with the output already in its final layout there
-        # is nothing left to check or redistribute.
-        #
-        # Transitional. Once redistribute collectives move inside the modules and
-        # boundary src->dst redistribution goes away, every module declares only
-        # its state like this and the branch collapses.
-        wo_config = ShardingConfig(state_shardings=wo_config.state_shardings)
-    attention_cfg.wo.sharding_config = wo_config
+    if tensor_parallel:
+        # The qkv projection now owns the input all-gather. Attaching the
+        # redistribution here makes it part of the qkv module boundary.
+        attention_cfg.qkv_linear.sharding_config = ShardingConfig(
+            in_src_shardings={"x": attn_x_layout},
+            in_dst_shardings=(
+                None
+                if async_qkv
+                else {"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))}
+            ),
+        )
+    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
+    wo_sharding = rowwise_config(output_sp=enable_sp)
+    attention_cfg.wo.sharding_config = (
+        ShardingConfig(
+            state_shardings=wo_sharding.state_shardings,
+            out_src_shardings=wo_sharding.out_dst_shardings,
+        )
+        if async_wo
+        else wo_sharding
+    )
 
 
 def set_gqa_inner_attention_local_spmd(inner_attention_cfg) -> None:
@@ -298,27 +314,50 @@ def set_dense_ffn_sharding(
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    # Same two differences as the dist-GEMM attention block: the fused w13
-    # consume the sequence shard directly, so there is no boundary all-gather to
-    # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
-    # See set_gqa_attention_sharding; both branches collapse once redistribute
-    # collectives move inside the modules.
-    dist_gemm = isinstance(feed_forward_cfg, DistGEMMFeedForward.Config)
-    if dist_gemm:
-        validate_dist_gemm_preconditions(enable_sp=enable_sp)
-    feed_forward_cfg.sharding_config = (
-        None
-        if dist_gemm
-        else ShardingConfig(
-            in_src_shardings={"x": attn_x_layout},
-            in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+    tensor_parallel = isinstance(feed_forward_cfg, TensorParallelFeedForward.Config)
+    async_w13 = isinstance(feed_forward_cfg.w13, AsyncColumnParallelLinear.Config)
+    async_w2 = isinstance(feed_forward_cfg.w2, AsyncRowParallelLinear.Config)
+    if async_w13 != async_w2:
+        raise ValueError(
+            "Async tensor parallelism must configure both w13 and w2 projections"
         )
+    if async_w13:
+        validate_async_tp_preconditions(enable_sp=enable_sp)
+    if tensor_parallel:
+        # The projection modules own the collectives inside their existing
+        # remat regions. This wrapper only validates the external FFN contract.
+        feed_forward_cfg.sharding_config = ShardingConfig(
+            in_src_shardings={"x": attn_x_layout},
+            out_src_shardings=attn_x_layout,
+        )
+        w13_sharding = colwise_config()
+        feed_forward_cfg.w13.sharding_config = ShardingConfig(
+            state_shardings=w13_sharding.state_shardings,
+            in_src_shardings={"input": attn_x_layout},
+            in_dst_shardings=(
+                None
+                if async_w13
+                else {"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))}
+            ),
+            out_src_shardings=w13_sharding.out_src_shardings,
+        )
+        w2_sharding = rowwise_config(output_sp=enable_sp)
+        feed_forward_cfg.w2.sharding_config = (
+            ShardingConfig(
+                state_shardings=w2_sharding.state_shardings,
+                out_src_shardings=w2_sharding.out_dst_shardings,
+            )
+            if async_w2
+            else w2_sharding
+        )
+        return
+
+    feed_forward_cfg.sharding_config = ShardingConfig(
+        in_src_shardings={"x": attn_x_layout},
+        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
     )
     feed_forward_cfg.w13.sharding_config = colwise_config()
-    w2_config = rowwise_config(output_sp=enable_sp)
-    if dist_gemm:
-        w2_config = ShardingConfig(state_shardings=w2_config.state_shardings)
-    feed_forward_cfg.w2.sharding_config = w2_config
+    feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
 def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
