@@ -201,13 +201,18 @@ class Module(nn.Module, Configurable):
                 f"{type(self).__name__}. Set param_init on this "
                 f"module's Config or use skip_param_init."
             )
-        if name not in self._param_init:
-            raise ValueError(
-                f"No initializer for parameter {name!r} in "
-                f"{type(self).__name__}. "
-                f"Available: {list(self._param_init.keys())}"
-            )
-        self._param_init[name](param)
+        init_fn = self._param_init[name]
+        # Under FSDP2 CPU offload, parameters are DTensors with a CUDA DeviceMesh
+        # but their local storage is on CPU. When DTensor random ops dispatch on CPU
+        # tensors with CUDA meshes, PyTorch's RNG tracker fork_rng resets the CPU RNG
+        # state on every call, causing infinite loops (e.g. in trunc_normal_) and
+        # identical weights across layers (see PyTorch #196072 / TorchTitan #4511).
+        # Initializing param.to_local() directly bypasses DTensor's CUDA RNG tracker
+        # dispatch and safely initializes the CPU memory.
+        if isinstance(param, DTensor) and param.device.type == "cpu":
+            init_fn(param.to_local())
+        else:
+            init_fn(param)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Initialize this module's own buffers.
