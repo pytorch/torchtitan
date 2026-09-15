@@ -140,6 +140,11 @@ def _matrix_batch_view_from_compute_layout(
         and (applicable_axis_names is None or axis_name in applicable_axis_names)
     )
     if not block_shards:
+        if compute_layout.num_rows_per_segment is not None:
+            raise ValueError(
+                f"Muon parameter {fqn!r} num_rows_per_segment requires a "
+                "BlockShard compute sharding"
+            )
         return None
 
     if len(storage_shape) != 2:
@@ -162,9 +167,16 @@ def _matrix_batch_view_from_compute_layout(
             f"Muon parameter {fqn!r} must use one BlockShard block size "
             "across mesh axes"
         )
+    num_rows_per_segment = compute_layout.num_rows_per_segment
+    if num_rows_per_segment is not None and sum(num_rows_per_segment) != block_size:
+        raise ValueError(
+            f"Muon parameter {fqn!r} BlockShard block size must equal the sum "
+            f"of num_rows_per_segment {sum(num_rows_per_segment)}; got {block_size}"
+        )
     return _MatrixBatchView.from_storage_shape(
         storage_shape,
         matrix_rows=block_size,
+        num_rows_per_segment=num_rows_per_segment,
     )
 
 
@@ -212,7 +224,11 @@ def _initialize_dist_muon(
             compute_view_key = ("identity",)
             global_compute_shape = global_storage_shape
         else:
-            compute_view_key = ("matrix_batch", compute_view.matrix_rows)
+            compute_view_key = (
+                "matrix_batch",
+                compute_view.matrix_rows,
+                compute_view.num_rows_per_segment,
+            )
             global_compute_shape = compute_view.matrix_batch_shape(global_storage_shape)
         if len(global_compute_shape) not in (2, 3):
             raise ValueError(
@@ -612,8 +628,27 @@ class DistMuon(Optimizer):
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
         group = self._group(compute_layout)
-        if compute_layout.compute_view is not None:
-            compute = compute_layout.compute_view.view_as_matrix_batch(compute)
+        compute_view = compute_layout.compute_view
+        if compute_view is not None and compute_view.num_rows_per_segment is not None:
+            for segment in compute_view.segment_matrix_batches(compute):
+                _compute_muon_direction(
+                    segment,
+                    ns_coefficients=group["ns_coefficients"],
+                    ns_steps=group["ns_steps"],
+                    eps=group["eps"],
+                    out=segment,
+                )
+                # Segments have different matrix shapes, so their learning-rate
+                # adjustment is folded into the direction here: the storage
+                # shard that applies the update may not hold complete blocks.
+                segment.mul_(
+                    _adjust_muon_learning_rate(
+                        1.0, group["adjust_lr_fn"], segment.shape[-2:]
+                    )
+                )
+            return
+        if compute_view is not None:
+            compute = compute_view.view_as_matrix_batch(compute)
         _compute_muon_direction(
             compute,
             ns_coefficients=group["ns_coefficients"],
@@ -629,12 +664,17 @@ class DistMuon(Optimizer):
         local_param = compute_layout.param.to_local()
         if compute_layout.storage_is_compute_ready:
             local_param = local_param.detach()
+        compute_view = compute_layout.compute_view
+        adjust_lr_fn = group["adjust_lr_fn"]
+        if compute_view is not None and compute_view.num_rows_per_segment is not None:
+            # _compute_update already scaled each segment for its own shape.
+            adjust_lr_fn = "none"
         _apply_muon_update(
             local_param,
             direction,
             lr=group["lr"],
             weight_decay=group["weight_decay"],
-            adjust_lr_fn=group["adjust_lr_fn"],
+            adjust_lr_fn=adjust_lr_fn,
             compute_matrix_shape=compute_layout.global_compute_shape,
         )
         torch.autograd.graph.increment_version(compute_layout.param)
@@ -650,8 +690,16 @@ class DistMuon(Optimizer):
 
 @dataclass(frozen=True, slots=True)
 class _MatrixBatchView:
+    """Matrix boundaries inside a flat 2D compute tensor.
+
+    ``matrix_rows`` is the block size. Without ``num_rows_per_segment`` each
+    block is one matrix; with it, each block holds contiguous matrices with
+    the given row counts.
+    """
+
     matrix_rows: int
     matrix_columns: int
+    num_rows_per_segment: tuple[int, ...] | None = None
 
     @classmethod
     def from_storage_shape(
@@ -659,7 +707,10 @@ class _MatrixBatchView:
         storage_shape: torch.Size,
         *,
         matrix_rows: int,
+        num_rows_per_segment: tuple[int, ...] | None = None,
     ) -> _MatrixBatchView:
+        if num_rows_per_segment is not None:
+            assert sum(num_rows_per_segment) == matrix_rows
         if (
             len(storage_shape) != 2
             or storage_shape[0] == 0
@@ -672,7 +723,21 @@ class _MatrixBatchView:
         return cls(
             matrix_rows=matrix_rows,
             matrix_columns=storage_shape[1],
+            num_rows_per_segment=num_rows_per_segment,
         )
+
+    def segment_matrix_batches(self, compute_tensor: Tensor) -> tuple[Tensor, ...]:
+        """Return one zero-copy ``[M, rows_i, C]`` batch per segment."""
+        assert self.num_rows_per_segment is not None
+        blocks = compute_tensor.view(
+            self.matrix_batch_shape(torch.Size(compute_tensor.shape))
+        )
+        batches = []
+        row_offset = 0
+        for rows in self.num_rows_per_segment:
+            batches.append(blocks.narrow(1, row_offset, rows))
+            row_offset += rows
+        return tuple(batches)
 
     def matrix_batch_shape(self, compute_tensor_shape: torch.Size) -> torch.Size:
         if not (
@@ -1831,6 +1896,8 @@ def _adjust_muon_learning_rate(
 ) -> float:
     """Adjust Muon's learning rate for the matrix aspect ratio."""
     rows, columns = compute_matrix_shape[-2:]
+    if adjust_lr_fn == "none":
+        return lr
     if adjust_lr_fn is None or adjust_lr_fn == "original":
         ratio = math.sqrt(max(1.0, rows / columns))
     elif adjust_lr_fn == "match_rms_adamw":
