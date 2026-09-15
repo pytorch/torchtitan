@@ -17,7 +17,7 @@ import torch.distributed as dist
 
 from torchtitan.distributed.linear import AsyncAllGatherLinear, AsyncLinearReduceScatter
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.models.common.linear import AllGatherLinear, LinearReduceScatter
+from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 
 
 logger = logging.getLogger(__name__)
@@ -72,11 +72,11 @@ def validate_async_tp_preconditions(*, enable_sp: bool) -> None:
         )
 
 
-class AsyncColumnParallelLinear(AllGatherLinear):
+class AsyncColumnParallelLinear(ColumnParallelLinear):
     """Overlap an input all-gather with a column-parallel GEMM."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(AllGatherLinear.Config):
+    class Config(ColumnParallelLinear.Config):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -97,11 +97,11 @@ class AsyncColumnParallelLinear(AllGatherLinear):
         )
 
 
-class AsyncRowParallelLinear(LinearReduceScatter):
+class AsyncRowParallelLinear(RowParallelLinear):
     """Overlap a row-parallel GEMM with its output reduce-scatter."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(LinearReduceScatter.Config):
+    class Config(RowParallelLinear.Config):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

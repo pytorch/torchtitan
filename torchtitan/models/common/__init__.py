@@ -33,12 +33,12 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
 from .linear import (
-    AllGatherLinear,
     CastLinear,
+    ColumnParallelLinear,
     Linear,
-    LinearReduceScatter,
     PartialBiasRowwiseLinear,
     RouterGateLinear,
+    RowParallelLinear,
 )
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .nn_modules import (
@@ -55,11 +55,11 @@ from .rope import ComplexRoPE, CosSinRoPE, RoPE
 from .tensor_parallel import TensorParallelFeedForward
 
 __all__ = [
-    "AllGatherLinear",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
     "CastLinear",
+    "ColumnParallelLinear",
     "CosSinRoPE",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
@@ -81,12 +81,12 @@ __all__ = [
     "InnerAttention",
     "LayerNorm",
     "Linear",
-    "LinearReduceScatter",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "PartialBiasRowwiseLinear",
     "RMSNorm",
     "RoPE",
+    "RowParallelLinear",
     "RouterGateLinear",
     "ScaledDotProductInnerAttention",
     "Sigmoid",

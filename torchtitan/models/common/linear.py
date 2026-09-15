@@ -72,11 +72,11 @@ class CastLinear(Linear):
         )
 
 
-class AllGatherLinear(Linear):
-    """Column-parallel linear with an input all-gather boundary.
+class ColumnParallelLinear(Linear):
+    """Column-parallel linear with an input redistribution boundary.
 
     The computation is inherited from ``Linear``. Sharding setup places the
-    input redistribution on this module's forward wrapper.
+    required SP or TP input redistribution on this module's forward wrapper.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -84,7 +84,7 @@ class AllGatherLinear(Linear):
         pass
 
 
-class LinearReduceScatter(Linear):
+class RowParallelLinear(Linear):
     """Row-parallel linear with an output reduction boundary.
 
     The subclass keeps ``Linear`` computation unchanged. Its distinct config
@@ -199,9 +199,9 @@ class PartialBiasRowwiseLinear(Linear):
 
 __all__ = [
     "CastLinear",
-    "AllGatherLinear",
+    "ColumnParallelLinear",
     "Linear",
-    "LinearReduceScatter",
+    "RowParallelLinear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
 ]
