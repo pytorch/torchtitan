@@ -932,3 +932,57 @@ def deepseek_v4_flash_8k_ep4_blk32_profile(
     config.profiler.profiler_warmup = 3
     config.profiler.profiler_active = 2
     return config
+
+
+# --- sweep on top of PR #18 ---------------------------------------------------
+#
+# With the sink out of the flex kernel the tuned config runs 92.15 TFLOP/s and
+# the profile (/mnt/dgxc/profiles/dsv4_flash_8k_ep4_blk32_pr18/) has changed
+# shape: NCCL 30.1 % of kernel time with 17.5 % exposed, elementwise 25.8 %
+# across ~153k launches, attention backward 20.6 %. Everything below starts
+# from the tuned config and moves one lever, so any gain is attributable.
+
+
+def _pr18_tuned(seq_len: int | None = 8192) -> Trainer.Config:
+    """The 92.15 TFLOP/s config: EP=4, block_size 32, FullAC, PR #18 attention."""
+    return deepseek_v4_flash_8k_ep4_blk32(seq_len)
+
+
+def deepseek_v4_flash_pr18_bf16reduce(seq_len: int | None = 8192) -> Trainer.Config:
+    """S1. FSDP gradient reduce-scatter in bf16.
+
+    Was throughput-neutral under the old attention kernel (18.58 vs 18.29,
+    inside noise) but freed 20.7 GiB. Now that NCCL is 30 % of kernel time and
+    ReduceScatter_Sum_f32 alone is 8.4 %, halving those bytes may finally show
+    up in the step time rather than only in memory.
+    """
+    config = _pr18_tuned(seq_len)
+    config.training.mixed_precision_reduce = "bfloat16"
+    return config
+
+
+def _pr18_batch(mult: int, seq_len: int | None = 8192) -> Trainer.Config:
+    config = _pr18_tuned(seq_len)
+    config.training.num_tokens_per_microbatch_per_dp_rank = mult * 8192
+    return config
+
+
+def deepseek_v4_flash_pr18_bs2(seq_len: int | None = 8192) -> Trainer.Config:
+    """S4a. 2x microbatch (16384 tokens/rank).
+
+    Peak is 76.18 GiB of ~276.5 GiB, so memory allows several multiples. The
+    caveat is history: under the old attention kernel, 2x and 4x never reached
+    step 1 (three attempts), wedging in model init / autotune. The attention
+    kernel is different now; this is the retry. Judge it by log growth.
+    """
+    return _pr18_batch(2, seq_len)
+
+
+def deepseek_v4_flash_pr18_bs3(seq_len: int | None = 8192) -> Trainer.Config:
+    """S4b. 3x microbatch (24576 tokens/rank). Run only if bs2 reaches steps."""
+    return _pr18_batch(3, seq_len)
+
+
+def deepseek_v4_flash_pr18_bs4(seq_len: int | None = 8192) -> Trainer.Config:
+    """S4c. 4x microbatch (32768 tokens/rank). Run only if bs3 fits."""
+    return _pr18_batch(4, seq_len)
