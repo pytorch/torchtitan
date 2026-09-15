@@ -8,11 +8,11 @@ import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import Literal
 
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
@@ -21,7 +21,10 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    Sigmoid,
+    Softmax,
     TransformerBlock,
+    UnaryActivationFn,
 )
 from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.config_utils import (
@@ -33,8 +36,6 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 
@@ -92,7 +93,7 @@ def make_deepseek_v3_router_config(
     num_experts: int,
     gate_param_init: dict[str, Callable],
     top_k: int = 1,
-    score_func: Literal["sigmoid", "softmax", "sqrtsoftplus"] = "sigmoid",
+    score_func: UnaryActivationFn.Config | None = None,
     route_norm: bool = False,
     route_scale: float = 1.0,
     num_expert_groups: int | None = None,
@@ -108,7 +109,7 @@ def make_deepseek_v3_router_config(
             param_init=gate_param_init,
         ),
         top_k=top_k,
-        score_func=score_func,
+        score_func=Sigmoid.Config() if score_func is None else score_func,
         route_norm=route_norm,
         route_scale=route_scale,
         num_expert_groups=num_expert_groups,
@@ -223,7 +224,7 @@ def build_mla_moe_layers(
     num_experts: int,
     num_shared_experts: int,
     router_top_k: int,
-    router_score_func: Literal["sigmoid", "softmax"],
+    router_score_func: UnaryActivationFn.Config,
     router_route_scale: float = 1.0,
     router_route_norm: bool = False,
     aux_loss_coeff: float | None = None,
@@ -287,7 +288,7 @@ def build_mla_moe_layers(
                     num_experts=num_experts,
                     gate_param_init=depth_init(layer_id),
                     top_k=router_top_k,
-                    score_func=router_score_func,
+                    score_func=copy.deepcopy(router_score_func),
                     route_scale=router_route_scale,
                     route_norm=router_route_norm,
                 ),
@@ -409,7 +410,7 @@ def _debugmodel(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=3,
-        router_score_func="sigmoid",
+        router_score_func=Sigmoid.Config(),
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
@@ -483,7 +484,7 @@ def _16b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=6,
-        router_score_func="sigmoid",
+        router_score_func=Sigmoid.Config(),
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
@@ -558,7 +559,7 @@ def _236b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=6,
-        router_score_func="softmax",
+        router_score_func=Softmax.Config(),
         router_num_expert_groups=8,
         router_num_limited_groups=3,
         router_route_scale=16.0,
@@ -635,7 +636,7 @@ def _671b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=8,
-        router_score_func="sigmoid",
+        router_score_func=Sigmoid.Config(),
         router_num_expert_groups=8,
         router_num_limited_groups=4,
         router_route_scale=2.5,
