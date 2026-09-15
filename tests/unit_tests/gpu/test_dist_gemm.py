@@ -38,7 +38,7 @@ from torchtitan.config.transform import (
     transform_model_config_,
 )
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.common.attention import QKVLinear
+from torchtitan.models.common.attention import QKVLinear, TensorParallelGQAttention
 from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_dense_ffn_sharding,
@@ -48,11 +48,8 @@ from torchtitan.models.common.dist_gemm import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
+from torchtitan.models.common.feed_forward import TensorParallelFeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.tensor_parallel import (
-    TensorParallelFeedForward,
-    TensorParallelGQAttention,
-)
 
 DIM = 256
 N_HEADS = 8

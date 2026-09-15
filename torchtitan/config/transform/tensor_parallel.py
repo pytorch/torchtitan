@@ -17,20 +17,20 @@
 from dataclasses import dataclass
 from typing import cast
 
-from torchtitan.models.common.attention import GQAttention, QKVLinear
+from torchtitan.models.common.attention import (
+    GQAttention,
+    QKVLinear,
+    TensorParallelGQAttention,
+)
 from torchtitan.models.common.dist_gemm import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import FeedForward, TensorParallelFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-)
-from torchtitan.models.common.tensor_parallel import (
-    TensorParallelFeedForward,
-    TensorParallelGQAttention,
 )
 from torchtitan.protocols.module import Module
 
