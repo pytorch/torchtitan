@@ -6,6 +6,14 @@
 
 """Tensor-parallel model transforms."""
 
+# TODO: Make this transform part of every TP model-construction path, then
+# remove the legacy enclosing-module redistributions from decoder sharding.
+# Common dense ``feed_forward`` configs are already supported across Llama 3,
+# Qwen 3/3.5, DeepSeek V3/V4 dense layers, Muse Glimmer, and Kimi K2. Remaining
+# work is wiring all TP recipes through the transform and migrating
+# model-specific attention paths and MoE shared experts whose communication is
+# intentionally kept at larger module boundaries today.
+
 from dataclasses import dataclass
 from typing import cast
 
@@ -20,7 +28,10 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
-from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
+from torchtitan.models.common.tensor_parallel import (
+    TensorParallelFeedForward,
+    TensorParallelGQAttention,
+)
 from torchtitan.protocols.module import Module
 
 from .base import convert_config_type, ModelConfigTransform
@@ -45,7 +56,7 @@ def _convert_linear(
     return config
 
 
-def _transform_attention(model: Module.Config, *, async_tp: bool) -> None:
+def _transform_attention(model: Module.Config, *, async_tp: bool) -> Module.Config:
     """Select TP projection roles for common GQA blocks.
 
     Synchronous TP keeps the inner QKV projection unchanged because the
@@ -55,10 +66,14 @@ def _transform_attention(model: Module.Config, *, async_tp: bool) -> None:
     Model-specific ``GQAttention`` subclasses retain their existing behavior.
     """
     output_linear = AsyncRowParallelLinear if async_tp else RowParallelLinear
-    for _, traversed, _, _ in model.traverse(GQAttention.Config):
-        attention = cast(GQAttention.Config, traversed)
-        if attention._owner is not GQAttention:
+    for _, traversed, parent, attr in model.traverse(GQAttention.Config):
+        is_root = parent is None
+        existing = cast(GQAttention.Config, traversed)
+        if type(existing) is not GQAttention.Config:
             continue
+
+        attention = convert_config_type(existing, TensorParallelGQAttention)
+        assert isinstance(attention, TensorParallelGQAttention.Config)
 
         # Synchronous TP attaches the input redistribution to QKVLinear, so
         # its inner wqkv receives replicated input and remains a normal Linear.
@@ -90,6 +105,13 @@ def _transform_attention(model: Module.Config, *, async_tp: bool) -> None:
             async_tp=async_tp,
             projection_name="attention output",
         )
+        if is_root:
+            model = attention
+        else:
+            assert parent is not None
+            assert isinstance(attr, str)
+            setattr(parent, attr, attention)
+    return model
 
 
 def _transform_feed_forward(
@@ -149,7 +171,7 @@ def _transform_tensor_parallel(
     *,
     async_tp: bool,
 ) -> Module.Config:
-    _transform_attention(model, async_tp=async_tp)
+    model = _transform_attention(model, async_tp=async_tp)
     return _transform_feed_forward(model, async_tp=async_tp)
 
 
