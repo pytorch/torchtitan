@@ -86,6 +86,9 @@ class _StubCompileConfig:
     memory_policy: str = "default"
     full_recompute_save_ops: str = ""
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
+    fsdp_param_unshard_mode: str = "auto"
+    fsdp_gradient_sync_mode: str = "auto"
+    gradient_accumulation_mode: str = "auto"
 
 
 @dataclass
@@ -259,6 +262,20 @@ class TestConfigFingerprint(unittest.TestCase):
             _make_stub_model(), cfg_graph_seq, dims
         )
         self.assertNotEqual(fp_graph_batch, fp_graph_seq)
+
+        cfg_scheduled_sync = _StubCompileConfig(fsdp_gradient_sync_mode="scheduled")
+        self.assertNotEqual(
+            compute_config_fingerprint(
+                _make_stub_model(),
+                cfg_scheduled_sync,
+                dims,
+            ),
+            compute_config_fingerprint(
+                _make_stub_model(),
+                _StubCompileConfig(),
+                dims,
+            ),
+        )
 
     def test_pass_order_sensitive(self):
         from torchtitan.experiments.graph_trainer.precompile import (
@@ -519,6 +536,54 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
                     expected_fingerprint="new_fp",
                     example_inputs=(),
                 )
+
+
+class TestPrecompiledGraphPPStageArtifact(unittest.TestCase):
+    def test_save_load_roundtrip(self):
+        from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
+            _StageGraphModules,
+            GraphTrainerStageGraphs,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_graph_pp_stage_load,
+            precompile_graph_pp_stage_save,
+        )
+
+        graph_module = torch.fx.symbolic_trace(lambda value: value + 1)
+        graphs = GraphTrainerStageGraphs(
+            modules=_StageGraphModules(
+                fw=graph_module,
+                full_bw=graph_module,
+            ),
+            meta=SimpleNamespace(
+                num_fw_param_inputs=0,
+                fwd_input_names=("value",),
+                fwd_flat_input_indices=(0,),
+            ),
+            compiled=True,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            precompile_graph_pp_stage_save(
+                graphs,
+                storage,
+                state_fqns=["weight"],
+                num_runtime_mesh_inputs=0,
+                config_fingerprint="test_fp",
+            )
+            loaded = precompile_graph_pp_stage_load(
+                storage,
+                expected_fingerprint="test_fp",
+                expected_state_fqns=["weight"],
+                runtime_meshes=[],
+            )
+
+        self.assertTrue(loaded.compiled)
+        self.assertEqual(loaded.runtime_meshes, ())
+        torch.testing.assert_close(
+            loaded.modules.fw(torch.tensor(2)),
+            torch.tensor(3),
+        )
 
 
 class TestCudagraphPass(unittest.TestCase):
