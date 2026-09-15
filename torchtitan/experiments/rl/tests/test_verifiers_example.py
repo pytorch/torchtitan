@@ -18,7 +18,7 @@ pytest.importorskip("verifiers")
 import verifiers.v1 as vf
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
-from torchtitan.components.renderer import RenderersLibraryConfig
+from torchtitan.components.renderer import RenderersConfigAdapter
 
 from torchtitan.config.manager import ConfigManager
 from torchtitan.experiments.rl.examples.dapo_math import DapoMathSample
@@ -104,6 +104,6 @@ def test_verifiers_config_keeps_dapo_training_recipe() -> None:
     assert isinstance(config.rollouter, VerifiersMathRollouter.Config)
     assert config.generator.sampling.max_tokens == 8192
     assert config.dump_folder == "outputs/rl/qwen3_4b_verifiers_8k"
-    assert isinstance(config.renderer, RenderersLibraryConfig)
+    assert isinstance(config.renderer, RenderersConfigAdapter)
     assert config.renderer.renderers_config.name == "qwen3"
     assert config.renderer.renderers_config.enable_thinking

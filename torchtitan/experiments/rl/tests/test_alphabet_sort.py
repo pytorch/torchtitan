@@ -13,7 +13,7 @@ import asyncio
 import pytest
 from renderers import Qwen3RendererConfig
 
-from torchtitan.components.renderer import RenderersLibraryConfig
+from torchtitan.components.renderer import from_renderers
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
@@ -383,9 +383,7 @@ def test_rollouter_builds_one_env_per_group_member(
     asyncio.run(
         worker.setup_async(
             tokenizer_config=HuggingFaceTokenizer.Config(),
-            renderer_config=RenderersLibraryConfig(
-                renderers_config=Qwen3RendererConfig(enable_thinking=False)
-            ),
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
             hf_assets_path="tests/assets/tokenizer",
         )
     )

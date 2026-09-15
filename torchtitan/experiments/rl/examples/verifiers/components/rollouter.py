@@ -19,7 +19,7 @@ from verifiers.v1.dialects.chat import message_to_wire
 from verifiers.v1.serve.client import EnvClient as VerifiersEnvClient
 from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 
-from torchtitan.components.renderer import RendererConfig, RenderersLibraryConfig
+from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.experiments.rl.examples.verifiers.components.data import (
@@ -171,10 +171,11 @@ class VerifiersRollouter(Rollouter):
         del tokenizer_config
         if self._verifiers_env_client is not None:
             return
-        if not isinstance(renderer_config, RenderersLibraryConfig):
+        if not isinstance(renderer_config, RenderersConfigAdapter):
             raise ValueError(
-                "Verifiers requires RenderersLibraryConfig so its client can "
-                "construct the same renderer in the environment-server process"
+                "Verifiers requires a renderer configured with from_renderers(...) "
+                "so its client can construct the same renderer in the "
+                "environment-server process"
             )
 
         # Verifiers generates through an HTTP endpoint, while TorchTitan exposes

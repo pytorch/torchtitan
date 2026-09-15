@@ -23,7 +23,7 @@ from renderers import Qwen3RendererConfig
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.components.renderer import RenderersLibraryConfig
+from torchtitan.components.renderer import from_renderers
 from torchtitan.config import (
     CompileConfig,
     OverrideConfig,
@@ -83,9 +83,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=RenderersLibraryConfig(
-            renderers_config=Qwen3RendererConfig(enable_thinking=False)
-        ),
+        renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),
@@ -212,9 +210,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 advantage=AdvantageEstimator.Config(should_std_normalize=True),
             ),
         ),
-        renderer=RenderersLibraryConfig(
-            renderers_config=Qwen3RendererConfig(enable_thinking=False)
-        ),
+        renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=PolicyTrainer.Config(
             optimizer=default_adamw(lr=1e-6),

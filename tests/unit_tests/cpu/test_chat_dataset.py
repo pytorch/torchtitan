@@ -23,7 +23,7 @@ from torchtitan.components.data.packing import FirstFitPackingConfig
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.renderer import RenderersLibraryConfig
+from torchtitan.components.renderer import from_renderers
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 from torchtitan.models.common.attention import (
@@ -328,7 +328,7 @@ class TestMultiTurnChatProcessor(unittest.TestCase):
         ]
         self.config = ChatProcessor.Config(
             messages_fn=lambda _: self.messages,
-            renderer=RenderersLibraryConfig(renderers_config=Qwen3RendererConfig()),
+            renderer=from_renderers(Qwen3RendererConfig()),
         )
 
     def test_eos_is_only_required_without_renderer(self):

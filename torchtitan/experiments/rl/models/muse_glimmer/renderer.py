@@ -34,7 +34,7 @@ this class directly.
 
 TODO: upstream this to PrimeIntellect-ai/renderers (renderer -> renderers/muse_glimmer.py,
 atem.py -> a tool parser in renderers/parsers.py), then delete both files and select it
-through ``RenderersLibraryConfig`` like the other renderers.
+through ``from_renderers`` like the other renderers.
 
 It lives under ``experiments/rl`` rather than ``torchtitan/models/muse_glimmer`` because
 RL is its only consumer.

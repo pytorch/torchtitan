@@ -226,11 +226,11 @@ For multi-turn conversations, select the model's renderer explicitly:
 ```python
 from renderers import Qwen3RendererConfig
 
-from torchtitan.components.renderer import RenderersLibraryConfig
+from torchtitan.components.renderer import from_renderers
 
 processor = ChatProcessor.Config(
     messages_fn=lambda row: row["messages"],
-    renderer=RenderersLibraryConfig(renderers_config=Qwen3RendererConfig()),
+    renderer=from_renderers(Qwen3RendererConfig()),
 )
 ```
 
