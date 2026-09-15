@@ -840,3 +840,75 @@ def deepseek_v4_flash_8k_ep4_blk32_batch2(
     config = _flash_8k_ep_blk(4, 32, seq_len)
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     return config
+
+
+# --- attention-backward tile sweep -----------------------------------------
+#
+# The profile of `deepseek_v4_flash_8k_ep4_blk32` puts ONE kernel,
+# triton_tem_fused_flex_attention_backward_2, at 72.5 % of all GPU time:
+# 517 ms/call mean against 7.3 ms for its own forward, a 122x ratio where 2-3x
+# is normal. 21 layers (compress_ratio=4) carry 84 % of that.
+#
+# The trace says why: registers per thread 255 (the hardware max), shared
+# memory 99,328 B, limitingFactors=SMEM, blockLimitRegs=2, and num_stages=1 --
+# no pipelining, and tiles so small the dkdv pass takes 8192/BLOCK_M1 = 512
+# trips over the query axis.
+#
+# Observed shared memory fits 2*(M+N)*head_dim*2 B exactly (98,304 at M1=16,
+# N1=32), so on GB300's 232,448 B the ceiling is M+N <= 113. The largest
+# power-of-two pairs that fit are 64/32 and 32/64, at 196,608 B = 85 % of the
+# limit, leaving ~36 KB for compiler overhead.
+#
+# The existing tiles are a correctness workaround (without them the backward
+# dies with "CUDA error: unspecified launch failure") and `_pin_gb300_flex_tiles`
+# only ever swept FORWARD tiles. Backward tiles are untested ground; a launch
+# failure here is information, not a setback.
+
+
+def _flash_8k_bwd_tiles(**overrides: int) -> Trainer.Config:
+    """Best config (EP=4 + block_size 32) with backward tile overrides.
+
+    Forward tiles and num_warps are deliberately untouched: the forward already
+    runs at 7.3 ms/call, larger forward tiles are known to fail on this
+    hardware, and changing warps at the same time would confound the result.
+    """
+    config = deepseek_v4_flash_8k_ep4_blk32()
+    for layer in config.model_spec.model.layers:
+        inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            opts = dict(inner.kernel_options or {})
+            opts.update(overrides)
+            inner.kernel_options = opts
+    return config
+
+
+def deepseek_v4_flash_8k_bwd_stages2(seq_len: int | None = 8192) -> Trainer.Config:
+    """A1. num_stages 1 -> 2, tiles unchanged. 196,608 B = 85 % of the limit.
+
+    Buys the software pipelining the kernel has none of, without touching tile
+    geometry. Cheapest possible change and the one most likely to just work.
+    """
+    del seq_len
+    return _flash_8k_bwd_tiles(num_stages=2)
+
+
+def deepseek_v4_flash_8k_bwd_tiles32(seq_len: int | None = 8192) -> Trainer.Config:
+    """A2. Square 32s: M1/N1/M2/N2 = 32. 131,072 B = 56 % of the limit.
+
+    Halves both looped dimensions' trip counts (query axis 512 -> 256, key axis
+    128 -> 64) while staying well inside shared memory -- the safe middle rung.
+    """
+    del seq_len
+    return _flash_8k_bwd_tiles(BLOCK_M1=32, BLOCK_N1=32, BLOCK_M2=32, BLOCK_N2=32)
+
+
+def deepseek_v4_flash_8k_bwd_tilesmax(seq_len: int | None = 8192) -> Trainer.Config:
+    """A3. The largest that fits: M1=64,N1=32 and M2=32,N2=64. 196,608 B (85 %).
+
+    Enlarges each pass along the axis it actually loops over -- dkdv iterates
+    the 8192-token query axis in BLOCK_M1 steps (512 -> 128 trips), dq iterates
+    the 2048-token compressed KV axis in BLOCK_N2 steps (128 -> 32 trips). A 4x
+    cut in loop trips for both. 64/64 would need 262,144 B and cannot fit.
+    """
+    del seq_len
+    return _flash_8k_bwd_tiles(BLOCK_M1=64, BLOCK_N1=32, BLOCK_M2=32, BLOCK_N2=64)
