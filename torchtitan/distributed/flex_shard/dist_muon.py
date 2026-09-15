@@ -690,13 +690,6 @@ class DistMuon(Optimizer):
 
 @dataclass(frozen=True, slots=True)
 class _MatrixBatchView:
-    """Matrix boundaries inside a flat 2D compute tensor.
-
-    ``matrix_rows`` is the block size. Without ``num_rows_per_segment`` each
-    block is one matrix; with it, each block holds contiguous matrices with
-    the given row counts.
-    """
-
     matrix_rows: int
     matrix_columns: int
     num_rows_per_segment: tuple[int, ...] | None = None
