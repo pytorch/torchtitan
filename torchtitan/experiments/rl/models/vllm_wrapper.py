@@ -593,13 +593,12 @@ class VLLMModelWrapper(Module):
                 )
                 if wqkv_sharding_config is None:
                     continue
-                for state_name in ("weight", "bias"):
-                    if state_name not in wqkv_sharding_config.state_shardings:
-                        continue
+                for (
+                    state_name,
+                    layout,
+                ) in wqkv_sharding_config.state_shardings.items():
                     for proj_name in ("wq", "wk", "wv"):
-                        layouts[
-                            f"{module_prefix}{proj_name}.{state_name}"
-                        ] = dense_param_placement(tp=spmd.S(0))
+                        layouts[f"{module_prefix}{proj_name}.{state_name}"] = layout
 
             if module_fqn.rsplit(".", 1)[-1] == "vllm_attn":
                 for buffer_name, _ in module.named_buffers(recurse=False):

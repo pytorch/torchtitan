@@ -8,7 +8,6 @@
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
 #   B = batch, T = packed tokens, L = sequence length,
 #   D = model dimension,
-#   R = Q/K/V projection slot, F = flattened features within one slot,
 #   H = attention heads (H is used for both query and kv heads in GQA;
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
@@ -21,6 +20,7 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
+from torch.distributed.tensor import DTensor, Replicate
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -709,15 +709,13 @@ class BaseAttention(Module):
 
 
 class QKVLinear(Module):
-    """Single fused linear projection with an explicit R dimension.
+    """Single fused linear projection, split along R dimension.
 
     Uses a single linear layer and splits the output along the R dimension,
     where R = n_heads // n_kv_heads + 2 (Q-heads-per-KV-group + K + V).
     Reduces kernel launch overhead compared to three separate projections.
 
-    ``wqkv.weight`` is stored as ``[R, n_kv_heads * head_dim, dim]`` so Q, K,
-    and V do not share quantization blocks. TP shards the middle feature
-    dimension.
+    Compatible with ColwiseParallel on the ``wqkv`` linear layer.
 
     Checkpoints expose logical ``wq.weight`` / ``wk.weight`` / ``wv.weight``
     keys via state_dict hooks so they interoperate with external formats.
@@ -756,46 +754,59 @@ class QKVLinear(Module):
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        qkv_TRF = self.wqkv(x)
-        local_num_tokens = qkv_TRF.shape[0]
-        local_num_kv_heads = qkv_TRF.shape[-1] // self.head_dim
-        qkv_TRHK = qkv_TRF.unflatten(-1, (local_num_kv_heads, self.head_dim))
-        xq_TRHK = qkv_TRHK[:, : self.heads_per_kv]
-        xk_THK = qkv_TRHK[:, self.heads_per_kv]
-        xv_THV = qkv_TRHK[:, self.heads_per_kv + 1]
-        # Q is stored R-major so every projection slot is contiguous. Restore
-        # the checkpoint head order, grouped first by KV head, at the boundary.
-        xq_THRK = xq_TRHK.transpose(1, 2)
+        num_tokens = x.shape[0]
+        # Fused QKV: single matmul, then reshape and split along R dim.
+        # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
+        # Use -1 for n_kv_heads so TP sharding is handled automatically.
+        qkv = self.wqkv(x)
+        with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
+            qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
+            if spmd.is_type_checking():
+                spmd.assert_type(
+                    qkv,
+                    spmd.V,
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
+                )
+
+        local_num_tokens = qkv.shape[0]
+        xq, xk, xv = torch.split(qkv, [self.heads_per_kv, 1, 1], dim=-2)
+        # split leaves xk/xv as strided views into the fused buffer; vLLM
+        # attention/KV-cache kernels read raw memory assuming a contiguous
+        # head-major layout, so materialize all three contiguously here.
         return (
-            xq_THRK.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
-            xk_THK.contiguous(),
-            xv_THV.contiguous(),
+            xq.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
+            xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
         )
 
     @staticmethod
     def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
         """Split fused ``wqkv`` into stock ``wq``/``wk``/``wv`` (weight and bias)."""
-        hd, hpk = module.head_dim, module.heads_per_kv
+        hd, hpk, r = module.head_dim, module.heads_per_kv, module.r_dim
 
-        for param, ndim in (("weight", 3), ("bias", 2)):
+        for param, ndim in (("weight", 4), ("bias", 3)):
             key = f"{prefix}wqkv.{param}"
             if key not in state_dict:
                 continue
             tensor = state_dict.pop(key)
-            tail = (tensor.shape[-1],) if ndim == 3 else ()
-            n_kv = tensor.shape[1] // hd
+            # Gather to Replicate so the n_kv-leading reshape is local (dim 0
+            # unsharded) when a Shard(0) split would not divide n_kv_heads
+            # (e.g. dp_shard=8, n_kv_heads=4); stays a DTensor for the copy.
+            if isinstance(tensor, DTensor):
+                tensor = tensor.redistribute(
+                    tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
+                )
+            n_kv = tensor.shape[0] // (r * hd)
+            tail = (tensor.shape[1],) if ndim == 4 else ()
+            w = tensor.reshape(n_kv, r, hd, *tail)
             state_dict[f"{prefix}wq.{param}"] = (
-                tensor[:hpk]
-                .reshape(hpk, n_kv, hd, *tail)
-                .transpose(0, 1)
-                .reshape(-1, *tail)
-                .contiguous()
+                w[:, :hpk].reshape(-1, *tail).contiguous()
             )
             state_dict[f"{prefix}wk.{param}"] = (
-                tensor[hpk].reshape(-1, *tail).contiguous()
+                w[:, hpk].reshape(-1, *tail).contiguous()
             )
             state_dict[f"{prefix}wv.{param}"] = (
-                tensor[hpk + 1].reshape(-1, *tail).contiguous()
+                w[:, hpk + 1].reshape(-1, *tail).contiguous()
             )
 
     @staticmethod
@@ -803,17 +814,27 @@ class QKVLinear(Module):
         """Merge stock ``wq``/``wk``/``wv`` back into fused ``wqkv`` (weight and bias)."""
         hd, hpk = module.head_dim, module.heads_per_kv
 
-        for param, ndim in (("weight", 3), ("bias", 2)):
+        for param, ndim in (("weight", 4), ("bias", 3)):
             keys = [f"{prefix}{w}.{param}" for w in ("wq", "wk", "wv")]
             if not all(k in state_dict for k in keys):
                 continue
             wq, wk, wv = (state_dict.pop(k) for k in keys)
+            # TODO: check if we could avoid this All-gather
+            # Gather to Replicate so the n_kv reshape is local; stays a DTensor so the
+            # fused result can be copied into the sharded wqkv param.
+            if isinstance(wq, DTensor):
+                wq, wk, wv = (
+                    t.redistribute(t.device_mesh, [Replicate()] * t.device_mesh.ndim)
+                    for t in (wq, wk, wv)
+                )
             n_kv = wk.shape[0] // hd
-            tail = (wq.shape[-1],) if ndim == 3 else ()
-            q = wq.reshape(n_kv, hpk, hd, *tail).transpose(0, 1).flatten(1, 2)
-            k = wk.reshape(1, n_kv * hd, *tail)
-            v = wv.reshape(1, n_kv * hd, *tail)
-            state_dict[f"{prefix}wqkv.{param}"] = torch.cat([q, k, v], dim=0)
+            tail = (wq.shape[1],) if ndim == 4 else ()
+            q = wq.reshape(n_kv, hpk, hd, *tail)
+            k = wk.reshape(n_kv, 1, hd, *tail)
+            v = wv.reshape(n_kv, 1, hd, *tail)
+            state_dict[f"{prefix}wqkv.{param}"] = torch.cat([q, k, v], dim=1).reshape(
+                -1, *tail
+            )
 
 
 class GQAttention(BaseAttention):

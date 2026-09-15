@@ -91,11 +91,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
                 head_dim=head_dim,
                 n_heads=num_heads,
                 n_kv_heads=num_heads,
-                wqkv=Linear.Config(
-                    in_features=dim,
-                    out_features=num_heads * head_dim,
-                    num_linears=3,
-                ),
+                wqkv=Linear.Config(in_features=dim, out_features=3 * dim),
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=VarlenInnerAttention.Config(),

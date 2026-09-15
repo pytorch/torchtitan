@@ -24,6 +24,7 @@ from torchtitan.config.transform import (
     MXFP8LinearConverter,
     NVFP4LinearConverter,
 )
+from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.feed_forward import FeedForward
@@ -547,6 +548,30 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
 
     assert isinstance(converted, MXFP8Linear.Config)
     assert converted.input_activation_format_for_backward == "bf16"
+
+
+def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    converter = MXFP8LinearConverter(
+        MXFP8LinearConverter.Config(model_compile_enabled=True)
+    )
+    head_dim = 48
+    n_heads = 4
+    n_kv_heads = 2
+    qkv_config = QKVLinear.Config(
+        head_dim=head_dim,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        wqkv=Linear.Config(
+            in_features=128,
+            out_features=(n_heads + 2 * n_kv_heads) * head_dim,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="head_dim divisible by 32"):
+        converter.convert(qkv_config)
 
 
 def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):

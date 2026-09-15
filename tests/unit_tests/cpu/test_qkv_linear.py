@@ -14,11 +14,9 @@ All tests run on CPU.
 """
 
 import unittest
-from functools import partial
 
 import torch
 from torchtitan.models.common.attention import QKVLinear
-from torchtitan.models.common.config_utils import fused_qkv_param_init
 from torchtitan.models.common.linear import Linear
 
 _DIM = 16
@@ -37,17 +35,12 @@ def _build_qkv_linear(with_bias: bool = False) -> QKVLinear:
         head_dim=_HEAD_DIM,
         n_heads=_N_HEADS,
         n_kv_heads=_N_KV_HEADS,
-        wqkv=Linear.Config(
-            in_features=_DIM,
-            out_features=_N_KV_HEADS * _HEAD_DIM,
-            num_linears=_R_DIM,
-            bias=with_bias,
-        ),
+        wqkv=Linear.Config(in_features=_DIM, out_features=_WQKV_OUT, bias=with_bias),
     ).build()
     with torch.no_grad():
-        fused.wqkv.weight.copy_(torch.randn(_R_DIM, _N_KV_HEADS * _HEAD_DIM, _DIM))
+        fused.wqkv.weight.copy_(torch.randn(_WQKV_OUT, _DIM))
         if with_bias:
-            fused.wqkv.bias.copy_(torch.randn(_R_DIM, _N_KV_HEADS * _HEAD_DIM))
+            fused.wqkv.bias.copy_(torch.randn(_WQKV_OUT))
     return fused
 
 
@@ -69,76 +62,29 @@ def _logical_state_dict(with_bias: bool = False) -> dict[str, torch.Tensor]:
 
 
 class TestQKVLinearCheckpointInterop(unittest.TestCase):
-    def test_stacked_qkv_preserves_logical_initialization(self):
-        init = partial(torch.nn.init.trunc_normal_, mean=0.0, std=0.02)
-        fused = QKVLinear.Config(
-            head_dim=_HEAD_DIM,
-            n_heads=_N_HEADS,
-            n_kv_heads=_N_KV_HEADS,
-            wqkv=Linear.Config(
-                in_features=_DIM,
-                out_features=_N_KV_HEADS * _HEAD_DIM,
-                num_linears=_R_DIM,
-                bias=True,
-                param_init=fused_qkv_param_init(
-                    {"weight": init, "bias": init},
-                    n_heads=_N_HEADS,
-                    n_kv_heads=_N_KV_HEADS,
-                    head_dim=_HEAD_DIM,
-                ),
-            ),
-        ).build()
-
-        torch.manual_seed(42)
-        fused.init_states()
-
-        torch.manual_seed(42)
-        expected = {
-            "wq.weight": torch.empty(_WQ_OUT, _DIM),
-            "wk.weight": torch.empty(_WK_OUT, _DIM),
-            "wv.weight": torch.empty(_WK_OUT, _DIM),
-            "wq.bias": torch.empty(_WQ_OUT),
-            "wk.bias": torch.empty(_WK_OUT),
-            "wv.bias": torch.empty(_WK_OUT),
-        }
-        for param in ("weight", "bias"):
-            for projection in ("wq", "wk", "wv"):
-                init(expected[f"{projection}.{param}"])
-
-        actual = fused.state_dict()
-        for key, value in expected.items():
-            torch.testing.assert_close(actual[key], value)
-
     def test_state_dict_exposes_logical_qkv(self):
         """The fused parameter is exposed as logical Q/K/V tensors."""
         fused = _build_qkv_linear(with_bias=True)
         state_dict = fused.state_dict()
 
-        wqkv = fused.wqkv.weight
+        n_kv = _WQKV_OUT // (_R_DIM * _HEAD_DIM)
+        wqkv = fused.wqkv.weight.reshape(n_kv, _R_DIM, _HEAD_DIM, _DIM)
         self.assertTrue(
-            torch.equal(
-                state_dict["wq.weight"],
-                wqkv[:_HPK]
-                .reshape(_HPK, _N_KV_HEADS, _HEAD_DIM, _DIM)
-                .transpose(0, 1)
-                .reshape(-1, _DIM),
-            )
+            torch.equal(state_dict["wq.weight"], wqkv[:, :_HPK].reshape(-1, _DIM))
         )
-        self.assertTrue(torch.equal(state_dict["wk.weight"], wqkv[_HPK]))
-        self.assertTrue(torch.equal(state_dict["wv.weight"], wqkv[_HPK + 1]))
+        self.assertTrue(
+            torch.equal(state_dict["wk.weight"], wqkv[:, _HPK].reshape(-1, _DIM))
+        )
+        self.assertTrue(
+            torch.equal(state_dict["wv.weight"], wqkv[:, _HPK + 1].reshape(-1, _DIM))
+        )
 
-        bias = fused.wqkv.bias
+        b_3d = fused.wqkv.bias.reshape(n_kv, _R_DIM, _HEAD_DIM)
+        self.assertTrue(torch.equal(state_dict["wq.bias"], b_3d[:, :_HPK].reshape(-1)))
+        self.assertTrue(torch.equal(state_dict["wk.bias"], b_3d[:, _HPK].reshape(-1)))
         self.assertTrue(
-            torch.equal(
-                state_dict["wq.bias"],
-                bias[:_HPK]
-                .reshape(_HPK, _N_KV_HEADS, _HEAD_DIM)
-                .transpose(0, 1)
-                .reshape(-1),
-            )
+            torch.equal(state_dict["wv.bias"], b_3d[:, _HPK + 1].reshape(-1))
         )
-        self.assertTrue(torch.equal(state_dict["wk.bias"], bias[_HPK]))
-        self.assertTrue(torch.equal(state_dict["wv.bias"], bias[_HPK + 1]))
 
     def test_logical_checkpoint_loads_into_qkv_linear(self):
         """Logical Q/K/V checkpoint tensors are packed into wqkv."""
@@ -146,31 +92,26 @@ class TestQKVLinearCheckpointInterop(unittest.TestCase):
         fused = _build_qkv_linear(with_bias=True)
         fused.load_state_dict(state_dict)
 
-        wqkv = fused.wqkv.weight
+        n_kv = _WQKV_OUT // (_R_DIM * _HEAD_DIM)
+        wqkv = fused.wqkv.weight.reshape(n_kv, _R_DIM, _HEAD_DIM, _DIM)
         self.assertTrue(
-            torch.equal(
-                wqkv[:_HPK]
-                .reshape(_HPK, _N_KV_HEADS, _HEAD_DIM, _DIM)
-                .transpose(0, 1)
-                .reshape(-1, _DIM),
-                state_dict["wq.weight"],
-            )
+            torch.equal(wqkv[:, :_HPK].reshape(-1, _DIM), state_dict["wq.weight"])
         )
-        self.assertTrue(torch.equal(wqkv[_HPK], state_dict["wk.weight"]))
-        self.assertTrue(torch.equal(wqkv[_HPK + 1], state_dict["wv.weight"]))
+        self.assertTrue(
+            torch.equal(wqkv[:, _HPK].reshape(-1, _DIM), state_dict["wk.weight"])
+        )
+        self.assertTrue(
+            torch.equal(wqkv[:, _HPK + 1].reshape(-1, _DIM), state_dict["wv.weight"])
+        )
 
-        wqkv_b = fused.wqkv.bias
+        wqkv_b = fused.wqkv.bias.reshape(n_kv, _R_DIM, _HEAD_DIM)
         self.assertTrue(
-            torch.equal(
-                wqkv_b[:_HPK]
-                .reshape(_HPK, _N_KV_HEADS, _HEAD_DIM)
-                .transpose(0, 1)
-                .reshape(-1),
-                state_dict["wq.bias"],
-            )
+            torch.equal(wqkv_b[:, :_HPK].reshape(-1), state_dict["wq.bias"])
         )
-        self.assertTrue(torch.equal(wqkv_b[_HPK], state_dict["wk.bias"]))
-        self.assertTrue(torch.equal(wqkv_b[_HPK + 1], state_dict["wv.bias"]))
+        self.assertTrue(torch.equal(wqkv_b[:, _HPK].reshape(-1), state_dict["wk.bias"]))
+        self.assertTrue(
+            torch.equal(wqkv_b[:, _HPK + 1].reshape(-1), state_dict["wv.bias"])
+        )
 
     def test_hf_adapter_roundtrip(self):
         """HF adapter works with QKVLinear's hook-produced wq/wk/wv keys."""
@@ -243,21 +184,40 @@ class TestFusedQKVForwardContiguity(unittest.TestCase):
         torch.testing.assert_close(xk_THK, ref_k_THK)
         torch.testing.assert_close(xv_THV, ref_v_THV)
 
-    def test_projection_storage_does_not_interleave_qkv(self):
-        """Every R-axis projection occupies one contiguous storage slab."""
+    def test_raw_pointer_read_needs_contiguous(self):
+        """A consumer reading the base pointer with contiguous head-major strides
+        (what vLLM's kernels do) gets the wrong bytes from the strided split, and
+        the correct bytes only after the forward's ``.contiguous()``.
+        """
         fused = _build_qkv_linear()
         num_tokens = 6
         x_TD = torch.randn(num_tokens, _DIM)
 
-        qkv_TRF = fused.wqkv(x_TD)
-        self.assertTrue(qkv_TRF.is_contiguous())
-        self.assertTrue(fused.wqkv.weight[_HPK].is_contiguous())
-        self.assertTrue(fused.wqkv.weight[_HPK + 1].is_contiguous())
+        # Reconstruct the pre-fix strided split (no .contiguous()).
+        qkv = fused.wqkv(x_TD).view(num_tokens, _N_KV_HEADS, _R_DIM, _HEAD_DIM)
+        _, xk_strided, _ = torch.split(qkv, [_HPK, 1, 1], dim=-2)
+        xk_strided = xk_strided.reshape(num_tokens, _N_KV_HEADS, _HEAD_DIM)
+        self.assertFalse(xk_strided.is_contiguous())  # the bug precondition
 
-        xq_THK, xk_THK, xv_THV = fused(x_TD)
-        self.assertTrue(xq_THK.is_contiguous())
-        self.assertTrue(xk_THK.is_contiguous())
-        self.assertTrue(xv_THV.is_contiguous())
+        # Strides a contiguous tensor of this shape would have.
+        contig_strides = torch.empty(xk_strided.shape).stride()
+
+        # Simulate a raw-pointer kernel: read xk's storage with contiguous
+        # strides. Because consecutive KV groups are R*head_dim apart in the
+        # fused buffer, this lands on interleaved Q bytes -> wrong values.
+        raw = xk_strided.as_strided(
+            xk_strided.shape, contig_strides, xk_strided.storage_offset()
+        )
+        self.assertFalse(torch.equal(raw, xk_strided))
+
+        # The fix: the real forward returns contiguous xk, so the same raw read
+        # now lands on the correct values.
+        xk_fixed = fused(x_TD)[1]
+        self.assertTrue(xk_fixed.is_contiguous())
+        raw_fixed = xk_fixed.as_strided(
+            xk_fixed.shape, contig_strides, xk_fixed.storage_offset()
+        )
+        self.assertTrue(torch.equal(raw_fixed, xk_fixed))
 
 
 if __name__ == "__main__":

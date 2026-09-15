@@ -277,10 +277,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
-    qkv_sharding = stacked_colwise_config()
-    if dist_gemm:
-        qkv_sharding = ShardingConfig(state_shardings=qkv_sharding.state_shardings)
-    attention_cfg.qkv_linear.wqkv.sharding_config = qkv_sharding
+    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
 
     wo_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:

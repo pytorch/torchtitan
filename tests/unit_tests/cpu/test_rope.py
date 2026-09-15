@@ -308,11 +308,7 @@ class TestPerLayerRoPECache(unittest.TestCase):
                 head_dim=head_dim,
                 n_heads=2,
                 n_kv_heads=2,
-                wqkv=Linear.Config(
-                    in_features=dim,
-                    out_features=2 * head_dim,
-                    num_linears=3,
-                ),
+                wqkv=Linear.Config(in_features=dim, out_features=3 * dim),
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
             inner_attention=VarlenInnerAttention.Config(),

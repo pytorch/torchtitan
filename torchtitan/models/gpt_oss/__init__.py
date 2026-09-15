@@ -100,8 +100,7 @@ def _make_gptoss_attn_config(
         n_kv_heads=n_kv_heads,
         wqkv=Linear.Config(
             in_features=dim,
-            out_features=n_kv_heads * head_dim,
-            num_linears=n_heads // n_kv_heads + 2,
+            out_features=(n_heads + 2 * n_kv_heads) * head_dim,
             bias=True,
             param_init=_depth_init(layer_id),
         ),

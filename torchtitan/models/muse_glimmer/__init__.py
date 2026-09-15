@@ -169,8 +169,7 @@ def _build_muse_glimmer_attention(
             n_kv_heads=n_kv_heads,
             wqkv=Linear.Config(
                 in_features=dim,
-                out_features=n_kv_heads * head_dim,
-                num_linears=n_heads // n_kv_heads + 2,
+                out_features=(n_heads + 2 * n_kv_heads) * head_dim,
                 param_init=fused_qkv_param_init(
                     _LINEAR_INIT,
                     n_heads=n_heads,
