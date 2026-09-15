@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
 import pickle
 from dataclasses import dataclass
@@ -94,42 +95,13 @@ def compute_config_fingerprint(
         if not f.name.startswith("_"):
             h.update(f"parallel:{f.name}:{getattr(parallel_dims, f.name)}\n".encode())
 
-    h.update(f"compile:mode:{compile_config.mode}\n".encode())
-    h.update(f"compile:backend:{compile_config.backend}\n".encode())
-    h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
-    h.update(f"compile:memory_policy:{compile_config.memory_policy}\n".encode())
+    compile_fields = dataclasses.asdict(compile_config)
+    compile_fields.pop("debug_graph_passes", None)
+    compile_fields.pop("precompile_artifact_dir", None)
     h.update(
-        "compile:full_recompute_save_ops:"
-        f"{compile_config.full_recompute_save_ops}\n".encode()
-    )
-    h.update(
-        f"compile:ep_overlap:enabled:{compile_config.ep_overlap.enabled}\n".encode()
-    )
-    h.update(
-        f"compile:ep_overlap:chunk_dim:{compile_config.ep_overlap.chunk_dim}\n".encode()
-    )
-    h.update(
-        "compile:ep_overlap:strategy:"
-        f"{compile_config.ep_overlap.strategy}\n".encode()
-    )
-    h.update(
-        f"compile:ep_overlap:module_fqn:{compile_config.ep_overlap.module_fqn}\n".encode()
-    )
-    h.update(
-        "compile:ep_overlap:disable_early_grad_accumulation:"
-        f"{compile_config.ep_overlap.disable_early_grad_accumulation}\n".encode()
-    )
-    h.update(
-        "compile:fsdp_param_unshard_mode:"
-        f"{compile_config.fsdp_param_unshard_mode}\n".encode()
-    )
-    h.update(
-        "compile:fsdp_gradient_sync_mode:"
-        f"{compile_config.fsdp_gradient_sync_mode}\n".encode()
-    )
-    h.update(
-        "compile:gradient_accumulation_mode:"
-        f"{compile_config.gradient_accumulation_mode}\n".encode()
+        b"compile:"
+        + json.dumps(compile_fields, sort_keys=True, separators=(",", ":")).encode()
+        + b"\n"
     )
     h.update(
         "torch:deterministic_algorithms:"

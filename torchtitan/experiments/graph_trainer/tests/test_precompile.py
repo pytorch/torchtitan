@@ -14,7 +14,10 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from torchtitan.experiments.graph_trainer.configs import EpOverlapConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    EpOverlapConfig,
+    GraphTrainerCompileConfig,
+)
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 
 
@@ -293,6 +296,51 @@ class TestConfigFingerprint(unittest.TestCase):
                 _StubCompileConfig(),
                 dims,
             ),
+        )
+
+    def test_all_compilation_settings_are_fingerprinted(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        dims = _StubParallelDims()
+        baseline = compute_config_fingerprint(
+            _make_stub_model(), GraphTrainerCompileConfig(enable=True), dims
+        )
+        changed_configs = [
+            GraphTrainerCompileConfig(enable=True, enable_passes=False),
+            GraphTrainerCompileConfig(
+                enable=True,
+                disable_passes=["joint_transformer_block_bucketing_reordering_pass"],
+            ),
+            GraphTrainerCompileConfig(enable=True, inductor_compilation="full"),
+            GraphTrainerCompileConfig(enable=True, numerics_changing_optim=True),
+            GraphTrainerCompileConfig(enable=True, enable_fsdp_ag_rs_overlap=True),
+        ]
+
+        for config in changed_configs:
+            with self.subTest(config=config):
+                self.assertNotEqual(
+                    baseline,
+                    compute_config_fingerprint(_make_stub_model(), config, dims),
+                )
+
+    def test_runtime_only_settings_are_not_fingerprinted(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        dims = _StubParallelDims()
+        baseline = compute_config_fingerprint(
+            _make_stub_model(), GraphTrainerCompileConfig(), dims
+        )
+        config = GraphTrainerCompileConfig(
+            debug_graph_passes=True,
+            precompile_artifact_dir="different/storage/location",
+        )
+        self.assertEqual(
+            baseline,
+            compute_config_fingerprint(_make_stub_model(), config, dims),
         )
 
     def test_pass_order_sensitive(self):
