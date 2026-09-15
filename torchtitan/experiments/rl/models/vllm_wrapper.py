@@ -399,6 +399,7 @@ class VLLMModelWrapper(Module):
             with self.spmd_context():
                 self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
+        self._install_weight_sync_tensors()
 
         # Give each gpt-oss attention's vLLM backend its sink rescale.
         # Need to do it here after parallelize + weight load so sinks are
@@ -409,6 +410,21 @@ class VLLMModelWrapper(Module):
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
+
+    def _install_weight_sync_tensors(self) -> None:
+        """Install weight sync representations, such as quantized weights."""
+        has_weight_sync_modules = False
+        for module in self.model.modules():
+            install_weight_sync_tensor = getattr(
+                module, "_install_weight_sync_tensor", None
+            )
+            if install_weight_sync_tensor is not None:
+                install_weight_sync_tensor()
+                has_weight_sync_modules = True
+        if has_weight_sync_modules:
+            # Reclaim memory released by _install_weight_sync_tensor before vLLM
+            # allocates its CUDA-graph private pools.
+            torch.cuda.empty_cache()
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:

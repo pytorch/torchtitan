@@ -32,6 +32,7 @@ from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
     _LinearShardedTensorWithMXFP8Compute,
     _MXFP8_BLOCK_SIZE,
+    _MXFP8WeightSyncTensor,
     _quantize_mxfp8_weight,
 )
 
@@ -171,20 +172,22 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # keeps the original tensor and builds the columnwise operand in
         # backward. MXFP8 mode keeps the columnwise qdata and scales produced
         # above. FPROP and DGRAD share the same weight qdata allocation.
-        # An unsharded tensor's storage is FSDP's to free at reshard and refill
-        # before backward, so save the wrapper and read the operands off it
-        # then. Anything else carries no operands to refill, so save them.
-        has_unsharded_tensor = isinstance(weight_NK, _UnshardedFSDPTensor)
+        # A lifecycle-managed tensor may have its operands refilled in place, so
+        # save the wrapper and read the current operands from it in backward.
+        # Anything else carries no operand owner, so save the tensors directly.
+        has_operand_backed_weight = isinstance(
+            weight_NK, (_UnshardedFSDPTensor, _MXFP8WeightSyncTensor)
+        )
         saved_weight_tensors = (
             (weight_NK,)
-            if has_unsharded_tensor
+            if has_operand_backed_weight
             else (weight_qdata_dgrad_NK, weight_scale_dgrad_swizzled)
         )
         if requires_wgrad and input_activation_format_for_backward == "bf16":
             ctx.save_for_backward(x, *saved_weight_tensors)
         else:
             ctx.save_for_backward(x_qdata_col_MK, x_scale_col, *saved_weight_tensors)
-        ctx.has_unsharded_tensor = has_unsharded_tensor
+        ctx.has_operand_backed_weight = has_operand_backed_weight
         ctx.input_shape = input_shape
         ctx.num_rows = num_rows
         ctx.requires_dgrad = ctx.needs_input_grad[0]
@@ -211,10 +214,12 @@ class _MXFP8LinearFunction(torch.autograd.Function):
             x_qdata_col_MK, x_scale_col = saved_tensors[:2]
             saved_weight_tensors = saved_tensors[2:]
 
-        if ctx.has_unsharded_tensor:
+        if ctx.has_operand_backed_weight:
             (weight_NK,) = saved_weight_tensors
-            if not isinstance(weight_NK, _UnshardedFSDPTensor):
-                raise RuntimeError("FSDP restored an incompatible MXFP8 weight")
+            if not isinstance(
+                weight_NK, (_UnshardedFSDPTensor, _MXFP8WeightSyncTensor)
+            ):
+                raise RuntimeError("Autograd restored an incompatible MXFP8 weight")
             operands = weight_NK.operands
             weight_qdata_dgrad_NK = operands.weight_qdata_dgrad_NK
             weight_scale_dgrad_swizzled = operands.weight_scale_dgrad_swizzled
@@ -348,17 +353,24 @@ class MXFP8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
+    def _install_weight_sync_tensor(self) -> None:
+        """Install a tensor that quantizes the BF16 parameter on weight sync."""
+        assert isinstance(self.weight, _LinearShardedTensorWithMXFP8Compute)
+        with torch.no_grad():
+            self.weight = nn.Parameter(
+                _MXFP8WeightSyncTensor(self.weight._tensor),
+                requires_grad=False,
+            )
+
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Always a plain tensor: spmd_types carries TP and EP as annotations
         # instead of wrapping the weight as a model-parallel DTensor.
         weight_NK = self.weight
-        # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
-        # not what forward usually sees. Under FSDP the post-all-gather hook has
-        # already replaced it for this unshard lifetime with the storage-free
-        # _UnshardedFSDPTensor holding the quantized operands, so the weight
-        # arrives here already quantized and the type identifies which state we
-        # are in.
-        if isinstance(weight_NK, _UnshardedFSDPTensor):
+        # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but a runtime
+        # lifecycle may replace it with a storage-free operand-backed tensor:
+        # FSDP does so after all-gather, and inference does so after loading or
+        # synchronizing weights. In either case the weight is already quantized.
+        if isinstance(weight_NK, (_UnshardedFSDPTensor, _MXFP8WeightSyncTensor)):
             operands = weight_NK.operands
         else:
             # No data parallel implementation owns this weight's lifecycle, so
