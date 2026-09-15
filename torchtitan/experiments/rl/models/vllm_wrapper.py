@@ -41,6 +41,7 @@ from torchtitan.distributed.spmd_types import (
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.models.common.attention import QKVLinear
+from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
@@ -574,14 +575,13 @@ class VLLMModelWrapper(Module):
                 # belongs to the physical w13 Linear child.
                 w13_sharding_config = getattr(module.w13, "_sharding_config", None)
                 if w13_sharding_config is not None:
-                    for (
-                        state_name,
-                        layout,
-                    ) in w13_sharding_config.state_shardings.items():
+                    for state_name in ("weight", "bias"):
+                        if state_name not in w13_sharding_config.state_shardings:
+                            continue
                         for projection_name in ("w1", "w3"):
                             layouts[
                                 f"{module_prefix}{projection_name}.{state_name}"
-                            ] = layout
+                            ] = dense_param_placement(tp=spmd.S(0))
 
             if isinstance(module, QKVLinear):
                 # QKVLinear exposes split wq/wk/wv state-dict keys while

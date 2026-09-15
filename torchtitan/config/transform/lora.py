@@ -85,9 +85,28 @@ def _get_lora_cls(parent_cls: type) -> type:
             for param in nn.Module.parameters(self):
                 param.requires_grad_(False)
             self._lora_scaling = config.alpha / config.rank
-            lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
-                config.sharding_config
-            )
+            if config.num_linears > 1:
+                # A stacked base projection is logically one fused linear with
+                # a shared A and a stacked B. Its Shard(1) placement shards the
+                # per-linear output dimension, unlike Shard(1) on a regular
+                # 2D weight, which denotes rowwise input sharding.
+                replicated_weight = ShardingConfig(
+                    state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+                )
+                lora_a_sharding = (
+                    replicated_weight if config.sharding_config is not None else None
+                )
+                lora_b_sharding = (
+                    ShardingConfig(
+                        state_shardings=dict(config.sharding_config.state_shardings),
+                    )
+                    if config.sharding_config is not None
+                    else None
+                )
+            else:
+                lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
+                    config.sharding_config
+                )
             self.lora_a = Linear.Config(
                 in_features=config.in_features,
                 out_features=config.rank,
@@ -100,6 +119,7 @@ def _get_lora_cls(parent_cls: type) -> type:
             self.lora_b = Linear.Config(
                 in_features=config.rank,
                 out_features=config.out_features,
+                num_linears=config.num_linears,
                 bias=False,
                 sharding_config=lora_b_sharding,
                 param_init={"weight": nn.init.zeros_},
@@ -190,8 +210,7 @@ class LoRAConverter(ModelConfigConverter):
     def _supports_lora(self, cfg: Module.Config) -> bool:
         """Return whether this converter can adapt ``cfg`` with LoRA.
 
-        Subclasses may extend this hook for projection types that do not
-        inherit from ``Linear.Config``.
+        Subclasses may extend this hook for other projection types.
         """
         return isinstance(cfg, Linear.Config)
 
@@ -242,6 +261,6 @@ class LoRAConverter(ModelConfigConverter):
         if unmatched:
             logger.warning(
                 f"LoRA target_modules {sorted(unmatched)} did not match any "
-                f"Linear.Config in the model config tree."
+                f"supported linear config in the model config tree."
             )
         return converted_root
