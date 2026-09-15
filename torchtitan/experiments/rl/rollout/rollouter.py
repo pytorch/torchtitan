@@ -13,10 +13,11 @@ from typing import TYPE_CHECKING
 
 from monarch.actor import ProcMesh, this_host
 
+from torchtitan.components.renderer import RendererConfig
+
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.experiments.rl.environment import MessageEnv, TokenEnv
-from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.types import (
     GenerateFn,

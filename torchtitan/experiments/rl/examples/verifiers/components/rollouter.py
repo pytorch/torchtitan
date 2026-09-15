@@ -19,6 +19,8 @@ from verifiers.v1.dialects.chat import message_to_wire
 from verifiers.v1.serve.client import EnvClient as VerifiersEnvClient
 from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 
+from torchtitan.components.renderer import RendererConfig, RenderersLibraryConfig
+
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.experiments.rl.examples.verifiers.components.data import (
     VerifiersTaskDataset,
@@ -31,7 +33,6 @@ from torchtitan.experiments.rl.examples.verifiers.components.generation_server i
     GenerationServer,
     VerifiersGenerationMetadata,
 )
-from torchtitan.experiments.rl.renderer import RendererConfig, RenderersLibraryConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.experiments.rl.rollout.types import (

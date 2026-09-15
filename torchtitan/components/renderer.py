@@ -11,7 +11,7 @@ from typing import Annotated, Any
 
 import tyro
 from renderers import create_renderer, Renderer
-from renderers.configs import BaseRendererConfig
+from renderers.configs import RendererConfig as PrimeRendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
@@ -25,6 +25,7 @@ class RendererConfig(Configurable.Config):
     in-tree renderers such as `MuseGlimmerRendererConfig`.
     """
 
+    # pyrefly: ignore[bad-override]
     def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
         raise NotImplementedError
 
@@ -38,7 +39,7 @@ class RenderersLibraryConfig(RendererConfig):
         from renderers import Qwen3RendererConfig
 
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
-        from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
+        from torchtitan.components.renderer import RenderersLibraryConfig
 
         renderer = RenderersLibraryConfig(
             renderers_config=Qwen3RendererConfig(enable_thinking=False)
@@ -49,7 +50,7 @@ class RenderersLibraryConfig(RendererConfig):
         )
     """
 
-    renderers_config: Annotated[BaseRendererConfig, tyro.conf.Suppress]
+    renderers_config: Annotated[PrimeRendererConfig, tyro.conf.Suppress]
     """The library's typed config for the model, e.g. `Qwen3RendererConfig(enable_thinking=False)`.
     Renderers and their options:
     https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.11/docs/renderer-config.md"""
@@ -91,7 +92,7 @@ class RendererTokenizerWrapper:
     Example:
 
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
-        from torchtitan.experiments.rl.renderer import RendererTokenizerWrapper
+        from torchtitan.components.renderer import RendererTokenizerWrapper
 
         tokenizer = RendererTokenizerWrapper(
             HuggingFaceTokenizer(tokenizer_path="./Qwen3-0.6B")
@@ -141,7 +142,7 @@ class RendererTokenizerWrapper:
         encoding = self._tokenizer_backend.encode(
             text, add_special_tokens=add_special_tokens
         )
-        output = {"input_ids": encoding.ids}
+        output: dict[str, Any] = {"input_ids": encoding.ids}
         if return_offsets_mapping:
             output["offset_mapping"] = encoding.offsets
         return output

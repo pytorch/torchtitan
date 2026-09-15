@@ -326,6 +326,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             golden_numerics_path=("tests/assets/losses/{execution_mode}/sft_a10g.txt"),
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_sft_multiturn],
+            test_descr="Multi-turn SFT with renderer-provided loss masks",
+            test_name="sft_multiturn",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_seed_checkpoint],
             test_descr="Seed checkpoint creation",
             test_name="seed_checkpoint",

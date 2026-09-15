@@ -11,11 +11,12 @@ from types import SimpleNamespace
 
 from renderers import Qwen3RendererConfig
 
+from torchtitan.components.renderer import RenderersLibraryConfig
+
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.experiments.rl.actors.generator import SamplingConfig
 from torchtitan.experiments.rl.environment.token import TokenEnvOutput
-from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.rollout import RolloutStatus
 from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rubrics import RubricOutput
