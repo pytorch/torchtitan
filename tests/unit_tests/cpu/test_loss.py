@@ -70,13 +70,21 @@ class TestLoss(unittest.TestCase):
         tokens = torch.tensor([10, 11, 12, 20, 21, 22, 23, 24])
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4])
         labels = torch.arange(8)
+        padding_mask = torch.tensor(
+            [False, False, False, False, False, False, True, True]
+        )
         model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
         with patch(
             "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallel_dims, batch, _input_sharding: batch,
         ):
             input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
-                {"input": tokens, "labels": labels, "positions": positions},
+                {
+                    "input": tokens,
+                    "labels": labels,
+                    "positions": positions,
+                    "padding_mask": padding_mask,
+                },
                 parallel_dims=SimpleNamespace(cp_enabled=False),
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
@@ -87,23 +95,43 @@ class TestLoss(unittest.TestCase):
         assert isinstance(loss_labels, tuple)
         torch.testing.assert_close(input_tokens[0], tokens)
         torch.testing.assert_close(
-            input_tokens[1], torch.tensor([11, 12, 0, 21, 22, 23, 24, 0])
+            input_tokens[1], torch.tensor([11, 12, 0, 21, 22, 0, 0, 0])
         )
         torch.testing.assert_close(
-            input_tokens[2], torch.tensor([12, 0, 0, 22, 23, 24, 0, 0])
+            input_tokens[2], torch.tensor([12, 0, 0, 22, 0, 0, 0, 0])
         )
         torch.testing.assert_close(loss_labels[0], labels)
         torch.testing.assert_close(
             loss_labels[1],
-            torch.tensor([1, 2, IGNORE_INDEX, 4, 5, 6, 7, IGNORE_INDEX]),
+            torch.tensor(
+                [1, 2, IGNORE_INDEX, 4, 5, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX]
+            ),
         )
         torch.testing.assert_close(
             loss_labels[2],
             torch.tensor(
-                [2, IGNORE_INDEX, IGNORE_INDEX, 5, 6, 7, IGNORE_INDEX, IGNORE_INDEX]
+                [
+                    2,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    5,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                ]
             ),
         )
         self.assertEqual(len(extra_kwargs["mtp_input_valid_masks"]), 2)
+        torch.testing.assert_close(
+            extra_kwargs["mtp_input_valid_masks"][0],
+            torch.tensor([True, True, False, True, True, False, False, False]),
+        )
+        torch.testing.assert_close(
+            extra_kwargs["mtp_input_valid_masks"][1],
+            torch.tensor([True, False, False, True, False, False, False, False]),
+        )
+        torch.testing.assert_close(extra_kwargs["padding_mask"], padding_mask)
 
     def test_mtp_loss_rejects_plain_tensor(self):
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
@@ -435,8 +463,8 @@ class _FakeDecoder(nn.Module):
 
 
 class _IdentityDecoderBlock(nn.Module):
-    def forward(self, hidden, attention_masks, positions):
-        del attention_masks, positions
+    def forward(self, hidden, attention_masks, positions, *, padding_mask=None):
+        del attention_masks, positions, padding_mask
         return hidden
 
 
@@ -448,8 +476,10 @@ class _AddMTPBlock(nn.Module):
         mtp_input_valid_mask,
         attention_masks,
         positions,
+        *,
+        padding_mask=None,
     ):
-        del attention_masks, positions
+        del attention_masks, positions, padding_mask
         return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
 
 

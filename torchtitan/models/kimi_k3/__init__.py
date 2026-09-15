@@ -12,12 +12,14 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
 from torchtitan.models.common import (
     Conv1d,
     Embedding,
     FeedForward,
     Linear,
     RouterGateLinear,
+    Sigmoid,
     SiTUGLU,
 )
 from torchtitan.models.common.config_utils import (
@@ -37,8 +39,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
@@ -252,7 +252,7 @@ def _latent_moe_config(
                 bias=False,
                 param_init=_LINEAR_INIT,
             ),
-            score_func="sigmoid",
+            score_func=Sigmoid.Config(),
             route_norm=True,
             route_scale=1.0,
         ),

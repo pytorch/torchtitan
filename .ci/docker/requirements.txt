@@ -4,6 +4,7 @@ tensorboard
 wandb
 tyro >= 1.0.5
 tokenizers >= 0.15.0
+renderers == 0.1.11
 safetensors
 einops
 pillow
