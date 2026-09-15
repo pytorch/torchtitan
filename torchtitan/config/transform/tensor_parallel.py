@@ -14,7 +14,6 @@ from torchtitan.models.common.attention import GQAttention, QKVLinear
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.dist_gemm import (
     AsyncAllGatherLinear,
-    AsyncAllGatherQKVLinear,
     AsyncLinearReduceScatter,
 )
 from torchtitan.models.common.feed_forward import FeedForward
@@ -48,7 +47,6 @@ def _convert_linear(
 
 
 def _transform_attention(model: Module.Config, *, async_tp: bool) -> int:
-    qkv_linear = AsyncAllGatherQKVLinear if async_tp else QKVLinear
     output_linear = AsyncLinearReduceScatter if async_tp else LinearReduceScatter
     num_replaced = 0
 
@@ -71,9 +69,11 @@ def _transform_attention(model: Module.Config, *, async_tp: bool) -> int:
                     "Async tensor parallelism does not support converted "
                     "QKV projections"
                 )
-            attention.qkv_linear = cast(
-                QKVLinear.Config,
-                convert_config_type(attention.qkv_linear, qkv_linear),
+            attention.qkv_linear.wqkv = _convert_linear(
+                attention.qkv_linear.wqkv,
+                AsyncAllGatherLinear,
+                async_tp=True,
+                projection_name="QKV",
             )
         attention.wo = _convert_linear(
             attention.wo,
