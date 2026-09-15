@@ -83,10 +83,10 @@ def set_kimi_k3_sharding_config(
             enable_ep=enable_ep,
         )
     config.output_res_norm.sharding_config = _tp_unsharded_weight_config(
-        enable_sp=enable_sp
+        token_sharded=enable_sp
     )
     config.output_res_proj.sharding_config = _tp_unsharded_weight_config(
-        enable_sp=enable_sp
+        token_sharded=enable_sp
     )
 
 
@@ -109,7 +109,9 @@ def _set_kimi_k3_layer_sharding(
         layer_cfg.ffn_res_proj,
     ):
         if res_cfg is not None:
-            res_cfg.sharding_config = _tp_unsharded_weight_config(enable_sp=enable_sp)
+            res_cfg.sharding_config = _tp_unsharded_weight_config(
+                token_sharded=enable_sp
+            )
 
     if layer_cfg.attention is not None:
         _set_mla_sharding(
@@ -247,7 +249,7 @@ def _set_latent_moe_sharding(
     moe_cfg.routed_down.sharding_config = routed_down
     token_sharded = enable_ep or enable_sp
     routed_norm = norm_config(enable_sp=token_sharded)
-    routed_up = _tp_unsharded_weight_config(enable_sp=token_sharded)
+    routed_up = _tp_unsharded_weight_config(token_sharded=token_sharded)
     partial = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     if enable_ep and not enable_sp:
         routed_experts.out_dst_shardings = token_shard
@@ -268,10 +270,10 @@ def _set_latent_moe_sharding(
     moe_cfg.routed_up.sharding_config = routed_up
 
 
-def _tp_unsharded_weight_config(*, enable_sp: bool) -> ShardingConfig:
-    """Keep the weight TP-unsharded: R with SP for gradient reduction, otherwise I."""
+def _tp_unsharded_weight_config(*, token_sharded: bool) -> ShardingConfig:
+    """Keep the weight TP-unsharded: R when tokens are TP-sharded, for gradient reduction; otherwise I."""
     return ShardingConfig(
-        state_shardings=norm_config(enable_sp=enable_sp).state_shardings
+        state_shardings=norm_config(enable_sp=token_sharded).state_shardings
     )
 
 
