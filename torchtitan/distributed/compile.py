@@ -67,7 +67,14 @@ def apply_compile(
 
     # pyrefly: ignore [missing-attribute]
     for layer_id, transformer_block in model.layers.named_children():
-        transformer_block.compile(backend=backend, fullgraph=True)
+        # fullgraph=False on this branch: DeepSeek-V4's DSA block mask is built
+        # inside the block from the indexer's per-layer top-k, and under fullgraph
+        # the flex template dies on it (job 395: "convert FlexibleLayout to
+        # FixedLayout first"); building it eagerly needs a graph break (job 398:
+        # "Skip inlining torch.compiler.disable()'d function"). Allowing the break
+        # splits each block into a few subgraphs but still fuses the HC-branch
+        # elementwise work, which is the compile target here (25.8% of kernel time).
+        transformer_block.compile(backend=backend, fullgraph=False)
 
     logger.info("Compiling each TransformerBlock with torch.compile")
 
