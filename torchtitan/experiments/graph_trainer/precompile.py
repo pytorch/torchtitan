@@ -131,6 +131,10 @@ def compute_config_fingerprint(
         "compile:gradient_accumulation_mode:"
         f"{compile_config.gradient_accumulation_mode}\n".encode()
     )
+    h.update(
+        "torch:deterministic_algorithms:"
+        f"{torch.are_deterministic_algorithms_enabled()}\n".encode()
+    )
     h.update(f"torch_version:{torch.__version__}\n".encode())
 
     if torch.cuda.is_available():
