@@ -559,6 +559,16 @@ def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
         converter.convert(qkv_config)
 
 
+def test_llama3_mxfp8_debugmodel_uses_block_aligned_heads():
+    from torchtitan.models.llama3 import model_registry
+
+    model_config = model_registry("debugmodel_mxfp8").model
+    qkv_config = model_config.layers[0].attention.qkv_linear
+
+    assert qkv_config.head_dim == 32
+    assert qkv_config.wqkv.out_features == 768
+
+
 def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(
