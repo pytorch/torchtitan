@@ -190,6 +190,24 @@ class TestConfigFingerprint(unittest.TestCase):
         self.assertEqual(fp1, fp2)
         self.assertEqual(len(fp1), 16)
 
+    def test_deterministic_algorithms_sensitivity(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        cfg = _StubCompileConfig()
+        dims = _StubParallelDims()
+        deterministic_algorithms_enabled = torch.are_deterministic_algorithms_enabled()
+        try:
+            torch.use_deterministic_algorithms(False)
+            fp_disabled = compute_config_fingerprint(_make_stub_model(), cfg, dims)
+            torch.use_deterministic_algorithms(True)
+            fp_enabled = compute_config_fingerprint(_make_stub_model(), cfg, dims)
+        finally:
+            torch.use_deterministic_algorithms(deterministic_algorithms_enabled)
+
+        self.assertNotEqual(fp_disabled, fp_enabled)
+
     def test_memory_policy_save_ops_sensitivity(self):
         from torchtitan.experiments.graph_trainer.precompile import (
             compute_config_fingerprint,
