@@ -174,7 +174,12 @@ class TorchFTCheckpointManager(CheckpointManager):
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         if self.enable and self.enable_ft_dataloader_checkpoints:
-            self._ft_load()
+            has_checkpoint_folder = self._storage.isdir(self.folder)
+            load_step = self._resolve_load_step(step, has_checkpoint_folder)
+            if load_step != -1:
+                main_checkpoint_id = self._create_checkpoint_id(load_step)
+                if self._storage.isdir(main_checkpoint_id):
+                    self._ft_load(load_step)
         return super().load(step)
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
@@ -220,8 +225,8 @@ class TorchFTCheckpointManager(CheckpointManager):
         self.save_future = result
         logger.info(f"Staging torchft checkpoint took {time.monotonic() - begin} secs.")
 
-    def _ft_load(self) -> None:
-        step = self._find_load_step(folder=self._ft_folder())
+    def _ft_load(self, max_step: int) -> None:
+        step = self._find_load_step(folder=self._ft_folder(), max_step=max_step)
         if step == -1:
             return
 

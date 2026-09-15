@@ -219,28 +219,36 @@ class TestFTCheckpointManager(unittest.TestCase):
 
     def test_load_restores_ft_checkpoint_before_main_checkpoint(self):
         manager = self._manager(participating_rank=0)
-        checkpoint_id = manager._create_checkpoint_id(5)
-        os.makedirs(checkpoint_id)
-        open(os.path.join(checkpoint_id, ".metadata"), "w").close()
+        main_checkpoint_id = manager._create_checkpoint_id(5)
+        os.makedirs(main_checkpoint_id)
+        open(os.path.join(main_checkpoint_id, ".metadata"), "w").close()
+        ft_folder = manager._ft_folder()
+        for step in (5, 6):
+            checkpoint_id = manager._create_checkpoint_id(step, folder=ft_folder)
+            os.makedirs(checkpoint_id)
+            open(os.path.join(checkpoint_id, ".metadata"), "w").close()
         calls = []
         ft_grad_enabled = []
+        loaded_checkpoint_ids = []
 
-        def load_ft_checkpoint():
-            calls.append("ft")
-            ft_grad_enabled.append(torch.is_grad_enabled())
+        def load_checkpoint(_states, checkpoint_id, **_kwargs):
+            calls.append("ft" if checkpoint_id.startswith(ft_folder) else "main")
+            loaded_checkpoint_ids.append(checkpoint_id)
+            if checkpoint_id.startswith(ft_folder):
+                ft_grad_enabled.append(torch.is_grad_enabled())
 
         with mock.patch.object(
             manager,
-            "_ft_load",
-            side_effect=load_ft_checkpoint,
-        ), mock.patch.object(
-            manager,
             "_load_checkpoint",
-            side_effect=lambda *_args, **_kwargs: calls.append("main"),
+            side_effect=load_checkpoint,
         ):
             self.assertTrue(manager.load())
 
         self.assertEqual(["ft", "main"], calls)
+        self.assertEqual(
+            loaded_checkpoint_ids,
+            [manager._create_checkpoint_id(5, folder=ft_folder), main_checkpoint_id],
+        )
         self.assertEqual([False], ft_grad_enabled)
         manager.close()
 
