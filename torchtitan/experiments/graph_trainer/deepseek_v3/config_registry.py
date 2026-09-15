@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from torchtitan.config.transform import MXFP8GroupedExpertsConverter
 
+from torchtitan.distributed.context_parallel import HeadTailLoadBalancer
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
@@ -84,7 +85,7 @@ def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
     config = graph_trainer_deepseek_v3_16b()
-    config.parallelism.context_parallel_load_balancer = "headtail"
+    config.parallelism.context_parallel_load_balancer = HeadTailLoadBalancer.Config()
     config.model_spec = model_registry(
         "16B",
         seq_len=config.training.max_context_length,
