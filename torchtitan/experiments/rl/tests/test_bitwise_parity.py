@@ -69,6 +69,7 @@ from torchtitan.distributed.utils import (
 from torchtitan.experiments.rl.controller import Controller
 from torchtitan.experiments.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_gpt_oss_debug_varlen_batch_invariant,
+    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_5_9b_varlen_batch_invariant,
@@ -907,6 +908,57 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
                 "bsz=1",
                 "bsz=3",
             )
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available()
+    and torch.version.hip is None
+    and torch.cuda.get_device_capability() in ((10, 0), (10, 3)),
+    "Attention Gym KDA requires CUDA capability 10.0 or 10.3",
+)
+class KimiK3BitwiseParityTestBase(BitwiseParityTestBase):
+    """Set the vLLM cache layout required by Attention Gym KDA."""
+
+    __test__ = False
+
+    @classmethod
+    def setUpClass(cls):
+        previous_layout = os.environ.get("VLLM_SSM_CONV_STATE_LAYOUT")
+        os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
+
+        def restore_layout():
+            if previous_layout is None:
+                os.environ.pop("VLLM_SSM_CONV_STATE_LAYOUT", None)
+            else:
+                os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = previous_layout
+
+        cls.addClassCleanup(restore_layout)
+        super().setUpClass()
+
+
+def _kimi_k3_debug_bitwise_config() -> Controller.Config:
+    """Build a one-GPU random-weight Kimi K3 parity configuration."""
+    config = rl_grpo_kimi_k3_debug_varlen_batch_invariant()
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_shard_degree=1,
+        ),
+    )
+    return config
+
+
+class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
+    """Kimi K3 KDA/MLA parity with random weights and matched TP=1."""
+
+    __test__ = True
+    config_fn = staticmethod(_kimi_k3_debug_bitwise_config)
+    attn_backend = "varlen"
+    sync_weights_from_trainer = True
+    BATCH_SIZE = 3
+    PROMPT_LENGTH = 64
+    MAX_GEN_TOKENS = 16
 
 
 class TestBitwiseParityMoEEP(BitwiseParityTestBase):

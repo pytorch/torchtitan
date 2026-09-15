@@ -10,11 +10,12 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from attn_gym.linear.kda import bound_gate, chunk_kda
+from attn_gym.linear.kda import bound_gate, chunk_kda, recurrent_kda
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
 from attn_gym.linear.short_conv import causal_conv1d
 from torch import nn
 
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
@@ -98,6 +99,17 @@ class KDAKernel(Module):
             lower_bound=self.lower_bound,
             impl="fused",
         )
+        if is_in_batch_invariant_mode() and cu_seqlens is not None:
+            output_1THV, _ = recurrent_kda(
+                l2norm(q_1THK),
+                l2norm(k_1THK),
+                v_1THV,
+                gate_1THK,
+                raw_beta_1TH.float().sigmoid(),
+                cu_seqlens=cu_seqlens,
+                batch_invariant=True,
+            )
+            return output_1THV.squeeze(0)
         output_1THV, _ = chunk_kda(
             l2norm(q_1THK),
             l2norm(k_1THK),

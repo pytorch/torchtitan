@@ -8,7 +8,7 @@
 
 Each function returns a complete ``Controller.Config``, discoverable by
 ``ConfigManager`` via
-``--module alphabet_sort --config rl_grpo_qwen3_*``.
+``--module alphabet_sort --config rl_grpo_*``.
 """
 
 import dataclasses
@@ -58,6 +58,7 @@ from torchtitan.experiments.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
+from torchtitan.models.kimi_k3 import model_registry as kimi_k3_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.models.qwen3_5 import model_registry as qwen3_5_model_registry
 from torchtitan.protocols.model_spec import ModelSpec
@@ -958,6 +959,24 @@ def _qwen3_5_rl_model_registry(
     )
 
 
+def _kimi_k3_rl_model_registry(
+    flavor: str,
+    *,
+    seq_len: int,
+    attn_backend: str = "varlen",
+    converters: list[ModelConfigConverter.Config] | None = None,
+) -> ModelSpec:
+    """``kimi_k3.model_registry`` with the RL lm_head fp32 cast."""
+    converters = list(converters or [])
+    converters.append(LMHeadCastConverter.Config())
+    return kimi_k3_model_registry(
+        flavor,
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        converters=converters,
+    )
+
+
 def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
     """Qwen3.5-9B GRPO with trainer and generator TP=2 (6 GPUs)."""
     num_samples_per_prompt = 8
@@ -1119,6 +1138,94 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant() -> Controller.Config:
         config.generator, debug=_BATCH_INVARIANT_DEBUG
     )
     return config
+
+
+def rl_grpo_kimi_k3_debug_varlen() -> Controller.Config:
+    """Random-init Kimi K3 GRPO config for Blackwell integration testing."""
+    seq_len = 2048
+    return Controller.Config(
+        model_spec=_kimi_k3_rl_model_registry(
+            "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        ),
+        hf_assets_path="tests/assets/tokenizer",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=5,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=8,
+            validation=ValidationConfig(num_samples=20),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
+            ),
+        ),
+        compile=CompileConfig(enable=False),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RenderersLibraryConfig(
+            renderers_config=Qwen3RendererConfig(enable_thinking=False)
+        ),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=0,
+                min_lr_factor=1.0,
+            ),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=seq_len,
+                max_context_length=seq_len,
+                dtype="bfloat16",
+            ),
+            # Kimi K3 currently supports FSDP data parallelism but not TP.
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            # Keep the first end-to-end KDA configuration eager. The paged KDA
+            # state mutation needs separate CUDA-graph validation.
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=256,
+            ),
+        ),
+    )
+
+
+def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config:
+    """Enable the shared trainer/generator batch-invariant execution mode."""
+    config.async_loop = dataclasses.replace(
+        config.async_loop,
+        target_offpolicy_steps=0,
+        window_fraction=None,
+    )
+    config.trainer = dataclasses.replace(
+        config.trainer,
+        debug=_BATCH_INVARIANT_DEBUG,
+        parallelism=dataclasses.replace(
+            config.trainer.parallelism,
+            enable_sequence_parallel=False,
+        ),
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        debug=_BATCH_INVARIANT_DEBUG,
+    )
+    return config
+
+
+def rl_grpo_kimi_k3_debug_varlen_batch_invariant() -> Controller.Config:
+    """On-policy, batch-invariant random-weight Kimi K3 GRPO config."""
+    return _set_kimi_k3_batch_invariant(rl_grpo_kimi_k3_debug_varlen())
 
 
 def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:

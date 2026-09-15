@@ -25,6 +25,8 @@ import subprocess
 import sys
 import time
 
+import torch
+
 from tests.integration_tests import OverrideDefinitions
 
 from torchtitan.observability.logging import init_logger
@@ -246,6 +248,36 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_qwen3_5_debug_tp2_batch_invariant",
             ngpu=8,
         ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module alphabet_sort",
+                    "--config rl_grpo_kimi_k3_debug_varlen_batch_invariant",
+                    "--async-loop.num-training-steps 3",
+                    "--hf_assets_path tests/assets/tokenizer",
+                    "--trainer.parallelism.data_parallel_shard_degree 2",
+                    "--trainer.parallelism.tensor_parallel_degree 1",
+                    "--generator.parallelism.tensor_parallel_degree 1",
+                    "--num_generators 2",
+                    "--async-loop.target-offpolicy-steps 0",
+                    "--async-loop.num-samples-per-prompt 2",
+                    "--trainer.training.max_context_length 1024",
+                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 1024",
+                    "--generator.sampling.max_tokens 128",
+                    "--trainer.checkpoint.no-enable",
+                    "--generator.checkpoint.no-enable",
+                    "--metrics.no-enable-wandb",
+                ],
+            ],
+            "RL GRPO Kimi K3 hybrid KDA batch-invariant",
+            "rl_grpo_kimi_k3_debug_batch_invariant",
+            ngpu=4,
+            disabled=not (
+                torch.cuda.is_available()
+                and torch.version.hip is None
+                and torch.cuda.get_device_capability() in ((10, 0), (10, 3))
+            ),
+        ),
     ]
 
     # CI can use random-init policies whose rollout groups all receive the same
@@ -297,7 +329,10 @@ def run_single_test(
             f"RL integration test: {test_flavor.test_descr}, command: {cmd} ====="
         )
 
-        result = subprocess.run(cmd, text=True, shell=True)
+        env = os.environ.copy()
+        if test_name == "rl_grpo_kimi_k3_debug_batch_invariant":
+            env["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
+        result = subprocess.run(cmd, text=True, shell=True, env=env)
         if result.returncode != 0:
             raise Exception(
                 f"RL integration test failed: {test_flavor.test_descr}, command: {cmd}"
