@@ -23,7 +23,11 @@ from torchtitan.config.transform import (
 from torchtitan.models.common.attention import FlexInnerAttention, QKVLinear
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import AllGatherLinear, Linear, LinearReduceScatter
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RowParallelLinear,
+)
 from torchtitan.models.common.tensor_parallel import TensorParallelFeedForward
 from torchtitan.protocols.module import Module
 
@@ -230,16 +234,12 @@ class TestTensorParallelTransform(unittest.TestCase):
 
         for layer in result.model_spec.model.layers:
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
-            self.assertIsInstance(layer.attention.wo, LinearReduceScatter.Config)
+            self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
             self.assertIsInstance(layer.feed_forward, TensorParallelFeedForward.Config)
-            self.assertIsInstance(layer.feed_forward.w13, AllGatherLinear.Config)
-            self.assertIsInstance(layer.feed_forward.w2, LinearReduceScatter.Config)
-            self.assertIsNotNone(layer.feed_forward.w13.sharding_config)
-            assert layer.feed_forward.w2.sharding_config is not None
-            self.assertIsNotNone(
-                layer.feed_forward.w2.sharding_config.out_src_shardings
-            )
-            self.assertIsNone(layer.feed_forward.w2.sharding_config.out_dst_shardings)
+            self.assertIsInstance(layer.feed_forward.w13, ColumnParallelLinear.Config)
+            self.assertIsInstance(layer.feed_forward.w2, RowParallelLinear.Config)
+            self.assertIsNone(layer.feed_forward.w13.sharding_config)
+            self.assertIsNone(layer.feed_forward.w2.sharding_config)
         for layer in config.model_spec.model.layers:
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIs(type(layer.attention.wo), Linear.Config)
