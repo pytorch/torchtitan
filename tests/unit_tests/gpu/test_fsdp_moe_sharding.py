@@ -14,7 +14,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.qwen3.model import Qwen3Model
 
 
@@ -138,6 +140,95 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         self.assertEqual(_get_expert_shard_dim(model), 1)
+
+
+class TestApplyFsdpStackedWeightSharding(DTensorTestBase):
+    """FSDP shards stacked projections on their matrix-row dimension."""
+
+    @property
+    def world_size(self):
+        return 4
+
+    @with_comms
+    def test_w13_shards_dim_one(self):
+        from torchtitan.models.llama3 import model_registry
+
+        model = model_registry("debugmodel").model.build().to(self.device_type)
+        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+        )
+
+        w13 = model.layers["0"].feed_forward.w13
+        self.assertIsInstance(w13, Linear)
+        shard_dims = {
+            placement.dim
+            for placement in w13.weight.placements
+            if isinstance(placement, Shard)
+        }
+        self.assertEqual(shard_dims, {1})
+        state_dict = model.state_dict()
+        self.assertNotIn("layers.0.feed_forward.w13.weight", state_dict)
+        self.assertEqual(
+            state_dict["layers.0.feed_forward.w1.weight"].shape,
+            (768, 256),
+        )
+        model.load_state_dict(state_dict)
+
+    @with_comms
+    def test_tp_fsdp_initializes_gate_and_up_separately(self):
+        from torchtitan.models.common.config_utils import fused_gate_up_param_init
+        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3.sharding import set_llama3_sharding_config
+
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=2,
+            cp=1,
+            tp=2,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+        )
+        parallel_dims.build_mesh()
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+
+        sharded_config = model_registry("debugmodel").model
+        sharded_config.layers[0].feed_forward.w13.param_init = fused_gate_up_param_init(
+            {"weight": lambda tensor: torch.nn.init.constant_(tensor, 1)},
+            {"weight": lambda tensor: torch.nn.init.constant_(tensor, 3)},
+        )
+        set_llama3_sharding_config(sharded_config, enable_sp=True)
+        with torch.device("meta"):
+            sharded = sharded_config.build()
+        sharded.parallelize(parallel_dims)
+        apply_fsdp_to_decoder(
+            sharded,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            dp_mesh_dims=dp_mesh_dims,
+        )
+        sharded.to_empty(device=self.device_type)
+        sharded.layers["0"].feed_forward.w13.init_states()
+
+        actual_w13 = sharded.layers["0"].feed_forward.w13.weight.full_tensor()
+        torch.testing.assert_close(actual_w13[0], torch.ones_like(actual_w13[0]))
+        torch.testing.assert_close(actual_w13[1], 3 * torch.ones_like(actual_w13[1]))
+
+        state_dict = sharded.state_dict()
+        self.assertEqual(
+            state_dict["layers.0.feed_forward.w1.weight"].shape, (768, 256)
+        )
+        self.assertEqual(
+            state_dict["layers.0.feed_forward.w3.weight"].shape, (768, 256)
+        )
+        sharded.load_state_dict(state_dict)
 
 
 if __name__ == "__main__":

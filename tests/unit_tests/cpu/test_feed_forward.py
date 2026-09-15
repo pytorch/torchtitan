@@ -26,7 +26,8 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
     config = FeedForward.Config(
         w13=Linear.Config(
             in_features=4,
-            out_features=16,
+            out_features=8,
+            num_linears=2,
             param_init=fused_gate_up_param_init(
                 {"weight": _fill(1.0)},
                 {"weight": _fill(5.0)},
@@ -50,14 +51,14 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
         "w3.weight",
     }
 
-    w13_H2D = feed_forward.w13.weight.unflatten(0, (8, 2))
-    torch.testing.assert_close(w13_H2D[:, 0], torch.ones_like(w13_H2D[:, 0]))
-    torch.testing.assert_close(w13_H2D[:, 1], 5 * torch.ones_like(w13_H2D[:, 1]))
+    w13_2HD = feed_forward.w13.weight
+    torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
+    torch.testing.assert_close(w13_2HD[1], 5 * torch.ones_like(w13_2HD[1]))
 
 
 def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     config = FeedForward.Config(
-        w13=Linear.Config(in_features=4, out_features=16),
+        w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=Linear.Config(in_features=8, out_features=4),
     )
     feed_forward = config.build()
@@ -86,16 +87,16 @@ def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     actual_TD.backward(grad_TD)
     expected_TD.backward(grad_TD)
     torch.testing.assert_close(x_TD.grad, reference_x_TD.grad)
-    w13_grad_H2D = feed_forward.w13.weight.grad.unflatten(0, (8, 2))
-    torch.testing.assert_close(w13_grad_H2D[:, 0], w1_HD.grad)
-    torch.testing.assert_close(w13_grad_H2D[:, 1], w3_HD.grad)
+    w13_grad_2HD = feed_forward.w13.weight.grad
+    torch.testing.assert_close(w13_grad_2HD[0], w1_HD.grad)
+    torch.testing.assert_close(w13_grad_2HD[1], w3_HD.grad)
     torch.testing.assert_close(feed_forward.w2.weight.grad, w2_DH.grad)
 
 
 def test_feed_forward_uses_configured_activation():
     activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
     config = FeedForward.Config(
-        w13=Linear.Config(in_features=4, out_features=16),
+        w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=Linear.Config(in_features=8, out_features=4),
         activation_fn=activation_fn,
     )
@@ -109,7 +110,7 @@ def test_feed_forward_uses_configured_activation():
     )
 
     x_TD = torch.randn(3, 4)
-    gate_up_TF = F.linear(x_TD, feed_forward.w13.weight)
-    gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
+    gate_up_T2F = feed_forward.w13(x_TD)
+    gate_TF, up_TF = gate_up_T2F.unbind(-2)
     expected_TD = feed_forward.w2(activation_fn.build()(gate_TF, up_TF))
     torch.testing.assert_close(feed_forward(x_TD), expected_TD)
