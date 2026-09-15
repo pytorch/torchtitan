@@ -19,6 +19,7 @@ Batch-invariant execution has two additional requirements:
 Decode and prefill update the paged convolution and SSM state pools directly.
 """
 
+import logging
 from dataclasses import dataclass
 
 import torch
@@ -33,12 +34,14 @@ from attn_gym.linear import (
 )
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.experiments.rl.models.gdn_backend import TorchTitanGDNAttentionBackend
+from torchtitan.experiments.rl.models.gdn_metadata import GDNGraphMetadata
 from torchtitan.protocols.module import Module
-
-# The recurrence mutates paged state and must run eager at a breakable cudagraph
-# split point. This decorator is inert when breakable capture is disabled.
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import get_current_vllm_config
+from vllm.compilation.breakable_cudagraph import (
+    eager_break_during_capture,
+    is_breakable_cudagraph_enabled,
+)
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
@@ -46,8 +49,12 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+
+
+logger = logging.getLogger(__name__)
 
 
 class VLLMInnerGatedDeltaNet(Module, MambaBase):
@@ -130,6 +137,33 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             raise ValueError(f"Duplicate GDN layer name: {self.prefix}")
         compilation_config.static_forward_context[self.prefix] = self
 
+        self.use_piecewise_capture = (
+            is_breakable_cudagraph_enabled()
+            and compilation_config.cudagraph_mode.mixed_mode()
+            == CUDAGraphMode.PIECEWISE
+            and not vllm_config.parallel_config.use_ubatching
+            and not vllm_config.parallel_config.enable_dbo
+            and vllm_config.parallel_config.data_parallel_size == 1
+        )
+        if (
+            is_breakable_cudagraph_enabled()
+            and (
+                vllm_config.parallel_config.use_ubatching
+                or vllm_config.parallel_config.enable_dbo
+                or vllm_config.parallel_config.data_parallel_size > 1
+            )
+            and config.layer_idx == 0
+        ):
+            logger.warning(
+                "GDN piecewise capture requires DP=1 without microbatching/DBO; "
+                "retaining eager GDN boundaries."
+            )
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.use_piecewise_capture:
+            return TorchTitanGDNAttentionBackend
+        return super().get_attn_backend()
+
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
         return MambaAttentionBackendEnum.GDN_ATTN
@@ -185,8 +219,8 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         )
         return query, key, value
 
-    # The decorator makes this an eager graph-split point during breakable capture.
-    # The caller-owned output has a stable address across graph replays.
+    # Legacy metadata contains replay-varying Python fields and tensor addresses.
+    # Keep its eager boundary; the prepared GDNGraphMetadata path bypasses it.
     @eager_break_during_capture
     def _forward(
         self,
@@ -284,11 +318,13 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
 
         # Recurrence over the whole batch in one call. The batch-invariant path
         # addresses the paged SSM pool directly.
+        assert gdn_metadata.non_spec_query_start_loc is not None
         cu_seqlens = gdn_metadata.non_spec_query_start_loc[: num_sequences + 1]
         if num_prefills == 0:
             all_slots = decode_slots
             has_initial_state = None
         else:
+            assert prefill_slots is not None and prefill_has_initial_state is not None
             all_slots = (
                 torch.cat([decode_slots, prefill_slots])
                 if num_decodes > 0
@@ -316,45 +352,69 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             )
             return
 
-        query, key, value = self._split_qkv(conv_output)
-        decay = (-torch.exp(A_log.float()) * F.softplus(a.float() + dt_bias)).unsqueeze(
-            0
+        self._forward_gdn(
+            conv_output,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            output[:num_actual_tokens],
+            cu_seqlens,
+            all_slots,
+            has_initial_state,
         )
-        update_gate = torch.sigmoid(b).unsqueeze(0)
-        query = l2norm(query, cu_seqlens=cu_seqlens)
-        key = l2norm(key, cu_seqlens=cu_seqlens)
 
-        if batch_invariant:
-            recurrent_output, _ = recurrent_gdn(
-                query,
-                key,
-                value,
-                decay,
-                update_gate,
-                ssm_state,
-                cu_seqlens=cu_seqlens,
+    def _forward_gdn(
+        self,
+        conv_output_TC: torch.Tensor,
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
+        output_THV: torch.Tensor,
+        cu_seqlens_N: torch.Tensor,
+        state_indices_N: torch.Tensor,
+        has_initial_state_N: torch.Tensor | None,
+    ) -> None:
+        # B: singleton batch, T: tokens, J/H: key/value heads, K/V: head dims,
+        # C: packed channels, N: requests (offset arrays have one extra entry).
+        query_BTJK, key_BTJK, value_BTHV = self._split_qkv(conv_output_TC)
+        decay_BTH = (
+            -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H.float())
+        ).unsqueeze(0)
+        update_gate_BTH = torch.sigmoid(b_TH).unsqueeze(0)
+        query_BTJK = l2norm(query_BTJK, cu_seqlens=cu_seqlens_N)
+        key_BTJK = l2norm(key_BTJK, cu_seqlens=cu_seqlens_N)
+
+        if is_in_batch_invariant_mode():
+            recurrent_output_BTHV, _ = recurrent_gdn(
+                query_BTJK,
+                key_BTJK,
+                value_BTHV,
+                decay_BTH,
+                update_gate_BTH,
+                self.kv_cache[1],
+                cu_seqlens=cu_seqlens_N,
                 scale=self.head_k_dim**-0.5,
-                state_indices=all_slots,
-                has_initial_state=has_initial_state,
+                state_indices=state_indices_N,
+                has_initial_state=has_initial_state_N,
                 # Triton autotuning breaks batch invariance.
                 autotune=False,
             )
         else:
-            recurrent_output = paged_chunk_gdn(
-                query,
-                key,
-                value,
-                decay,
-                update_gate,
-                ssm_state,
-                all_slots,
-                cu_seqlens=cu_seqlens,
-                has_initial_state=has_initial_state,
+            recurrent_output_BTHV = paged_chunk_gdn(
+                query_BTJK,
+                key_BTJK,
+                value_BTHV,
+                decay_BTH,
+                update_gate_BTH,
+                self.kv_cache[1],
+                state_indices_N,
+                cu_seqlens=cu_seqlens_N,
+                has_initial_state=has_initial_state_N,
                 scale=self.head_k_dim**-0.5,
             )
-        output[:num_actual_tokens] = recurrent_output[0, :num_actual_tokens].to(
-            output.dtype
-        )
+        output_THV.copy_(recurrent_output_BTHV[0].to(output_THV.dtype))
 
     def forward(
         self,
@@ -389,6 +449,34 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         output_THV = mixed_qkv_TC.new_zeros(
             num_tokens, self.local_num_v_heads, self.head_v_dim
         )
+        attn_metadata = get_forward_context().attn_metadata
+        metadata = (
+            attn_metadata[self.prefix] if isinstance(attn_metadata, dict) else None
+        )
+        if isinstance(metadata, GDNGraphMetadata):
+            # Null slots cover empty requests and token padding. One-token
+            # decodes in mixed batches use the same packed conv/GDN path.
+            conv_output_TC = paged_causal_conv1d(
+                mixed_qkv_TC.unsqueeze(0),
+                conv_weight_CW,
+                self.kv_cache[0],
+                metadata.state_indices,
+                activation="silu",
+                cu_seqlens=metadata.query_start_loc,
+                has_initial_state=metadata.has_initial_state,
+            ).squeeze(0)
+            self._forward_gdn(
+                conv_output_TC,
+                a_TH,
+                b_TH,
+                A_log_H,
+                dt_bias_H,
+                output_THV,
+                metadata.query_start_loc,
+                metadata.state_indices,
+                metadata.has_initial_state,
+            )
+            return output_THV
         self._forward(
             mixed_qkv_TC,
             a_TH,

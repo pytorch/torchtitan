@@ -130,8 +130,8 @@ uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@mai
 uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu130
 
 # Blackwell (GB200/GB300, SM100): Flash Attention 4
-# Newer FA4 betas require apache-tvm-ffi>=0.1.12, but vLLM pins 0.1.11.
-uv pip install "flash-attn-4[cu13]==4.0.0b19"
+# Qwen3.5 head_dim=256 needs current FA4 paged/seqused support; b19 is too old.
+uv pip install --pre "flash-attn-4[cu13]"
 ```
 
 TorchTitan selects FA4 on Blackwell, FA3 on Hopper, and the FA2 implementation
@@ -180,6 +180,11 @@ python -m torchtitan.experiments.rl.train \
 Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), then follow the [bitwise parity guide](./docs/bitwise_parity.md) for configuration, supported layouts, verification, and limitations.
 
 For background, see [train/inference mismatch in asynchronous RL](https://yichuan-w.github.io/blog/GDN-train-inference-mismatch-asyncRL/) and [Defeating Nondeterminism in LLM Inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/).
+
+## GDN CUDA graphs
+
+For Qwen3.5 GDN prefill capture, metadata staging, and preserved decode paths,
+see the [GDN CUDA graph guide](./docs/gdn_cuda_graphs.md).
 
 ## Observability
 
