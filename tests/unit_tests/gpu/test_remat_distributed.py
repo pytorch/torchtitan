@@ -130,7 +130,7 @@ class TestDistributedRematRegions(DTensorTestBase):
             ),
             (
                 UlyssesCPFlexInnerAttention,
-                "nccl:all_to_all",
+                "c10d::alltoall_",
             ),
         ):
             with (
