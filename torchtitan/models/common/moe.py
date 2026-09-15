@@ -24,6 +24,7 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
+    Sigmoid,
     SwiGLU,
     UnaryActivationFn,
 )
@@ -281,6 +282,19 @@ class TokenChoiceTopKRouter(Module):
         # RouterGateLinear returns FP32, so configured scoring runs in FP32.
         scores_TE = self.score_func(self.gate(x_TD))
 
+        if padding_mask_T is not None:
+            if padding_mask_T.dtype != torch.bool:
+                raise ValueError(
+                    "padding_mask_T must have dtype bool, "
+                    f"got {padding_mask_T.dtype}."
+                )
+            if padding_mask_T.shape != scores_TE.shape[:-1]:
+                raise ValueError(
+                    "padding_mask_T must have shape matching the routing-map "
+                    f"token axis, got {tuple(padding_mask_T.shape)} for scores "
+                    f"{tuple(scores_TE.shape)}."
+                )
+
         if self._debug_force_load_balance:
             topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
                 scores_TE
@@ -291,7 +305,12 @@ class TokenChoiceTopKRouter(Module):
                 self._select_experts,
                 "routing_decision",
                 recompute=False,
-            )(scores_TE, expert_bias_E, **router_kwargs)
+            )(
+                scores_TE,
+                expert_bias_E,
+                padding_mask_T=padding_mask_T,
+                **router_kwargs,
+            )
 
             # The expert bias is only used for routing. The gating value is
             # still derived from the original scores.
@@ -314,18 +333,6 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK,
             True,
         )
-        if padding_mask_T is not None:
-            if padding_mask_T.dtype != torch.bool:
-                raise ValueError(
-                    "padding_mask_T must have dtype bool, "
-                    f"got {padding_mask_T.dtype}."
-                )
-            if padding_mask_T.shape != routing_map_TE.shape[:-1]:
-                raise ValueError(
-                    "padding_mask_T must have shape matching the routing-map "
-                    f"token axis, got {tuple(padding_mask_T.shape)} for routing "
-                    f"map {tuple(routing_map_TE.shape)}."
-                )
         # Keep the full routing map for dispatch, and build the masked view once
         # for all load-balancing statistics. The auxiliary-loss gradient is
         # injected into topk_scores_TK on backward; see ``AuxLoss.inject``.
@@ -359,11 +366,11 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TokenChoiceTopKRouter.Config):
-        num_bins: int = 1000
+        num_bins: int
 
     def __init__(self, config: Config):
         super().__init__(config)
-        if self.score_func != "sigmoid":
+        if not isinstance(self.score_func, Sigmoid):
             raise ValueError("Quantile balancing requires sigmoid router scores.")
         if self._debug_force_load_balance:
             raise ValueError(
@@ -379,6 +386,7 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
         self,
         scores_TE: torch.Tensor,
         expert_bias_E: torch.Tensor | None = None,
+        padding_mask_T: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
         if expert_bias_E is None:
@@ -401,6 +409,7 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             scores_TE,
             topk_plus_one_scores[:, self.top_k :],
             expert_bias_E,
+            padding_mask_T,
         )
         return topk_plus_one_expert_ids[:, : self.top_k].contiguous()
 
@@ -417,7 +426,7 @@ class QuantileBalancer(Module):
     class Config(Module.Config):
         num_experts: int
         top_k: int
-        num_bins: int = 1000
+        num_bins: int
 
     def __init__(self, config: Config):
         super().__init__()
@@ -441,6 +450,7 @@ class QuantileBalancer(Module):
         scores_TE: torch.Tensor,
         cutoff_T1: torch.Tensor,
         expert_bias_E: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
     ) -> None:
         """Accumulate required-bias histograms for one local micro-batch."""
         if not self.training:
@@ -450,6 +460,10 @@ class QuantileBalancer(Module):
             local_scores_TE = self._local_tensor(scores_TE)
             local_cutoff_T1 = self._local_tensor(cutoff_T1)
             local_expert_bias_E = self._local_tensor(expert_bias_E)
+            if padding_mask_T is not None:
+                valid_mask_T = ~self._local_tensor(padding_mask_T)
+                local_scores_TE = local_scores_TE[valid_mask_T]
+                local_cutoff_T1 = local_cutoff_T1[valid_mask_T]
 
             lower_bound = local_expert_bias_E.min() - 1.0
             bin_width = (

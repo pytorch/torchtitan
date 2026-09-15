@@ -596,5 +596,6 @@ def register_moe_quantile_balancing_hook(
                 expert_bias_E = expert_bias_E.to_local()
             expert_bias_E.copy_(next_expert_bias_E)
             quantile_balancer.required_bias_histogram_EB.zero_()
+            router.tokens_per_expert_E.zero_()
 
     optimizers.register_step_pre_hook(lambda *args, **kwargs: _update_expert_bias())

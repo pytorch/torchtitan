@@ -46,7 +46,7 @@ class KimiLatentMoE(MoE):
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
-            buffer_device = self.tokens_per_expert_E.device
+            buffer_device = self.router.tokens_per_expert_E.device
         super()._init_self_buffers(buffer_device=buffer_device)
         with torch.device(buffer_device):
             self.expert_bias_E = torch.zeros(
