@@ -133,6 +133,13 @@ class DSV4FlexAttention(FlexAttention):
         cmp_idx = torch.where(cmp_idx < causal_limit, seqlen + cmp_idx, -1)
         return cmp_idx.unsqueeze(0).expand(bsz, -1, -1)
 
+    # Kept out of torch.compile on purpose. Under the per-block compile the
+    # dense ``selected_mask`` this builds becomes an Inductor intermediate, and
+    # the flex template asserts "convert FlexibleLayout to FixedLayout first"
+    # while rendering the ``mask_mod`` that indexes it (job 395). Built eagerly,
+    # it enters the flex region as a graph input with a fixed layout. The index
+    # math here is small; the compile target is the HC-branch elementwise work.
+    @torch.compiler.disable
     def _build_block_mask(
         self,
         bsz: int,
