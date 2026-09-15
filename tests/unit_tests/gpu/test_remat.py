@@ -16,6 +16,7 @@ import torch
 import torch_remat as remat
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
+from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
@@ -395,6 +396,7 @@ class TestRematRegions(unittest.TestCase):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            score_func=Sigmoid.Config(),
             top_k=1,
         ).build()
 

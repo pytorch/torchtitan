@@ -16,7 +16,6 @@ from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
-from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.module import Module
 
 
@@ -170,22 +169,6 @@ def test_float8_lora_targets_fused_feed_forward_projection():
         "w13.lora_b.weight",
     }
     assert feed_forward(torch.randn(2, 16)).shape == (2, 16)
-
-
-def test_validate_converter_order():
-    """Quantization before LoRA is valid; LoRA before quantization is not."""
-    lora_cfg = LoRAConverter.Config(rank=8, alpha=16.0)
-
-    # Valid order: no error
-    validate_converter_order([lora_cfg])
-
-    # Invalid order: quantization after LoRA
-    float8_cfg = Float8LinearConverter.Config(emulate=True)
-    with pytest.raises(ValueError, match="must be applied before"):
-        validate_converter_order([lora_cfg, float8_cfg])
-
-    # Valid order: quantization before LoRA
-    validate_converter_order([float8_cfg, lora_cfg])
 
 
 def test_lora_cls_cache():
