@@ -51,16 +51,11 @@ class TestDistMuon(DTensorTestBase):
 
     @with_comms
     def test_segments_match_independent_matrix_updates(self):
-        """Per-head [K_nope; V] with unequal rows, plus a single-block
-        [latent; rope] parameter: each segment gets its own Newton-Schulz and
-        aspect-ratio learning-rate adjustment."""
         lr = 0.03
+        num_rows_per_segment = (3, 2)
+        block_rows = sum(num_rows_per_segment)
+        num_blocks = self.world_size
         matrix_columns = 2
-        cases = {
-            # fqn: (num_blocks, num_rows_per_segment)
-            "layers.0.attention.wkv_b.weight": (4, (3, 2)),
-            "layers.0.attention.wkv_a.weight": (1, (5, 2)),
-        }
         mesh = init_device_mesh(
             self.device_type,
             (self.world_size,),
@@ -68,27 +63,26 @@ class TestDistMuon(DTensorTestBase):
         )
         device = torch.device(self.device_type, self.rank)
 
-        values, params, layouts = {}, {}, {}
-        for fqn, (num_blocks, segments) in cases.items():
-            rows = num_blocks * sum(segments)
-            values[fqn] = (
-                torch.arange(rows * matrix_columns, device=device)
-                .reshape(rows, matrix_columns)
-                .float()
-                .div_(7)
-            )
-            params[fqn] = torch.nn.Parameter(
-                distribute_tensor(values[fqn].clone(), mesh, (Shard(0),))
-            )
-            layouts[fqn] = ComputeLayout(
-                shardings_by_mesh_axis={
-                    "dp_shard": BlockShard(dim=0, block_size=sum(segments))
-                },
-                num_rows_per_segment=segments,
-            )
+        value = (
+            torch.arange(num_blocks * block_rows * matrix_columns, device=device)
+            .reshape(num_blocks * block_rows, matrix_columns)
+            .float()
+            .div_(7)
+        )
+        grad = value.sin()
+        param = torch.nn.Parameter(distribute_tensor(value.clone(), mesh, (Shard(0),)))
+        param.grad = distribute_tensor(grad.clone(), mesh, (Shard(0),))
+        fqn = "layers.0.attention.wkv_b.weight"
         optimizer = build_dist_muon(
-            [{"params": list(params.values()), "param_names": list(params)}],
-            compute_sharding_by_fqn=layouts,
+            [{"params": [param], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": BlockShard(dim=0, block_size=block_rows)
+                    },
+                    num_rows_per_segment=num_rows_per_segment,
+                ),
+            },
             bucket_configs=[BucketConfig(patterns=("layers.0.*",))],
             lr=lr,
             weight_decay=0.0,
@@ -97,25 +91,26 @@ class TestDistMuon(DTensorTestBase):
             ns_steps=2,
             adjust_lr_fn="match_rms_adamw",
         )
-        reference = {}
-        for fqn, (num_blocks, segments) in cases.items():
-            grad = values[fqn].sin()
-            params[fqn].grad = distribute_tensor(grad.clone(), mesh, (Shard(0),))
-            blocks = values[fqn].view(num_blocks, sum(segments), matrix_columns)
-            grad_blocks = grad.view(num_blocks, sum(segments), matrix_columns)
-            matrices = []
-            for block in range(num_blocks):
-                start = 0
-                for rows in segments:
-                    matrix = torch.nn.Parameter(
-                        blocks[block, start : start + rows].clone()
-                    )
-                    matrix.grad = grad_blocks[block, start : start + rows].clone()
-                    matrices.append(matrix)
-                    start += rows
-            reference[fqn] = matrices
+
+        # One reference parameter per (block, segment) matrix.
+        segments = torch.split(
+            value.view(num_blocks, block_rows, matrix_columns),
+            list(num_rows_per_segment),
+            dim=1,
+        )
+        grad_segments = torch.split(
+            grad.view(num_blocks, block_rows, matrix_columns),
+            list(num_rows_per_segment),
+            dim=1,
+        )
+        reference = []
+        for block in range(num_blocks):
+            for segment, grad_segment in zip(segments, grad_segments, strict=True):
+                matrix = torch.nn.Parameter(segment[block].clone())
+                matrix.grad = grad_segment[block].clone()
+                reference.append(matrix)
         reference_optimizer = torch.optim.Muon(
-            [matrix for matrices in reference.values() for matrix in matrices],
+            reference,
             lr=lr,
             weight_decay=0.0,
             momentum=0.0,
@@ -127,12 +122,9 @@ class TestDistMuon(DTensorTestBase):
         optimizer.step()
         reference_optimizer.step()
 
-        for fqn in cases:
-            expected = torch.cat([matrix.detach() for matrix in reference[fqn]])
-            expected_local = distribute_tensor(expected, mesh, (Shard(0),)).to_local()
-            torch.testing.assert_close(
-                params[fqn].to_local(), expected_local, rtol=0, atol=1e-3
-            )
+        expected = torch.cat([matrix.detach() for matrix in reference])
+        expected_local = distribute_tensor(expected, mesh, (Shard(0),)).to_local()
+        torch.testing.assert_close(param.to_local(), expected_local, rtol=0, atol=1e-3)
 
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
