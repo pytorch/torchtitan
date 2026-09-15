@@ -230,6 +230,14 @@ class ParallelismConfig:
     PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
     """
 
+    pipeline_parallel_max_active_stages: int = 3
+    """
+    Maximum number of FSDP stages kept unsharded during pipeline schedule lowering.
+    If this is smaller than the number of virtual pipeline stages, stale stages are
+    resharded to reduce weight memory usage and must be unsharded again when reused,
+    incurring additional weight all-gathers.
+    """
+
     num_pp_microbatches: int = 1
     """
     Number of pipeline microbatches per data-parallel rank and gradient

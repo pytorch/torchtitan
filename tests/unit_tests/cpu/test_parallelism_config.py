@@ -54,6 +54,10 @@ def test_parallelism_config_default_schedule() -> None:
     assert ParallelismConfig().pipeline_parallel_schedule == "1F1B"
 
 
+def test_parallelism_config_default_max_active_stages() -> None:
+    assert ParallelismConfig().pipeline_parallel_max_active_stages == 3
+
+
 def test_parallelism_config_accepts_interleaved_1f1b() -> None:
     config = ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B")
     assert config.pipeline_parallel_schedule == "Interleaved1F1B"

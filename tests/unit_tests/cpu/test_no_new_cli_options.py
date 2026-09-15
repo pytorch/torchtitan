@@ -153,6 +153,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "parallelism.pipeline_parallel_first_stage_less_layers",
         "parallelism.pipeline_parallel_last_stage_less_layers",
         "parallelism.pipeline_parallel_layers_per_stage",
+        "parallelism.pipeline_parallel_max_active_stages",
         "parallelism.num_pp_microbatches",
         "parallelism.pipeline_parallel_schedule",
         "parallelism.pipeline_parallel_schedule_csv",

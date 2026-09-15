@@ -12,6 +12,7 @@ import torch.nn as nn
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.pipeline_parallel import (
+    _build_pipeline_schedule,
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
@@ -76,6 +77,31 @@ def test_pipeline_with_first_stage_modules_preserves_explicit_split(monkeypatch)
     )
 
     assert captured["parallelism"] is parallelism
+
+
+def test_build_pipeline_schedule_passes_max_active_stages(monkeypatch):
+    captured = {}
+
+    class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        pipeline_parallel, "get_schedule_class", lambda _: CapturingSchedule
+    )
+
+    _build_pipeline_schedule(
+        parallelism=ParallelismConfig(
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule="Interleaved1F1B",
+            pipeline_parallel_max_active_stages=4,
+        ),
+        num_microbatches=4,
+        stages=[object(), object()],  # pyrefly: ignore [bad-argument-type]
+        loss_fn=lambda: None,
+    )
+
+    assert captured["max_active_stages"] == 4
 
 
 def _assert_layer_assignment(module_names_per_stage: list[list[str]], num_layers: int):
