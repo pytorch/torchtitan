@@ -37,9 +37,8 @@ class ModelConfigConverter(Configurable):
 def validate_converter_order(
     converters: list[ModelConfigConverter.Config],
 ) -> None:
-    """Validate converter compatibility and ordering before model conversion."""
+    """Validate converter compatibility before model conversion."""
     from .cast_linear import LMHeadCastConverter
-    from .lora import LoRAConverter
     from .quantization import QuantizationConverter
 
     has_quantization = any(
@@ -54,16 +53,3 @@ def validate_converter_order(
         raise ValueError(
             "QuantizationConverter and LMHeadCastConverter cannot be combined."
         )
-
-    seen_lora = False
-    for converter in converters:
-        if isinstance(converter, LoRAConverter.Config):
-            seen_lora = True
-        elif seen_lora and isinstance(
-            converter,
-            (QuantizationConverter.Config, LMHeadCastConverter.Config),
-        ):
-            raise ValueError(
-                f"{type(converter).__name__} must be applied before "
-                "LoRAConverter. Reorder the converters list."
-            )

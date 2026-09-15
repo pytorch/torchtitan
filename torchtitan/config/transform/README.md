@@ -24,6 +24,11 @@ config = apply_transforms(
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.
 
+Legacy `ModelConfigConverter` instances passed to `model_registry` run before
+all model config transforms. In particular, apply quantization in
+`model_registry` before applying `LoRATransform`; running a converter over a
+LoRA-transformed tree can replace an adapter config.
+
 Use `transform_model_config_` when there is no trainer config, such as with a bare
 `ModelSpec`. It rewrites the model config in place and returns the root. It does
 not copy or validate the config.
