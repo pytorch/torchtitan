@@ -18,6 +18,7 @@ def kimi_k3_debugmodel_mm() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.enable_sequence_parallel = True
     config.parallelism.expert_parallel_degree = 2
     return config
 
