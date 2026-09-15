@@ -78,15 +78,12 @@ class GraphPPFSDPBackwardSplit:
         reduce_grad_input_names (tuple[str, ...]): ``reduce_grad_module``
             placeholder names, or empty when ``reduce_grad_module`` is
             ``None``.
-        reduction_node_names (frozenset[str]): Nodes owned by the reduction
-            epilogue, including when extraction is disabled.
     """
 
     bw_no_fsdp_module: fx.GraphModule
     reduce_grad_module: fx.GraphModule | None
     bw_no_fsdp_output_names: tuple[str, ...]
     reduce_grad_input_names: tuple[str, ...]
-    reduction_node_names: frozenset[str] = frozenset()
 
 
 def _remove_dead_all_gather_launches(graph: fx.Graph) -> None:
@@ -367,6 +364,14 @@ def split_backward_fsdp_collectives(
             reduce_grad_input_names=(),
         )
 
+    if not extract_grad_reduction:
+        return GraphPPFSDPBackwardSplit(
+            bw_no_fsdp_module=bw_module,
+            reduce_grad_module=None,
+            bw_no_fsdp_output_names=output_names(bw_module),
+            reduce_grad_input_names=(),
+        )
+
     reduction_node_names = set()
     for grad_output, boundaries in reduction_outputs:
         pending = [grad_output]
@@ -378,15 +383,6 @@ def split_backward_fsdp_collectives(
                 continue
             reduction_node_names.add(node.name)
             pending.extend(node.all_input_nodes)
-
-    if not extract_grad_reduction:
-        return GraphPPFSDPBackwardSplit(
-            bw_no_fsdp_module=bw_module,
-            reduce_grad_module=None,
-            bw_no_fsdp_output_names=output_names(bw_module),
-            reduce_grad_input_names=(),
-            reduction_node_names=frozenset(reduction_node_names),
-        )
 
     _remove_dead_all_gather_launches(graph)
     graph.eliminate_dead_code()
@@ -437,5 +433,4 @@ def split_backward_fsdp_collectives(
         reduce_grad_module=reduce_grad_module,
         bw_no_fsdp_output_names=output_names(bw_no_fsdp_module),
         reduce_grad_input_names=placeholder_names(reduce_grad_module),
-        reduction_node_names=frozenset(reduction_node_names),
     )

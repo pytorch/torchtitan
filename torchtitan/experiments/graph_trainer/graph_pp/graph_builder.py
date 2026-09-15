@@ -1123,14 +1123,6 @@ def _build_stage_graphs(
         num_param_grads=num_param_grad_values,
         extract_grad_reduction=extract_fsdp_grad_reduction,
     )
-    if fsdp_bw.reduction_node_names:
-        # The forward partition can retain a dead copy of the mutation-only
-        # reduction tail. The backward graph owns those operations.
-        for node in reversed(list(fsdp_fw.fw_no_fsdp_module.graph.nodes)):
-            if node.name in fsdp_bw.reduction_node_names and not node.users:
-                fsdp_fw.fw_no_fsdp_module.graph.erase_node(node)
-        fsdp_fw.fw_no_fsdp_module.graph.lint()
-        fsdp_fw.fw_no_fsdp_module.recompile()
     didw_split: GraphPPDiDwSplit | None = split_di_dw_graph(
         fsdp_bw.bw_no_fsdp_module,
         num_param_grads=num_param_grad_values,
