@@ -26,12 +26,18 @@ from .attention import (
     InnerAttention,
     QKVLinear,
     ScaledDotProductInnerAttention,
+    TensorParallelGQAttention,
     VarlenInnerAttention,
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
-from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
+from .feed_forward import (
+    compute_ffn_hidden_dim,
+    FeedForward,
+    SigmoidGatedFeedForward,
+    TensorParallelFeedForward,
+)
 from .linear import (
     CastLinear,
     ColumnParallelLinear,
@@ -52,7 +58,6 @@ from .nn_modules import (
     SiLU,
 )
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
-from .tensor_parallel import TensorParallelFeedForward, TensorParallelGQAttention
 
 __all__ = [
     "Conv1d",
