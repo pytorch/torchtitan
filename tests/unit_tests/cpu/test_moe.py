@@ -10,9 +10,9 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchtitan.distributed.spmd_types import _per_axis_types
 
 from torchtitan.models.common.activation import Sigmoid, SiTUGLU, Softmax, SqrtSoftplus
-from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
@@ -237,6 +237,7 @@ class TestMoE(unittest.TestCase):
         router = make_router_config(
             dim=4,
             num_experts=2,
+            score_func=Sigmoid.Config(),
             gate_param_init={"weight": nn.init.zeros_},
             top_k=1,
         ).build()
@@ -267,6 +268,7 @@ class TestMoE(unittest.TestCase):
         router = make_router_config(
             dim=4,
             num_experts=2,
+            score_func=Sigmoid.Config(),
             gate_param_init={"weight": nn.init.zeros_},
             top_k=1,
         ).build()
