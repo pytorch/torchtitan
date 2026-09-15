@@ -912,3 +912,23 @@ def deepseek_v4_flash_8k_bwd_tilesmax(seq_len: int | None = 8192) -> Trainer.Con
     """
     del seq_len
     return _flash_8k_bwd_tiles(BLOCK_M1=64, BLOCK_N1=32, BLOCK_M2=32, BLOCK_N2=64)
+
+
+def deepseek_v4_flash_8k_ep4_blk32_profile(
+    seq_len: int | None = 8192,
+) -> Trainer.Config:
+    """P1. The tuned config on the PR #18 attention, with the profiler on.
+
+    Same profiler settings as the DSv4 Pro deliverable (profile_freq=10,
+    warmup=3, active=2) so this trace is directly comparable to
+    /mnt/dgxc/profiles/dsv4_flash_8k_ep4_blk32/ -- the same config with the
+    sink-token flex attention, where one backward kernel was 72.5 % of GPU
+    time. This branch measured 92.15 TFLOP/s vs that profile's 25.45; the
+    question is what the step is spending its time on now.
+    """
+    config = deepseek_v4_flash_8k_ep4_blk32(seq_len)
+    config.profiler.enable_profiling = True
+    config.profiler.profile_freq = 10
+    config.profiler.profiler_warmup = 3
+    config.profiler.profiler_active = 2
+    return config
