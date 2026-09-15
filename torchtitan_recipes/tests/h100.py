@@ -6,7 +6,11 @@
 
 """Configurations for the ``h100`` integration test suite."""
 
-from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+from torchtitan.config.transform import (
+    apply_transforms,
+    ContextParallelTransform,
+    TensorParallelTransform,
+)
 
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
@@ -25,7 +29,7 @@ def llama3_debugmodel_tp2_asynctp_compile() -> Trainer.Config:
     config.compile.enable = True
     config.parallelism.tensor_parallel_degree = 2
     config.compile.enable_async_tensor_parallel = True
-    return config
+    return apply_transforms(config, [TensorParallelTransform()])
 
 
 def llama3_debugmodel_dist_gemm_tp2() -> Trainer.Config:
