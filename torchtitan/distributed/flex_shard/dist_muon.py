@@ -637,14 +637,11 @@ class DistMuon(Optimizer):
                     eps=group["eps"],
                     out=segment,
                 )
-                # Segments have different matrix shapes, so their learning-rate
-                # adjustment is folded into the direction here: the storage
-                # shard that applies the update may not hold complete blocks.
-                segment.mul_(
-                    _adjust_muon_learning_rate(
-                        1.0, group["adjust_lr_fn"], segment.shape[-2:]
-                    )
-                )
+                # Segments have different matrix shapes, so the aspect-ratio
+                # factor is folded into each segment's direction here; the
+                # storage shard that applies the update may not hold complete
+                # blocks, so _apply_update then uses the plain lr.
+                segment.mul_(_muon_lr_ratio(group["adjust_lr_fn"], segment.shape[-2:]))
             return
         if compute_view is not None:
             compute = compute_view.view_as_matrix_batch(compute)
@@ -664,17 +661,20 @@ class DistMuon(Optimizer):
         if compute_layout.storage_is_compute_ready:
             local_param = local_param.detach()
         compute_view = compute_layout.compute_view
-        adjust_lr_fn = group["adjust_lr_fn"]
         if compute_view is not None and compute_view.num_rows_per_segment is not None:
-            # _compute_update already scaled each segment for its own shape.
-            adjust_lr_fn = "none"
+            adjusted_lr = group["lr"]
+        else:
+            adjusted_lr = _adjust_muon_learning_rate(
+                group["lr"],
+                group["adjust_lr_fn"],
+                compute_layout.global_compute_shape,
+            )
         _apply_muon_update(
             local_param,
             direction,
             lr=group["lr"],
+            adjusted_lr=adjusted_lr,
             weight_decay=group["weight_decay"],
-            adjust_lr_fn=adjust_lr_fn,
-            compute_matrix_shape=compute_layout.global_compute_shape,
         )
         torch.autograd.graph.increment_version(compute_layout.param)
 
@@ -1885,18 +1885,22 @@ def _adjust_muon_learning_rate(
     compute_matrix_shape: torch.Size | tuple[int, ...],
 ) -> float:
     """Adjust Muon's learning rate for the matrix aspect ratio."""
+    return lr * _muon_lr_ratio(adjust_lr_fn, compute_matrix_shape)
+
+
+def _muon_lr_ratio(
+    adjust_lr_fn: str | None,
+    compute_matrix_shape: torch.Size | tuple[int, ...],
+) -> float:
+    """Return the aspect-ratio factor that adjust_lr_fn applies to the lr."""
     rows, columns = compute_matrix_shape[-2:]
-    if adjust_lr_fn == "none":
-        return lr
     if adjust_lr_fn is None or adjust_lr_fn == "original":
-        ratio = math.sqrt(max(1.0, rows / columns))
-    elif adjust_lr_fn == "match_rms_adamw":
-        ratio = 0.2 * math.sqrt(max(rows, columns))
-    elif adjust_lr_fn == "spectral_unclamped":
-        ratio = math.sqrt(rows / columns)
-    else:
-        raise ValueError(f"unsupported adjust_lr_fn {adjust_lr_fn!r}")
-    return lr * ratio
+        return math.sqrt(max(1.0, rows / columns))
+    if adjust_lr_fn == "match_rms_adamw":
+        return 0.2 * math.sqrt(max(rows, columns))
+    if adjust_lr_fn == "spectral_unclamped":
+        return math.sqrt(rows / columns)
+    raise ValueError(f"unsupported adjust_lr_fn {adjust_lr_fn!r}")
 
 
 def _prepare_muon_input(
@@ -1945,16 +1949,13 @@ def _apply_muon_update(
     direction: Tensor,
     *,
     lr: float,
+    adjusted_lr: float,
     weight_decay: float,
-    adjust_lr_fn: str | None,
-    compute_matrix_shape: torch.Size | tuple[int, ...],
 ) -> Tensor:
-    """Apply decoupled weight decay and a computed Muon direction."""
-    adjusted_lr = _adjust_muon_learning_rate(
-        lr,
-        adjust_lr_fn,
-        compute_matrix_shape,
-    )
+    """Apply decoupled weight decay and a computed Muon direction.
+
+    ``lr`` scales the weight decay and ``adjusted_lr`` scales the direction.
+    """
     parameter.mul_(1 - lr * weight_decay)
     parameter.add_(direction, alpha=-adjusted_lr)
     return parameter
