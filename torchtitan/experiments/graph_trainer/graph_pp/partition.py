@@ -439,6 +439,26 @@ def _backward_grad_inputs_from_schedule(
     return backward_grad_inputs, backward_grad_input_indices
 
 
+def _remove_dead_backward_nodes_from_forward(
+    fw_graph: fx.Graph,
+    bw_graph: fx.Graph,
+) -> None:
+    """Remove backward-only tails retained as side effects in forward.
+
+    Both extracted graphs preserve their joint-graph node names. Forward-owned
+    nodes remain reachable from forward outputs, so only userless shared names
+    belong exclusively to backward.
+    """
+    backward_node_names = {node.name for node in bw_graph.nodes}
+    for node in reversed(list(fw_graph.nodes)):
+        if (
+            node.op not in ("placeholder", "output")
+            and node.name in backward_node_names
+            and not node.users
+        ):
+            fw_graph.erase_node(node)
+
+
 def partition_joint_graph(
     traced: TracedResult,
     *,
@@ -582,6 +602,7 @@ def partition_joint_graph(
         "backward",
         ignore_must_be_in_fw_bw=True,
     )
+    _remove_dead_backward_nodes_from_forward(fw_graph, bw_graph)
     fw_module = _make_graph_module(joint, fw_graph)
     bw_module = _make_graph_module(joint, bw_graph)
     fw_module.graph.lint()

@@ -6,6 +6,7 @@
 
 import contextlib
 import operator
+import types
 import unittest
 import warnings
 from dataclasses import dataclass
@@ -470,6 +471,36 @@ class GraphPPPartitionTest(unittest.TestCase):
                 num_fwd_outputs=1,
                 backward_only_input_indices=(1,),
             )
+
+    def test_partition_removes_backward_collective_from_forward(self) -> None:
+        graph = fx.Graph()
+        x = graph.placeholder("x")
+        output = graph.call_function(torch.ops.aten.sin.default, args=(x,))
+        grad = graph.call_function(torch.ops.aten.cos.default, args=(x,))
+        reduced_grad = graph.call_function(
+            torch.ops._c10d_functional.all_reduce.default,
+            args=(grad, "sum", _FAKE_PG),
+        )
+        reduced_grad = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(reduced_grad,),
+        )
+        graph.output((output, reduced_grad))
+        traced = types.SimpleNamespace(gm=_make_graph_module(graph))
+
+        fw_module, bw_module, _ = partition_joint_graph(
+            traced,
+            num_fwd_outputs=1,
+        )
+
+        self.assertNotIn(
+            torch.ops._c10d_functional.all_reduce.default,
+            _call_targets(fw_module),
+        )
+        self.assertIn(
+            torch.ops._c10d_functional.all_reduce.default,
+            _call_targets(bw_module),
+        )
 
 
 class _GraphPPDsv3FSDPTest(FSDPTest):
