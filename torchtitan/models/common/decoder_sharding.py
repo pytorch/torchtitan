@@ -8,16 +8,13 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import GQAttention
+from torchtitan.models.common.attention import GQAttention, TensorParallelGQAttention
 from torchtitan.models.common.dist_gemm import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
     validate_async_tp_preconditions,
 )
-from torchtitan.models.common.tensor_parallel import (
-    TensorParallelFeedForward,
-    TensorParallelGQAttention,
-)
+from torchtitan.models.common.feed_forward import TensorParallelFeedForward
 from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP

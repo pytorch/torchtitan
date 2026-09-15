@@ -20,17 +20,17 @@ from torchtitan.config.transform import (
     transform_model_config_,
 )
 
-from torchtitan.models.common.attention import FlexInnerAttention, QKVLinear
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    QKVLinear,
+    TensorParallelGQAttention,
+)
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.feed_forward import FeedForward, TensorParallelFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-)
-from torchtitan.models.common.tensor_parallel import (
-    TensorParallelFeedForward,
-    TensorParallelGQAttention,
 )
 from torchtitan.protocols.module import Module
 
