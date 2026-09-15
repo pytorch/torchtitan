@@ -31,8 +31,9 @@ from torchtitan.experiments.rl.models.vllm_worker import TorchTitanGDNGraphWrapp
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
-@pytest.fixture
-def gdn_layer():
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_gdn_graph_replay_matches_eager(monkeypatch, batch_invariant):
+    monkeypatch.setattr(distributed_utils, "_batch_invariant_enabled", batch_invariant)
     torch.manual_seed(42)
     tokens, key_heads, value_heads, dim, width = 192, 1, 2, 128, 4
     channels = (2 * key_heads + value_heads) * dim
@@ -81,26 +82,12 @@ def gdn_layer():
             value_head_dim=dim,
         )
 
-    return SimpleNamespace(
-        layer=layer,
-        run=run,
-        value=v,
-        tokens=tokens,
-        storage=(conv_storage, ssm_storage),
-    )
-
-
-@pytest.mark.parametrize("batch_invariant", [False, True])
-def test_real_builder_and_wrapper_replay_changed_batches(
-    gdn_layer, monkeypatch, batch_invariant
-):
-    monkeypatch.setattr(distributed_utils, "_batch_invariant_enabled", batch_invariant)
-    fixture = gdn_layer
+    storage = (conv_storage, ssm_storage)
     compilation = SimpleNamespace(
         cudagraph_num_of_warmups=1,
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
         max_cudagraph_capture_size=192,
-        static_forward_context={fixture.layer.prefix: fixture.layer},
+        static_forward_context={layer.prefix: layer},
     )
     config = SimpleNamespace(
         compilation_config=compilation,
@@ -115,22 +102,24 @@ def test_real_builder_and_wrapper_replay_changed_batches(
     )
     spec = MambaSpec(
         block_size=128,
-        shapes=tuple(tuple(cache.shape[1:]) for cache in fixture.layer.kv_cache),
-        dtypes=tuple(cache.dtype for cache in fixture.layer.kv_cache),
+        shapes=tuple(tuple(cache.shape[1:]) for cache in layer.kv_cache),
+        dtypes=tuple(cache.dtype for cache in layer.kv_cache),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
     builder = TorchTitanGDNAttentionMetadataBuilder(
-        spec, [fixture.layer.prefix], config, torch.device("cuda")
+        spec, [layer.prefix], config, torch.device("cuda")
     )
     group = SimpleNamespace(
-        layer_names=[fixture.layer.prefix], get_metadata_builder=lambda: builder
+        layer_names=[layer.prefix], get_metadata_builder=lambda: builder
     )
     runner = SimpleNamespace(
         compilation_config=compilation, vllm_config=config, attn_groups=[[group]]
     )
-    wrapper = TorchTitanGDNGraphWrapper(lambda **kwargs: fixture.run(), runner)
-    positions = torch.arange(fixture.tokens, device="cuda")
-    descriptor = BatchDescriptor(num_tokens=fixture.tokens)
+    wrapper = TorchTitanGDNGraphWrapper(lambda **kwargs: run(), runner)
+    # Do not reuse vLLM's process-global pool across independent test lifetimes.
+    wrapper.graph_pool = torch.cuda.graph_pool_handle()
+    positions = torch.arange(tokens, device="cuda")
+    descriptor = BatchDescriptor(num_tokens=tokens)
     context = ForwardContext(
         no_compile_layers={},
         attn_metadata=None,
@@ -183,20 +172,18 @@ def test_real_builder_and_wrapper_replay_changed_batches(
                 ),
             )
             metadata = builder.build(0, common)
-            context.attn_metadata = {fixture.layer.prefix: metadata}
+            context.attn_metadata = {layer.prefix: metadata}
             context.cudagraph_runtime_mode = CUDAGraphMode.NONE
-            fixture.value.mul_(0.9)
-            before = tuple(tensor.clone() for tensor in fixture.storage)
-            expected = fixture.run().clone()
-            expected_storage = tuple(tensor.clone() for tensor in fixture.storage)
-            for tensor, snapshot in zip(fixture.storage, before, strict=True):
+            v.mul_(0.9)
+            before = tuple(tensor.clone() for tensor in storage)
+            expected = run().clone()
+            expected_storage = tuple(tensor.clone() for tensor in storage)
+            for tensor, snapshot in zip(storage, before, strict=True):
                 tensor.copy_(snapshot)
             context.cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
             actual = wrapper(positions=positions)
             torch.cuda.synchronize()
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            for tensor, reference in zip(
-                fixture.storage, expected_storage, strict=True
-            ):
+            for tensor, reference in zip(storage, expected_storage, strict=True):
                 torch.testing.assert_close(tensor, reference, rtol=0, atol=0)
         assert len(wrapper.entries) == 1

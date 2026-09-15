@@ -67,7 +67,7 @@ or omit the unused TileLang package in a Qwen-only environment.
 CPU contracts:
 
 ```sh
-pytest tests/unit_tests/cpu/test_gdn_graph_metadata.py torchtitan/experiments/rl/tests/test_gdn_graph_dispatch.py -v
+pytest tests/unit_tests/cpu/test_gdn_graph_metadata.py -v
 ```
 
 GPU capture/replay (requires vLLM and Attention Gym's linear dependencies):
