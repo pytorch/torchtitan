@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
+from torchtitan.config import ParallelismConfig
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
@@ -364,6 +365,29 @@ class TestConfigFingerprint(unittest.TestCase):
 
         self.assertNotEqual(sdpa, flex_attention)
         self.assertNotEqual(sdpa, different_norm)
+
+    def test_parallelism_config_sensitivity(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        model = _make_stub_model()
+        compile_config = _StubCompileConfig()
+        dims = _StubParallelDims()
+        default_reshard = compute_config_fingerprint(
+            model,
+            compile_config,
+            dims,
+            parallelism_config=ParallelismConfig(fsdp_reshard_after_forward="default"),
+        )
+        never_reshard = compute_config_fingerprint(
+            model,
+            compile_config,
+            dims,
+            parallelism_config=ParallelismConfig(fsdp_reshard_after_forward="never"),
+        )
+
+        self.assertNotEqual(default_reshard, never_reshard)
 
     def test_all_compilation_settings_are_fingerprinted(self):
         from torchtitan.experiments.graph_trainer.precompile import (

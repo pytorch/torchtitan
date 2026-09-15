@@ -19,6 +19,7 @@ from typing import Any, NewType, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from torchtitan.components.loss import BaseLoss
+    from torchtitan.config import ParallelismConfig
     from torchtitan.distributed import ParallelDims
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
     from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
@@ -142,6 +143,7 @@ def compute_config_fingerprint(
     *,
     loss_config: BaseLoss.Config | None = None,
     model_config: BaseModel.Config | None = None,
+    parallelism_config: ParallelismConfig | None = None,
 ) -> ConfigFingerprint:
     """
     Compute a fingerprint that captures everything affecting the compiled output:
@@ -186,6 +188,16 @@ def compute_config_fingerprint(
             b"model_config:"
             + json.dumps(
                 _canonical_config_value(model_config),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n"
+        )
+    if parallelism_config is not None:
+        h.update(
+            b"parallelism_config:"
+            + json.dumps(
+                _canonical_config_value(parallelism_config),
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()
