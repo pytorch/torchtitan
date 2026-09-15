@@ -13,7 +13,9 @@ from renderers import Qwen3RendererConfig
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.renderer import from_renderers
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config.transform import LMHeadCastConverter
 from torchtitan.experiments.rl.actors.generator import (
     SamplingConfig,
     VLLMCudagraphConfig,
@@ -29,10 +31,8 @@ from torchtitan.experiments.rl.examples.verifiers.dapo_math.rollouter import (
     VerifiersMathRollouter,
 )
 from torchtitan.experiments.rl.losses import DAPOLoss
-from torchtitan.experiments.rl.models.cast_linear import LMHeadCastConverter
 from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismConfig
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
-from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.routing.inter_generator_router import (
     InterGeneratorRouter,
 )
@@ -66,9 +66,7 @@ def _qwen3_4b_verifiers_config(
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=VerifiersMathRollouter.Config(),
-        renderer=RenderersLibraryConfig(
-            renderers_config=Qwen3RendererConfig(enable_thinking=True)
-        ),
+        renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         generator_router=InterGeneratorRouter.Config(
             strategy=LeastLoadedRoutingStrategy.Config()

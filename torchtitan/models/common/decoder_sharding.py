@@ -61,31 +61,18 @@ def dense_activation_placement(
     )
 
 
-def token_id_placement() -> SpmdType:
-    """Placement for decoder token IDs with shape ``(tokens,)``."""
-    return SpmdType(
-        {
-            DP: spmd.V,
-            CP: spmd.V,
-            TP: spmd.R,
-        },
-        partition_spec=spmd.PartitionSpec((DP, CP)),
-    )
+def token_id_placement(*, enable_sp: bool = False) -> SpmdType:
+    """Placement for decoder token IDs with shape ``(tokens,)``.
 
-
-def token_id_sequence_parallel_placement() -> SpmdType:
-    """Sequence-parallel token IDs with shape ``(tokens,)``.
-
-    Same token-axis mesh as ``dense_sequence_parallel_placement()``, but the
-    tensor is 1D so there is no trailing replicated feature dim.
+    When sequence parallelism is enabled, TP also shards the token dimension.
     """
     return SpmdType(
         {
             DP: spmd.V,
             CP: spmd.V,
-            TP: spmd.V,
+            TP: spmd.V if enable_sp else spmd.R,
         },
-        partition_spec=spmd.PartitionSpec((DP, CP, TP)),
+        partition_spec=spmd.PartitionSpec((DP, CP, TP) if enable_sp else (DP, CP)),
     )
 
 
@@ -128,6 +115,7 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
     return {
         "input": token_id_placement(),
         "positions": token_id_placement(),
+        "padding_mask": token_id_placement(),
         "labels": SpmdType(
             {DP: spmd.V, CP: spmd.V, TP: spmd.I},
             partition_spec=spmd.PartitionSpec((DP, CP)),

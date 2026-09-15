@@ -22,7 +22,7 @@ import triton
 import triton.language as tl
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.activation import ActivationFn, SwiGLU
+from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -323,11 +323,11 @@ silu_and_mul_op.register_autograd(
 )
 
 
-class FusedSwiGLU(ActivationFn):
+class FusedSwiGLU(BinaryActivationFn):
     """SwiGLU activation implemented by the fused Triton operation."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ActivationFn.Config):
+    class Config(BinaryActivationFn.Config):
         pass
 
     def __init__(self, config: Config) -> None:

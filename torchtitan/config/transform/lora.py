@@ -15,9 +15,10 @@ import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
+
+from .converter import ModelConfigConverter
 
 
 logger = logging.getLogger(__name__)

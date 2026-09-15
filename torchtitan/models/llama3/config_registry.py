@@ -6,6 +6,8 @@
 
 from typing import cast
 
+from renderers import Message
+
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
@@ -421,7 +423,7 @@ def sft_debugmodel(
 ) -> Trainer.Config:
     """SFT debug config with Llama3 debugmodel and local test data."""
 
-    def process_sample(sample):
+    def process_sample(sample) -> list[Message]:
         return [
             {"role": "user", "content": sample["question"]},
             {"role": "assistant", "content": sample["answer"]},

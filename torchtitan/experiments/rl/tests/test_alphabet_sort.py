@@ -13,6 +13,8 @@ import asyncio
 import pytest
 from renderers import Qwen3RendererConfig
 
+from torchtitan.components.renderer import from_renderers
+
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.experiments.rl.examples.alphabet_sort import (
@@ -25,7 +27,6 @@ from torchtitan.experiments.rl.examples.alphabet_sort import (
 )
 from torchtitan.experiments.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.experiments.rl.examples.alphabet_sort.rubric import score_sorted_list
-from torchtitan.experiments.rl.renderer import RenderersLibraryConfig
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.experiments.rl.types import RolloutTurnID
 
@@ -382,9 +383,7 @@ def test_rollouter_builds_one_env_per_group_member(
     asyncio.run(
         worker.setup_async(
             tokenizer_config=HuggingFaceTokenizer.Config(),
-            renderer_config=RenderersLibraryConfig(
-                renderers_config=Qwen3RendererConfig(enable_thinking=False)
-            ),
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
             hf_assets_path="tests/assets/tokenizer",
         )
     )

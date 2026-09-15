@@ -24,6 +24,7 @@ from torchtitan.config.transform import (
     MXFP8LinearConverter,
     NVFP4LinearConverter,
 )
+from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
@@ -55,6 +56,7 @@ def _router_config_for_quantization(dim: int):
     return make_router_config(
         dim=dim,
         num_experts=dim,
+        score_func=Sigmoid.Config(),
         gate_param_init={"weight": torch.nn.init.zeros_},
     )
 

@@ -12,6 +12,7 @@ from functools import partial
 from torch.nn import init
 
 from torchtitan.config.override import _REGISTRY, apply_overrides, OverrideConfig
+from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
@@ -63,6 +64,7 @@ def _moe_config(comm_backend: str):
         dim=_DIM,
         num_experts=_E,
         gate_param_init={"weight": partial(init.trunc_normal_, std=0.02)},
+        score_func=Sigmoid.Config(),
         top_k=1,
     )
     return make_moe_config(num_experts=_E, router=router, routed_experts=routed_experts)
