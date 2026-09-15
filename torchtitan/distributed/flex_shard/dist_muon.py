@@ -139,6 +139,11 @@ def _matrix_batch_view_from_compute_layout(
         and (applicable_axis_names is None or axis_name in applicable_axis_names)
     )
     if not block_shards:
+        if compute_layout.num_rows_per_segment is not None:
+            raise ValueError(
+                f"Muon parameter {fqn!r} num_rows_per_segment requires a "
+                "BlockShard compute sharding"
+            )
         return None
 
     if len(storage_shape) != 2:
@@ -161,9 +166,16 @@ def _matrix_batch_view_from_compute_layout(
             f"Muon parameter {fqn!r} must use one BlockShard block size "
             "across mesh axes"
         )
+    num_rows_per_segment = compute_layout.num_rows_per_segment
+    if num_rows_per_segment is not None and sum(num_rows_per_segment) != block_size:
+        raise ValueError(
+            f"Muon parameter {fqn!r} BlockShard block size must equal the sum "
+            f"of num_rows_per_segment {sum(num_rows_per_segment)}; got {block_size}"
+        )
     return _MatrixBatchView.from_storage_shape(
         storage_shape,
         matrix_rows=block_size,
+        num_rows_per_segment=num_rows_per_segment,
     )
 
 
@@ -211,7 +223,11 @@ def _initialize_dist_muon(
             compute_view_key = ("identity",)
             global_compute_shape = global_storage_shape
         else:
-            compute_view_key = ("matrix_batch", compute_view.matrix_rows)
+            compute_view_key = (
+                "matrix_batch",
+                compute_view.matrix_rows,
+                compute_view.num_rows_per_segment,
+            )
             global_compute_shape = compute_view.matrix_batch_shape(global_storage_shape)
         if len(global_compute_shape) not in (2, 3):
             raise ValueError(
@@ -611,8 +627,24 @@ class DistMuon(Optimizer):
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
         group = self._group(compute_layout)
-        if compute_layout.compute_view is not None:
-            compute = compute_layout.compute_view.view_as_matrix_batch(compute)
+        compute_view = compute_layout.compute_view
+        if compute_view is not None and compute_view.num_rows_per_segment is not None:
+            for segment in compute_view.segment_matrix_batches(compute):
+                _compute_muon_direction(
+                    segment,
+                    ns_coefficients=group["ns_coefficients"],
+                    ns_steps=group["ns_steps"],
+                    eps=group["eps"],
+                    out=segment,
+                )
+                # Segments have different matrix shapes, so the aspect-ratio
+                # factor is folded into each segment's direction here; the
+                # storage shard that applies the update may not hold complete
+                # blocks, so _apply_update then uses the plain lr.
+                segment.mul_(_muon_lr_ratio(group["adjust_lr_fn"], segment.shape[-2:]))
+            return
+        if compute_view is not None:
+            compute = compute_view.view_as_matrix_batch(compute)
         _compute_muon_direction(
             compute,
             ns_coefficients=group["ns_coefficients"],
@@ -628,13 +660,21 @@ class DistMuon(Optimizer):
         local_param = compute_layout.param.to_local()
         if compute_layout.storage_is_compute_ready:
             local_param = local_param.detach()
+        compute_view = compute_layout.compute_view
+        if compute_view is not None and compute_view.num_rows_per_segment is not None:
+            adjusted_lr = group["lr"]
+        else:
+            adjusted_lr = _adjust_muon_learning_rate(
+                group["lr"],
+                group["adjust_lr_fn"],
+                compute_layout.global_compute_shape,
+            )
         _apply_muon_update(
             local_param,
             direction,
             lr=group["lr"],
+            adjusted_lr=adjusted_lr,
             weight_decay=group["weight_decay"],
-            adjust_lr_fn=group["adjust_lr_fn"],
-            compute_matrix_shape=compute_layout.global_compute_shape,
         )
         torch.autograd.graph.increment_version(compute_layout.param)
 
@@ -651,6 +691,7 @@ class DistMuon(Optimizer):
 class _MatrixBatchView:
     matrix_rows: int
     matrix_columns: int
+    num_rows_per_segment: tuple[int, ...] | None = None
 
     @classmethod
     def from_storage_shape(
@@ -658,7 +699,10 @@ class _MatrixBatchView:
         storage_shape: torch.Size,
         *,
         matrix_rows: int,
+        num_rows_per_segment: tuple[int, ...] | None = None,
     ) -> _MatrixBatchView:
+        if num_rows_per_segment is not None:
+            assert sum(num_rows_per_segment) == matrix_rows
         if (
             len(storage_shape) != 2
             or storage_shape[0] == 0
@@ -671,7 +715,21 @@ class _MatrixBatchView:
         return cls(
             matrix_rows=matrix_rows,
             matrix_columns=storage_shape[1],
+            num_rows_per_segment=num_rows_per_segment,
         )
+
+    def segment_matrix_batches(self, compute_tensor: Tensor) -> tuple[Tensor, ...]:
+        """Return one zero-copy ``[M, rows_i, C]`` batch per segment."""
+        assert self.num_rows_per_segment is not None
+        blocks = compute_tensor.view(
+            self.matrix_batch_shape(torch.Size(compute_tensor.shape))
+        )
+        batches = []
+        row_offset = 0
+        for rows in self.num_rows_per_segment:
+            batches.append(blocks.narrow(1, row_offset, rows))
+            row_offset += rows
+        return tuple(batches)
 
     def matrix_batch_shape(self, compute_tensor_shape: torch.Size) -> torch.Size:
         if not (
@@ -1827,16 +1885,22 @@ def _adjust_muon_learning_rate(
     compute_matrix_shape: torch.Size | tuple[int, ...],
 ) -> float:
     """Adjust Muon's learning rate for the matrix aspect ratio."""
+    return lr * _muon_lr_ratio(adjust_lr_fn, compute_matrix_shape)
+
+
+def _muon_lr_ratio(
+    adjust_lr_fn: str | None,
+    compute_matrix_shape: torch.Size | tuple[int, ...],
+) -> float:
+    """Return the aspect-ratio factor that adjust_lr_fn applies to the lr."""
     rows, columns = compute_matrix_shape[-2:]
     if adjust_lr_fn is None or adjust_lr_fn == "original":
-        ratio = math.sqrt(max(1.0, rows / columns))
-    elif adjust_lr_fn == "match_rms_adamw":
-        ratio = 0.2 * math.sqrt(max(rows, columns))
-    elif adjust_lr_fn == "spectral_unclamped":
-        ratio = math.sqrt(rows / columns)
-    else:
-        raise ValueError(f"unsupported adjust_lr_fn {adjust_lr_fn!r}")
-    return lr * ratio
+        return math.sqrt(max(1.0, rows / columns))
+    if adjust_lr_fn == "match_rms_adamw":
+        return 0.2 * math.sqrt(max(rows, columns))
+    if adjust_lr_fn == "spectral_unclamped":
+        return math.sqrt(rows / columns)
+    raise ValueError(f"unsupported adjust_lr_fn {adjust_lr_fn!r}")
 
 
 def _prepare_muon_input(
@@ -1885,16 +1949,13 @@ def _apply_muon_update(
     direction: Tensor,
     *,
     lr: float,
+    adjusted_lr: float,
     weight_decay: float,
-    adjust_lr_fn: str | None,
-    compute_matrix_shape: torch.Size | tuple[int, ...],
 ) -> Tensor:
-    """Apply decoupled weight decay and a computed Muon direction."""
-    adjusted_lr = _adjust_muon_learning_rate(
-        lr,
-        adjust_lr_fn,
-        compute_matrix_shape,
-    )
+    """Apply decoupled weight decay and a computed Muon direction.
+
+    ``lr`` scales the weight decay and ``adjusted_lr`` scales the direction.
+    """
     parameter.mul_(1 - lr * weight_decay)
     parameter.add_(direction, alpha=-adjusted_lr)
     return parameter

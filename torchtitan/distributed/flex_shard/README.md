@@ -19,6 +19,10 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
+- `ComputeLayout.num_rows_per_segment` splits every `BlockShard` block into
+  contiguous matrices with different row counts, e.g. `(128, 64)` for a
+  per-head `[K_nope; V]` stack whose block size is 192. Each segment gets its
+  own Newton-Schulz and its own aspect-ratio learning-rate adjustment.
 - `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
   values in `compute_sharding_by_fqn`. DistMuon's `BlockShard` path accepts
   only a 2D parameter `[M * R, C]` with contiguous local DTensor storage. The
