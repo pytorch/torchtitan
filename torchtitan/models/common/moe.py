@@ -14,7 +14,6 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
-from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
@@ -441,10 +440,6 @@ class QuantileBalancer(Module):
             persistent=False,
         )
 
-    @staticmethod
-    def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.to_local() if isinstance(tensor, DTensor) else tensor
-
     def observe(
         self,
         scores_TE: torch.Tensor,
@@ -457,19 +452,16 @@ class QuantileBalancer(Module):
             return
 
         with spmd.no_typecheck(), torch.no_grad():
-            local_scores_TE = self._local_tensor(scores_TE)
-            local_cutoff_T1 = self._local_tensor(cutoff_T1)
-            local_expert_bias_E = self._local_tensor(expert_bias_E)
             if padding_mask_T is not None:
-                valid_mask_T = ~self._local_tensor(padding_mask_T)
-                local_scores_TE = local_scores_TE[valid_mask_T]
-                local_cutoff_T1 = local_cutoff_T1[valid_mask_T]
+                valid_mask_T = ~padding_mask_T
+                scores_TE = scores_TE[valid_mask_T]
+                cutoff_T1 = cutoff_T1[valid_mask_T]
 
-            lower_bound = local_expert_bias_E.min() - 1.0
+            lower_bound = expert_bias_E.min() - 1.0
             bin_width = (
-                local_expert_bias_E.max() - local_expert_bias_E.min() + 2.0
+                expert_bias_E.max() - expert_bias_E.min() + 2.0
             ) / self.num_bins
-            required_bias_TE = local_cutoff_T1 - local_scores_TE
+            required_bias_TE = cutoff_T1 - scores_TE
             bin_indices_TE = torch.floor(
                 (required_bias_TE - lower_bound) / bin_width
             ).to(torch.int64)
@@ -489,8 +481,6 @@ class QuantileBalancer(Module):
         expert_bias_E: torch.Tensor,
     ) -> torch.Tensor:
         """Estimate the next mean-centered expert bias from the histogram."""
-        local_expert_bias_E = self._local_tensor(expert_bias_E)
-
         counts_E = histogram_EB.sum(dim=-1, dtype=torch.int64)
         target_count_E = counts_E.float() * (self.top_k / self.num_experts)
         cumulative_counts_EB = histogram_EB.cumsum(dim=-1, dtype=torch.int64)
@@ -506,9 +496,7 @@ class QuantileBalancer(Module):
             target_count_E - counts_before_E.float()
         ) / counts_in_bin_E.float()
 
-        bin_width = (
-            local_expert_bias_E.max() - local_expert_bias_E.min() + 2.0
-        ) / self.num_bins
+        bin_width = (expert_bias_E.max() - expert_bias_E.min() + 2.0) / self.num_bins
         quantile_position_E = target_bin_E.float() + fraction_E
         return (quantile_position_E - quantile_position_E.mean()) * bin_width
 

@@ -15,7 +15,6 @@ import torch
 import torch.nn as nn
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
@@ -592,8 +591,6 @@ def register_moe_quantile_balancing_hook(
                 histogram_EB,
                 expert_bias_E,
             )
-            if isinstance(expert_bias_E, DTensor):
-                expert_bias_E = expert_bias_E.to_local()
             expert_bias_E.copy_(next_expert_bias_E)
             quantile_balancer.required_bias_histogram_EB.zero_()
             router.tokens_per_expert_E.zero_()
