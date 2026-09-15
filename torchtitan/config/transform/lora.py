@@ -96,7 +96,13 @@ def _get_lora_cls(parent_cls: type) -> type:
                 lora_a_sharding = (
                     replicated_weight if config.sharding_config is not None else None
                 )
-                lora_b_sharding = config.sharding_config
+                lora_b_sharding = (
+                    ShardingConfig(
+                        state_shardings=dict(config.sharding_config.state_shardings),
+                    )
+                    if config.sharding_config is not None
+                    else None
+                )
             else:
                 lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
                     config.sharding_config

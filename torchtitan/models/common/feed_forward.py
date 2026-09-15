@@ -16,7 +16,12 @@ from torchtitan.protocols.module import Module
 # Shape suffix legend:
 #   T = token dimensions, D = model dimension, F = feed-forward hidden dimension
 
-__all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
+__all__ = [
+    "FeedForward",
+    "SigmoidGatedFeedForward",
+    "TensorParallelFeedForward",
+    "compute_ffn_hidden_dim",
+]
 
 
 def compute_ffn_hidden_dim(
@@ -95,6 +100,20 @@ class FeedForward(Module):
         )(self.activation_fn(gate_TF, up_TF))
         remat.recompute_needs_tensor(out_TD)
         return out_TD
+
+
+class TensorParallelFeedForward(FeedForward):
+    """Dense FFN whose projection modules own the TP collectives.
+
+    The subclass marks transformer-block FFNs selected by
+    ``TensorParallelTransform``. Sharding setup attaches the input collective
+    to ``w13`` and the output collective to ``w2``, so their existing remat
+    regions remain communication-complete.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FeedForward.Config):
+        pass
 
 
 class SigmoidGatedFeedForward(FeedForward):

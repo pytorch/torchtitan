@@ -7,12 +7,19 @@
 from dataclasses import dataclass
 
 import pytest
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 
-from torchtitan.config.transform import Float8LinearConverter
+from torchtitan.config.transform import Float8LinearConverter, TensorParallelTransform
 from torchtitan.config.transform.lora import _get_lora_cls, LoRAConverter
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.config_utils import make_ffn_config
+from torchtitan.models.common.decoder_sharding import (
+    dense_param_placement,
+    dense_sequence_parallel_placement,
+    set_dense_ffn_sharding,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
@@ -133,6 +140,39 @@ def test_lora_targets_fused_feed_forward_projection():
     reloaded.init_states()
     reloaded.load_state_dict(feed_forward.state_dict())
     torch.testing.assert_close(reloaded(x), expected)
+
+
+def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
+    """The nested LoRA projection inherits state sharding, not TP collectives."""
+    init = {"weight": torch.nn.init.zeros_}
+    config = make_ffn_config(
+        dim=4,
+        hidden_dim=8,
+        w1_param_init=init,
+        w2w3_param_init=init,
+    )
+    config = TensorParallelTransform().transform(config)
+    config = LoRAConverter.Config(rank=2, alpha=4).build().convert(config)
+    assert isinstance(config, FeedForward.Config)
+    set_dense_ffn_sharding(
+        config,
+        attn_x_layout=dense_sequence_parallel_placement(),
+        enable_sp=True,
+    )
+
+    feed_forward = config.build()
+    assert feed_forward.w13._sharding_config is not None
+    assert feed_forward.w13._sharding_config.in_dst_shardings is not None
+
+    lora_b_sharding = feed_forward.w13.lora_b._sharding_config
+    assert lora_b_sharding is not None
+    assert lora_b_sharding.state_shardings["weight"] == dense_param_placement(
+        tp=spmd.S(1)
+    )
+    assert lora_b_sharding.in_src_shardings is None
+    assert lora_b_sharding.in_dst_shardings is None
+    assert lora_b_sharding.out_src_shardings is None
+    assert lora_b_sharding.out_dst_shardings is None
 
 
 def test_float8_lora_targets_fused_feed_forward_projection():
