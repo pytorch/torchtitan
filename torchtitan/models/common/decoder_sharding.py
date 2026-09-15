@@ -10,7 +10,7 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
-    ColumnParallelLinear,
+    DistGEMMFeedForward,
     RowParallelLinear,
     validate_dist_gemm_preconditions,
 )
@@ -259,8 +259,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    # dist-GEMM: the ColumnParallelLinear inside QKVLinear consumes the sequence
-    # shard directly, so there is no attention-boundary all-gather to declare.
+    # dist-GEMM: AllGatherFusedQKVLinear consumes the sequence shard directly, so
+    # there is no attention-boundary all-gather left for the block to declare.
     attention_cfg.sharding_config = (
         None
         if dist_gemm
@@ -340,7 +340,7 @@ def set_dense_ffn_sharding(
     # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
     # See set_gqa_attention_sharding; both branches collapse once redistribute
     # collectives move inside the modules.
-    dist_gemm = isinstance(feed_forward_cfg.w13, ColumnParallelLinear.Config)
+    dist_gemm = isinstance(feed_forward_cfg, DistGEMMFeedForward.Config)
     if dist_gemm:
         validate_dist_gemm_preconditions(enable_sp=enable_sp)
     feed_forward_cfg.sharding_config = (
