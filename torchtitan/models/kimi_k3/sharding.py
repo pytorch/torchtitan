@@ -227,15 +227,25 @@ def _set_latent_moe_sharding(
         enable_sp=enable_sp,
         expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
     )
-    # Replicated when the experts are TP-sharded; under EP they are whole on
-    # every tp rank, so routed_down follows the stream's rule.
-    moe_cfg.routed_down.sharding_config = (
-        _tp_unsharded_weight_config(enable_sp=enable_sp)
-        if enable_ep
-        else ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.R)}
-        )
+    routed_down = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.R)}
     )
+    if enable_ep:
+        # Like the router, routed_down runs on the rank's token shard under EP.
+        token_shard = dense_sequence_parallel_placement()
+        routed_down.in_src_shardings = {
+            "input": token_shard
+            if enable_sp
+            else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+        }
+        routed_down.in_dst_shardings = {"input": token_shard}
+        routed_experts = moe_cfg.routed_experts.sharding_config
+        assert routed_experts is not None
+        routed_experts.in_src_shardings = {
+            **(routed_experts.in_src_shardings or {}),
+            "x_TD": token_shard,
+        }
+    moe_cfg.routed_down.sharding_config = routed_down
     routed_norm = norm_config(enable_sp=enable_sp)
     routed_up = _tp_unsharded_weight_config(enable_sp=enable_sp)
     if not enable_sp:
