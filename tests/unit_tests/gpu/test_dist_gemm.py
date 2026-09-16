@@ -37,7 +37,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import set_gqa_attention_sharding
-from torchtitan.models.common.async_linear import (
+from torchtitan.models.common.dist_gemm import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
