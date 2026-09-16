@@ -196,11 +196,15 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         a: torch.Tensor,
         b: torch.Tensor,
         conv_weight: torch.Tensor,
+        conv_bias: torch.Tensor | None,
         A_log: torch.Tensor,
         dt_bias: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
         """Run convolution and recurrence against vLLM's paged state in place."""
+        assert (
+            conv_bias is None
+        ), "Attention Gym convolution kernels do not support bias"
         attn_metadata = get_forward_context().attn_metadata
         # vLLM's profiling/warmup runs have no attention metadata; leave the
         # zero-filled output.
@@ -222,6 +226,8 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         # Decode has no per-request initialization mask. The builder retains a
         # mask for packed capture even when its dummy requests are all one-token.
         if gdn_metadata.has_initial_state is None:
+            # One token per physical slot, including null padding, as in native
+            # vLLM padded decode organization (not necessarily its numerics).
             num_actual_tokens = state_indices.numel()
             conv_output = causal_conv1d_decode(
                 mixed_qkv[:num_actual_tokens],
@@ -256,8 +262,10 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
                 )
             return
 
-        # PIECEWISE/SP can pad model inputs without padding attention metadata.
-        # Only overwrite the prepared extent; the caller zeroed the entire output.
+        # vLLM intentionally pads PIECEWISE/SP model inputs, but pads attention
+        # metadata only for FULL. Write only the prepared extent; the caller
+        # zeroed the entire output. FULL descriptors fix the extent and storage:
+        # requests restage buffer contents, not the captured slices.
         conv_output = paged_causal_conv1d(
             mixed_qkv[:num_actual_tokens].unsqueeze(0),
             conv_weight,
@@ -291,6 +299,10 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         all_slots: torch.Tensor,
         has_initial_state: torch.Tensor | None,
     ) -> None:
+        """Map each cu_seqlens interval to its paged SSM slot in all_slots.
+
+        Null slots skip state writes and produce zero output for padding.
+        """
         query, key, value = self._split_qkv(conv_output)
         # Keep the existing FP32 arithmetic while reusing the GDN gate contract.
         decay = gate_transform(
@@ -372,6 +384,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             a_TH,
             b_TH,
             conv_weight_CW,
+            None,
             A_log_H,
             dt_bias_H,
             output_THV,

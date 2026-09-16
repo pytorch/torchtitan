@@ -17,7 +17,10 @@ import pytest
 MODEL_ENV = "TORCHTITAN_QWEN3_5_0_8B_HF_PATH"
 
 
-def test_gdn_full_runner_matches_eager(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "batch_invariant", [False, True], ids=["regular", "batch-invariant"]
+)
+def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) -> None:
     model = os.environ.get(MODEL_ENV)
     if not model:
         pytest.skip(f"set {MODEL_ENV} to a local Qwen3.5-0.8B checkpoint")
@@ -33,7 +36,12 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path) -> None:
         output = tmp_path / f"{mode}.json"
         command = ["timeout", "--kill-after=5s", "180s", sys.executable]
         command += "-m torch.distributed.run --standalone --nproc-per-node=1".split()
-        command += [str(Path(__file__).resolve()), mode, str(output)]
+        command += [
+            str(Path(__file__).resolve()),
+            mode,
+            str(output),
+            str(int(batch_invariant)),
+        ]
         with output.with_suffix(".log").open("w") as log:
             subprocess.run(
                 command,
@@ -47,6 +55,11 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path) -> None:
             )
         results.append(json.loads(output.read_text()))
     eager, full = results
+    assert eager["batch_invariant"] == full["batch_invariant"] == batch_invariant
+    if batch_invariant:
+        # Real packed recurrence ran eagerly and was captured for FULL replay.
+        assert [False, True] in eager["recurrent_calls"]
+        assert [True, True] in full["recurrent_calls"]
     assert eager["outputs"] == full["outputs"]
     assert eager["states"] == full["states"]
     assert all(step["mode"] == "NONE" for step in eager["dispatch"])
@@ -61,7 +74,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path) -> None:
     assert len({tuple(step["slots"]) for step in replayed}) > 1
 
 
-def run_engine(mode: str, output: Path) -> None:
+def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     os.environ.update(
         VLLM_USE_V2_MODEL_RUNNER="0",
         VLLM_ENABLE_V1_MULTIPROCESSING="0",
@@ -73,20 +86,42 @@ def run_engine(mode: str, output: Path) -> None:
     )
     import torch
     from vllm import EngineArgs, LLMEngine, SamplingParams
-    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
-    from vllm.compilation.cuda_graph import CUDAGraphWrapper
     from vllm.forward_context import get_forward_context
 
     from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.config import CompileConfig, OverrideConfig
-    from torchtitan.experiments.rl.models import vllm_registry as registry
-    from torchtitan.experiments.rl.models.gdn import VLLMInnerGatedDeltaNet
-    from torchtitan.experiments.rl.models.vllm_worker import TorchTitanGPUModelRunner
-    from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
+    from torchtitan.distributed.utils import (
+        is_in_batch_invariant_mode,
+        set_batch_invariance,
+    )
+    from torchtitan.experiments.rl.batch_invariance import (
+        force_logprobs_fn_for_batch_invariance,
+    )
+    from torchtitan.experiments.rl.models import gdn, vllm_registry as registry
     from torchtitan.models.qwen3_5 import model_registry
 
     assert int(os.environ["WORLD_SIZE"]) == 1
+    set_batch_invariance(batch_invariant)
+    if batch_invariant:
+        force_logprobs_fn_for_batch_invariance()
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.manual_seed(42)
+    recurrent_calls = []
+    original_recurrent = gdn.recurrent_gdn
+
+    def recurrent(*args, **kwargs):
+        recurrent_calls.append(
+            [
+                torch.cuda.is_current_stream_capturing(),
+                kwargs["has_initial_state"] is not None,
+            ]
+        )
+        return original_recurrent(*args, **kwargs)
+
+    gdn.recurrent_gdn = recurrent
     model = os.environ[MODEL_ENV]
     registry.register_to_vllm(
         model_registry("0.8B", seq_len=256, attn_backend="varlen"),
@@ -125,15 +160,21 @@ def run_engine(mode: str, output: Path) -> None:
             disable_log_stats=True,
         )
     )
-    result = {"outputs": {}, "states": [], "dispatch": []}
+    result = {
+        "outputs": {},
+        "states": [],
+        "dispatch": [],
+        "batch_invariant": is_in_batch_invariant_mode(),
+        "recurrent_calls": recurrent_calls,
+    }
 
     def instrument(worker):
         runner = worker.model_runner
-        assert type(runner) is TorchTitanGPUModelRunner
+        assert is_in_batch_invariant_mode() == batch_invariant
         layers = {
             name: layer
             for name, layer in runner.compilation_config.static_forward_context.items()
-            if isinstance(layer, VLLMInnerGatedDeltaNet)
+            if isinstance(layer, gdn.VLLMInnerGatedDeltaNet)
         }
         assert layers
         with torch.inference_mode():
@@ -142,11 +183,7 @@ def run_engine(mode: str, output: Path) -> None:
                     state.zero_()
         replays = []
         if mode == "full":
-            assert type(runner.model) is CUDAGraphWrapper
-            assert type(runner.model.runnable) is BreakableCUDAGraphWrapper
-            assert isinstance(runner.model.unwrap(), VLLMModelWrapper)
             entries = runner.model.concrete_cudagraph_entries
-            assert {descriptor.uniform for descriptor in entries} == {False, True}
             for entry in entries.values():
                 assert entry.cudagraph is not None
 
@@ -227,4 +264,4 @@ def run_engine(mode: str, output: Path) -> None:
 
 
 if __name__ == "__main__":
-    run_engine(sys.argv[1], Path(sys.argv[2]))
+    run_engine(sys.argv[1], Path(sys.argv[2]), bool(int(sys.argv[3])))

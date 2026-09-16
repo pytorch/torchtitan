@@ -22,9 +22,11 @@ from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 class TorchTitanGDNDispatcher(CudagraphDispatcher):
     """Keep native FULL descriptors distinct for packed GDN and fused decode.
 
-    vLLM at c6fa1f0 discards the uniform-decode discriminator in FULL mode.
-    Reuse its FULL_DECODE_ONLY dispatcher for those keys until upstream exposes
-    FULL decode specialization. Capture, replay and graph ownership stay native.
+    vLLM at c6fa1f0 erases the uniform-decode discriminator in FULL mode:
+    four one-token decodes collide with one four-token prefill. Attention Gym's
+    different numerical paths need distinct keys. Delegate decode keys to the
+    native FULL_DECODE_ONLY dispatcher until upstream supports FULL decode
+    specialization; native capture, replay and graph ownership stay intact.
     """
 
     def initialize_cudagraph_keys(

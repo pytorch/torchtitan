@@ -80,8 +80,10 @@ class TorchTitanGDNAttentionMetadataBuilder(
                 "Attention Gym GDN does not support intermediate prefix-cache checkpoints; use 'none' or 'align'"
             )
         self.num_reqs_capacity = vllm_config.scheduler_config.max_num_seqs
-        # One extra null request owns the physical token tail even when every
-        # real request slot is occupied. Common metadata remains untouched.
+        # max_num_seqs + 1 request slots need max_num_seqs + 2 offsets. The
+        # extra local null request owns [real_tokens, padded_capacity), even
+        # with all real slots full; it is not an extra scheduler request.
+        # Common metadata remains untouched.
         self.query_start_loc = torch.zeros(
             self.num_reqs_capacity + 2, device=device, dtype=torch.int32
         )
@@ -138,6 +140,7 @@ class TorchTitanGDNAttentionMetadataBuilder(
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
+            # The GDN layer constructor rejects speculative decoding.
             num_spec_decodes=0,
             num_spec_decode_tokens=0,
             num_actual_tokens=m.num_actual_tokens,

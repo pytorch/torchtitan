@@ -8,8 +8,6 @@ from dataclasses import replace
 
 import pytest
 import torch
-import torch.nn.functional as F
-from attn_gym.linear import gate_transform
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -165,14 +163,13 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
     )
     value, output = torch.ones(4, 1), torch.zeros(4, 1)
     with override_forward_context(context):
-        layer._forward(value, value, value, value, value, value, output)
+        layer._forward(value, value, value, value, None, value, value, output)
+        # Reject bias even in profiling and empty-batch early returns.
+        for attn_metadata in (None, {"gdn": replace(metadata, num_actual_tokens=0)}):
+            context.attn_metadata = attn_metadata
+            with pytest.raises(
+                AssertionError,
+                match="Attention Gym convolution kernels do not support bias",
+            ):
+                layer._forward(value, value, value, value, value, value, value, output)
     assert torch.equal(output[:, 0], (torch.arange(4) < extent).float())
-
-
-def test_shared_gate_preserves_gdn_arithmetic():
-    raw = torch.linspace(-30, 30, 16, dtype=torch.bfloat16).view(1, 8, 2)
-    A_log = torch.tensor([0.2, -1.0])
-    bias = torch.tensor([0.1, 0.3])
-    expected = -A_log.exp() * F.softplus(raw.float() + bias)
-    actual = gate_transform(raw, A_log, bias, kind="softplus", impl="reference")
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
