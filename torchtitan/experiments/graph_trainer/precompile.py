@@ -39,13 +39,13 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.storage import StorageAdapter
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.tools.logging import logger
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
 
 _GRAPH_AFFECTING_TRAINING_FIELDS = (
     "num_tokens_per_microbatch_per_dp_rank",
-    "num_tokens_per_train_step",
     "max_context_length",
     "enable_cpu_offload",
     "dtype",
@@ -184,6 +184,8 @@ def compute_config_fingerprint(
     compile_fields = dataclasses.asdict(compile_config)
     compile_fields.pop("debug_graph_passes", None)
     compile_fields.pop("precompile_artifact_dir", None)
+    # Stage graphs execute one microbatch; the runtime owns accumulation count.
+    compile_fields.pop("gradient_accumulation_mode", None)
     h.update(
         b"compile:"
         + json.dumps(compile_fields, sort_keys=True, separators=(",", ":")).encode()
@@ -228,6 +230,11 @@ def compute_config_fingerprint(
             name: getattr(training_config, name)
             for name in _GRAPH_AFFECTING_TRAINING_FIELDS
         }
+        # AuxLoss normalization is captured in the precompiled graph.
+        if any(isinstance(module, AuxLoss) for module in model.modules()):
+            training_fields[
+                "num_tokens_per_train_step"
+            ] = training_config.num_tokens_per_train_step
         h.update(
             b"training_config:"
             + json.dumps(
