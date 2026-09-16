@@ -196,7 +196,7 @@ class _RowParallelLinearMixin(Module):
 class ColumnParallelLinear(_ColumnParallelLinearMixin, Linear):
     """Linear that explicitly all-gathers its TP-sharded input."""
 
-    _parallel_linear_compute_cls = Linear
+    _underlying_linear_cls = Linear
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
@@ -206,7 +206,7 @@ class ColumnParallelLinear(_ColumnParallelLinearMixin, Linear):
 class RowParallelLinear(_RowParallelLinearMixin, Linear):
     """Linear that explicitly reduces its TP-partial output."""
 
-    _parallel_linear_compute_cls = Linear
+    _underlying_linear_cls = Linear
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
@@ -216,26 +216,23 @@ class RowParallelLinear(_RowParallelLinearMixin, Linear):
 @cache
 def specialize_column_parallel_linear(
     parent_cls: type[Module],
-    parent_config_cls: type[Module.Config] | None = None,
 ) -> type[Module]:
-    """Add an outer input all-gather boundary to a Linear implementation."""
-    parent_config_cls = parent_config_cls or parent_cls.Config
-    compute_cls = getattr(parent_cls, "_parallel_linear_compute_cls", parent_cls)
-    if (
-        issubclass(parent_cls, _ColumnParallelLinearMixin)
-        and parent_config_cls is parent_cls.Config
-    ):
+    """Add an outer input all-gather boundary to a Linear implementation.
+
+    Quantization and LoRA converters use this after replacing the underlying
+    Linear class. The mixin runs first in the MRO, all-gathers the input, and
+    calls ``super().forward()`` to preserve the converted Linear computation.
+    """
+    if issubclass(parent_cls, _ColumnParallelLinearMixin):
         return parent_cls
-    if parent_cls is Linear and parent_config_cls is Linear.Config:
+    if parent_cls is Linear:
         return ColumnParallelLinear
 
-    bases = (
-        (parent_cls,)
-        if issubclass(parent_cls, _ColumnParallelLinearMixin)
-        else (_ColumnParallelLinearMixin, parent_cls)
-    )
+    parent_config_cls = parent_cls.Config
 
-    class SpecializedColumnParallelLinear(*bases):  # type: ignore[misc, valid-type]
+    class SpecializedColumnParallelLinear(
+        _ColumnParallelLinearMixin, parent_cls  # type: ignore[misc, valid-type]
+    ):
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             pass
@@ -244,40 +241,37 @@ def specialize_column_parallel_linear(
     SpecializedColumnParallelLinear.__qualname__ = (
         f"ColumnParallel{parent_cls.__qualname__}"
     )
-    SpecializedColumnParallelLinear._parallel_linear_compute_cls = compute_cls
+    SpecializedColumnParallelLinear._underlying_linear_cls = parent_cls
     return SpecializedColumnParallelLinear
 
 
 @cache
 def specialize_row_parallel_linear(
     parent_cls: type[Module],
-    parent_config_cls: type[Module.Config] | None = None,
 ) -> type[Module]:
-    """Add an outer output-reduction boundary to a Linear implementation."""
-    parent_config_cls = parent_config_cls or parent_cls.Config
-    compute_cls = getattr(parent_cls, "_parallel_linear_compute_cls", parent_cls)
-    if (
-        issubclass(parent_cls, _RowParallelLinearMixin)
-        and parent_config_cls is parent_cls.Config
-    ):
+    """Add an outer output-reduction boundary to a Linear implementation.
+
+    Quantization and LoRA converters use this after replacing the underlying
+    Linear class. The mixin calls ``super().forward()`` for that computation,
+    then reduce-scatters or all-reduces its partial output.
+    """
+    if issubclass(parent_cls, _RowParallelLinearMixin):
         return parent_cls
-    if parent_cls is Linear and parent_config_cls is Linear.Config:
+    if parent_cls is Linear:
         return RowParallelLinear
 
-    bases = (
-        (parent_cls,)
-        if issubclass(parent_cls, _RowParallelLinearMixin)
-        else (_RowParallelLinearMixin, parent_cls)
-    )
+    parent_config_cls = parent_cls.Config
 
-    class SpecializedRowParallelLinear(*bases):  # type: ignore[misc, valid-type]
+    class SpecializedRowParallelLinear(
+        _RowParallelLinearMixin, parent_cls  # type: ignore[misc, valid-type]
+    ):
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             pass
 
     SpecializedRowParallelLinear.__name__ = f"RowParallel{parent_cls.__name__}"
     SpecializedRowParallelLinear.__qualname__ = f"RowParallel{parent_cls.__qualname__}"
-    SpecializedRowParallelLinear._parallel_linear_compute_cls = compute_cls
+    SpecializedRowParallelLinear._underlying_linear_cls = parent_cls
     return SpecializedRowParallelLinear
 
 
@@ -295,10 +289,10 @@ def is_row_parallel_linear_config(config: Module.Config) -> bool:
     )
 
 
-def linear_compute_cls(config: Module.Config) -> type[Module]:
+def underlying_linear_cls(config: Module.Config) -> type[Module]:
     """Return the projection implementation inside a parallel boundary."""
     assert config._owner is not None
-    return getattr(config._owner, "_parallel_linear_compute_cls", config._owner)
+    return getattr(config._owner, "_underlying_linear_cls", config._owner)
 
 
 def preserve_parallel_linear_role(
@@ -421,7 +415,7 @@ __all__ = [
     "RouterGateLinear",
     "is_column_parallel_linear_config",
     "is_row_parallel_linear_config",
-    "linear_compute_cls",
+    "underlying_linear_cls",
     "preserve_parallel_linear_role",
     "specialize_column_parallel_linear",
     "specialize_row_parallel_linear",

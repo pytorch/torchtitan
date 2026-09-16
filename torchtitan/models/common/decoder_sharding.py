@@ -10,14 +10,10 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
     validate_async_tp_preconditions,
 )
 from torchtitan.models.common.attention import GQAttention
-from torchtitan.models.common.linear import (
-    is_column_parallel_linear_config,
-    is_row_parallel_linear_config,
-)
+from torchtitan.models.common.linear import is_column_parallel_linear_config
 from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
@@ -263,68 +259,6 @@ def pre_lm_head_norm_config(*, enable_sp: bool) -> ShardingConfig:
     )
 
 
-def _validate_tensor_parallel_projection_pair(
-    column_config,
-    row_config,
-    *,
-    column_name: str,
-    row_name: str,
-    enable_sp: bool,
-) -> bool:
-    """Validate matching explicit TP projection roles and return whether used."""
-    column_parallel = is_column_parallel_linear_config(column_config)
-    row_parallel = is_row_parallel_linear_config(row_config)
-    if column_parallel != row_parallel:
-        raise ValueError(
-            "Tensor parallelism must configure both "
-            f"{column_name} and {row_name} projections"
-        )
-
-    async_column = isinstance(column_config, AsyncColumnParallelLinear.Config)
-    async_row = isinstance(row_config, AsyncRowParallelLinear.Config)
-    if async_column != async_row:
-        raise ValueError(
-            "Async tensor parallelism must configure both "
-            f"{column_name} and {row_name} projections"
-        )
-    if async_column:
-        validate_async_tp_preconditions(enable_sp=enable_sp)
-    return column_parallel
-
-
-def _set_explicit_gqa_attention_sharding(
-    attention_cfg,
-    *,
-    attn_x_layout: SpmdType,
-) -> None:
-    """Configure GQA whose projection modules own their TP collectives."""
-    attention_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={"x_TD": attn_x_layout},
-        out_src_shardings=attn_x_layout,
-    )
-    attention_cfg.qkv_linear.wqkv.sharding_config = column_parallel_config(
-        input_layout=attn_x_layout
-    )
-    attention_cfg.wo.sharding_config = row_parallel_config(output_layout=attn_x_layout)
-
-
-def _set_legacy_gqa_attention_sharding(
-    attention_cfg,
-    *,
-    attn_x_layout: SpmdType,
-    enable_sp: bool,
-) -> None:
-    """Keep TP redistribution wrappers for unsupported attention paths."""
-    # TODO: Delete this fallback after model-specific attention paths, including
-    # Muse Glimmer's shared input, expose explicit TP projection boundaries.
-    attention_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={"x_TD": attn_x_layout},
-        in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
-    )
-    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
-    attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
-
-
 def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     """Standard GQA attention (``qkv_linear``/``wo``) TP sharding.
 
@@ -344,23 +278,31 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    if _validate_tensor_parallel_projection_pair(
-        attention_cfg.qkv_linear.wqkv,
-        attention_cfg.wo,
-        column_name="qkv",
-        row_name="wo",
-        enable_sp=enable_sp,
-    ):
-        _set_explicit_gqa_attention_sharding(
-            attention_cfg,
-            attn_x_layout=attn_x_layout,
+    qkv = attention_cfg.qkv_linear.wqkv
+    projection_owned = is_column_parallel_linear_config(qkv)
+    if isinstance(qkv, AsyncColumnParallelLinear.Config):
+        validate_async_tp_preconditions(enable_sp=enable_sp)
+
+    if projection_owned:
+        attention_cfg.sharding_config = ShardingConfig(
+            in_src_shardings={"x_TD": attn_x_layout},
+            out_src_shardings=attn_x_layout,
+        )
+        qkv.sharding_config = column_parallel_config(input_layout=attn_x_layout)
+        attention_cfg.wo.sharding_config = row_parallel_config(
+            output_layout=attn_x_layout
         )
     else:
-        _set_legacy_gqa_attention_sharding(
-            attention_cfg,
-            attn_x_layout=attn_x_layout,
-            enable_sp=enable_sp,
+        # Muse Glimmer gathers once at the attention boundary because qkv and
+        # its output gate consume the same input.
+        attention_cfg.sharding_config = ShardingConfig(
+            in_src_shardings={"x_TD": attn_x_layout},
+            in_dst_shardings={
+                "x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+            },
         )
+        qkv.sharding_config = colwise_config()
+        attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
     if attention_cfg.rope is not None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
@@ -395,23 +337,6 @@ def set_gqa_inner_attention_local_spmd(inner_attention_cfg) -> None:
     )
 
 
-def _set_legacy_dense_ffn_sharding(
-    feed_forward_cfg,
-    *,
-    attn_x_layout: SpmdType,
-    enable_sp: bool,
-) -> None:
-    """Keep TP redistribution wrappers for unsupported dense FFN paths."""
-    # TODO: Delete this fallback after model-specific FFNs expose explicit TP
-    # projection boundaries.
-    feed_forward_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={"x": attn_x_layout},
-        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
-    )
-    feed_forward_cfg.w13.sharding_config = stacked_colwise_config()
-    feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
-
-
 def set_dense_ffn_sharding(
     feed_forward_cfg,
     *,
@@ -424,30 +349,30 @@ def set_dense_ffn_sharding(
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    if _validate_tensor_parallel_projection_pair(
-        feed_forward_cfg.w13,
-        feed_forward_cfg.w2,
-        column_name="w13",
-        row_name="w2",
-        enable_sp=enable_sp,
-    ):
+    w13 = feed_forward_cfg.w13
+    projection_owned = is_column_parallel_linear_config(w13)
+    if isinstance(w13, AsyncColumnParallelLinear.Config):
+        validate_async_tp_preconditions(enable_sp=enable_sp)
+
+    if projection_owned:
         feed_forward_cfg.sharding_config = ShardingConfig(
             in_src_shardings={"x": attn_x_layout},
             out_src_shardings=attn_x_layout,
         )
-        feed_forward_cfg.w13.sharding_config = stacked_column_parallel_config(
-            input_layout=attn_x_layout
-        )
+        w13.sharding_config = stacked_column_parallel_config(input_layout=attn_x_layout)
         feed_forward_cfg.w2.sharding_config = row_parallel_config(
             output_layout=attn_x_layout
         )
         return
 
-    _set_legacy_dense_ffn_sharding(
-        feed_forward_cfg,
-        attn_x_layout=attn_x_layout,
-        enable_sp=enable_sp,
+    # A model-specific FFN may share x across projections, so its parent keeps
+    # the single input redistribution.
+    feed_forward_cfg.sharding_config = ShardingConfig(
+        in_src_shardings={"x": attn_x_layout},
+        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
     )
+    w13.sharding_config = stacked_colwise_config()
+    feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
 def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
