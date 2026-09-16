@@ -20,7 +20,7 @@ from dataclasses import dataclass
 import torch
 
 from torchtitan.models.common.activation import SwiGLU
-from torchtitan.models.common.dist_gemm import (
+from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
