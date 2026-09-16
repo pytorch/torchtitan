@@ -70,8 +70,8 @@ class FeedForward(Module):
             if fused_key not in state_dict:
                 continue
             gate_up = state_dict.pop(fused_key)
-            state_dict[f"{prefix}w1.{param_name}"] = gate_up[0].contiguous()
-            state_dict[f"{prefix}w3.{param_name}"] = gate_up[1].contiguous()
+            state_dict[f"{prefix}w1.{param_name}"] = gate_up[0]
+            state_dict[f"{prefix}w3.{param_name}"] = gate_up[1]
 
     @staticmethod
     def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
