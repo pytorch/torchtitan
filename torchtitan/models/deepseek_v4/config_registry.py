@@ -1110,3 +1110,69 @@ def deepseek_v4_flash_pr18_bs3_det(seq_len: int | None = 8192) -> Trainer.Config
     config.debug.deterministic = True
     config.debug.deterministic_warn_only = True
     return config
+
+
+# --- round 4: compiled-run profile, and the EP re-sweep on the 100.09 config --
+
+
+def deepseek_v4_flash_pr18_compile_profile(seq_len: int | None = 8192) -> Trainer.Config:
+    """P2. The compiled tuned config (job 401's code path) with the profiler on.
+
+    Compile ran and was flat (92.18 vs 92.15). The question this answers is
+    *why*: does the ~153k-launch elementwise bucket (25.8 % of kernel time in
+    the uncompiled PR #18 profile) shrink at all, and do fused Inductor
+    kernels appear? If not, compile is being fragmented by the graph breaks
+    (eager DSA mask build, all-to-all `.tolist()` sync) and only hoisting the
+    mask out of the block could rescue it. Same profiler settings as the other
+    profiles so the tables line up.
+    """
+    config = deepseek_v4_flash_pr18_compile(seq_len)
+    config.profiler.enable_profiling = True
+    config.profiler.profile_freq = 10
+    config.profiler.profiler_warmup = 3
+    config.profiler.profiler_active = 2
+    return config
+
+
+def _pr18_best(ep: int, seq_len: int | None = 8192) -> Trainer.Config:
+    """The 100.09 TFLOP/s recipe at an arbitrary EP degree.
+
+    PR #18 attention, block_size 32, GB300 tile pin, FullAC, MinimalAsyncEP
+    dispatch, bf16 gradient reduce -- everything the best config has, with
+    only ``expert_parallel_degree`` varied. EP must divide dp_shard*cp*tp
+    (= 64) and the 256 routed experts.
+    """
+    config = _flash_8k_ep_blk(ep, 32, seq_len)
+    config.model_spec = model_registry(
+        "deepseek_v4_flash", seq_len=seq_len, moe_comm_backend="minimal_async_ep"
+    )
+    _pin_gb300_flex_tiles(config)
+    for layer in config.model_spec.model.layers:
+        inner = getattr(getattr(layer, "attention", None), "inner_attention", None)
+        if isinstance(inner, FlexAttention.Config):
+            inner.block_size = 32
+    config.training.mixed_precision_reduce = "bfloat16"
+    return config
+
+
+def deepseek_v4_flash_pr18_best_ep8(seq_len: int | None = 8192) -> Trainer.Config:
+    """E1. EP=8 on the 100.09 recipe. EP=4 was chosen under a blocking
+    all-to-all, where small EP groups (one node's NVLink) won; MinimalAsyncEP
+    overlaps that all-to-all, so the optimum may have moved."""
+    return _pr18_best(8, seq_len)
+
+
+def deepseek_v4_flash_pr18_best_ep16(seq_len: int | None = 8192) -> Trainer.Config:
+    """E2. EP=16 on the 100.09 recipe (4 nodes per EP group)."""
+    return _pr18_best(16, seq_len)
+
+
+def deepseek_v4_flash_pr18_best_ep32(seq_len: int | None = 8192) -> Trainer.Config:
+    """E3. EP=32 on the 100.09 recipe (8 nodes per EP group)."""
+    return _pr18_best(32, seq_len)
+
+
+def deepseek_v4_flash_pr18_best_ep64(seq_len: int | None = 8192) -> Trainer.Config:
+    """E4. EP=64 -- the stock degree, every expert on its own rank. 18.29 with
+    sink-token flex and a blocking all-to-all; the question is what it is now."""
+    return _pr18_best(64, seq_len)
