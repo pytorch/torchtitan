@@ -1,0 +1,178 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+from dataclasses import replace
+
+import pytest
+import torch
+import torch.nn.functional as F
+from attn_gym.linear import gate_transform
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    SchedulerConfig,
+    VllmConfig,
+)
+from vllm.forward_context import ForwardContext, override_forward_context
+from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaSpec
+
+from torchtitan.experiments.rl.models import gdn
+from torchtitan.experiments.rl.models.gdn_backend import (
+    TorchTitanGDNAttentionMetadataBuilder,
+)
+from torchtitan.experiments.rl.models.vllm_worker import TorchTitanGDNDispatcher
+
+
+def test_full_metadata_and_native_dispatch_variants():
+    config = VllmConfig()
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        max_cudagraph_capture_size=8,
+        cudagraph_num_of_warmups=1,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=16,
+        max_num_seqs=2,
+        max_num_batched_tokens=8,
+        is_encoder_decoder=False,
+    )
+    dispatcher = TorchTitanGDNDispatcher(config)
+    assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+    decode_mode, decode = dispatcher.dispatch(2, uniform_decode=True)
+    packed_mode, packed = dispatcher.dispatch(2)
+    assert decode_mode == packed_mode == CUDAGraphMode.FULL
+    assert decode != packed and decode.uniform and not packed.uniform
+    for mode, descriptors in dispatcher.get_capture_descs():
+        for descriptor in descriptors:
+            assert dispatcher.dispatch(
+                descriptor.num_tokens, uniform_decode=descriptor.uniform
+            ) == (mode, descriptor)
+    assert dispatcher.dispatch(9)[0] == CUDAGraphMode.NONE
+    assert (
+        dispatcher.dispatch(2, uniform_decode=True, valid_modes={CUDAGraphMode.NONE})[0]
+        == CUDAGraphMode.NONE
+    )
+
+    spec = MambaSpec(
+        block_size=8,
+        shapes=((3, 512), (2, 128, 128)),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    builder = TorchTitanGDNAttentionMetadataBuilder(
+        spec, [], config, torch.device("cpu")
+    )
+    offsets = torch.tensor([0, 1, 2], dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=offsets,
+        query_start_loc_cpu=offsets,
+        seq_lens=torch.tensor([1, 3], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=4,
+        max_query_len=4,
+        max_seq_len=3,
+        block_table_tensor=torch.tensor([[1], [2]], dtype=torch.int32),
+        slot_mapping=torch.zeros(4, dtype=torch.int64),
+    )
+    captured = builder.build_for_cudagraph_capture(common)
+    assert type(captured) is GDNAttentionMetadata
+    # Native splits stay truthful; the mask keeps this general dummy packed.
+    assert captured.num_prefills == 0 and captured.num_decodes == 2
+    assert captured.num_decode_tokens == 4 and captured.num_prefill_tokens == 0
+    assert captured.has_initial_state is not None
+    assert not captured.non_spec_state_indices_tensor.any()
+    assert captured.spec_sequence_masks is None and captured.chunk_indices is None
+    assert common.block_table_tensor.tolist() == [[1], [2]]
+    actual = builder.build(0, common)
+    for name in (
+        "non_spec_query_start_loc",
+        "non_spec_state_indices_tensor",
+        "has_initial_state",
+    ):
+        assert getattr(captured, name).data_ptr() == getattr(actual, name).data_ptr()
+    assert actual.non_spec_query_start_loc.tolist() == [0, 1, 2, 4]
+    assert actual.non_spec_state_indices_tensor.tolist() == [1, 2, 0]
+    assert actual.has_initial_state.tolist() == [False, True, False]
+    assert actual.num_actual_tokens == 4
+    padded_offsets = torch.tensor([0, 1, 1], dtype=torch.int32)
+    decode_metadata = builder.build(
+        0,
+        replace(
+            common,
+            max_query_len=1,
+            num_actual_tokens=2,
+            query_start_loc=padded_offsets,
+            query_start_loc_cpu=padded_offsets,
+            seq_lens=torch.tensor([3, 0], dtype=torch.int32),
+            block_table_tensor=torch.tensor([[1], [0]], dtype=torch.int32),
+            _num_computed_tokens_cache=None,
+        ),
+    )
+    assert decode_metadata.has_initial_state is None
+    assert decode_metadata.num_actual_tokens == 2
+    assert decode_metadata.non_spec_query_start_loc.tolist() == [0, 1, 2]
+    assert decode_metadata.non_spec_state_indices_tensor.tolist() == [1, 0]
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
+    assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
+
+
+@pytest.mark.parametrize("decode", [False, True])
+def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode):
+    layer = gdn.VLLMInnerGatedDeltaNet.__new__(gdn.VLLMInnerGatedDeltaNet)
+    torch.nn.Module.__init__(layer)
+    layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
+    extent = 4 if decode else 3
+    metadata = GDNAttentionMetadata(
+        # General capture dummies can have zero native prefills as well.
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=extent,
+        num_decode_tokens=extent,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=extent,
+        non_spec_query_start_loc=(
+            torch.arange(5) if decode else torch.tensor([0, 1, 2, 3, 3])
+        ),
+        non_spec_state_indices_tensor=(
+            torch.tensor([1, 2, 0, 0]) if decode else torch.tensor([1, 2, 3, 0])
+        ),
+        has_initial_state=None if decode else torch.zeros(4, dtype=torch.bool),
+    )
+    monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
+    monkeypatch.setattr(gdn, "causal_conv1d_decode", lambda x, *args, **kwargs: x)
+    monkeypatch.setattr(gdn, "paged_causal_conv1d", lambda x, *args, **kwargs: x)
+
+    def recurrent(conv, a, b, A_log, bias, out, offsets, slots, initial):
+        assert conv.shape[0] == out.shape[0] == extent
+        assert offsets[-1] == extent
+        assert (initial is None) == decode
+        out.fill_(1)
+
+    monkeypatch.setattr(layer, "_forward_gdn", recurrent)
+    context = ForwardContext(
+        no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
+    )
+    value, output = torch.ones(4, 1), torch.zeros(4, 1)
+    with override_forward_context(context):
+        layer._forward(value, value, value, value, value, value, output)
+    assert torch.equal(output[:, 0], (torch.arange(4) < extent).float())
+
+
+def test_shared_gate_preserves_gdn_arithmetic():
+    raw = torch.linspace(-30, 30, 16, dtype=torch.bfloat16).view(1, 8, 2)
+    A_log = torch.tensor([0.2, -1.0])
+    bias = torch.tensor([0.1, 0.3])
+    expected = -A_log.exp() * F.softplus(raw.float() + bias)
+    actual = gate_transform(raw, A_log, bias, kind="softplus", impl="reference")
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
