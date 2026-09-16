@@ -126,6 +126,8 @@ class _RowParallelLinearMixin(Module):
 class ColumnParallelLinear(_ColumnParallelLinearMixin, Linear):
     """Linear that explicitly all-gathers its TP-sharded input."""
 
+    _parallel_linear_compute_cls = Linear
+
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         pass
@@ -133,6 +135,8 @@ class ColumnParallelLinear(_ColumnParallelLinearMixin, Linear):
 
 class RowParallelLinear(_RowParallelLinearMixin, Linear):
     """Linear that explicitly reduces its TP-partial output."""
+
+    _parallel_linear_compute_cls = Linear
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
@@ -146,6 +150,7 @@ def specialize_column_parallel_linear(
 ) -> type[Module]:
     """Add an outer input all-gather boundary to a Linear implementation."""
     parent_config_cls = parent_config_cls or parent_cls.Config
+    compute_cls = getattr(parent_cls, "_parallel_linear_compute_cls", parent_cls)
     if (
         issubclass(parent_cls, _ColumnParallelLinearMixin)
         and parent_config_cls is parent_cls.Config
@@ -169,6 +174,7 @@ def specialize_column_parallel_linear(
     SpecializedColumnParallelLinear.__qualname__ = (
         f"ColumnParallel{parent_cls.__qualname__}"
     )
+    SpecializedColumnParallelLinear._parallel_linear_compute_cls = compute_cls
     return SpecializedColumnParallelLinear
 
 
@@ -179,6 +185,7 @@ def specialize_row_parallel_linear(
 ) -> type[Module]:
     """Add an outer output-reduction boundary to a Linear implementation."""
     parent_config_cls = parent_config_cls or parent_cls.Config
+    compute_cls = getattr(parent_cls, "_parallel_linear_compute_cls", parent_cls)
     if (
         issubclass(parent_cls, _RowParallelLinearMixin)
         and parent_config_cls is parent_cls.Config
@@ -200,6 +207,7 @@ def specialize_row_parallel_linear(
 
     SpecializedRowParallelLinear.__name__ = f"RowParallel{parent_cls.__name__}"
     SpecializedRowParallelLinear.__qualname__ = f"RowParallel{parent_cls.__qualname__}"
+    SpecializedRowParallelLinear._parallel_linear_compute_cls = compute_cls
     return SpecializedRowParallelLinear
 
 
@@ -215,6 +223,23 @@ def is_row_parallel_linear_config(config: Module.Config) -> bool:
     return config._owner is not None and issubclass(
         config._owner, _RowParallelLinearMixin
     )
+
+
+def linear_compute_cls(config: Module.Config) -> type[Module]:
+    """Return the projection implementation inside a parallel boundary."""
+    assert config._owner is not None
+    return getattr(config._owner, "_parallel_linear_compute_cls", config._owner)
+
+
+def preserve_parallel_linear_role(
+    replacement: type[Module], source_config: Module.Config
+) -> type[Module]:
+    """Apply ``source_config``'s column/row role to ``replacement``."""
+    if is_column_parallel_linear_config(source_config):
+        return specialize_column_parallel_linear(replacement)
+    if is_row_parallel_linear_config(source_config):
+        return specialize_row_parallel_linear(replacement)
+    return replacement
 
 
 @spmd.register_local_autograd_function
@@ -324,6 +349,8 @@ __all__ = [
     "RouterGateLinear",
     "is_column_parallel_linear_config",
     "is_row_parallel_linear_config",
+    "linear_compute_cls",
+    "preserve_parallel_linear_role",
     "specialize_column_parallel_linear",
     "specialize_row_parallel_linear",
 ]

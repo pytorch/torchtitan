@@ -8,7 +8,11 @@ import logging
 from dataclasses import dataclass, fields
 from typing import Any, cast, ClassVar, Protocol
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    Linear,
+    linear_compute_cls,
+    preserve_parallel_linear_role,
+)
 from torchtitan.models.common.lora import specialize_lora_linear
 from torchtitan.protocols.module import Module
 
@@ -75,8 +79,8 @@ class LinearLoRAHandler:
         rank: int,
         alpha: float,
     ) -> Module.Config:
-        assert cfg._owner is not None
-        lora_cls = specialize_lora_linear(cast(type[Module], cfg._owner))
+        lora_cls = specialize_lora_linear(linear_compute_cls(cfg))
+        lora_cls = preserve_parallel_linear_role(lora_cls, cfg)
         lora_config_cls = cast(Any, lora_cls.Config)
         return lora_config_cls(
             **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},

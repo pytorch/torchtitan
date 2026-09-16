@@ -26,7 +26,11 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    RouterGateLinear,
+    RowParallelLinear,
+)
 from torchtitan.models.common.moe import (
     GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
@@ -208,7 +212,8 @@ def make_gqa_config(
     ``rope=None`` builds a NoPE layer (no positional encoding); see
     :class:`GQAttention`.
 
-    A model-config transform selects tensor-parallel projection implementations.
+    The projection types make the standard synchronous TP collectives explicit.
+    Without a TP mesh, they execute as ordinary linear modules.
     """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
@@ -218,7 +223,7 @@ def make_gqa_config(
         head_dim=per_head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv,
-        wqkv=Linear.Config(
+        wqkv=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=(n_heads + 2 * n_kv) * per_head_dim,
             param_init=fused_qkv_param_init(
@@ -236,7 +241,7 @@ def make_gqa_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=Linear.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * per_head_dim,
             out_features=dim,
             param_init=wo_param_init,
@@ -256,12 +261,12 @@ def make_ffn_config(
 ) -> FeedForward.Config:
     """Build a fully-specified FeedForward.Config."""
     return FeedForward.Config(
-        w13=Linear.Config(
+        w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=2 * hidden_dim,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
-        w2=Linear.Config(
+        w2=RowParallelLinear.Config(
             in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init
         ),
     )
