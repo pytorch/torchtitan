@@ -45,10 +45,10 @@ def linear_param_shard_placements(module: nn.Module) -> dict[nn.Parameter, Shard
         if not isinstance(child, nn.Linear) or child.weight.ndim == 2:
             continue
         weight = cast(nn.Parameter, child.weight)
-        placements[weight] = Shard(weight.ndim - 2)
+        placements[weight] = Shard(1)
         if child.bias is not None:
             bias = child.bias
-            placements[bias] = Shard(bias.ndim - 1)
+            placements[bias] = Shard(1)
     return placements
 
 
