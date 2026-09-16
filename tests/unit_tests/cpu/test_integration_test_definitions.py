@@ -127,11 +127,31 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
 
 
 def test_b200_tests_are_registered_in_separate_suite() -> None:
-    assert {test.test_name for test in build_b200_tests_list()} == {
+    kimi_k3_test_names = {
         "kimi_k3_mm",
+        "kimi_k3_mm_fsdp_ep_numerics",
+    }
+    assert {test.test_name for test in build_b200_tests_list()} == {
+        *kimi_k3_test_names,
         "mxfp8_linear_fsdp",
     }
-    assert "kimi_k3_mm" not in {test.test_name for test in build_model_tests_list()}
+    assert kimi_k3_test_names.isdisjoint(
+        test.test_name for test in build_model_tests_list()
+    )
+    configs = {
+        test.test_name: test.configs[0]()
+        for test in build_b200_tests_list()
+        if test.test_name in kimi_k3_test_names
+    }
+    parallel_config = configs["kimi_k3_mm"].parallelism
+    assert parallel_config.data_parallel_shard_degree == 2
+    assert parallel_config.tensor_parallel_degree == 2
+    assert parallel_config.expert_parallel_degree == 2
+
+    numerics_config = configs["kimi_k3_mm_fsdp_ep_numerics"].parallelism
+    assert numerics_config.data_parallel_shard_degree == 2
+    assert numerics_config.tensor_parallel_degree == 1
+    assert numerics_config.expert_parallel_degree == 2
 
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:
