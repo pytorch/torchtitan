@@ -98,8 +98,9 @@ class Linear(nn.Linear, Module):
         """
         if weight is None:
             weight = self.weight
+        weight = weight.flatten(0, -2)
         bias = None if self.bias is None else self.bias.flatten()
-        return weight.flatten(0, -2), bias
+        return weight, bias
 
     def _unflatten_output(self, output: torch.Tensor) -> torch.Tensor:
         """Restore the logical stacked output dimensions after a linear operation."""
