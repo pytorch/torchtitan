@@ -106,7 +106,8 @@ def kimi_k2_5_debugmodel(
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
         optimizer=_dist_muon_optimizer(
             model_spec,
-            lr=8e-4,
+            muon_lr=8e-4,
+            adamw_lr=8e-4,
             parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -151,7 +152,8 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         optimizer=_dist_muon_optimizer(
             model_spec,
-            lr=3e-4,
+            muon_lr=3e-4,
+            adamw_lr=3e-4,
             parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -196,7 +198,8 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m"]),
         optimizer=_dist_muon_optimizer(
             model_spec,
-            lr=3e-4,
+            muon_lr=3e-4,
+            adamw_lr=3e-4,
             parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -239,7 +242,8 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
         ),
         optimizer=_dist_muon_optimizer(
             model_spec,
-            lr=2.2e-4,
+            muon_lr=2.2e-4,
+            adamw_lr=2.2e-4,
             parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -291,7 +295,8 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
 def _dist_muon_optimizer(
     model_spec: ModelSpec,
     *,
-    lr: float,
+    muon_lr: float,
+    adamw_lr: float,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
     model_config = cast(KimiK25Model.Config, model_spec.model)
@@ -334,7 +339,7 @@ def _dist_muon_optimizer(
     }
     num_layers = len(model_config.layers)
     muon_kwargs = {
-        "lr": lr,
+        "lr": muon_lr,
         "weight_decay": 0.1,
         "foreach": False,
         # Kimi K2 uses 0.2 * sqrt(max(rows, columns))
@@ -343,7 +348,7 @@ def _dist_muon_optimizer(
         "adjust_lr_fn": "match_rms_adamw",
     }
     adamw_kwargs = {
-        "lr": lr,
+        "lr": adamw_lr,
         "betas": (0.9, 0.95),
         "eps": 1e-8,
         "weight_decay": 0.1,
