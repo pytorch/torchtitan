@@ -9,25 +9,16 @@ import pytest
 from torchtitan.config.transform import (
     Float8LinearConverter,
     LMHeadCastConverter,
-    LoRAConverter,
-    validate_converter_order,
+    validate_converter_compatibility,
 )
 
 
-def test_validate_converter_order():
-    """Quantization and lm-head casting cannot mix and must precede LoRA."""
+def test_validate_converter_compatibility():
+    """Quantization and lm-head casting cannot be combined."""
     float8 = Float8LinearConverter.Config(emulate=True)
     lm_head_cast = LMHeadCastConverter.Config()
-    lora = LoRAConverter.Config(rank=8, alpha=16.0)
-
-    validate_converter_order([float8, lora])
-    validate_converter_order([lm_head_cast, lora])
 
     with pytest.raises(ValueError, match="cannot be combined"):
-        validate_converter_order([lm_head_cast, float8])
+        validate_converter_compatibility([lm_head_cast, float8])
     with pytest.raises(ValueError, match="cannot be combined"):
-        validate_converter_order([float8, lm_head_cast])
-    with pytest.raises(ValueError, match="before LoRAConverter"):
-        validate_converter_order([lora, float8])
-    with pytest.raises(ValueError, match="before LoRAConverter"):
-        validate_converter_order([lora, lm_head_cast])
+        validate_converter_compatibility([float8, lm_head_cast])
