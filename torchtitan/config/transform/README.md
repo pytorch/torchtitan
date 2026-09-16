@@ -44,8 +44,8 @@ LoRA-transformed tree can replace an adapter config.
 Synchronous tensor-parallel boundaries compose with quantization and LoRA.
 Their converters replace the projection computation while preserving its
 column- or row-parallel role. Async tensor parallelism does not yet support
-converted projections; its `run_after` declaration makes that unsupported
-composition fail explicitly after `LoRATransform`.
+converted projections; it conflicts with `LoRATransform` and rejects
+quantized projection configs.
 
 Use `transform_model_config_` when there is no trainer config, such as with a bare
 `ModelSpec`. It rewrites the model config in place and returns the root. It does
