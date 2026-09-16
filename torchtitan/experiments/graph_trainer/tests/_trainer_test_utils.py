@@ -13,7 +13,10 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.utils import get_spmd_context
-from torchtitan.experiments.graph_trainer.common_utils import accumulate_param_grads_
+from torchtitan.experiments.graph_trainer.common_utils import (
+    accumulate_param_grads_,
+    maybe_register_blockmask_pytree_node,
+)
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
@@ -129,10 +132,18 @@ def build_minimal_trainer(
                         args, kwargs = prepared
             return args, kwargs
 
-        def run_direct_graph_step(microbatches, global_valid_tokens):
-            assert len(microbatches) == 1
-            inputs, labels, extra_kwargs = microbatches[0]
+        def run_direct_graph_step(
+            arg_mbs,
+            kwarg_mbs,
+            target_mbs,
+            global_valid_tokens,
+        ):
+            assert len(arg_mbs) == len(kwarg_mbs) == len(target_mbs) == 1
+            (inputs,) = arg_mbs[0]
+            labels = target_mbs[0]
+            extra_kwargs = kwarg_mbs[0]
             if trainer._traced_step is None:
+                maybe_register_blockmask_pytree_node()
                 fwd_bwd_fn = make_fwd_bwd_step(model, trainer.loss_fn)
                 with trainer.train_context():
                     trainer._traced_step = minimal_fx_tracer(
