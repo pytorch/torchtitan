@@ -177,7 +177,6 @@ class Decoder(BaseModel):
 
             ep = parallelism.expert_parallel_degree
             for moe_fqn, moe, _, _ in self.traverse(MoE.Config):
-                assert isinstance(moe, MoE.Config)
                 if moe.num_experts % ep != 0:
                     raise ValueError(
                         f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
