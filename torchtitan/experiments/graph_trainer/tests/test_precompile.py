@@ -94,6 +94,7 @@ class _StubCompileConfig:
     fsdp_param_unshard_mode: str = "auto"
     fsdp_gradient_sync_mode: str = "auto"
     gradient_accumulation_mode: str = "auto"
+    enable_autoparallel: bool = False
 
 
 @dataclass
@@ -345,6 +346,25 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint(_make_stub_model(), trainer_accumulation, dims),
             compute_config_fingerprint(
                 _make_stub_model(), scheduled_accumulation, dims
+            ),
+        )
+
+    def test_autoparallel_fingerprints_train_step_tokens(self):
+        from torchtitan.experiments.graph_trainer.precompile import (
+            compute_config_fingerprint,
+        )
+
+        cfg = _StubCompileConfig(enable_autoparallel=True)
+        dims = _StubParallelDims()
+        training = TrainingConfig()
+        changed = replace(training, num_tokens_per_train_step=4096)
+
+        self.assertNotEqual(
+            compute_config_fingerprint(
+                _make_stub_model(), cfg, dims, training_config=training
+            ),
+            compute_config_fingerprint(
+                _make_stub_model(), cfg, dims, training_config=changed
             ),
         )
 

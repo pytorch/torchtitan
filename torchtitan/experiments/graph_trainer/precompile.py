@@ -225,9 +225,12 @@ def compute_config_fingerprint(
             + b"\n"
         )
     if training_config is not None:
+        training_field_names = _GRAPH_AFFECTING_TRAINING_FIELDS
+        if compile_config.enable_autoparallel:
+            # AutoParallel plans against a full-step example input.
+            training_field_names += ("num_tokens_per_train_step",)
         training_fields = {
-            name: getattr(training_config, name)
-            for name in _GRAPH_AFFECTING_TRAINING_FIELDS
+            name: getattr(training_config, name) for name in training_field_names
         }
         h.update(
             b"training_config:"
