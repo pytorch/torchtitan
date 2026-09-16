@@ -24,8 +24,11 @@ _SEARCH = "torchtitan.experiments.rl.examples.search_r1.config_registry"
         (_ALPHABET, "rl_grpo_qwen3_6_27b_varlen_perf"),
         (_SEARCH, "rl_grpo_qwen3_1_7b_search_r1"),
         (_SEARCH, "rl_grpo_qwen3_8b_search_r1"),
+        (_ALPHABET, "rl_grpo_gpt_oss_debug_varlen_batch_invariant"),
+        (_ALPHABET, "rl_grpo_qwen3_moe_debug_varlen_batch_invariant"),
         (_ALPHABET, "rl_grpo_qwen3_0_6b_varlen_batch_invariant"),
         (_ALPHABET, "rl_grpo_qwen3_0_6b_flex_batch_invariant"),
+        (_ALPHABET, "rl_grpo_qwen3_5_9b_varlen_batch_invariant"),
         (_ALPHABET, "rl_grpo_qwen3_5_debug_varlen_batch_invariant"),
     ],
     ids=lambda value: value.rsplit(".", 1)[-1],
@@ -47,9 +50,4 @@ def test_policy_loss_vocab_size_matches_model_and_mode(module_name, factory_name
         loss_config = loss_config.loss_fn
     assert isinstance(loss_config, (DAPOLoss.Config, GRPOLoss.Config))
 
-    expected = (
-        None
-        if config.trainer.debug.batch_invariant
-        else decoder_vocab_size(config.model_spec)
-    )
-    assert loss_config.global_vocab_size == expected
+    assert loss_config.global_vocab_size == decoder_vocab_size(config.model_spec)

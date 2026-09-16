@@ -244,16 +244,9 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
     config.async_loop.target_offpolicy_steps = 0
     config.async_loop.window_fraction = None
-    loss_config = config.trainer.loss
-    assert isinstance(loss_config, ChunkedLossWrapper.Config)
-    assert isinstance(loss_config.loss_fn, GRPOLoss.Config)
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
-        loss=dataclasses.replace(
-            loss_config,
-            loss_fn=dataclasses.replace(loss_config.loss_fn, global_vocab_size=None),
-        ),
         # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
         training=dataclasses.replace(config.trainer.training, dtype="float32"),
         parallelism=dataclasses.replace(
@@ -415,10 +408,11 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     num_samples_per_prompt = 8
     seq_len = 2048
+    model_spec = gpt_oss_model_registry(
+        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+    )
     return Controller.Config(
-        model_spec=gpt_oss_model_registry(
-            "debugmodel", seq_len=seq_len, attn_backend="varlen"
-        ),
+        model_spec=model_spec,
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
@@ -461,7 +455,12 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             debug=batch_invariant_config,
-            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=GRPOLoss.Config(
+                    global_vocab_size=decoder_vocab_size(model_spec)
+                ),
+            ),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -765,13 +764,14 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
     """
     num_samples_per_prompt = 8
     seq_len = 2048
+    model_spec = model_registry(
+        "debugmodel_moe",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        moe_comm_backend="standard",
+    )
     return Controller.Config(
-        model_spec=model_registry(
-            "debugmodel_moe",
-            seq_len=seq_len,
-            attn_backend="varlen",
-            moe_comm_backend="standard",
-        ),
+        model_spec=model_spec,
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
@@ -819,7 +819,12 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
                 last_save_model_only=False,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
-            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=GRPOLoss.Config(
+                    global_vocab_size=decoder_vocab_size(model_spec)
+                ),
+            ),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -961,10 +966,11 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     num_samples_per_prompt = 8
     seq_len = 2048
+    model_spec = _qwen3_rl_model_registry(
+        "0.6B", seq_len=seq_len, attn_backend="varlen"
+    )
     return Controller.Config(
-        model_spec=_qwen3_rl_model_registry(
-            "0.6B", seq_len=seq_len, attn_backend="varlen"
-        ),
+        model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         num_generators=3,
         async_loop=AsyncLoopConfig(
@@ -1005,7 +1011,12 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 last_save_model_only=False,
             ),
             debug=batch_invariant_config,
-            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=GRPOLoss.Config(
+                    global_vocab_size=decoder_vocab_size(model_spec)
+                ),
+            ),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -1119,16 +1130,9 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
         target_offpolicy_steps=0,
         window_fraction=None,
     )
-    loss_config = config.trainer.loss
-    assert isinstance(loss_config, ChunkedLossWrapper.Config)
-    assert isinstance(loss_config.loss_fn, GRPOLoss.Config)
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
-        loss=dataclasses.replace(
-            loss_config,
-            loss_fn=dataclasses.replace(loss_config.loss_fn, global_vocab_size=None),
-        ),
         # Matching TP and disabling SP keep trainer/generator reduction order equal.
         parallelism=dataclasses.replace(
             config.trainer.parallelism,
@@ -1215,16 +1219,9 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant() -> Controller.Config:
         target_offpolicy_steps=0,
         window_fraction=None,
     )
-    loss_config = config.trainer.loss
-    assert isinstance(loss_config, ChunkedLossWrapper.Config)
-    assert isinstance(loss_config.loss_fn, GRPOLoss.Config)
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
-        loss=dataclasses.replace(
-            loss_config,
-            loss_fn=dataclasses.replace(loss_config.loss_fn, global_vocab_size=None),
-        ),
         parallelism=dataclasses.replace(
             config.trainer.parallelism,
             enable_sequence_parallel=False,

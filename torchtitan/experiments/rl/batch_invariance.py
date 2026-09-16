@@ -22,8 +22,8 @@ def force_logprobs_fn_for_batch_invariance() -> None:
 
     Swapping the kernel routes the generator and the trainer through
     the same set of ops, so logprobs match bit-for-bit. The wrapper supplies
-    full logits to vLLM, and this patch intentionally omits
-    ``global_vocab_size`` so it cannot select vocab-parallel statistics.
+    full logits to vLLM outside the trainer's TP SPMD context, so the replicated
+    path is selected directly even though this patch omits ``global_vocab_size``.
     """
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
