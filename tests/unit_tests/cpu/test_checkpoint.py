@@ -1364,6 +1364,10 @@ class TestBaseCheckpointManagerTracing(unittest.TestCase):
         manager.enable = enable
         manager._save.return_value = True
         manager.folder = "/checkpoint"
+        # Set by __init__, so spec= does not cover them, but load() reads them.
+        manager.initial_load_path = None
+        manager.initial_load_in_hf = False
+        manager.initial_load_in_hf_quantized = False
         manager._storage = mock.Mock()
         manager._storage.isdir.return_value = True
         manager._create_checkpoint_id.return_value = "/checkpoint/step-10"
