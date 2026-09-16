@@ -23,13 +23,14 @@ from torchtitan.config.transform import (
 
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
+    GQAttention,
     QKVLinear,
-    TensorParallelGQAttention,
 )
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
-from torchtitan.models.common.feed_forward import FeedForward, TensorParallelFeedForward
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    is_column_parallel_linear_config,
     Linear,
     RowParallelLinear,
 )
@@ -290,21 +291,18 @@ class TestTensorParallelTransform(unittest.TestCase):
         result = apply_transforms(config, [TensorParallelTransform()])
 
         for layer in result.model_spec.model.layers:
-            self.assertIsInstance(layer.attention, TensorParallelGQAttention.Config)
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
+            self.assertIsInstance(
+                layer.attention.qkv_linear.wqkv, ColumnParallelLinear.Config
+            )
             self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
-            self.assertIsInstance(layer.feed_forward, TensorParallelFeedForward.Config)
             self.assertIsInstance(layer.feed_forward.w13, ColumnParallelLinear.Config)
             self.assertIsInstance(layer.feed_forward.w2, RowParallelLinear.Config)
             self.assertIsNone(layer.feed_forward.w13.sharding_config)
             self.assertIsNone(layer.feed_forward.w2.sharding_config)
         for layer in config.model_spec.model.layers:
-            self.assertNotIsInstance(layer.attention, TensorParallelGQAttention.Config)
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIs(type(layer.attention.wo), Linear.Config)
-            self.assertNotIsInstance(
-                layer.feed_forward, TensorParallelFeedForward.Config
-            )
 
     def test_does_not_replace_moe_shared_experts(self):
         source = self._config().model_spec.model.layers[0].feed_forward
@@ -315,9 +313,8 @@ class TestTensorParallelTransform(unittest.TestCase):
 
         transformed = TensorParallelTransform().transform(model)
 
-        self.assertIsInstance(
-            transformed.feed_forward, TensorParallelFeedForward.Config
-        )
+        self.assertIs(type(transformed.feed_forward), FeedForward.Config)
+        self.assertIsInstance(transformed.feed_forward.w13, ColumnParallelLinear.Config)
         self.assertIs(type(transformed.shared_experts), FeedForward.Config)
 
     def test_transforms_root_attention(self):
@@ -325,7 +322,8 @@ class TestTensorParallelTransform(unittest.TestCase):
 
         transformed = TensorParallelTransform().transform(config)
 
-        self.assertIsInstance(transformed, TensorParallelGQAttention.Config)
+        self.assertIs(type(transformed), GQAttention.Config)
+        self.assertIsInstance(transformed.qkv_linear.wqkv, ColumnParallelLinear.Config)
         self.assertIsInstance(transformed.wo, RowParallelLinear.Config)
 
     def test_sync_transform_preserves_converted_projection(self):
@@ -338,8 +336,9 @@ class TestTensorParallelTransform(unittest.TestCase):
 
         transformed = TensorParallelTransform().transform(config)
 
-        self.assertIsInstance(transformed, TensorParallelFeedForward.Config)
-        self.assertIs(type(transformed.w13), _ConvertedLinear.Config)
+        self.assertIs(type(transformed), FeedForward.Config)
+        self.assertIsInstance(transformed.w13, _ConvertedLinear.Config)
+        self.assertTrue(is_column_parallel_linear_config(transformed.w13))
 
     def test_async_transform_rejects_converted_projection(self):
         config = copy.deepcopy(self._config().model_spec.model.layers[0].feed_forward)
@@ -366,9 +365,9 @@ class TestTensorParallelTransform(unittest.TestCase):
 
         self.assertIsNone(feed_forward.sharding_config.in_dst_shardings)
         self.assertIsNotNone(feed_forward.sharding_config.out_src_shardings)
-        self.assertIsNotNone(feed_forward.w13.sharding_config.in_dst_shardings)
+        self.assertIsNone(feed_forward.w13.sharding_config.in_dst_shardings)
         self.assertIsNotNone(feed_forward.w2.sharding_config.out_src_shardings)
-        self.assertIsNotNone(feed_forward.w2.sharding_config.out_dst_shardings)
+        self.assertIsNone(feed_forward.w2.sharding_config.out_dst_shardings)
 
     def test_sharding_sets_no_sequence_parallel_contract(self):
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
@@ -381,8 +380,8 @@ class TestTensorParallelTransform(unittest.TestCase):
         feed_forward = model.layers[0].feed_forward
         assert feed_forward.w13.sharding_config is not None
         assert feed_forward.w2.sharding_config is not None
-        self.assertIsNotNone(feed_forward.w13.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(feed_forward.w2.sharding_config.out_dst_shardings)
+        self.assertIsNone(feed_forward.w13.sharding_config.in_dst_shardings)
+        self.assertIsNone(feed_forward.w2.sharding_config.out_dst_shardings)
 
 
 if __name__ == "__main__":

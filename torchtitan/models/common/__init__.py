@@ -26,18 +26,12 @@ from .attention import (
     InnerAttention,
     QKVLinear,
     ScaledDotProductInnerAttention,
-    TensorParallelGQAttention,
     VarlenInnerAttention,
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
-from .feed_forward import (
-    compute_ffn_hidden_dim,
-    FeedForward,
-    SigmoidGatedFeedForward,
-    TensorParallelFeedForward,
-)
+from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
 from .linear import (
     CastLinear,
     ColumnParallelLinear,
@@ -103,8 +97,6 @@ __all__ = [
     "SwiGLU",
     "TransformerBlock",
     "UnaryActivationFn",
-    "TensorParallelFeedForward",
-    "TensorParallelGQAttention",
     "VarlenInnerAttention",
     "VarlenMetadata",
     "compute_ffn_hidden_dim",
