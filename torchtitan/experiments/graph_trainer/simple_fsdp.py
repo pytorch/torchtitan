@@ -26,6 +26,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
+from torch.fx.traceback import annotate
 
 from torchtitan.protocols.module import Module
 
@@ -35,6 +36,7 @@ from torchtitan.quantization._fsdp_tensor import (
 )
 
 _active_parametrization = True
+FSDP_PARAM_FQNS_META = "fsdp_param_fqns"
 
 
 @contextmanager
@@ -262,6 +264,7 @@ class _BuildUnshardedTensorFunction(torch.autograd.Function):
 class ReplicateComputation(Module):
     def __init__(
         self,
+        param_fqn: str,
         device_mesh: DeviceMesh,
         param_sharding: tuple[Placement, ...],
         mode: str,
@@ -269,6 +272,7 @@ class ReplicateComputation(Module):
         non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType],
     ) -> None:
         super().__init__()
+        self.param_fqn = param_fqn
         self.device_mesh = device_mesh
         self.param_sharding = param_sharding
         self.mode = mode
@@ -343,6 +347,10 @@ class ReplicateComputation(Module):
         return output
 
     def forward(self, x: DTensor) -> torch.Tensor:
+        with annotate({FSDP_PARAM_FQNS_META: (self.param_fqn,)}):
+            return self._forward(x)
+
+    def _forward(self, x: DTensor) -> torch.Tensor:
         global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
@@ -405,9 +413,7 @@ def data_parallel(
     else:
         raise ValueError(f"Unsupported mode {mode}")
 
-    modules = list(model.modules())
-
-    for mod in modules:
+    for module_fqn, mod in model.named_modules():
         params_dict = dict(mod.named_parameters(recurse=False))
         # we shouldn't apply data parallel to the modules that are already
         # sharded by data parallel
@@ -452,6 +458,7 @@ def data_parallel(
             mod,
             list(params_dict.keys()),
             lambda param_name: ReplicateComputation(
+                param_fqn=(f"{module_fqn}.{param_name}" if module_fqn else param_name),
                 device_mesh=device_mesh,
                 param_sharding=param_sharding,
                 mode=mode,
