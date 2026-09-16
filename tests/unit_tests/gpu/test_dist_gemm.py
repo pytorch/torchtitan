@@ -35,22 +35,25 @@ from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     LinearLoRAHandler,
     LoRATransform,
-    TensorParallelTransform,
     transform_model_config_,
 )
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.models.common.async_linear import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
 )
-from torchtitan.models.common.async_linear import (
-    AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
-)
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RowParallelLinear,
+)
 
 DIM = 256
 N_HEADS = 8
@@ -65,12 +68,15 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
         return model_registry("debugmodel").model
 
-    def test_default_keeps_plain_projections(self):
+    def test_default_uses_sync_tp_projections(self):
         for layer in self._model_config().layers:
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
-            self.assertIs(type(layer.attention.wo), Linear.Config)
-            self.assertIs(type(layer.feed_forward.w13), Linear.Config)
-            self.assertIs(type(layer.feed_forward.w2), Linear.Config)
+            self.assertIsInstance(
+                layer.attention.qkv_linear.wqkv, ColumnParallelLinear.Config
+            )
+            self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
+            self.assertIsInstance(layer.feed_forward.w13, ColumnParallelLinear.Config)
+            self.assertIsInstance(layer.feed_forward.w2, RowParallelLinear.Config)
 
     def test_transform_selects_async_linears(self):
         model = transform_model_config_(
@@ -132,7 +138,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             enable_sp=True,
         )
 
-        self.assertIsNotNone(stock_layer.attention.sharding_config.in_dst_shardings)
+        self.assertIsNone(stock_layer.attention.sharding_config.in_dst_shardings)
         self.assertIsNone(stock_layer.attention.sharding_config.out_dst_shardings)
         self.assertIsNone(async_layer.attention.sharding_config.in_dst_shardings)
         self.assertIsNone(async_layer.attention.sharding_config.out_dst_shardings)
@@ -146,7 +152,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             async_layer.attention.qkv_linear.wqkv.sharding_config.in_dst_shardings
         )
         self.assertIsNotNone(stock_layer.attention.wo.sharding_config.out_src_shardings)
-        self.assertIsNotNone(stock_layer.attention.wo.sharding_config.out_dst_shardings)
+        self.assertIsNone(stock_layer.attention.wo.sharding_config.out_dst_shardings)
         self.assertIsNotNone(async_layer.attention.wo.sharding_config.out_src_shardings)
         self.assertIsNone(async_layer.attention.wo.sharding_config.out_dst_shardings)
         self.assertIn(
@@ -166,7 +172,6 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         model = transform_model_config_(
             self._model_config(),
             [
-                TensorParallelTransform(),
                 LoRATransform(handlers=(LinearLoRAHandler(),)),
             ],
         )

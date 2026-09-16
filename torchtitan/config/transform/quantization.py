@@ -10,13 +10,17 @@ import logging
 from dataclasses import dataclass, field, fields
 from functools import partial
 from importlib.util import find_spec
-from typing import Literal
+from typing import Any, cast, Literal
 
 import torch
 import torch._inductor.config
 
 from torchtitan.models.common.attention import QKVLinear
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import (
+    Linear,
+    preserve_parallel_linear_role,
+    RouterGateLinear,
+)
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls, Float8Linear
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
@@ -154,7 +158,11 @@ class Float8LinearConverter(QuantizationConverter):
                         f"Float8 quantization does not support router gate {fqn!r}; "
                         "exclude it with filter_fqns."
                     )
-                new_config = Float8Linear.Config(
+                quantized_cls = preserve_parallel_linear_role(
+                    Float8Linear, linear_config
+                )
+                config_cls = cast(Any, quantized_cls.Config)
+                new_config = config_cls(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,
                     bias=linear_config.bias,
@@ -356,7 +364,9 @@ class MXFP8LinearConverter(QuantizationConverter):
             fqn for fqn in target_fqns if any(selector in fqn for selector in selectors)
         }
         for fqn, config, parent, attr in targets:
-            new_config = MXFP8Linear.Config(
+            quantized_cls = preserve_parallel_linear_role(MXFP8Linear, config)
+            config_cls = cast(Any, quantized_cls.Config)
+            new_config = config_cls(
                 in_features=config.in_features,
                 out_features=config.out_features,
                 bias=config.bias,
@@ -484,7 +494,9 @@ class NVFP4LinearConverter(QuantizationConverter):
                         f"NVFP4 quantization does not support router gate {fqn!r}; "
                         "exclude it with fqns."
                     )
-                new_config = NVFP4Linear.Config(
+                quantized_cls = preserve_parallel_linear_role(NVFP4Linear, config)
+                config_cls = cast(Any, quantized_cls.Config)
+                new_config = config_cls(
                     in_features=config.in_features,
                     out_features=config.out_features,
                     bias=config.bias,
