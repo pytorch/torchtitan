@@ -150,6 +150,11 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Enable passes that improve performance but may change numerics
     compared to the uncompiled path (e.g. RMSNorm Inductor fusion)."""
 
+    coalesce_chunked_loss_rs: bool = False
+    """Sum chunk gradients locally before reduce-scatter.
+    Requires numerics_changing_optim: changes floating-point reduction order.
+    """
+
     cpu_offload_prefetch_n_layers: int = 1
     """Prefetch reloads this many layers ahead in the backward graph
     to overlap H2D transfers with compute."""

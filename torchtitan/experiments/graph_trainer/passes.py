@@ -213,9 +213,31 @@ def compile_time_passes(
 
     passes = construct_mandatory_graph_passes()
     if include_mandatory_normalization:
+        passes.append(eliminate_dead_code_pass)
+
+    if config.compile.coalesce_chunked_loss_rs:
+        if not config.compile.numerics_changing_optim:
+            raise ValueError(
+                "--compile.coalesce_chunked_loss_rs requires "
+                "--compile.numerics_changing_optim because it changes "
+                "floating-point reduction order."
+            )
+        if uses_chunked_loss:
+            from torchtitan.experiments.graph_trainer.performance_passes import (
+                coalesce_chunked_loss_rs_pass,
+            )
+
+            # Consume gradient identities before canonicalization removes the
+            # detach/view nodes on which marker removal may have placed them.
+            passes.append(coalesce_chunked_loss_rs_pass)
+        else:
+            logger.warning(
+                "Ignoring coalesce_chunked_loss_rs: the loss is not chunked."
+            )
+
+    if include_mandatory_normalization:
         passes.extend(
             [
-                eliminate_dead_code_pass,
                 canonicalize_graph_pass,
                 deduplicate_fsdp_unshard_chains_pass,
             ]
