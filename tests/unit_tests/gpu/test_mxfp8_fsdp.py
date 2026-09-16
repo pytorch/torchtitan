@@ -36,9 +36,7 @@ from torchtitan.quantization.mxfp8.tensor import (  # noqa: E402
 )
 
 
-# Every test here spawns a two-rank process group, so the whole module belongs
-# to the multi_gpu lane. Without the marker the tests land in the single-GPU
-# lane instead, where the device-count guard skips all of them.
+# These tests use up to two ranks, so the module belongs to the multi_gpu lane.
 pytestmark = [
     pytest.mark.multi_gpu,
     pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two GPUs"),
@@ -480,6 +478,108 @@ def test_mxfp8_fsdp_tensor_lifecycle(target):
         target,
         args=(2, get_free_port()),
         nprocs=2,
+        join=True,
+    )
+
+
+def _run_inference_cache_lifecycle(
+    rank: int,
+    world_size: int,
+    port: int,
+) -> None:
+    """Cache real MXFP8 operands across decode steps and refresh after weight sync."""
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    original_quantize_weight = mxfp8_tensor._quantize_mxfp8_weight
+    num_quantize_calls = 0
+
+    def counted_quantize_weight(weight_NK: torch.Tensor):
+        nonlocal num_quantize_calls
+        num_quantize_calls += 1
+        return original_quantize_weight(weight_NK)
+
+    try:
+        torch.manual_seed(42)
+        weight_NK = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16) * 0.1
+        updated_weight_NK = -2 * weight_NK
+        inputs = [
+            torch.randn(64, 128, device="cuda", dtype=torch.bfloat16) for _ in range(3)
+        ]
+        config = MXFP8Linear.Config(in_features=128, out_features=128, bias=False)
+        reference = config.build().cuda().bfloat16().eval().requires_grad_(False)
+        expected_outputs = []
+        for reference_weight_NK in (weight_NK, updated_weight_NK):
+            with torch.no_grad():
+                reference.weight.copy_(reference_weight_NK)
+            with torch.inference_mode():
+                expected_outputs.append([reference(input_MK) for input_MK in inputs])
+        assert not torch.equal(expected_outputs[0][0], expected_outputs[1][0])
+
+        linear = config.build().cuda().bfloat16().eval().requires_grad_(False)
+        with torch.no_grad():
+            linear.weight.copy_(weight_NK)
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
+        fully_shard(
+            linear,
+            mesh=mesh,
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+            ),
+            reshard_after_forward=False,
+        )
+        mxfp8_tensor._quantize_mxfp8_weight = counted_quantize_weight
+        inner_tensor_ids = None
+        unsharded_param_id = None
+        for generation, generation_outputs in enumerate(expected_outputs):
+            if generation:
+                state_dict = linear.state_dict()
+                assert isinstance(linear.weight, DTensor)
+                assert all(
+                    tensor.untyped_storage().size() == 0
+                    for tensor in weight_param._unsharded_inner_tensors
+                )
+                with torch.no_grad():
+                    state_dict["weight"].to_local().copy_(
+                        updated_weight_NK.chunk(world_size, dim=0)[rank]
+                    )
+                linear.load_state_dict(state_dict)
+
+            for input_MK, expected_MN in zip(inputs, generation_outputs, strict=True):
+                # No FSDP warmup: the first unshard creates inference tensors.
+                with torch.inference_mode():
+                    output_MN = linear(input_MK)
+                torch.testing.assert_close(output_MN, expected_MN, rtol=0, atol=0)
+                assert num_quantize_calls == generation + 1
+                assert isinstance(linear.weight, _UnshardedFSDPTensor)
+                weight_param = _get_weight_param(linear)
+                current_ids = tuple(map(id, weight_param._unsharded_inner_tensors))
+                if inner_tensor_ids is None:
+                    inner_tensor_ids = current_ids
+                    unsharded_param_id = id(linear.weight)
+                assert current_ids == inner_tensor_ids
+                assert id(linear.weight) == unsharded_param_id
+                assert all(
+                    tensor.is_inference() and tensor.untyped_storage().size() > 0
+                    for tensor in weight_param._unsharded_inner_tensors
+                )
+                assert all(
+                    tensor.untyped_storage().size() == 0
+                    for tensor in weight_param.all_gather_outputs
+                )
+    finally:
+        mxfp8_tensor._quantize_mxfp8_weight = original_quantize_weight
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world_size", [1, 2])
+def test_mxfp8_fsdp_inference_cache_lifecycle(world_size):
+    mp.spawn(
+        _run_inference_cache_lifecycle,
+        args=(world_size, get_free_port()),
+        nprocs=world_size,
         join=True,
     )
 
