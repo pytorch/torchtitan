@@ -40,6 +40,11 @@ all model config transforms. In particular, apply quantization in
 `model_registry` before applying `LoRATransform`; running a converter over a
 LoRA-transformed tree can replace an adapter config.
 
+Tensor parallelism must wrap the final projection implementation. The intended
+ordering is quantization converter -> LoRA transform -> TP transform. Legacy
+quantization converters already run before transforms, and the TP transforms'
+`run_after` declarations ensure that they run after `LoRATransform`.
+
 Use `transform_model_config_` when there is no trainer config, such as with a bare
 `ModelSpec`. It rewrites the model config in place and returns the root. It does
 not copy or validate the config.
