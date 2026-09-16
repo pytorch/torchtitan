@@ -83,9 +83,9 @@ jobs:
         # 4. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-        # Config-only CPU guard: regular recipes select the vocab-parallel
-        # statistics path; batch-invariant parity recipes do not.
-        pytest tests/unit_tests/cpu/test_rl_policy_loss_configs.py -q
+        # Config-only guard: TP policy recipes carry the model vocabulary size;
+        # runtime batch-invariant mode, not config omission, selects the gather.
+        pytest torchtitan/experiments/rl/tests/test_policy_loss_configs.py -q
 
         # 5. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
