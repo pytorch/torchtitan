@@ -113,6 +113,6 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
         return _transform_feed_forward(model)
 
 
-# Async TP does not yet compose with converted projection implementations. Run
-# after LoRA so the transform rejects that unsupported composition explicitly.
-AsyncTensorParallelTransform.run_after = (LoRATransform,)
+# Async kernels call their fused autograd functions directly instead of the
+# wrapped projection's forward, so they would silently omit LoRA computation.
+AsyncTensorParallelTransform.conflicts_with = (LoRATransform,)

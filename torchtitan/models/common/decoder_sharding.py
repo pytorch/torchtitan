@@ -155,14 +155,23 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
 
 
 def column_parallel_config(*, input_layout: SpmdType) -> ShardingConfig:
-    """Sharding contract for an explicit column-parallel ``Linear``."""
-    sharding = colwise_config()
-    return ShardingConfig(
-        state_shardings=sharding.state_shardings,
-        in_src_shardings={"input": input_layout},
-        out_src_shardings=sharding.out_src_shardings,
-    )
+    """Sharding contract for an explicit column-parallel ``Linear``.
 
+    Unlike ``colwise_config``, this records the input layout consumed by
+    ``ColumnParallelLinear`` when it performs its own all-gather. The older
+    helper remains for model-specific projections whose parent still owns the
+    redistribution, and can be removed after those projections migrate.
+    """
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0)),
+            "bias": dense_param_placement(tp=spmd.S(0)),
+        },
+        # ColumnParallelLinear reads this source layout to choose the explicit
+        # input redistribution to Replicate before calling Linear.forward().
+        in_src_shardings={"input": input_layout},
+        out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
+    )
 
 def row_parallel_config(
     *,
