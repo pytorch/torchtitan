@@ -161,7 +161,6 @@ class LoRATransform(ModelConfigTransform):
         )
 
         for fqn, cfg, parent, attr in reversed(configs):
-            assert isinstance(cfg, Module.Config)
             last_segment = fqn.rsplit(".", 1)[-1]
             handler = next(
                 (
