@@ -17,7 +17,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.config.transform import LoRAConverter, TensorParallelTransform
+from torchtitan.config.transform import (
+    LinearLoRAHandler,
+    LoRATransform,
+    TensorParallelTransform,
+)
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
@@ -133,7 +137,11 @@ class TestTpRematRegions(DTensorTestBase):
         config = TensorParallelTransform().transform(config)
         assert isinstance(config, FeedForward.Config)
         if use_lora:
-            config = LoRAConverter.Config(rank=2, alpha=4).build().convert(config)
+            config = LoRATransform(
+                handlers=(LinearLoRAHandler(),),
+                rank=2,
+                alpha=4,
+            ).transform(config)
             assert isinstance(config, FeedForward.Config)
         set_dense_ffn_sharding(
             config,

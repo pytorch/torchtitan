@@ -10,7 +10,10 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
@@ -1117,7 +1120,7 @@ def model_registry(
         ),
     )
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
 
