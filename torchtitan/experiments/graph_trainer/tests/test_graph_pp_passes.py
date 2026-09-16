@@ -833,11 +833,16 @@ def _make_forward_graph_without_wait() -> fx.GraphModule:
     return _make_graph_module(graph)
 
 
-def _make_backward_graph_with_reduce_grad_epilogues() -> fx.GraphModule:
+def _make_backward_graph_with_reduce_grad_epilogues(
+    *, process_group_is_input: bool = False
+) -> fx.GraphModule:
     graph = fx.Graph()
     fsdp_grad = graph.placeholder("fsdp_grad")
     ddp_grad = graph.placeholder("ddp_grad")
     input_grad = graph.placeholder("input_grad")
+    process_group = (
+        graph.placeholder("process_group") if process_group_is_input else _FAKE_PG
+    )
     cast = graph.call_function(
         torch.ops.aten._to_copy.default,
         args=(fsdp_grad,),
@@ -845,7 +850,7 @@ def _make_backward_graph_with_reduce_grad_epilogues() -> fx.GraphModule:
     )
     reduce_scatter = graph.call_function(
         torch.ops._c10d_functional.reduce_scatter_tensor.default,
-        args=(cast, "sum", 1, _FAKE_PG),
+        args=(cast, "sum", 1, process_group),
     )
     reduce_scatter_wait = graph.call_function(
         torch.ops._c10d_functional.wait_tensor.default,
@@ -853,13 +858,20 @@ def _make_backward_graph_with_reduce_grad_epilogues() -> fx.GraphModule:
     )
     all_reduce = graph.call_function(
         torch.ops._c10d_functional.all_reduce.default,
-        args=(ddp_grad, "sum", _FAKE_PG),
+        args=(ddp_grad, "sum", process_group),
     )
     all_reduce_wait = graph.call_function(
         torch.ops._c10d_functional.wait_tensor.default,
         args=(all_reduce,),
     )
-    graph.output((reduce_scatter_wait, all_reduce_wait, None, input_grad))
+    graph.output(
+        (
+            reduce_scatter_wait,
+            all_reduce_wait,
+            process_group if process_group_is_input else None,
+            input_grad,
+        )
+    )
     return _make_graph_module(graph)
 
 
@@ -1248,6 +1260,21 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         )
         self.assertEqual(len(split.bw_no_fsdp_output_names), 4)
         self.assertEqual(split.bw_no_fsdp_output_names[-1], "input_grad")
+
+    def test_backward_split_accepts_dynamic_process_group_input(self) -> None:
+        split = split_backward_fsdp_collectives(
+            _make_backward_graph_with_reduce_grad_epilogues(
+                process_group_is_input=True
+            ),
+            num_param_grads=3,
+        )
+
+        self.assertIsNotNone(split.reduce_grad_module)
+        self.assertIn("process_group", split.reduce_grad_input_names)
+        self.assertNotIn(
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            _call_targets(split.bw_no_fsdp_module),
+        )
 
     def test_backward_split_removes_dead_bucketed_all_gather(self) -> None:
         split = split_backward_fsdp_collectives(

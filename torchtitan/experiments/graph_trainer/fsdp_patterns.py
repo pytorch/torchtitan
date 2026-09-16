@@ -400,9 +400,10 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     GraphPP splits at the input to the earliest grad-sync collective in that
     suffix. The cast remains in ``bw_no_fsdp`` so microbatch accumulation
     happens in FSDP's reduce dtype, and ``reduce_grad`` contains only the
-    scheduled collective epilogue. Values that are not FX nodes, such as
-    ``None`` parameter-grad slots, are not collective outputs and are preserved
-    by the caller.
+    scheduled collective epilogue. CooR supplies the process group as another
+    FX input, so collective traversal follows its tensor argument explicitly.
+    Values that are not FX nodes, such as ``None`` parameter-grad slots, are
+    not collective outputs and are preserved by the caller.
 
     TODO(sanketpurandare): requires upstream change: FSDP trace/passes should
     annotate reduce-grad collective regions for downstream graph extraction.
@@ -412,12 +413,18 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
 
     node = param_grad_output
     reduce_grad_input = None
-    while isinstance(node, fx.Node) and len(node.all_input_nodes) == 1:
-        input_node = node.all_input_nodes[0]
+    while isinstance(node, fx.Node):
+        if is_reduce_grad_collective(node):
+            input_node = node.args[0]
+            if not isinstance(input_node, fx.Node):
+                break
+        elif len(node.all_input_nodes) == 1:
+            input_node = node.all_input_nodes[0]
+        else:
+            break
         if len(input_node.users) > 1:
             break
-        previous_node = node
+        if is_reduce_grad_collective(node):
+            reduce_grad_input = input_node
         node = input_node
-        if is_reduce_grad_collective(previous_node):
-            reduce_grad_input = node
     return reduce_grad_input
