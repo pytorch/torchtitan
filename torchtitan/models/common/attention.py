@@ -56,7 +56,6 @@ __all__ = [
     "InnerAttention",
     "QKVLinear",
     "ScaledDotProductInnerAttention",
-    "TensorParallelGQAttention",
     "VarlenInnerAttention",
     "VarlenMetadata",
     "create_attention_mask",
@@ -950,11 +949,3 @@ class GQAttention(BaseAttention):
         )(out_TD)
         remat.recompute_needs_tensor(out_TD)
         return out_TD
-
-
-class TensorParallelGQAttention(GQAttention):
-    """Common GQA whose projection modules own the TP collectives."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(GQAttention.Config):
-        pass

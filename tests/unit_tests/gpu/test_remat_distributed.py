@@ -134,8 +134,6 @@ class TestTpRematRegions(DTensorTestBase):
             w1_param_init=init,
             w2w3_param_init=init,
         )
-        config = TensorParallelTransform().transform(config)
-        assert isinstance(config, FeedForward.Config)
         if use_lora:
             config = LoRATransform(
                 handlers=(LinearLoRAHandler(),),
@@ -143,6 +141,8 @@ class TestTpRematRegions(DTensorTestBase):
                 alpha=4,
             ).transform(config)
             assert isinstance(config, FeedForward.Config)
+        config = TensorParallelTransform().transform(config)
+        assert isinstance(config, FeedForward.Config)
         set_dense_ffn_sharding(
             config,
             attn_x_layout=(
