@@ -8,6 +8,7 @@ import unittest
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
+from itertools import product
 
 import spmd_types as spmd
 import torch
@@ -109,50 +110,74 @@ class TestEmbedding(DTensorTestBase):
 
     @with_comms
     def test_vocab_parallel_padding_forward_backward(self):
-        """Preserve nn.Embedding padding semantics on every vocabulary shard."""
+        """Preserve padding, frequency scaling, and renormalization on each shard."""
         mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
-        for vocab_size in (128, 131):
-            for padding_idx in (None, 0, 32, 33, 64, -1):
-                with self.subTest(vocab_size=vocab_size, padding_idx=padding_idx):
-                    torch.manual_seed(42)
-                    reference = nn.Embedding(
-                        vocab_size,
-                        32,
-                        padding_idx=padding_idx,
-                        device=self.device_type,
+        for (
+            vocab_size,
+            padding_idx,
+            (scale_grad_by_freq, max_norm),
+            cover_full_vocab,
+        ) in product(
+            (128, 131),
+            (None, 0, 32, 33, 64, -1),
+            ((False, None), (True, None), (True, 1.0)),
+            (False, True),
+        ):
+            with self.subTest(
+                vocab_size=vocab_size,
+                padding_idx=padding_idx,
+                scale_grad_by_freq=scale_grad_by_freq,
+                max_norm=max_norm,
+                cover_full_vocab=cover_full_vocab,
+            ):
+                torch.manual_seed(42)
+                reference = nn.Embedding(
+                    vocab_size,
+                    32,
+                    padding_idx=padding_idx,
+                    max_norm=max_norm,
+                    scale_grad_by_freq=scale_grad_by_freq,
+                    device=self.device_type,
+                )
+                # Nonzero padding weights must still be returned by forward.
+                with torch.no_grad():
+                    reference.weight.normal_()
+                # The review's two-token case leaves some shards with no hits.
+                tokens = torch.tensor([0, 32], device=self.device_type)
+                if cover_full_vocab:
+                    tokens = torch.cat(
+                        (
+                            torch.arange(vocab_size, device=self.device_type).repeat(2),
+                            torch.tensor([0, 32, 32, 64], device=self.device_type),
+                        )
                     )
-                    # Nonzero padding weights must still be returned by forward.
-                    with torch.no_grad():
-                        reference.weight.normal_()
-                    tokens = (
-                        torch.arange(vocab_size, device=self.device_type)
-                        .repeat(2)
-                        .unsqueeze(0)
-                    )
-                    expected = reference(tokens)
-                    expected.sum().backward()
+                tokens = tokens.unsqueeze(0)
 
-                    # HF module conversion preserves nn.Embedding attributes.
-                    embedding = deepcopy(reference)
-                    embedding.__class__ = Embedding
-                    embedding.weight = nn.Parameter(
-                        distribute_tensor(
-                            reference.weight.detach(), mesh, (Shard(0),)
-                        ).to_local()
-                    )
-                    with set_current_spmd_mesh(mesh):
-                        partial_output = embedding(tokens)
-                    partial_output.sum().backward()
-                    output = partial_output.detach().clone()
-                    dist.all_reduce(output, group=mesh.get_group("tp"))
-
-                    expected_grad = distribute_tensor(
-                        reference.weight.grad, mesh, (Shard(0),)
+                # HF module conversion preserves nn.Embedding attributes.
+                embedding = deepcopy(reference)
+                embedding.__class__ = Embedding
+                embedding.weight = nn.Parameter(
+                    distribute_tensor(
+                        reference.weight.detach().clone(), mesh, (Shard(0),)
                     ).to_local()
-                    self.assertEqual(output, expected, atol=0, rtol=0)
-                    self.assertEqual(
-                        embedding.weight.grad, expected_grad, atol=0, rtol=0
-                    )
+                )
+                expected = reference(tokens)
+                expected.sum().backward()
+                with set_current_spmd_mesh(mesh):
+                    partial_output = embedding(tokens)
+                partial_output.sum().backward()
+                output = partial_output.detach().clone()
+                dist.all_reduce(output, group=mesh.get_group("tp"))
+
+                expected_grad = distribute_tensor(
+                    reference.weight.grad, mesh, (Shard(0),)
+                ).to_local()
+                expected_weight = distribute_tensor(
+                    reference.weight.detach(), mesh, (Shard(0),)
+                ).to_local()
+                self.assertEqual(output, expected, atol=0, rtol=0)
+                self.assertEqual(embedding.weight, expected_weight, atol=0, rtol=0)
+                self.assertEqual(embedding.weight.grad, expected_grad, atol=0, rtol=0)
 
     @with_comms
     def test_vocab_parallel_embedding_parity(self):

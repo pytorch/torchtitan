@@ -57,15 +57,27 @@ class Embedding(nn.Embedding, Module):
             and offset <= self.padding_idx < offset + self.weight.shape[0]
         ):
             local_padding_idx = self.padding_idx - offset
+        # V: local vocabulary rows; D: embedding dimension.
+        weight_VD = self.weight
+        if self.scale_grad_by_freq:
+            # Nonlocal tokens need a separate row to avoid inflating the
+            # frequency of real tokens at the clamped vocabulary boundaries.
+            local_input = torch.where(mask, local_input, weight_VD.shape[0])
+            weight_VD = F.pad(weight_VD, (0, 0, 0, 1))
         out = F.embedding(
             local_input,
-            self.weight,
+            weight_VD,
             local_padding_idx,
             self.max_norm,
             self.norm_type,
             self.scale_grad_by_freq,
             self.sparse,
         )
+        if self.scale_grad_by_freq and self.max_norm is not None:
+            # F.embedding renormalizes in place; preserve that on the parameter
+            # after the lookup used a padded copy.
+            with torch.no_grad():
+                self.weight.copy_(weight_VD[:-1])
         return out * mask.unsqueeze(-1).to(out.dtype)
 
 
