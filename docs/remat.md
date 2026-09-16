@@ -74,9 +74,9 @@ wo or w2 region:
 ```
 
 Each projection owns its redistribution through its `ShardingConfig`, so the
-generic module-forward wrapper runs inside the remat region. For dense FFNs,
-`TensorParallelTransform` selects `w13` and `w2` projection roles while keeping
-the `FeedForward` computation unchanged.
+generic module-forward wrapper runs inside the remat region. Common model
+builders use synchronous column- and row-parallel projections directly while
+keeping the `FeedForward` computation unchanged.
 
 `AsyncTensorParallelTransform` selects symmetric-memory implementations that
 overlap the same communication and GEMM. The logical remat region names and

@@ -218,7 +218,7 @@ def _shared_experts_sharding_configs(
         )
 
     # TODO: Delete this fallback after every shared-expert construction path
-    # applies TensorParallelTransform.
+    # uses explicit tensor-parallel projection boundaries.
     return (
         ShardingConfig(
             in_src_shardings={"x": input_layout},

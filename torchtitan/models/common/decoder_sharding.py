@@ -315,8 +315,8 @@ def _set_legacy_gqa_attention_sharding(
     enable_sp: bool,
 ) -> None:
     """Keep TP redistribution wrappers for unsupported attention paths."""
-    # TODO: Delete this fallback after TensorParallelTransform supports every
-    # model-specific attention path, including Muse Glimmer's shared input.
+    # TODO: Delete this fallback after model-specific attention paths, including
+    # Muse Glimmer's shared input, expose explicit TP projection boundaries.
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x_TD": attn_x_layout},
         in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
@@ -402,8 +402,8 @@ def _set_legacy_dense_ffn_sharding(
     enable_sp: bool,
 ) -> None:
     """Keep TP redistribution wrappers for unsupported dense FFN paths."""
-    # TODO: Delete this fallback after every TP model-construction path applies
-    # TensorParallelTransform, including model-specific FFNs and shared experts.
+    # TODO: Delete this fallback after model-specific FFNs expose explicit TP
+    # projection boundaries.
     feed_forward_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x": attn_x_layout},
         in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},

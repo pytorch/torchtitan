@@ -15,7 +15,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.config.transform import TensorParallelTransform
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.config_utils import make_ffn_config
@@ -48,9 +47,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     w2w3_param_init=init,
                 )
                 reference = copy.deepcopy(base_config).build().to(device)
-                parallel_config = TensorParallelTransform().transform(
-                    copy.deepcopy(base_config)
-                )
+                parallel_config = copy.deepcopy(base_config)
                 set_dense_ffn_sharding(
                     parallel_config,
                     attn_x_layout=(

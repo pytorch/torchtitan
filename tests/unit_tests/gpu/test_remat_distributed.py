@@ -17,11 +17,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.config.transform import (
-    LinearLoRAHandler,
-    LoRATransform,
-    TensorParallelTransform,
-)
+from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
@@ -141,7 +137,6 @@ class TestTpRematRegions(DTensorTestBase):
                 alpha=4,
             ).transform(config)
             assert isinstance(config, FeedForward.Config)
-        config = TensorParallelTransform().transform(config)
         assert isinstance(config, FeedForward.Config)
         set_dense_ffn_sharding(
             config,
@@ -166,7 +161,6 @@ class TestTpRematRegions(DTensorTestBase):
             inner_attention=_InnerAttention.Config(),
             rope=None,
         )
-        config = TensorParallelTransform().transform(config)
         assert isinstance(config, GQAttention.Config)
         set_gqa_attention_sharding(config, enable_sp=enable_sp)
         set_gqa_inner_attention_local_spmd(config.inner_attention)

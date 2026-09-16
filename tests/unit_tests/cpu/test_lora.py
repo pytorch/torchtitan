@@ -15,7 +15,6 @@ from torchtitan.config.transform import (
     Float8LinearConverter,
     LinearLoRAHandler,
     LoRATransform,
-    TensorParallelTransform,
     transform_model_config_,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -176,7 +175,6 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
         alpha=4,
         target_modules=["w13"],
     ).transform(config)
-    config = TensorParallelTransform().transform(config)
     assert isinstance(config, FeedForward.Config)
     set_dense_ffn_sharding(
         config,
