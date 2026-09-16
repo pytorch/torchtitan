@@ -235,6 +235,11 @@ class Validator(BaseValidator):
                         kwarg_mbs=kwarg_mbs,
                         target_mbs=target_mbs,
                         losses=losses,
+                        return_outputs=False,
+                        # Validation aggregates loss sums before normalizing.
+                        loss_kwargs={
+                            "global_valid_tokens": torch.ones_like(global_valid_tokens)
+                        },
                     )
 
                 # accumulate losses across pipeline microbatches

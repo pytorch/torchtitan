@@ -99,6 +99,35 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
     assert loader.closed
 
 
+def test_pipeline_validator_requests_unnormalized_loss(monkeypatch):
+    def row(num_valid_tokens):
+        return {
+            "input": torch.ones(1, 1),
+            "labels": torch.ones(1, 1, dtype=torch.long),
+            "num_valid_tokens": num_valid_tokens,
+        }
+
+    validator = _generic_validator(_ClosableLoader([row(2), row(3)]))
+    validator.parallel_dims.pp_enabled = True
+    validator.parallelism.num_pp_microbatches = 2
+    validator.pp_has_first_stage = True
+    validator.pp_has_last_stage = True
+
+    def eval_schedule(**kwargs):
+        assert kwargs["return_outputs"] is False
+        torch.testing.assert_close(
+            kwargs["loss_kwargs"]["global_valid_tokens"], torch.tensor(1)
+        )
+        kwargs["losses"].extend((torch.tensor(4.0), torch.tensor(6.0)))
+
+    validator.pp_schedule = SimpleNamespace(eval=eval_schedule)
+    monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+
+    validator.validate([_EchoModel()], step=1)
+
+    validator.metrics_processor.log_validation.assert_called_once_with(loss=2.0, step=1)
+
+
 def _flux_validator(loader):
     validator = object.__new__(FluxValidator)
     validator.config = FluxValidator.Config(
