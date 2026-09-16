@@ -170,13 +170,13 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
         w1_param_init=init,
         w2w3_param_init=init,
     )
-    config = TensorParallelTransform().transform(config)
     config = LoRATransform(
         handlers=LINEAR_LORA_HANDLERS,
         rank=2,
         alpha=4,
         target_modules=["w13"],
     ).transform(config)
+    config = TensorParallelTransform().transform(config)
     assert isinstance(config, FeedForward.Config)
     set_dense_ffn_sharding(
         config,
@@ -186,7 +186,8 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
 
     feed_forward = config.build()
     assert feed_forward.w13._sharding_config is not None
-    assert feed_forward.w13._sharding_config.in_dst_shardings is not None
+    assert feed_forward.w13._sharding_config.in_src_shardings is not None
+    assert feed_forward.w13._sharding_config.in_dst_shardings is None
 
     lora_b_sharding = feed_forward.w13.lora_b._sharding_config
     assert lora_b_sharding is not None
