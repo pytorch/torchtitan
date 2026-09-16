@@ -225,7 +225,7 @@ def _precompile_aot_fx_trace(
     from torchtitan.experiments.graph_trainer.make_fx_tracer import extract_module_state
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
-        get_spmd_precompile_meshes,
+        get_precompile_runtime_meshes,
         precompile_graph_pp_stage_save,
     )
 
@@ -309,11 +309,7 @@ def _precompile_aot_fx_trace(
         device=device,
         group=pp_mesh.get_group("pp"),
     )
-    precompile_meshes = (
-        get_spmd_precompile_meshes(parallel_dims)
-        if config.parallelism.spmd_backend == "spmd_types"
-        else None
-    )
+    precompile_meshes = get_precompile_runtime_meshes(parallel_dims)
     logger.info("Tracing and compiling PP=1 GraphPP stage callables...")
     with trace_context(), loss_parallel_ctx:
         _build_stage_graphs(

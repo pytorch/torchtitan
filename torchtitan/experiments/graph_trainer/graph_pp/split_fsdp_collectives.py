@@ -76,14 +76,17 @@ class GraphPPFSDPBackwardSplit:
         bw_no_fsdp_output_names (tuple[str, ...]): ``bw_no_fsdp_module`` output
             names.
         reduce_grad_input_names (tuple[str, ...]): ``reduce_grad_module``
-            placeholder names, or empty when ``reduce_grad_module`` is
-            ``None``.
+            parameter-gradient placeholder names, or empty when
+            ``reduce_grad_module`` is ``None``.
+        reduce_grad_aux_input_names (tuple[str, ...]): Runtime metadata
+            placeholders consumed after the parameter gradients.
     """
 
     bw_no_fsdp_module: fx.GraphModule
     reduce_grad_module: fx.GraphModule | None
     bw_no_fsdp_output_names: tuple[str, ...]
     reduce_grad_input_names: tuple[str, ...]
+    reduce_grad_aux_input_names: tuple[str, ...]
 
 
 def _remove_dead_all_gather_launches(graph: fx.Graph) -> None:
@@ -369,6 +372,7 @@ def split_backward_fsdp_collectives(
             reduce_grad_module=None,
             bw_no_fsdp_output_names=output_names(bw_module),
             reduce_grad_input_names=(),
+            reduce_grad_aux_input_names=(),
         )
 
     if not extract_grad_reduction:
@@ -377,6 +381,7 @@ def split_backward_fsdp_collectives(
             reduce_grad_module=None,
             bw_no_fsdp_output_names=output_names(bw_module),
             reduce_grad_input_names=(),
+            reduce_grad_aux_input_names=(),
         )
 
     reduction_node_names = set()
@@ -399,6 +404,11 @@ def split_backward_fsdp_collectives(
         for input_node in reduce_grad_inputs
         if isinstance(input_node, fx.Node)
     )
+    reduce_grad_aux_inputs = [
+        node
+        for node in placeholders
+        if node.name in reduction_node_names and node not in unique_reduce_grad_inputs
+    ]
     bw_no_fsdp_output_descs = [None] * len(reduce_grad_inputs)
     with allow_fx_graph_extraction_of_side_effectful_ops(
         {
@@ -416,7 +426,7 @@ def split_backward_fsdp_collectives(
         )
         reduce_grad_graph = _extract_graph_with_inputs_outputs(
             graph,
-            unique_reduce_grad_inputs,
+            unique_reduce_grad_inputs + reduce_grad_aux_inputs,
             list(grad_outputs),
             grad_output_descs,
             "reduce_grad",
@@ -439,5 +449,6 @@ def split_backward_fsdp_collectives(
         bw_no_fsdp_module=bw_no_fsdp_module,
         reduce_grad_module=reduce_grad_module,
         bw_no_fsdp_output_names=output_names(bw_no_fsdp_module),
-        reduce_grad_input_names=placeholder_names(reduce_grad_module),
+        reduce_grad_input_names=tuple(node.name for node in unique_reduce_grad_inputs),
+        reduce_grad_aux_input_names=tuple(node.name for node in reduce_grad_aux_inputs),
     )

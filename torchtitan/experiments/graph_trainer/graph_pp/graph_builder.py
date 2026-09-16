@@ -135,7 +135,8 @@ class _StageGraphMeta:
        to the previous stage.
     5. FSDP edges: ``unshard_flat_param_indices`` and
        ``reduce_grad_input_names`` bind optional ``UNSHARD`` and ``REDUCE_GRAD``
-       graphs to the same flat calling convention.
+       graphs to the same flat calling convention. Runtime mesh indices supply
+       process-group dependencies in CooR-precompiled reduction graphs.
 
     Counts ending in ``_values`` refer to flat graph values, not privacy. This
     metadata is private to ``GraphTrainerStageGraphs``; the PP runtime must not
@@ -155,6 +156,7 @@ class _StageGraphMeta:
     fwd_flat_input_indices: tuple[int, ...]
     bw_no_fsdp_output_names: tuple[str, ...] = ()
     reduce_grad_input_names: tuple[str, ...] = ()
+    reduce_grad_runtime_mesh_indices: tuple[int, ...] = ()
     unshard_flat_param_indices: tuple[int, ...] = ()
     num_fw_param_inputs: int = 0
     is_last_stage: bool = False
@@ -583,6 +585,10 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
         reduce_grad_args = [
             grad_values_by_name[name] for name in self.meta.reduce_grad_input_names
         ]
+        reduce_grad_args.extend(
+            self.runtime_meshes[index]
+            for index in self.meta.reduce_grad_runtime_mesh_indices
+        )
         return list(_execute_graph_module(self.modules.reduce_grad, reduce_grad_args))
 
     def param_grads_for_accumulation(
@@ -920,6 +926,42 @@ def _validate_stage_step_output_spec(
         )
 
 
+def _reduce_grad_runtime_mesh_indices(
+    bw_module: fx.GraphModule,
+    input_names: tuple[str, ...],
+    precompile_meshes: list[DeviceMesh] | None,
+) -> tuple[int, ...]:
+    """Map CooR reduction dependencies to their runtime mesh inputs."""
+    if not input_names:
+        return ()
+
+    inputs_by_name = {
+        node.name: node for node in bw_module.graph.find_nodes(op="placeholder")
+    }
+    runtime_meshes = precompile_meshes or []
+    indices = []
+    for name in input_names:
+        value = inputs_by_name[name].meta.get("val")
+        matches = [
+            index for index, mesh in enumerate(runtime_meshes) if value is mesh
+        ]
+        if not matches and isinstance(value, DeviceMesh):
+            matches = [
+                index
+                for index, mesh in enumerate(runtime_meshes)
+                if value.device_type == mesh.device_type
+                and value.mesh_dim_names == mesh.mesh_dim_names
+                and torch.equal(value.mesh, mesh.mesh)
+            ]
+        if len(matches) != 1:
+            raise ValueError(
+                "GraphPP reduce-grad input must identify one runtime mesh: "
+                f"{name} matched {len(matches)}"
+            )
+        indices.append(matches[0])
+    return tuple(indices)
+
+
 def _build_stage_graphs(
     stage: GraphPipelineStage,
     args: tuple[Any, ...],
@@ -1123,6 +1165,11 @@ def _build_stage_graphs(
         num_param_grads=num_param_grad_values,
         extract_grad_reduction=extract_fsdp_grad_reduction,
     )
+    reduce_grad_runtime_mesh_indices = _reduce_grad_runtime_mesh_indices(
+        bw_module,
+        fsdp_bw.reduce_grad_aux_input_names,
+        precompile_meshes,
+    )
     didw_split: GraphPPDiDwSplit | None = split_di_dw_graph(
         fsdp_bw.bw_no_fsdp_module,
         num_param_grads=num_param_grad_values,
@@ -1160,6 +1207,7 @@ def _build_stage_graphs(
         fwd_flat_input_indices=fsdp_fw.fw_no_fsdp_flat_input_indices,
         bw_no_fsdp_output_names=fsdp_bw.bw_no_fsdp_output_names,
         reduce_grad_input_names=fsdp_bw.reduce_grad_input_names,
+        reduce_grad_runtime_mesh_indices=reduce_grad_runtime_mesh_indices,
         unshard_flat_param_indices=fsdp_fw.unshard_flat_param_indices,
         num_fw_param_inputs=fsdp_fw.num_fw_param_inputs,
         is_last_stage=stage.is_last,

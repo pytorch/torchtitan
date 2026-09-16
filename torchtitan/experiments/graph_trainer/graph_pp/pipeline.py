@@ -272,16 +272,12 @@ def make_pp1_vpp1_graph_pipeline_runtime(
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             compute_config_fingerprint,
-            get_spmd_precompile_meshes,
+            get_precompile_runtime_meshes,
             precompile_graph_pp_stage_load,
         )
         from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 
-        runtime_meshes = (
-            get_spmd_precompile_meshes(parallel_dims)
-            if parallelism.spmd_backend == "spmd_types"
-            else []
-        )
+        runtime_meshes = get_precompile_runtime_meshes(parallel_dims)
         graph_provider.precompiled_stage_graphs = precompile_graph_pp_stage_load(
             DiskStorageAdapter(compile_config.precompile_artifact_dir),
             expected_fingerprint=compute_config_fingerprint(

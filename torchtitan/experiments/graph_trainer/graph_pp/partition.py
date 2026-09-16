@@ -76,6 +76,8 @@ from torch._functorch.partitioners import (
     _extract_fwd_bwd_outputs,
     _extract_graph_with_inputs_outputs,
 )
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.distributed_c10d import ProcessGroup
 from torch.fx._lazy_graph_module import _make_graph_module
 
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
@@ -262,7 +264,10 @@ def _saved_values_for_backward(
     for node in joint.graph.nodes:
         if node not in forward_nodes or node.name in backward_only_names:
             continue
-        if isinstance(node.meta.get("val"), torch.device):
+        if isinstance(
+            node.meta.get("val"),
+            (torch.device, DeviceMesh, ProcessGroup),
+        ):
             continue
         if any(
             user in backward_nodes and user not in forward_nodes for user in node.users
@@ -351,6 +356,23 @@ def _backward_passthrough_placeholders(
         and node.op == "placeholder"
         and node.name not in backward_only_names
     )
+
+
+def _backward_device_mesh_placeholders(
+    placeholders: Sequence[fx.Node],
+    *,
+    bwd_outputs: Sequence[object],
+    backward_only_names: set[str],
+) -> list[fx.Node]:
+    """Pass runtime meshes through forward so backward can derive submeshes."""
+    bwd_input_set = placeholder_dependencies(bwd_outputs)
+    return [
+        node
+        for node in placeholders
+        if node in bwd_input_set
+        and node.name not in backward_only_names
+        and isinstance(node.meta.get("val"), DeviceMesh)
+    ]
 
 
 def _is_tuple_like_node(node: fx.Node) -> bool:
@@ -534,6 +556,13 @@ def partition_joint_graph(
     # 2. Add metadata-only placeholders needed to rewrap backward outputs.
     saved_values.extend(
         _backward_passthrough_placeholders(
+            bwd_outputs=bwd_outputs,
+            backward_only_names=backward_only_names,
+        )
+    )
+    saved_values.extend(
+        _backward_device_mesh_placeholders(
+            placeholders,
             bwd_outputs=bwd_outputs,
             backward_only_names=backward_only_names,
         )

@@ -125,19 +125,26 @@ def flatten_runtime_inputs(
     return tuple(flat_inputs)
 
 
-def get_spmd_precompile_meshes(parallel_dims: ParallelDims) -> list[DeviceMesh]:
+def get_precompile_runtime_meshes(parallel_dims: ParallelDims) -> list[DeviceMesh]:
     """
-    Return SPMD meshes that must be registered as runtime graph inputs.
+    Return meshes that must be registered as runtime graph inputs.
 
     Pre-registering meshes allows PG lookups for collectives in forward code (ambient mesh)
     to appear in graph as custom op results (indexing input meshes), rather than
     opaque objects with no source, matching graph structure from legacy DTensor path.
     """
-    candidates = [
-        parallel_dims.spmd_dense_mesh(),
-        parallel_dims.spmd_sparse_mesh(),
-        parallel_dims.get_optional_mesh("pp"),
-    ]
+    candidates = (
+        [
+            parallel_dims.spmd_dense_mesh(),
+            parallel_dims.spmd_sparse_mesh(),
+            parallel_dims.get_optional_mesh("pp"),
+        ]
+        if parallel_dims.spmd_backend == "spmd_types"
+        else [
+            parallel_dims.get_optional_mesh("tp"),
+            parallel_dims.get_optional_mesh("pp"),
+        ]
+    )
     meshes: list[DeviceMesh] = []
     for mesh in candidates:
         if mesh is not None and all(mesh is not other for other in meshes):

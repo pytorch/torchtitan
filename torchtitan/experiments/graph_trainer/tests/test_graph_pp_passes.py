@@ -11,10 +11,12 @@ import unittest
 import warnings
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import Mock
 
 import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
+from torch.distributed.device_mesh import DeviceMesh
 from torch.nn.attention.flex_attention import flex_attention
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.utils.checkpoint import CheckpointPolicy
@@ -323,6 +325,75 @@ class GraphPPPartitionTest(unittest.TestCase):
                 for node in bw_module.graph.nodes
                 if node.op == "call_function"
             )
+        )
+
+    def test_device_mesh_values_are_recomputed_in_backward(self) -> None:
+        from torchtitan.experiments.graph_trainer.precompile import _register_coor_ops
+
+        _register_coor_ops()
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        mesh = graph.placeholder("mesh")
+        mesh.meta["val"] = object.__new__(DeviceMesh)
+        grad = graph.placeholder("grad")
+        forward_submesh = graph.call_function(
+            torch.ops.device_mesh._get_submesh,
+            (mesh, [0]),
+        )
+        forward_submesh.meta["val"] = object.__new__(DeviceMesh)
+        forward_process_group = graph.call_function(
+            torch.ops._dtensor.mesh_get_process_group.default,
+            (forward_submesh, 0),
+        )
+        forward_process_group.meta["val"] = Mock(spec=torch.distributed.ProcessGroup)
+        forward_output = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            (x, 1, forward_process_group),
+        )
+        backward_submesh = graph.call_function(
+            torch.ops.device_mesh._get_submesh,
+            (mesh, [0]),
+        )
+        backward_submesh.meta["val"] = object.__new__(DeviceMesh)
+        backward_process_group = graph.call_function(
+            torch.ops._dtensor.mesh_get_process_group.default,
+            (backward_submesh, 0),
+        )
+        backward_process_group.meta["val"] = Mock(spec=torch.distributed.ProcessGroup)
+        backward_output = graph.call_function(
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            (grad, "sum", 1, backward_process_group),
+        )
+        graph.output([forward_output, backward_output])
+        traced = TracedResult(
+            gm=torch.fx.GraphModule(torch.nn.Module(), graph),
+            example_inputs=(torch.ones(1), object.__new__(DeviceMesh), torch.ones(1)),
+            num_flat_inputs=3,
+            input_subclass_layouts={},
+            user_inputs_spec=torch.utils._pytree.tree_flatten(
+                ((torch.ones(1), object.__new__(DeviceMesh), torch.ones(1)), {})
+            )[1],
+            tensor_input_indices=[0, 2],
+            num_flat_outputs=2,
+            output_subclass_layouts={},
+            output_spec=torch.utils._pytree.tree_flatten(
+                [torch.ones(1), torch.ones(1)]
+            )[1],
+            state_fqns=[],
+        )
+
+        _fw_module, bw_module, meta = partition_joint_graph(
+            traced,
+            num_fwd_outputs=1,
+            backward_only_input_indices=(2,),
+        )
+
+        self.assertIn(mesh.name, meta.saved_for_backward_names)
+        self.assertNotIn(forward_submesh.name, meta.saved_for_backward_names)
+        self.assertNotIn(backward_submesh.name, meta.saved_for_backward_names)
+        self.assertIn(
+            torch.ops.device_mesh._get_submesh,
+            _call_targets(bw_module),
         )
 
     def test_real_dsv3_moe_block_partition_matches_joint_graph(self) -> None:
@@ -1295,11 +1366,12 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             _make_backward_graph_with_reduce_grad_epilogues(
                 process_group_is_input=True
             ),
-            num_param_grads=3,
+            num_param_grads=2,
         )
 
         self.assertIsNotNone(split.reduce_grad_module)
-        self.assertIn("process_group", split.reduce_grad_input_names)
+        self.assertNotIn("process_group", split.reduce_grad_input_names)
+        self.assertEqual(split.reduce_grad_aux_input_names, ("process_group",))
         self.assertNotIn(
             torch.ops._c10d_functional.reduce_scatter_tensor.default,
             _call_targets(split.bw_no_fsdp_module),
