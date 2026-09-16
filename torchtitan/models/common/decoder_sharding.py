@@ -8,13 +8,16 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import GQAttention, TensorParallelGQAttention
+from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
     validate_async_tp_preconditions,
 )
-from torchtitan.models.common.feed_forward import TensorParallelFeedForward
+from torchtitan.models.common.linear import (
+    is_column_parallel_linear_config,
+    is_row_parallel_linear_config,
+)
 from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
@@ -240,7 +243,13 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    tensor_parallel = isinstance(attention_cfg, TensorParallelGQAttention.Config)
+    column_parallel = is_column_parallel_linear_config(attention_cfg.qkv_linear.wqkv)
+    row_parallel = is_row_parallel_linear_config(attention_cfg.wo)
+    if column_parallel != row_parallel:
+        raise ValueError(
+            "Tensor parallelism must configure both qkv and wo projections"
+        )
+    tensor_parallel = column_parallel
     async_qkv = isinstance(
         attention_cfg.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
     )
@@ -276,25 +285,26 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
         )
 
-    if tensor_parallel:
-        # The qkv projection now owns the input all-gather. Attaching the
-        # redistribution here makes it part of the qkv module boundary.
-        attention_cfg.qkv_linear.sharding_config = ShardingConfig(
-            in_src_shardings={"x": attn_x_layout},
-            in_dst_shardings=(
-                None
-                if async_qkv
-                else {"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))}
-            ),
+    qkv_sharding = colwise_config()
+    attention_cfg.qkv_linear.wqkv.sharding_config = (
+        ShardingConfig(
+            state_shardings=qkv_sharding.state_shardings,
+            in_src_shardings={"input": attn_x_layout},
+            out_src_shardings=qkv_sharding.out_src_shardings,
         )
-    attention_cfg.qkv_linear.wqkv.sharding_config = colwise_config()
+        if tensor_parallel
+        else qkv_sharding
+    )
     wo_sharding = rowwise_config(output_sp=enable_sp)
     attention_cfg.wo.sharding_config = (
         ShardingConfig(
             state_shardings=wo_sharding.state_shardings,
+            in_src_shardings={
+                "input": dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
+            },
             out_src_shardings=wo_sharding.out_dst_shardings,
         )
-        if async_wo
+        if tensor_parallel
         else wo_sharding
     )
 
@@ -339,7 +349,13 @@ def set_dense_ffn_sharding(
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    tensor_parallel = isinstance(feed_forward_cfg, TensorParallelFeedForward.Config)
+    column_parallel = is_column_parallel_linear_config(feed_forward_cfg.w13)
+    row_parallel = is_row_parallel_linear_config(feed_forward_cfg.w2)
+    if column_parallel != row_parallel:
+        raise ValueError(
+            "Tensor parallelism must configure both w13 and w2 projections"
+        )
+    tensor_parallel = column_parallel
     async_w13 = isinstance(feed_forward_cfg.w13, AsyncColumnParallelLinear.Config)
     async_w2 = isinstance(feed_forward_cfg.w2, AsyncRowParallelLinear.Config)
     if async_w13 != async_w2:
@@ -359,22 +375,16 @@ def set_dense_ffn_sharding(
         feed_forward_cfg.w13.sharding_config = ShardingConfig(
             state_shardings=w13_sharding.state_shardings,
             in_src_shardings={"input": attn_x_layout},
-            in_dst_shardings=(
-                None
-                if async_w13
-                else {"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))}
-            ),
             out_src_shardings=w13_sharding.out_src_shardings,
             local_spmd=w13_sharding.local_spmd,
         )
         w2_sharding = rowwise_config(output_sp=enable_sp)
-        feed_forward_cfg.w2.sharding_config = (
-            ShardingConfig(
-                state_shardings=w2_sharding.state_shardings,
-                out_src_shardings=w2_sharding.out_dst_shardings,
-            )
-            if async_w2
-            else w2_sharding
+        feed_forward_cfg.w2.sharding_config = ShardingConfig(
+            state_shardings=w2_sharding.state_shardings,
+            in_src_shardings={
+                "input": dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
+            },
+            out_src_shardings=w2_sharding.out_dst_shardings,
         )
         return
 
