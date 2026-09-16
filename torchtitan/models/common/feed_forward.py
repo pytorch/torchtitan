@@ -16,11 +16,7 @@ from torchtitan.protocols.module import Module
 # Shape suffix legend:
 #   T = token dimensions, D = model dimension, F = feed-forward hidden dimension
 
-__all__ = [
-    "FeedForward",
-    "SigmoidGatedFeedForward",
-    "compute_ffn_hidden_dim",
-]
+__all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
 
 
 def compute_ffn_hidden_dim(
