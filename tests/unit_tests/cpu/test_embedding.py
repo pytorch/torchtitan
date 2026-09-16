@@ -111,6 +111,7 @@ class TestEmbedding(DTensorTestBase):
     @with_comms
     def test_vocab_parallel_padding_forward_backward(self):
         """Preserve padding, frequency scaling, and renormalization on each shard."""
+        # CPU Unit Test CI runs all four ranks with real Gloo collectives.
         mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
         for (
             vocab_size,

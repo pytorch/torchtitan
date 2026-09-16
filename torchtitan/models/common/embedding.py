@@ -76,6 +76,8 @@ class Embedding(nn.Embedding, Module):
         if self.scale_grad_by_freq and self.max_norm is not None:
             # F.embedding renormalizes in place; preserve that on the parameter
             # after the lookup used a padded copy.
+            # TODO: As with F.embedding, FSDP2 resharding discards forward-time
+            # max_norm updates to the transient all-gathered parameter.
             with torch.no_grad():
                 self.weight.copy_(weight_VD[:-1])
         return out * mask.unsqueeze(-1).to(out.dtype)
