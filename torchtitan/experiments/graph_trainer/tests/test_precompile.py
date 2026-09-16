@@ -21,7 +21,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.models.common.aux_loss import AuxLoss
 
 
 class TestDiskStorageAdapter(unittest.TestCase):
@@ -347,23 +346,6 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint(
                 _make_stub_model(), scheduled_accumulation, dims
             ),
-        )
-
-    def test_step_tokens_affect_aux_loss_artifacts(self):
-        from torchtitan.experiments.graph_trainer.precompile import (
-            compute_config_fingerprint,
-        )
-
-        model = torch.nn.Module()
-        model.aux_loss = AuxLoss(AuxLoss.Config(coeff=1.0))
-        cfg = _StubCompileConfig()
-        dims = _StubParallelDims()
-        training = TrainingConfig()
-        changed = replace(training, num_tokens_per_train_step=4096)
-
-        self.assertNotEqual(
-            compute_config_fingerprint(model, cfg, dims, training_config=training),
-            compute_config_fingerprint(model, cfg, dims, training_config=changed),
         )
 
     def test_compile_config_sensitivity(self):

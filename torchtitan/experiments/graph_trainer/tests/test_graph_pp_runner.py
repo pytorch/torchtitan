@@ -66,6 +66,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
 )
+from torchtitan.models.common.aux_loss import AuxLoss
 
 
 def _boxed_run(gm: fx.GraphModule, args: list[object]):
@@ -109,6 +110,7 @@ def _make_test_stage(
 ):
     stage = types.SimpleNamespace(
         submod=submod,
+        is_first=stage_index == 0,
         is_last=is_last,
         loss_fn=loss_fn,
         stage_index=stage_index,
@@ -257,6 +259,48 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
         )
 
         self.assertEqual(loss, ((pred - target) ** 2).sum() / global_valid_tokens)
+
+    def test_pp1_aux_loss_denominator_is_a_runtime_input(self) -> None:
+        class AuxLossModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.tensor(1.0))
+                self.aux_loss = AuxLoss(AuxLoss.Config(coeff=1.0))
+
+            def forward(self, x):
+                denominator = AuxLoss._step_denominator
+                assert denominator is not None
+                return x * self.weight / denominator
+
+        def loss_fn(pred, _target, *, global_valid_tokens):
+            return pred.sum()
+
+        model = AuxLossModel()
+        stage = _make_test_stage(model, is_last=True, loss_fn=loss_fn)
+        x = torch.ones(4, requires_grad=True)
+        target = torch.zeros(4)
+        _build_test_stage_graphs(
+            stage,
+            (x,),
+            {},
+            target,
+            {"global_valid_tokens": torch.tensor(2.0)},
+        )
+
+        param_grads = []
+        for denominator in (2.0, 4.0):
+            loss, saved = stage.graphs.forward(
+                (x,),
+                {},
+                target,
+                {"global_valid_tokens": torch.tensor(denominator)},
+                unsharded_param_values=[model.weight],
+                flat_buffer_values=[model.aux_loss.instance_acc],
+            )
+            _, grads = stage.graphs.full_backward((loss,), saved, ())
+            param_grads.append(grads[0])
+
+        self.assertEqual(param_grads[0], param_grads[1] * 2)
 
     def test_prepare_fwd_user_args_allows_absent_args_and_kwargs(self) -> None:
         stage = types.SimpleNamespace(is_first=True, is_last=False)

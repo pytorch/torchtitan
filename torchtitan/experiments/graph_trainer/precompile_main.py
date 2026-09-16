@@ -122,10 +122,8 @@ def _common_setup(config):
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
     model_config = model_spec.model
-    # Auxiliary losses normalize by the step's global valid-token count, which
-    # the training loop derives from the data; precompile has no batches, so
-    # use the configured budget.  TODO: the traced graph bakes this value, so
-    # it goes stale if the per-step count varies (e.g. with padding).
+    # Initialize AuxLoss for setup without a real batch. PP1 stage tracing
+    # later binds its denominator to the runtime global token count.
     num_pp_microbatches = (
         config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
     )

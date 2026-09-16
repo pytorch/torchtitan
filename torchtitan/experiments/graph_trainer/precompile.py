@@ -39,7 +39,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.storage import StorageAdapter
-from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.tools.logging import logger
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
@@ -230,11 +229,6 @@ def compute_config_fingerprint(
             name: getattr(training_config, name)
             for name in _GRAPH_AFFECTING_TRAINING_FIELDS
         }
-        # AuxLoss normalization is captured in the precompiled graph.
-        if any(isinstance(module, AuxLoss) for module in model.modules()):
-            training_fields[
-                "num_tokens_per_train_step"
-            ] = training_config.num_tokens_per_train_step
         h.update(
             b"training_config:"
             + json.dumps(

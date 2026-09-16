@@ -89,6 +89,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     eliminate_dead_code_pass,
     final_inductor_compile_passes,
 )
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.protocols.model import BaseModel
 from torchtitan.tools.logging import logger
 
@@ -1050,6 +1051,9 @@ def _build_stage_graphs(
     num_state_buffer_values = len(flatten_graph_values(state_buffers))
     num_grad_params = len(grad_params)
     num_input_grad_leaves = len(_grad_input_leaves(stage_args, stage_kwargs))
+    uses_aux_loss = any(
+        isinstance(module, AuxLoss) for module in stage.submod.modules()
+    )
     prepare_inputs = None
     prepare_call_inputs = None
     if (
@@ -1075,6 +1079,9 @@ def _build_stage_graphs(
             )
 
         def stage_step(stage_args, stage_kwargs, target, loss_kwargs):
+            if stage.is_first and uses_aux_loss:
+                # Bind the shared denominator to this stage's runtime input.
+                AuxLoss.set_step_denominator(loss_kwargs["global_valid_tokens"])
             pred = stage.submod(*stage_args, **stage_kwargs)
             loss = compute_annotated_loss(
                 loss_fn,
