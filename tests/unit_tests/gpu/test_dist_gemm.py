@@ -45,7 +45,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
 )
-from torchtitan.models.common.dist_gemm import (
+from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
