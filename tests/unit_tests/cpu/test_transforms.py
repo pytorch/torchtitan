@@ -304,7 +304,7 @@ class TestTensorParallelTransform(unittest.TestCase):
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIs(type(layer.attention.wo), Linear.Config)
 
-    def test_does_not_replace_moe_shared_experts(self):
+    def test_replaces_common_moe_shared_experts(self):
         source = self._config().model_spec.model.layers[0].feed_forward
         model = _FeedForwardSlots.Config(
             feed_forward=copy.deepcopy(source),
@@ -316,6 +316,42 @@ class TestTensorParallelTransform(unittest.TestCase):
         self.assertIs(type(transformed.feed_forward), FeedForward.Config)
         self.assertIsInstance(transformed.feed_forward.w13, ColumnParallelLinear.Config)
         self.assertIs(type(transformed.shared_experts), FeedForward.Config)
+        self.assertIsInstance(
+            transformed.shared_experts.w13, ColumnParallelLinear.Config
+        )
+        self.assertIsInstance(transformed.shared_experts.w2, RowParallelLinear.Config)
+
+    def test_async_does_not_replace_moe_shared_experts(self):
+        source = self._config().model_spec.model.layers[0].feed_forward
+        model = _FeedForwardSlots.Config(
+            feed_forward=copy.deepcopy(source),
+            shared_experts=copy.deepcopy(source),
+        )
+
+        transformed = AsyncTensorParallelTransform().transform(model)
+
+        self.assertIs(type(transformed.shared_experts.w13), Linear.Config)
+        self.assertIs(type(transformed.shared_experts.w2), Linear.Config)
+
+    def test_shared_expert_sharding_uses_projection_boundaries(self):
+        from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+        from torchtitan.models.deepseek_v3 import model_registry
+
+        model = model_registry("debugmodel", seq_len=128).model
+        transformed = TensorParallelTransform().transform(model)
+        moe = next(layer.moe for layer in transformed.layers if layer.moe is not None)
+        assert moe.shared_experts is not None
+
+        set_moe_sharding_config(
+            moe,
+            enable_ep=True,
+            enable_sp=True,
+            expert_param_layout={},
+        )
+
+        self.assertIsNone(moe.shared_experts.sharding_config.in_dst_shardings)
+        self.assertIsNone(moe.shared_experts.w13.sharding_config.in_dst_shardings)
+        self.assertIsNone(moe.shared_experts.w2.sharding_config.out_dst_shardings)
 
     def test_transforms_root_attention(self):
         config = copy.deepcopy(self._config().model_spec.model.layers[0].attention)
