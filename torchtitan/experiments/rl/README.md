@@ -130,8 +130,8 @@ uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@mai
 uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu130
 
 # Blackwell (GB200/GB300, SM100): Flash Attention 4
-# Newer FA4 betas require apache-tvm-ffi>=0.1.12, but vLLM pins 0.1.11.
-uv pip install "flash-attn-4[cu13]==4.0.0b19"
+# Qwen3.5 head_dim=256 needs current FA4 paged/seqused support; b19 is too old.
+uv pip install --pre "flash-attn-4[cu13]"
 ```
 
 TorchTitan selects FA4 on Blackwell, FA3 on Hopper, and the FA2 implementation
@@ -142,15 +142,19 @@ bundled with PyTorch on older GPUs such as A100.
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 ```
 
-4. Install PyTorch and torchvision nightlies, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
+4. Install matching PyTorch, torchvision, and vLLM nightlies. This is the tuple
+validated for Qwen inference. The torchvision date differs because its wheel
+requires this exact Torch build. Distributed RL training also needs a matching
+`torchcomms` nightly.
 
-`torchvision` is only needed because the current vllm nightly imports it during kernel warmup; TorchTitan RL does not otherwise require it.
+`torchvision` is needed because vLLM imports it during kernel warmup. For a fresh
+Qwen-only environment, exclude the unused TileLang/tokenspeed packages and
+explicitly select the TVM FFI version needed by Attention Gym and FA4; this vLLM
+wheel still declares the older FFI pin.
 
 ```bash
-# Install vllm with nightly torch and torchvision
-uv pip install torch torchvision vllm torchcomms --pre \
---extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
---index-strategy unsafe-best-match
+runtime=("torch==2.15.0.dev20260913+cu130" "torchvision==0.30.0.dev20260914+cu130" "vllm==1.0.0.dev20260913+cu130" --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu130 --index-strategy unsafe-best-match)
+uv pip install "${runtime[@]}" --overrides <(printf '%s\n' 'apache-tvm-ffi==0.1.13.post3') --excludes <(printf '%s\n' tilelang tokenspeed-mla)
 ```
 
 **NOTE:** The pre-built vLLM wheels are only compatible with CUDA 13.0, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu130, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
