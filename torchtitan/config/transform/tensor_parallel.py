@@ -9,19 +9,19 @@
 # TODO: Make this transform part of every TP model-construction path, then
 # remove the legacy enclosing-module redistributions from decoder sharding.
 # Common dense ``feed_forward`` configs are already supported across Llama 3,
-# Qwen 3/3.5, DeepSeek V3/V4 dense layers, Muse Glimmer, and Kimi K2. Remaining
-# work is wiring all TP recipes through the transform and migrating
-# model-specific attention paths and MoE shared experts whose communication is
-# intentionally kept at larger module boundaries today.
+# Qwen 3/3.5, DeepSeek V3/V4 dense layers, Muse Glimmer, Kimi K2, and common
+# MoE shared experts. Remaining work is wiring all TP recipes through the
+# transform and migrating model-specific attention and feed-forward paths.
 
 from dataclasses import dataclass
 from typing import cast
 
-from torchtitan.models.common.attention import GQAttention, QKVLinear
-from torchtitan.models.common.dist_gemm import (
+from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
+
+from torchtitan.models.common.attention import GQAttention, QKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -106,16 +106,19 @@ def _transform_feed_forward(
 ) -> Module.Config:
     """Select TP projection roles for transformer-block dense FFNs.
 
-    Only configs stored as ``feed_forward`` fields, plus a root FFN config, are
-    transformed; shared-expert FFNs are intentionally left unchanged. The
-    synchronous transform specializes the final projection implementation, so
-    the collective encloses converted compute such as quantization or LoRA.
+    Configs stored as ``feed_forward`` fields and common shared experts are
+    transformed, along with a root FFN config. The synchronous transform
+    specializes the final projection implementation, so the collective
+    encloses converted compute such as quantization or LoRA. Async TP leaves
+    shared experts unchanged because their input layout depends on EP.
     """
     input_linear = AsyncColumnParallelLinear if async_tp else ColumnParallelLinear
     output_linear = AsyncRowParallelLinear if async_tp else RowParallelLinear
     for _, traversed, parent, attr in model.traverse(FeedForward.Config):
         is_root = parent is None
-        if not is_root and attr != "feed_forward":
+        is_dense_block = attr == "feed_forward"
+        is_shared_expert = attr == "shared_experts" and not async_tp
+        if not is_root and not is_dense_block and not is_shared_expert:
             continue
         existing = cast(FeedForward.Config, traversed)
         if existing._owner is not FeedForward:
@@ -161,6 +164,9 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
         return _transform_tensor_parallel(model, async_tp=True)
 
 
+# TP wraps the final projection implementation. Quantization uses legacy model
+# converters, which run before transforms; this dependency ensures LoRA also
+# runs before TP specializes the resulting projection config.
 TensorParallelTransform.run_after = (LoRATransform,)
 AsyncTensorParallelTransform.run_after = (LoRATransform,)
 TensorParallelTransform.conflicts_with = (AsyncTensorParallelTransform,)
