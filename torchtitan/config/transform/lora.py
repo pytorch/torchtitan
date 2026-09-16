@@ -10,8 +10,8 @@ from typing import Any, cast, ClassVar, Protocol
 
 from torchtitan.models.common.linear import (
     Linear,
-    linear_compute_cls,
     preserve_parallel_linear_role,
+    underlying_linear_cls,
 )
 from torchtitan.models.common.lora import specialize_lora_linear
 from torchtitan.protocols.module import Module
@@ -79,7 +79,7 @@ class LinearLoRAHandler:
         rank: int,
         alpha: float,
     ) -> Module.Config:
-        lora_cls = specialize_lora_linear(linear_compute_cls(cfg))
+        lora_cls = specialize_lora_linear(underlying_linear_cls(cfg))
         lora_cls = preserve_parallel_linear_role(lora_cls, cfg)
         lora_config_cls = cast(Any, lora_cls.Config)
         return lora_config_cls(
