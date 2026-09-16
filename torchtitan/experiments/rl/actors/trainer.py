@@ -14,7 +14,7 @@ import torchstore as ts
 from monarch.actor import Actor, concurrent_endpoint, current_rank
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
+from torchtitan.components.loss import ChunkedLossWrapper, LossConfig
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import (
     apply_overrides,
@@ -74,7 +74,7 @@ class PolicyTrainer(Actor, Configurable):
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
-        loss: BaseLoss.Config = field(default_factory=GRPOLoss.Config)
+        loss: LossConfig = field(default_factory=GRPOLoss.Config)
         ac_config: ActivationCheckpointingConfig = field(
             default_factory=SelectiveAC.Config
         )
