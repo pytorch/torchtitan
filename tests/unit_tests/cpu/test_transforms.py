@@ -17,7 +17,6 @@ from torchtitan.config.transform import (
     ContextParallelTransform,
     convert_config_type,
     ModelConfigTransform,
-    TensorParallelTransform,
     transform_model_config_,
 )
 
@@ -30,7 +29,6 @@ from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttentio
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    is_column_parallel_linear_config,
     Linear,
     RowParallelLinear,
 )
@@ -277,7 +275,7 @@ class TestContextParallelTransform(unittest.TestCase):
         self.assertTrue(all("lora_a" in name or "lora_b" in name for name in trainable))
 
 
-class TestTensorParallelTransform(unittest.TestCase):
+class TestTensorParallelModules(unittest.TestCase):
     @staticmethod
     def _config():
         from torchtitan.models.llama3.config_registry import llama3_debugmodel
@@ -286,11 +284,10 @@ class TestTensorParallelTransform(unittest.TestCase):
         config.parallelism.tensor_parallel_degree = 2
         return config
 
-    def test_replaces_common_attention_and_dense_block_feed_forwards(self):
+    def test_common_attention_and_feed_forward_use_sync_tp_projections(self):
         config = self._config()
-        result = apply_transforms(config, [TensorParallelTransform()])
 
-        for layer in result.model_spec.model.layers:
+        for layer in config.model_spec.model.layers:
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIsInstance(
                 layer.attention.qkv_linear.wqkv, ColumnParallelLinear.Config
@@ -300,26 +297,19 @@ class TestTensorParallelTransform(unittest.TestCase):
             self.assertIsInstance(layer.feed_forward.w2, RowParallelLinear.Config)
             self.assertIsNone(layer.feed_forward.w13.sharding_config)
             self.assertIsNone(layer.feed_forward.w2.sharding_config)
-        for layer in config.model_spec.model.layers:
-            self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
-            self.assertIs(type(layer.attention.wo), Linear.Config)
 
-    def test_replaces_common_moe_shared_experts(self):
+    def test_common_moe_shared_experts_use_sync_tp_projections(self):
         source = self._config().model_spec.model.layers[0].feed_forward
         model = _FeedForwardSlots.Config(
             feed_forward=copy.deepcopy(source),
             shared_experts=copy.deepcopy(source),
         )
 
-        transformed = TensorParallelTransform().transform(model)
-
-        self.assertIs(type(transformed.feed_forward), FeedForward.Config)
-        self.assertIsInstance(transformed.feed_forward.w13, ColumnParallelLinear.Config)
-        self.assertIs(type(transformed.shared_experts), FeedForward.Config)
-        self.assertIsInstance(
-            transformed.shared_experts.w13, ColumnParallelLinear.Config
-        )
-        self.assertIsInstance(transformed.shared_experts.w2, RowParallelLinear.Config)
+        self.assertIs(type(model.feed_forward), FeedForward.Config)
+        self.assertIsInstance(model.feed_forward.w13, ColumnParallelLinear.Config)
+        self.assertIs(type(model.shared_experts), FeedForward.Config)
+        self.assertIsInstance(model.shared_experts.w13, ColumnParallelLinear.Config)
+        self.assertIsInstance(model.shared_experts.w2, RowParallelLinear.Config)
 
     def test_async_does_not_replace_moe_shared_experts(self):
         source = self._config().model_spec.model.layers[0].feed_forward
@@ -330,16 +320,17 @@ class TestTensorParallelTransform(unittest.TestCase):
 
         transformed = AsyncTensorParallelTransform().transform(model)
 
-        self.assertIs(type(transformed.shared_experts.w13), Linear.Config)
-        self.assertIs(type(transformed.shared_experts.w2), Linear.Config)
+        self.assertIsInstance(
+            transformed.shared_experts.w13, ColumnParallelLinear.Config
+        )
+        self.assertIsInstance(transformed.shared_experts.w2, RowParallelLinear.Config)
 
     def test_shared_expert_sharding_uses_projection_boundaries(self):
         from torchtitan.models.common.moe_sharding import set_moe_sharding_config
         from torchtitan.models.deepseek_v3 import model_registry
 
         model = model_registry("debugmodel", seq_len=128).model
-        transformed = TensorParallelTransform().transform(model)
-        moe = next(layer.moe for layer in transformed.layers if layer.moe is not None)
+        moe = next(layer.moe for layer in model.layers if layer.moe is not None)
         assert moe.shared_experts is not None
 
         set_moe_sharding_config(
@@ -353,28 +344,12 @@ class TestTensorParallelTransform(unittest.TestCase):
         self.assertIsNone(moe.shared_experts.w13.sharding_config.in_dst_shardings)
         self.assertIsNone(moe.shared_experts.w2.sharding_config.out_dst_shardings)
 
-    def test_transforms_root_attention(self):
+    def test_root_attention_uses_sync_tp_projections(self):
         config = copy.deepcopy(self._config().model_spec.model.layers[0].attention)
 
-        transformed = TensorParallelTransform().transform(config)
-
-        self.assertIs(type(transformed), GQAttention.Config)
-        self.assertIsInstance(transformed.qkv_linear.wqkv, ColumnParallelLinear.Config)
-        self.assertIsInstance(transformed.wo, RowParallelLinear.Config)
-
-    def test_sync_transform_preserves_converted_projection(self):
-        config = copy.deepcopy(self._config().model_spec.model.layers[0].feed_forward)
-        config.w13 = _ConvertedLinear.Config(
-            in_features=config.w13.in_features,
-            out_features=config.w13.out_features,
-            param_init=config.w13.param_init,
-        )
-
-        transformed = TensorParallelTransform().transform(config)
-
-        self.assertIs(type(transformed), FeedForward.Config)
-        self.assertIsInstance(transformed.w13, _ConvertedLinear.Config)
-        self.assertTrue(is_column_parallel_linear_config(transformed.w13))
+        self.assertIs(type(config), GQAttention.Config)
+        self.assertIsInstance(config.qkv_linear.wqkv, ColumnParallelLinear.Config)
+        self.assertIsInstance(config.wo, RowParallelLinear.Config)
 
     def test_async_transform_rejects_converted_projection(self):
         config = copy.deepcopy(self._config().model_spec.model.layers[0].feed_forward)
@@ -391,8 +366,7 @@ class TestTensorParallelTransform(unittest.TestCase):
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
         config = self._config()
-        result = apply_transforms(config, [TensorParallelTransform()])
-        model = result.model_spec.model
+        model = config.model_spec.model
         set_llama3_sharding_config(model, enable_sp=True)
         feed_forward = model.layers[0].feed_forward
         assert feed_forward.sharding_config is not None
@@ -409,8 +383,7 @@ class TestTensorParallelTransform(unittest.TestCase):
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
         config = self._config()
-        result = apply_transforms(config, [TensorParallelTransform()])
-        model = result.model_spec.model
+        model = config.model_spec.model
         set_llama3_sharding_config(model, enable_sp=False)
 
         feed_forward = model.layers[0].feed_forward

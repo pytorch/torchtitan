@@ -21,7 +21,7 @@ from .quantization import (
     NVFP4LinearConverter,
     QuantizationConverter,
 )
-from .tensor_parallel import AsyncTensorParallelTransform, TensorParallelTransform
+from .tensor_parallel import AsyncTensorParallelTransform
 
 __all__ = [
     "ModelConfigTransform",
@@ -35,7 +35,6 @@ __all__ = [
     "LMHeadCastConverter",
     "LinearLoRAHandler",
     "LoRATransform",
-    "TensorParallelTransform",
     "Float8GroupedExpertsConverter",
     "Float8LinearConverter",
     "MXFP8GroupedExpertsConverter",

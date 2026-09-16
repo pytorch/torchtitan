@@ -141,8 +141,23 @@ def _shared_experts_config(
         w2w3_param_init=_depth_init(layer_id),
     )
     return SigmoidGatedFeedForward.Config(
-        w13=ffn.w13,
-        w2=ffn.w2,
+        # The gate and w13 share x, so the enclosing shared-expert boundary
+        # retains their single input all-gather until this module has an
+        # explicit shared-input TP implementation.
+        w13=Linear.Config(
+            in_features=ffn.w13.in_features,
+            out_features=ffn.w13.out_features,
+            num_linears=ffn.w13.num_linears,
+            bias=ffn.w13.bias,
+            param_init=ffn.w13.param_init,
+        ),
+        w2=Linear.Config(
+            in_features=ffn.w2.in_features,
+            out_features=ffn.w2.out_features,
+            num_linears=ffn.w2.num_linears,
+            bias=ffn.w2.bias,
+            param_init=ffn.w2.param_init,
+        ),
         gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
     )
 
