@@ -58,8 +58,8 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     assert eager["batch_invariant"] == full["batch_invariant"] == batch_invariant
     if batch_invariant:
         # Real packed recurrence ran eagerly and was captured for FULL replay.
-        assert [False, True] in eager["recurrent_calls"]
-        assert [True, True] in full["recurrent_calls"]
+        assert [False, "PACKED"] in eager["recurrent_calls"]
+        assert [True, "PACKED"] in full["recurrent_calls"]
     assert eager["outputs"] == full["outputs"]
     assert eager["states"] == full["states"]
     assert all(step["mode"] == "NONE" for step in eager["dispatch"])
@@ -72,6 +72,157 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
         step["mode"] == "NONE" and step["actual"] > 128 for step in full["dispatch"]
     )
     assert len({tuple(step["slots"]) for step in replayed}) > 1
+    single_token = [step for step in replayed if step["path"] == "SINGLE_TOKEN"]
+    assert any(step["initial"] == [False] for step in single_token)
+    assert any(set(step["initial"]) == {False, True} for step in single_token)
+
+
+@pytest.mark.parametrize(
+    "batch_invariant", [False, True], ids=["regular", "batch-invariant"]
+)
+def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -> None:
+    import torch
+    from vllm.config import SchedulerConfig, VllmConfig
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    from torchtitan.experiments.rl.models import gdn
+    from torchtitan.experiments.rl.models.gdn_backend import (
+        TorchTitanGDNAttentionMetadataBuilder,
+    )
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: batch_invariant)
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+    # Qwen3.5-0.8B's local TP=1 shapes, with padding between physical slots.
+    shapes = ((3, 6144), (16, 128, 128))
+    spec = MambaSpec(
+        block_size=8,
+        shapes=shapes,
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+    config = VllmConfig()
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=16,
+        max_num_seqs=4,
+        max_num_batched_tokens=8,
+        is_encoder_decoder=False,
+    )
+    builder = TorchTitanGDNAttentionMetadataBuilder(spec, [], config, device)
+    offsets = torch.arange(5, device=device, dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=offsets,
+        query_start_loc_cpu=offsets.cpu(),
+        seq_lens=torch.ones(4, device=device, dtype=torch.int32),
+        num_reqs=4,
+        num_actual_tokens=4,
+        max_query_len=1,
+        max_seq_len=16,
+        block_table_tensor=torch.zeros(4, 1, device=device, dtype=torch.int32),
+        slot_mapping=torch.zeros(4, device=device, dtype=torch.int64),
+    )
+    metadata = builder.build_for_cudagraph_capture(common)
+    context = ForwardContext(
+        no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
+    )
+    layer = gdn.VLLMInnerGatedDeltaNet.__new__(gdn.VLLMInnerGatedDeltaNet)
+    torch.nn.Module.__init__(layer)
+    layer.prefix = "gdn"
+    layer.local_num_k_heads = layer.local_num_v_heads = 16
+    layer.head_k_dim = layer.head_v_dim = 128
+    layer.local_key_dim = 2048
+    pools = [
+        torch.randn(6, torch.Size(shape).numel() + 128, device=device, dtype=dtype)
+        for shape, dtype in zip(shapes, spec.dtypes)
+    ]
+
+    def cache_views(storage):
+        return tuple(
+            pool[:, : torch.Size(shape).numel()].view(6, *shape)
+            for pool, shape in zip(storage, shapes)
+        )
+
+    layer.kv_cache = cache_views(pools)
+    inputs = torch.randn(4, 6144, device=device, dtype=torch.bfloat16)
+    weight = torch.randn(6144, 4, device=device, dtype=torch.bfloat16)
+    a, b = torch.randn(2, 4, 16, device=device)
+    A_log, bias = torch.randn(2, 16, device=device)
+    output = torch.zeros(4, 16, 128, device=device, dtype=torch.bfloat16)
+
+    def forward():
+        layer._forward(inputs, a, b, weight, None, A_log, bias, output)
+
+    def without_mask(kernel):
+        def resumed(*args, has_initial_state=None, **kwargs):
+            return kernel(*args, **kwargs)
+
+        return resumed
+
+    with torch.inference_mode(), override_forward_context(context):
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            forward()
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            forward()
+        # The first replay occupies both slots. Later requests reuse dirty slots,
+        # alone and beside a continuing request, without changing the graph key.
+        for slots, initial in (
+            ([1, 2], [True, True]),
+            ([2], [False]),
+            ([1, 2], [True, False]),
+            ([1, 2], [False, True]),
+        ):
+            for slot, has_state in zip(slots, initial):
+                if not has_state:
+                    assert all(state[slot].count_nonzero() for state in layer.kv_cache)
+                    for state in layer.kv_cache:
+                        state[slot].fill_(float("nan"))
+            before = [pool.clone() for pool in pools]
+            reference = [pool.clone() for pool in pools]
+            layer.kv_cache = cache_views(reference)
+            for slot, has_state in zip(slots, initial):
+                if not has_state:
+                    for state in layer.kv_cache:
+                        state[slot].zero_()
+            # Explicitly clean history is the initialization oracle, independent
+            # of both the mask implementation and eager-vs-graph agreement.
+            builder.state_indices.copy_(
+                torch.tensor(slots + [0] * (5 - len(slots)), device=device)
+            )
+            builder.has_initial_state.fill_(True)
+            # Bypass mask handling in the already-clean reference, so an
+            # accidental reset of continuing slots cannot affect both sides.
+            with monkeypatch.context() as unmasked:
+                for name in (
+                    "causal_conv1d_decode",
+                    "recurrent_gdn_decode",
+                    "recurrent_gdn",
+                ):
+                    unmasked.setattr(gdn, name, without_mask(getattr(gdn, name)))
+                forward()
+            expected = output.clone()
+            layer.kv_cache = cache_views(pools)
+            builder.has_initial_state.copy_(
+                torch.tensor(initial + [False] * (5 - len(slots)), device=device)
+            )
+            # Both repeated null slots and a negative sentinel must skip writes.
+            builder.state_indices[3] = -1
+            graph.replay()
+            torch.testing.assert_close(output, expected, rtol=0, atol=0)
+            assert not output[len(slots) :].count_nonzero()
+            for actual, clean, untouched in zip(pools, reference, before):
+                assert torch.equal(actual.view(torch.uint8), clean.view(torch.uint8))
+                unused = [slot for slot in range(6) if slot not in slots]
+                assert torch.equal(actual[unused], untouched[unused])
+                assert torch.equal(actual[:, -128:], untouched[:, -128:])
 
 
 def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
@@ -113,11 +264,13 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     original_recurrent = gdn.recurrent_gdn
 
     def recurrent(*args, **kwargs):
+        metadata = next(
+            metadata
+            for metadata in get_forward_context().attn_metadata.values()
+            if isinstance(metadata, gdn.TorchTitanGDNAttentionMetadata)
+        )
         recurrent_calls.append(
-            [
-                torch.cuda.is_current_stream_capturing(),
-                kwargs["has_initial_state"] is not None,
-            ]
+            [torch.cuda.is_current_stream_capturing(), metadata.execution_path.name]
         )
         return original_recurrent(*args, **kwargs)
 
@@ -225,7 +378,14 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
             result["states"].append([requests, offsets, hashes])
             record = asdict(context.batch_descriptor)
             assert record["num_tokens"] == kwargs["input_ids"].shape[0]
-            record.update(mode=runtime, slots=slots, kind=kind, actual=offsets[-1])
+            record.update(
+                mode=runtime,
+                slots=slots,
+                kind=kind,
+                actual=offsets[-1],
+                path=first.execution_path.name,
+                initial=first.has_initial_state.cpu().tolist()[: len(requests)],
+            )
             result["dispatch"].append(record)
             return value
 
@@ -238,17 +398,20 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     base = engine.renderer.tokenizer.encode(
         "Explain physics.", add_special_tokens=False
     )
-    for wave, lengths in enumerate(([11, 17, 23, 37], [129], [9, 13, 29, 41])):
+    for wave, lengths in enumerate(
+        ([11, 17, 23, 37], [129], [9, 13, 29, 41], [1], [1, 1])
+    ):
         prompts = engine.renderer.render_cmpl(
             [{"prompt_token_ids": (base * length)[:length]} for length in lengths]
         )
         for index, prompt in enumerate(prompts):
-            if wave != 2 or index < 3:
+            if (wave != 2 or index < 3) and (wave != 4 or index == 0):
                 engine.add_request(f"{wave}-{index}", prompt, sampling)
         step = 0
         while engine.has_unfinished_requests():
-            if wave == 2 and step == 2:
-                engine.add_request("2-3", prompts[3], sampling)
+            if wave in (2, 4) and step == 2:
+                index = 3 if wave == 2 else 1
+                engine.add_request(f"{wave}-{index}", prompts[index], sampling)
             for request in engine.step():
                 if request.finished:
                     completion = request.outputs[0]
@@ -256,7 +419,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
                     assert completion.logprobs is not None
                     result["outputs"][request.request_id] = asdict(completion)
             step += 1
-    assert len(result["outputs"]) == 9
+    assert len(result["outputs"]) == 12
     if torch.distributed.get_rank() == 0:
         output.write_text(json.dumps(result, allow_nan=False))
     engine.model_executor.shutdown()

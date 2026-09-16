@@ -27,6 +27,8 @@ class TorchTitanGDNDispatcher(CudagraphDispatcher):
     different numerical paths need distinct keys. Delegate decode keys to the
     native FULL_DECODE_ONLY dispatcher until upstream supports FULL decode
     specialization; native capture, replay and graph ownership stay intact.
+    The single-token key also covers fresh requests: initialization is GPU mask
+    data, not another dispatch key or a reason to switch to packed arithmetic.
     """
 
     def initialize_cudagraph_keys(

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
 import pytest
 import torch
@@ -23,6 +23,8 @@ from vllm.v1.kv_cache_interface import MambaSpec
 
 from torchtitan.experiments.rl.models import gdn
 from torchtitan.experiments.rl.models.gdn_backend import (
+    GDNExecutionPath,
+    TorchTitanGDNAttentionMetadata,
     TorchTitanGDNAttentionMetadataBuilder,
 )
 from torchtitan.experiments.rl.models.vllm_worker import TorchTitanGDNDispatcher
@@ -83,8 +85,12 @@ def test_full_metadata_and_native_dispatch_variants():
         slot_mapping=torch.zeros(4, dtype=torch.int64),
     )
     captured = builder.build_for_cudagraph_capture(common)
-    assert type(captured) is GDNAttentionMetadata
-    # Native splits stay truthful; the mask keeps this general dummy packed.
+    assert isinstance(captured, GDNAttentionMetadata)
+    assert {field.name for field in fields(captured)} == {
+        field.name for field in fields(GDNAttentionMetadata)
+    } | {"execution_path"}
+    # Native splits stay truthful; the graph key keeps this general dummy packed.
+    assert captured.execution_path is GDNExecutionPath.PACKED
     assert captured.num_prefills == 0 and captured.num_decodes == 2
     assert captured.num_decode_tokens == 4 and captured.num_prefill_tokens == 0
     assert captured.has_initial_state is not None
@@ -116,10 +122,27 @@ def test_full_metadata_and_native_dispatch_variants():
             _num_computed_tokens_cache=None,
         ),
     )
-    assert decode_metadata.has_initial_state is None
+    assert decode_metadata.execution_path is GDNExecutionPath.SINGLE_TOKEN
+    assert decode_metadata.has_initial_state.tolist() == [True, False]
     assert decode_metadata.num_actual_tokens == 2
     assert decode_metadata.non_spec_query_start_loc.tolist() == [0, 1, 2]
     assert decode_metadata.non_spec_state_indices_tensor.tolist() == [1, 0]
+    single_token = replace(common, max_query_len=1, num_actual_tokens=2)
+    decode_capture = builder.build_for_cudagraph_capture(single_token)
+    assert not decode_capture.has_initial_state.any()
+    actual = builder.build(0, single_token)
+    assert actual.execution_path is GDNExecutionPath.SINGLE_TOKEN
+    assert actual.has_initial_state.tolist() == [False, True]
+    for name in (
+        "non_spec_query_start_loc",
+        "non_spec_state_indices_tensor",
+        "has_initial_state",
+    ):
+        assert getattr(decode_capture, name).shape == getattr(actual, name).shape
+        assert (
+            getattr(decode_capture, name).data_ptr() == getattr(actual, name).data_ptr()
+        )
+    assert actual.num_prefills == 0 and actual.num_decodes == 2
     dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
     assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
 
@@ -130,7 +153,10 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
     extent = 4 if decode else 3
-    metadata = GDNAttentionMetadata(
+    metadata = TorchTitanGDNAttentionMetadata(
+        execution_path=(
+            GDNExecutionPath.SINGLE_TOKEN if decode else GDNExecutionPath.PACKED
+        ),
         # General capture dummies can have zero native prefills as well.
         num_prefills=0,
         num_prefill_tokens=0,
@@ -138,30 +164,35 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
         num_decode_tokens=extent,
         num_spec_decodes=0,
         num_spec_decode_tokens=0,
-        num_actual_tokens=extent,
+        num_actual_tokens=3,
         non_spec_query_start_loc=(
             torch.arange(5) if decode else torch.tensor([0, 1, 2, 3, 3])
         ),
         non_spec_state_indices_tensor=(
             torch.tensor([1, 2, 0, 0]) if decode else torch.tensor([1, 2, 3, 0])
         ),
-        has_initial_state=None if decode else torch.zeros(4, dtype=torch.bool),
+        has_initial_state=torch.tensor([False, True, False, False]),
     )
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: True)
-    monkeypatch.setattr(gdn, "causal_conv1d_decode", lambda x, *args, **kwargs: x)
-    monkeypatch.setattr(gdn, "paged_causal_conv1d", lambda x, *args, **kwargs: x)
+
+    def convolution(x, *args, has_initial_state=None, **kwargs):
+        assert has_initial_state is metadata.has_initial_state
+        return x
+
+    monkeypatch.setattr(gdn, "causal_conv1d_decode", convolution)
+    monkeypatch.setattr(gdn, "paged_causal_conv1d", convolution)
 
     def recurrent(conv, a, b, A_log, bias, out, offsets, slots, initial):
         assert conv.shape[0] == out.shape[0] == extent
         assert offsets[-1] == extent
-        assert (initial is None) == decode
+        assert initial is metadata.has_initial_state
         out.fill_(1)
 
     monkeypatch.setattr(layer, "_forward_gdn", recurrent)
     context = ForwardContext(
         no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
     )
-    value, output = torch.ones(4, 1), torch.zeros(4, 1)
+    value, output = torch.ones(6, 1), torch.zeros(6, 1)
     with override_forward_context(context):
         layer._forward(value, value, value, value, None, value, value, output)
         # Reject bias even in profiling and empty-batch early returns.
@@ -172,4 +203,5 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
                 match="Attention Gym convolution kernels do not support bias",
             ):
                 layer._forward(value, value, value, value, value, value, value, output)
-    assert torch.equal(output[:, 0], (torch.arange(4) < extent).float())
+    assert metadata.num_actual_tokens == 3
+    assert torch.equal(output[:, 0], (torch.arange(6) < extent).float())

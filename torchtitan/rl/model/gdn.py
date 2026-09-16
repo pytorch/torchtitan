@@ -33,7 +33,11 @@ from attn_gym.linear import (
 )
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.experiments.rl.models.gdn_backend import TorchTitanGDNAttentionBackend
+from torchtitan.experiments.rl.models.gdn_backend import (
+    GDNExecutionPath,
+    TorchTitanGDNAttentionBackend,
+    TorchTitanGDNAttentionMetadata,
+)
 from torchtitan.protocols.module import Module
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
@@ -45,7 +49,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
@@ -212,7 +215,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             return
         assert isinstance(attn_metadata, dict)
         gdn_metadata = attn_metadata[self.prefix]
-        assert isinstance(gdn_metadata, GDNAttentionMetadata)
+        assert isinstance(gdn_metadata, TorchTitanGDNAttentionMetadata)
         assert (
             gdn_metadata.spec_sequence_masks is None
         ), "VLLMInnerGatedDeltaNet does not support speculative decoding"
@@ -222,50 +225,52 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             return
         state_indices = gdn_metadata.non_spec_state_indices_tensor
         cu_seqlens = gdn_metadata.non_spec_query_start_loc
-        assert state_indices is not None and cu_seqlens is not None
-        # Decode has no per-request initialization mask. The builder retains a
-        # mask for packed capture even when its dummy requests are all one-token.
-        if gdn_metadata.has_initial_state is None:
-            # One token per physical slot, including null padding, as in native
-            # vLLM padded decode organization (not necessarily its numerics).
-            num_actual_tokens = state_indices.numel()
+        has_initial_state = gdn_metadata.has_initial_state
+        assert (
+            state_indices is not None
+            and cu_seqlens is not None
+            and has_initial_state is not None
+        )
+        # SP/model-input rounding need not pad attention metadata. FULL bucket
+        # padding does: its prepared rows and captured slices stay fixed while
+        # the builder restages slots and freshness, including null padding.
+        if gdn_metadata.execution_path is GDNExecutionPath.SINGLE_TOKEN:
+            num_decode_rows = state_indices.numel()
             conv_output = causal_conv1d_decode(
-                mixed_qkv[:num_actual_tokens],
+                mixed_qkv[:num_decode_rows],
                 conv_weight,
                 self.kv_cache[0],
                 activation="silu",
                 state_indices=state_indices,
+                has_initial_state=has_initial_state,
             )
             if not is_in_batch_invariant_mode():
                 recurrent_gdn_decode(
                     conv_output,
-                    a[:num_actual_tokens].unsqueeze(0),
-                    b[:num_actual_tokens].unsqueeze(0),
+                    a[:num_decode_rows].unsqueeze(0),
+                    b[:num_decode_rows].unsqueeze(0),
                     A_log.float(),
                     dt_bias.float(),
                     self.kv_cache[1],
                     state_indices,
+                    has_initial_state=has_initial_state,
                     scale=self.head_k_dim**-0.5,
-                    out=output[:num_actual_tokens].unsqueeze(0),
+                    out=output[:num_decode_rows].unsqueeze(0),
                 )
             else:
                 self._forward_gdn(
                     conv_output,
-                    a[:num_actual_tokens],
-                    b[:num_actual_tokens],
+                    a[:num_decode_rows],
+                    b[:num_decode_rows],
                     A_log,
                     dt_bias,
-                    output[:num_actual_tokens],
+                    output[:num_decode_rows],
                     cu_seqlens,
                     state_indices,
-                    None,
+                    has_initial_state,
                 )
             return
 
-        # vLLM intentionally pads PIECEWISE/SP model inputs, but pads attention
-        # metadata only for FULL. Write only the prepared extent; the caller
-        # zeroed the entire output. FULL descriptors fix the extent and storage:
-        # requests restage buffer contents, not the captured slices.
         conv_output = paged_causal_conv1d(
             mixed_qkv[:num_actual_tokens].unsqueeze(0),
             conv_weight,
@@ -273,7 +278,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             state_indices,
             activation="silu",
             cu_seqlens=cu_seqlens,
-            has_initial_state=gdn_metadata.has_initial_state,
+            has_initial_state=has_initial_state,
         ).squeeze(0)
         self._forward_gdn(
             conv_output,
@@ -284,7 +289,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             output[:num_actual_tokens],
             cu_seqlens,
             state_indices,
-            gdn_metadata.has_initial_state,
+            has_initial_state,
         )
 
     def _forward_gdn(
@@ -297,7 +302,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         output: torch.Tensor,
         cu_seqlens: torch.Tensor,
         all_slots: torch.Tensor,
-        has_initial_state: torch.Tensor | None,
+        has_initial_state: torch.Tensor,
     ) -> None:
         """Map each cu_seqlens interval to its paged SSM slot in all_slots.
 

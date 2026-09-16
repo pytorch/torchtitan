@@ -6,6 +6,9 @@
 
 """Attention Gym's paged GDN metadata contract for the native vLLM runner."""
 
+from dataclasses import dataclass
+from enum import auto, Enum
+
 import torch
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import (
@@ -20,6 +23,16 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+
+
+class GDNExecutionPath(Enum):
+    SINGLE_TOKEN = auto()
+    PACKED = auto()
+
+
+@dataclass(kw_only=True)
+class TorchTitanGDNAttentionMetadata(GDNAttentionMetadata):
+    execution_path: GDNExecutionPath
 
 
 class TorchTitanGDNAttentionBackend(AttentionBackend):
@@ -39,7 +52,7 @@ class TorchTitanGDNAttentionBackend(AttentionBackend):
 
 
 class TorchTitanGDNAttentionMetadataBuilder(
-    AttentionMetadataBuilder[GDNAttentionMetadata]
+    AttentionMetadataBuilder[TorchTitanGDNAttentionMetadata]
 ):
     """Stage shared request buffers before eager execution or native graph replay."""
 
@@ -103,7 +116,7 @@ class TorchTitanGDNAttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> GDNAttentionMetadata:
+    ) -> TorchTitanGDNAttentionMetadata:
         m = common_attn_metadata
         capacity = min(self.num_reqs_capacity, m.num_actual_tokens)
         if not 0 <= m.num_reqs <= capacity:
@@ -131,11 +144,16 @@ class TorchTitanGDNAttentionMetadataBuilder(
             if m.num_reqs
             else (0, 0, 0, 0)
         )
-        # Retain native split counts, even when a general capture dummy happens
-        # to contain only one-token requests. Decode needs no initialization mask;
-        # packed execution always keeps one, including for those capture dummies.
-        decode = m.max_query_len == 1
-        return GDNAttentionMetadata(
+        # Match the native graph key, not the native split counts: a general
+        # capture dummy can contain only one-token requests. Freshness does not
+        # select the execution path; both paths consume the initialization mask.
+        single_token = m.max_query_len == 1
+        return TorchTitanGDNAttentionMetadata(
+            execution_path=(
+                GDNExecutionPath.SINGLE_TOKEN
+                if single_token
+                else GDNExecutionPath.PACKED
+            ),
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
@@ -146,22 +164,24 @@ class TorchTitanGDNAttentionMetadataBuilder(
             num_actual_tokens=m.num_actual_tokens,
             non_spec_query_start_loc=(
                 self.decode_query_start_loc[: capacity + 1]
-                if decode
+                if single_token
                 else self.query_start_loc[: capacity + 2]
             ),
             non_spec_state_indices_tensor=(
                 self.state_indices[:capacity]
-                if decode
+                if single_token
                 else self.state_indices[: capacity + 1]
             ),
             has_initial_state=(
-                None if decode else self.has_initial_state[: capacity + 1]
+                self.has_initial_state[:capacity]
+                if single_token
+                else self.has_initial_state[: capacity + 1]
             ),
         )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
-    ) -> GDNAttentionMetadata:
+    ) -> TorchTitanGDNAttentionMetadata:
         metadata = self.build(0, common_attn_metadata)
         self.state_indices.zero_()
         self.has_initial_state.zero_()
