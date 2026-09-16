@@ -244,7 +244,5 @@ class GraphTrainer(Trainer):
 
         super().close()
 
-        self._graph_pipeline_runtime = None
-
         # See Note [explicit cudagraph teardown] in cudagraph.py
         cudagraph_teardown()
