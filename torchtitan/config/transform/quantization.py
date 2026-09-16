@@ -35,18 +35,6 @@ from .converter import ModelConfigConverter
 logger = logging.getLogger(__name__)
 
 
-def _replace_config(model_config, parent, attr, new_config):
-    if parent is None:
-        return new_config
-    if isinstance(parent, list):
-        assert isinstance(attr, int)
-        parent[attr] = new_config
-    else:
-        assert isinstance(attr, str)
-        setattr(parent, attr, new_config)
-    return model_config
-
-
 class QuantizationConverter(ModelConfigConverter):
     """Base class for quantization converters.
 
@@ -61,7 +49,7 @@ class QuantizationConverter(ModelConfigConverter):
 
 
 class Float8LinearConverter(QuantizationConverter):
-    """Replace matching dense or stacked linear configs with Float8."""
+    """Replace matching Linear.Config with Float8Linear.Config."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
@@ -71,7 +59,7 @@ class Float8LinearConverter(QuantizationConverter):
         filter_fqns: list[str] = field(default_factory=list)
         """
         List of fully qualified names of modules to skip applying float8 training to.
-        Linear modules with an incompatible matrix dimension are always skipped
+        nn.Linear modules with any dim size not divisible by 16 are always skipped
         due to hardware requirements.
         """
 
@@ -182,7 +170,12 @@ class Float8LinearConverter(QuantizationConverter):
                     param_init=linear_config.param_init,
                     _torchao_config=self.torchao_config,
                 )
-                model_config = _replace_config(model_config, parent, attr, new_config)
+                if parent is None:
+                    model_config = new_config
+                elif isinstance(parent, list):
+                    parent[attr] = new_config
+                else:
+                    setattr(parent, attr, new_config)
 
         logger.info("Swapped to Float8Linear layers")
         return model_config
@@ -263,15 +256,15 @@ def _torchao_nightly_install_command() -> str:
 
 
 class MXFP8LinearConverter(QuantizationConverter):
-    """Replace matching dense or stacked linear configs with MXFP8."""
+    """Replace matching Linear.Config with MXFP8Linear.Config."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
         fqns: list[str] = field(default_factory=list)
         """
         List of fully qualified names of modules to apply MXFP8 quantization to.
-        Only linear configs whose FQN contains a match are converted. If empty,
-        all dense and stacked linear modules are converted.
+        Only Linear.Config entries whose FQN contains a match are converted.
+        If empty, all Linear modules are converted.
         """
         linears_saving_inputs_for_backward_in_mxfp8: list[str] = field(
             default_factory=list
@@ -328,18 +321,11 @@ class MXFP8LinearConverter(QuantizationConverter):
     def convert(self, model_config):
         assert MXFP8Linear is not None
         fqns = self.config.fqns
-        targets: list[
-            tuple[
-                str,
-                Linear.Config,
-                object | None,
-                str | int | None,
-            ]
-        ] = []
-        for fqn, config, parent, attr in model_config.traverse(Linear.Config):
-            assert isinstance(config, Linear.Config)
-            if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                targets.append((fqn, config, parent, attr))
+        targets = [
+            entry
+            for entry in model_config.traverse(Linear.Config)
+            if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
+        ]
 
         block_size = MXFP8Linear.WEIGHT_BLOCK_SIZE
         for fqn, _config, parent, _attr in targets:
@@ -379,9 +365,6 @@ class MXFP8LinearConverter(QuantizationConverter):
             fqn for fqn in target_fqns if any(selector in fqn for selector in selectors)
         }
         for fqn, config, parent, attr in targets:
-            input_format: Literal["bf16", "mxfp8"] = (
-                "mxfp8" if fqn in mxfp8_fqns else "bf16"
-            )
             quantized_cls = preserve_parallel_linear_role(MXFP8Linear, config)
             config_cls = cast(Any, quantized_cls.Config)
             new_config = config_cls(
@@ -390,9 +373,16 @@ class MXFP8LinearConverter(QuantizationConverter):
                 num_linears=config.num_linears,
                 bias=config.bias,
                 param_init=config.param_init,
-                input_activation_format_for_backward=input_format,
+                input_activation_format_for_backward=(
+                    "mxfp8" if fqn in mxfp8_fqns else "bf16"
+                ),
             )
-            model_config = _replace_config(model_config, parent, attr, new_config)
+            if parent is None:
+                model_config = new_config
+            elif isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
 
         num_mxfp8 = len(mxfp8_fqns)
         num_bf16 = len(targets) - num_mxfp8
@@ -465,17 +455,16 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
 
 
 class NVFP4LinearConverter(QuantizationConverter):
-    """Replace matching dense or stacked linear configs with NVFP4."""
+    """Replace matching Linear.Config with NVFP4Linear.Config."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(QuantizationConverter.Config):
         fqns: list[str] = field(default_factory=list)
         """
         List of fully qualified names of modules to apply NVFP4 quantization to.
-        Only linear configs whose FQN contains a match are converted. If empty,
-        all dense and stacked linear modules are converted -- pass explicit
-        fqns to keep the LM head in bf16, which the mixed recipe leaves
-        unquantized for stability.
+        Only Linear.Config entries whose FQN contains a match are converted.
+        If empty, all Linear modules are converted -- pass explicit fqns to keep
+        the LM head in bf16, which the mixed recipe leaves unquantized for stability.
         """
 
     def __init__(self, config: Config):
@@ -500,26 +489,28 @@ class NVFP4LinearConverter(QuantizationConverter):
     def convert(self, model_config):
         assert NVFP4Linear is not None
         fqns = self.config.fqns
-        for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
-            assert isinstance(linear_config, Linear.Config)
+        for fqn, config, parent, attr in model_config.traverse(Linear.Config):
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                if isinstance(linear_config, RouterGateLinear.Config):
+                if isinstance(config, RouterGateLinear.Config):
                     raise ValueError(
                         f"NVFP4 quantization does not support router gate {fqn!r}; "
                         "exclude it with fqns."
                     )
-                quantized_cls = preserve_parallel_linear_role(
-                    NVFP4Linear, linear_config
-                )
+                quantized_cls = preserve_parallel_linear_role(NVFP4Linear, config)
                 config_cls = cast(Any, quantized_cls.Config)
                 new_config = config_cls(
-                    in_features=linear_config.in_features,
-                    out_features=linear_config.out_features,
-                    num_linears=linear_config.num_linears,
-                    bias=linear_config.bias,
-                    param_init=linear_config.param_init,
+                    in_features=config.in_features,
+                    out_features=config.out_features,
+                    num_linears=config.num_linears,
+                    bias=config.bias,
+                    param_init=config.param_init,
                 )
-                model_config = _replace_config(model_config, parent, attr, new_config)
+                if parent is None:
+                    model_config = new_config
+                elif isinstance(parent, list):
+                    parent[attr] = new_config
+                else:
+                    setattr(parent, attr, new_config)
 
         logger.info("Converted Linear layers to NVFP4Linear")
         return model_config
