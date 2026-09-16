@@ -264,6 +264,19 @@ def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
 
 
+def _touches_backward(node: torch.fx.Node) -> bool:
+    """True if `node` is in backward, or any of its inputs is.
+
+    Deliberately separate from `_is_backward_node`, which every memory policy,
+    the cpu_offload passes and the EP/FSDP passes depend on. Widening that
+    shared predicate would change the node sets those all compute; only the
+    auto_perf_maxing solver wants the input-inclusive form, so it gets its own.
+    """
+    return node.meta.get("autograd_backward", False) or any(
+        n.meta.get("autograd_backward", False) for n in node.all_input_nodes
+    )
+
+
 def _get_module_fqn(node: torch.fx.Node) -> str:
     return node.meta.get("custom", {}).get(_MODULE_FQN, "")
 

@@ -82,6 +82,52 @@ The `--compile.memory_policy` config selects the tagging strategy.
 New policies (e.g. budget-aware mixed SAC + offload) should be added
 as new branches in `tag_with_memory_policy_pass`.
 
+### Using `auto_perf_maxing`
+
+Selecting the policy is the whole setup. The budget defaults to 90% of the
+local device's memory, so there is no measure-then-configure round trip:
+
+```bash
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test \
+    ./run_train.sh \
+    --compile.mode aot_fx_trace \
+    --compile.memory_policy auto_perf_maxing
+```
+
+Pass a budget only to target a specific peak -- to leave room for another
+process on the same GPU, or to measure the throughput/memory tradeoff:
+
+```bash
+    --compile.memory_policy auto_perf_maxing \
+    --compile.auto_sac.memory_budget_gb 76
+```
+
+The budget is per rank, in GiB, and covers the graph plus optimizer state. It
+does not cover the CUDA context, allocator fragmentation, or NCCL buffers,
+which is why `budget_fraction` defaults below 1.0.
+
+Two flags that are easy to get wrong:
+
+- **Disabling cudagraphs.** Use `--training.disable_cuda_graphs`, not only
+  `--compile.disable_passes cudagraph_pass`. `zero_grad(set_to_none=)` keys off
+  the training flag, so passing just the pass name leaves a full copy of the
+  sharded gradients resident and the run OOMs at step 2.
+- **`--compile.auto_sac.cpu_offload_bw`** is the bandwidth the solver *assumes*
+  when sizing transfer windows, not one it enforces. The default measures the
+  link at startup. Overriding it changes the plan, not the hardware: too high
+  and transfers stop hiding under compute.
+
+`--compile.auto_sac.solver_type` picks how each layer's budget is turned into
+per-tensor decisions. `greedy` (the default) is an exact per-layer knapsack;
+`ilp` solves the same split with CBC and can express an offload/recompute
+conflict constraint the greedy pass cannot. They land within noise of each
+other on llama3-8b, and the ILP's solve time grows as the budget tightens, so
+prefer `greedy` unless you are specifically comparing the two.
+
+Add `--compile.auto_sac.debug_solver` to see the per-layer keep/recompute/
+offload split and the constraint the plan is binding against. Without it the
+solver logs only warnings and errors.
+
 **NUMA binding for CPU offload:** On multi-NUMA machines (e.g. GB200
 NVLink-C2C), D2H/H2D bandwidth is ~350 GB/s NUMA-local vs ~120 GB/s
 cross-NUMA. `Trainer` automatically applies NUMA binding
