@@ -653,14 +653,19 @@ def _quantize_weight_for_graph_test(
     return weight, weight, weight
 
 
-def _make_forward_graph_with_unshard_and_replicated_param() -> fx.GraphModule:
+def _make_forward_graph_with_unshard_and_replicated_param(
+    *, process_group_is_input: bool = False
+) -> fx.GraphModule:
     graph = fx.Graph()
     sharded_param = graph.placeholder("sharded_param")
     replicated_param = graph.placeholder("replicated_param")
+    process_group = (
+        graph.placeholder("process_group") if process_group_is_input else _FAKE_PG
+    )
     x = graph.placeholder("x")
     all_gather = graph.call_function(
         torch.ops._c10d_functional.all_gather_into_tensor.default,
-        args=(sharded_param, 1, _FAKE_PG),
+        args=(sharded_param, 1, process_group),
     )
     wait = graph.call_function(
         torch.ops._c10d_functional.wait_tensor.default,
@@ -675,7 +680,7 @@ def _make_forward_graph_with_unshard_and_replicated_param() -> fx.GraphModule:
     )
     duplicate_all_gather = graph.call_function(
         torch.ops._c10d_functional.all_gather_into_tensor.default,
-        args=(sharded_param, 1, _FAKE_PG),
+        args=(sharded_param, 1, process_group),
     )
     duplicate_wait = graph.call_function(
         torch.ops._c10d_functional.wait_tensor.default,
@@ -964,6 +969,30 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         self.assertNotIn(
             torch.ops._c10d_functional.all_gather_into_tensor.default,
             _call_targets(split.fw_no_fsdp_module),
+        )
+
+    def test_forward_split_accepts_dynamic_process_group_input(self) -> None:
+        gm = _make_forward_graph_with_unshard_and_replicated_param(
+            process_group_is_input=True
+        )
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        split = split_forward_fsdp_collectives(
+            gm,
+            num_params=3,
+            fwd_input_names=(
+                "sharded_param",
+                "replicated_param",
+                "process_group",
+                "x",
+            ),
+            fwd_flat_input_indices=(0, 1, 2, 3),
+        )
+
+        self.assertIsNotNone(split.unshard_module)
+        self.assertIn(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            _call_targets(split.unshard_module),
         )
 
     def test_forward_split_passes_through_shard_saved_for_backward(self) -> None:

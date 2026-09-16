@@ -71,7 +71,11 @@ def _fsdp_param_fqns(node: fx.Node) -> tuple[str, ...]:
 
 
 def _find_last_all_gather_in_chain(start_node: fx.Node) -> fx.Node | None:
-    """Find the final all-gather in a linear FSDP unshard launch chain."""
+    """Find the final all-gather in a linear FSDP unshard launch chain.
+
+    CooR supplies the process group as another FX input, so all-gather
+    traversal follows its tensor argument explicitly.
+    """
     node = start_node
     last_all_gather = None
     while True:
@@ -80,7 +84,10 @@ def _find_last_all_gather_in_chain(start_node: fx.Node) -> fx.Node | None:
         if len(node.users) != 1:
             break
         user = next(iter(node.users))
-        if len(user.all_input_nodes) > 1:
+        if is_all_gather_into_tensor(user):
+            if user.args[0] is not node:
+                break
+        elif len(user.all_input_nodes) > 1:
             break
         node = user
     return last_all_gather
@@ -199,7 +206,9 @@ def _find_fsdp_unshard_outputs_structural(
     outputs: list[fx.Node] = []
     seen: set[fx.Node] = set()
     for user in param_placeholder.users:
-        if len(user.all_input_nodes) > 1:
+        if len(user.all_input_nodes) > 1 and not (
+            is_all_gather_into_tensor(user) and user.args[0] is param_placeholder
+        ):
             continue
         last_all_gather = _find_last_all_gather_in_chain(user)
         if last_all_gather is None:
