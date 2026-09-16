@@ -114,7 +114,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                 )
                 torch.testing.assert_close(
                     parallel.w2.weight.grad,
-                    reference.w2.weight.grad.chunk(self.world_size, 1)[self.rank],
+                    reference.w2.weight.grad.chunk(self.world_size, 2)[self.rank],
                 )
 
 

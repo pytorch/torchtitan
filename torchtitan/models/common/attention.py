@@ -796,6 +796,7 @@ class QKVLinear(Module):
                 tensor = tensor.redistribute(
                     tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
                 )
+            tensor = tensor.squeeze(0)
             n_kv = tensor.shape[0] // (r * hd)
             tail = (tensor.shape[1],) if ndim == 4 else ()
             w = tensor.reshape(n_kv, r, hd, *tail)
@@ -832,8 +833,8 @@ class QKVLinear(Module):
             q = wq.reshape(n_kv, hpk, hd, *tail)
             k = wk.reshape(n_kv, 1, hd, *tail)
             v = wv.reshape(n_kv, 1, hd, *tail)
-            state_dict[f"{prefix}wqkv.{param}"] = torch.cat([q, k, v], dim=1).reshape(
-                -1, *tail
+            state_dict[f"{prefix}wqkv.{param}"] = (
+                torch.cat([q, k, v], dim=1).reshape(-1, *tail).unsqueeze(0)
             )
 
 

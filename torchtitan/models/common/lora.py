@@ -94,15 +94,15 @@ class _LoRALinearMixin:
         replicated_weight = ShardingConfig(
             state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         )
-        if base_weight_sharding == dense_param_placement(tp=spmd.S(0)):
+        if base_weight_sharding == dense_param_placement(tp=spmd.S(1)):
             lora_b_sharding = ShardingConfig(
                 state_shardings={"weight": base_weight_sharding},
             )
             return replicated_weight, lora_b_sharding
 
-        assert base_weight_sharding == dense_param_placement(tp=spmd.S(1))
+        assert base_weight_sharding == dense_param_placement(tp=spmd.S(2))
         lora_a_sharding = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
+            state_shardings={"weight": dense_param_placement(tp=spmd.S(2))},
         )
         return lora_a_sharding, replicated_weight
 
