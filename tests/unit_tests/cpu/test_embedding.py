@@ -38,6 +38,43 @@ class TestEmbeddingConfig(unittest.TestCase):
         self.assertIsInstance(emb, Embedding)
         self.assertIsInstance(emb, nn.Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
+        self.assertIsNone(emb.padding_idx)
+
+    def test_config_padding_idx(self):
+        """Native config preserves nn.Embedding initialization and padding gradients."""
+        for padding_idx in (0, 3, -1, -8):
+            with self.subTest(padding_idx=padding_idx):
+                config = Embedding.Config(
+                    num_embeddings=8, embedding_dim=4, padding_idx=padding_idx
+                )
+                torch.manual_seed(42)
+                emb = config.build()
+                torch.manual_seed(42)
+                reference = nn.Embedding(8, 4, padding_idx=padding_idx)
+                self.assertEqual(emb.padding_idx, reference.padding_idx)
+                torch.testing.assert_close(emb.weight, reference.weight, atol=0, rtol=0)
+                self.assertTrue(torch.all(emb.weight[emb.padding_idx] == 0))
+
+                nn.init.ones_(emb.weight)
+                torch.manual_seed(43)
+                emb.init_states()
+                torch.manual_seed(43)
+                reference.reset_parameters()
+                torch.testing.assert_close(emb.weight, reference.weight, atol=0, rtol=0)
+
+                # Loaded padding weights are returned, but receive no gradient.
+                with torch.no_grad():
+                    reference.weight.copy_(torch.arange(1, 33).reshape(8, 4))
+                emb.load_state_dict(reference.state_dict())
+                tokens = torch.arange(8).repeat(2)
+                output = emb(tokens)
+                expected = reference(tokens)
+                output.sum().backward()
+                expected.sum().backward()
+                torch.testing.assert_close(output, expected, atol=0, rtol=0)
+                torch.testing.assert_close(
+                    emb.weight.grad, reference.weight.grad, atol=0, rtol=0
+                )
 
     def test_config_build_without_fields_raises(self):
         """Embedding.Config() raises TypeError when required fields are not provided."""
@@ -155,7 +192,7 @@ class TestEmbedding(DTensorTestBase):
                     )
                 tokens = tokens.unsqueeze(0)
 
-                # Config.build() never sets padding_idx; HF conversion retains it.
+                # HF conversion retains the constructor-normalized padding index.
                 convert_hf_to_module(hf_model)
                 embedding = hf_model.get_input_embeddings()
                 self.assertIsInstance(embedding, Embedding)

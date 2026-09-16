@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from copy import deepcopy
 from itertools import product
 
 import pytest
@@ -55,7 +54,7 @@ class TestFSDPEmbedding(DTensorTestBase):
         )
 
         for padding_idx, reshard_after_forward in product(
-            (None, 5, 69, 127), (False, True)
+            (None, 5, 69, 127, -1), (False, True)
         ):
             with self.subTest(
                 padding_idx=padding_idx,
@@ -70,19 +69,28 @@ class TestFSDPEmbedding(DTensorTestBase):
                 )
                 with torch.no_grad():
                     reference.weight.normal_()
-                embedding = deepcopy(reference)
-                # Match HF conversion before applying Module and FSDP wrappers.
-                embedding.__class__ = Embedding
-                embedding._sharding_config = ShardingConfig(
-                    state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-                    in_src_shardings={"input": input_layout},
-                    in_dst_shardings={"input": input_layout},
-                    out_src_shardings=SpmdType(
-                        {dp: spmd.S(0), cp: spmd.S(1), tp: spmd.P}
-                    ),
-                    out_dst_shardings=output_layout,
-                    local_spmd=True,
+                embedding = (
+                    Embedding.Config(
+                        num_embeddings=128,
+                        embedding_dim=16,
+                        padding_idx=padding_idx,
+                        sharding_config=ShardingConfig(
+                            state_shardings={
+                                "weight": dense_param_placement(tp=spmd.S(0))
+                            },
+                            in_src_shardings={"input": input_layout},
+                            in_dst_shardings={"input": input_layout},
+                            out_src_shardings=SpmdType(
+                                {dp: spmd.S(0), cp: spmd.S(1), tp: spmd.P}
+                            ),
+                            out_dst_shardings=output_layout,
+                            local_spmd=True,
+                        ),
+                    )
+                    .build()
+                    .to(self.device_type)
                 )
+                embedding.load_state_dict(reference.state_dict())
                 embedding.parallelize(parallel_dims)
                 fully_shard(
                     embedding,

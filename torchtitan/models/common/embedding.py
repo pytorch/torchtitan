@@ -27,9 +27,12 @@ class Embedding(nn.Embedding, Module):
     class Config(Module.Config):
         num_embeddings: int
         embedding_dim: int
+        padding_idx: int | None = None
 
     def __init__(self, config: Config):
-        super().__init__(config.num_embeddings, config.embedding_dim)
+        super().__init__(
+            config.num_embeddings, config.embedding_dim, padding_idx=config.padding_idx
+        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Run vocab-parallel embedding when the active mesh has a TP group."""
