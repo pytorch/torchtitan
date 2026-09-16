@@ -41,20 +41,19 @@ try:
             )
             self.out_features = config.out_features
             self.num_linears = config.num_linears
-            if config.num_linears > 1:
-                self.weight = torch.nn.Parameter(
-                    self.weight.detach().unflatten(
+            self.weight = torch.nn.Parameter(
+                self.weight.detach().unflatten(
+                    0, (config.num_linears, config.out_features)
+                ),
+                requires_grad=self.weight.requires_grad,
+            )
+            if self.bias is not None:
+                self.bias = torch.nn.Parameter(
+                    self.bias.detach().unflatten(
                         0, (config.num_linears, config.out_features)
                     ),
-                    requires_grad=self.weight.requires_grad,
+                    requires_grad=self.bias.requires_grad,
                 )
-                if self.bias is not None:
-                    self.bias = torch.nn.Parameter(
-                        self.bias.detach().unflatten(
-                            0, (config.num_linears, config.out_features)
-                        ),
-                        requires_grad=self.bias.requires_grad,
-                    )
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             if torch.is_autocast_enabled():
@@ -69,13 +68,17 @@ try:
             )
             if bias is not None:
                 output = output + bias.to(output.dtype)
+            if self.num_linears == 1:
+                return output
             return output.unflatten(-1, self.weight.shape[:-1])
 
         def reset_parameters(self) -> None:
-            if self.weight.ndim == 2:
-                TorchAOFloat8Linear.reset_parameters(self)
-            else:
-                Linear.reset_parameters(self)
+            Linear.reset_parameters(self)
+
+        def _init_param(self, name: str, param: torch.Tensor) -> None:
+            if self.num_linears == 1:
+                param = param.flatten(0, -2) if name == "weight" else param.flatten()
+            Module._init_param(self, name, param)
 
 except ImportError:
     Float8Linear = None

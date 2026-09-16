@@ -349,7 +349,11 @@ class MXFP8Linear(Linear):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        local_out_features = self.weight.shape[-2]
+        # Read the parameter once. SimpleFSDP exposes its unsharded weight
+        # through a parametrization, and each read would rebuild the MXFP8
+        # operands for that unshard.
+        physical_weight = self.weight
+        local_out_features = physical_weight.shape[-2]
         if local_out_features % _MXFP8_BLOCK_SIZE:
             raise ValueError(
                 "MXFP8 requires local out_features divisible by "
@@ -358,17 +362,19 @@ class MXFP8Linear(Linear):
                 "not span projection boundaries."
             )
 
-        # Always a plain tensor: spmd_types carries TP and EP as annotations
-        # instead of wrapping the weight as a model-parallel DTensor.
-        weight_NK, bias_N = self._flatten_weight_and_bias()
         # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
         # not what forward usually sees. Under FSDP the post-all-gather hook has
         # already replaced it for this unshard lifetime with the storage-free
         # _UnshardedFSDPTensor holding the quantized operands, so the weight
         # arrives here already quantized and the type identifies which state we
         # are in.
-        if isinstance(weight_NK, _UnshardedFSDPTensor):
-            operands = weight_NK.operands
+        # spmd_types carries TP and EP as annotations instead of wrapping the
+        # weight as a model-parallel DTensor.
+        weight_NK, bias_N = self._flatten_weight_and_bias(weight=physical_weight)
+        if isinstance(physical_weight, _UnshardedFSDPTensor):
+            # Read operands before flattening. Dynamo can source the module
+            # parameter, but not a temporary tensor-subclass view of it.
+            operands = physical_weight.operands
         else:
             # No data parallel implementation owns this weight's lifecycle, so
             # it still holds high-precision storage and the operands are built
@@ -377,14 +383,15 @@ class MXFP8Linear(Linear):
             # hands forward a plain annotated local tensor, so the wrapper
             # SimpleFSDP's parametrization built never reaches here. Quantize
             # the storage rather than the wrapper, which the kernels cannot
-            # consume; ``weight_NK`` itself stays wrapped so autograd returns
+            # consume; the matrix view itself stays wrapped so autograd returns
             # the gradient to the parameter.
             with torch.no_grad():
-                operands = _quantize_mxfp8_weight(
-                    weight_NK._tensor
-                    if isinstance(weight_NK, _LinearShardedTensorWithMXFP8Compute)
-                    else weight_NK
+                high_precision_weight = (
+                    physical_weight._tensor
+                    if isinstance(physical_weight, _LinearShardedTensorWithMXFP8Compute)
+                    else physical_weight
                 )
+                operands = _quantize_mxfp8_weight(high_precision_weight.flatten(0, -2))
             # Nothing caches this across calls, so a frozen weight is
             # requantized on every forward. Training pays that anyway, since
             # the weight changes each optimizer step; inference does not.

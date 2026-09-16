@@ -33,16 +33,16 @@ def test_router_gate_linear_forward_and_backward_contract_cpu():
     output_TE.backward(grad_output_TE)
 
     input_ref_TD = input_TD.detach().float().requires_grad_()
-    weight_ref_ED = layer.weight.detach().float().requires_grad_()
-    bias_ref_E = layer.bias.detach().float().requires_grad_()
+    weight_ref_ED = layer.weight[0].detach().float().requires_grad_()
+    bias_ref_E = layer.bias[0].detach().float().requires_grad_()
     output_ref_TE = input_ref_TD @ weight_ref_ED.T + bias_ref_E
     output_ref_TE.backward(grad_output_TE)
 
     assert output_TE.dtype is torch.float32
     torch.testing.assert_close(output_TE, output_ref_TE)
     torch.testing.assert_close(input_TD.grad, input_ref_TD.grad.bfloat16())
-    torch.testing.assert_close(layer.weight.grad, weight_ref_ED.grad.bfloat16())
-    torch.testing.assert_close(layer.bias.grad, bias_ref_E.grad.bfloat16())
+    torch.testing.assert_close(layer.weight.grad[0], weight_ref_ED.grad.bfloat16())
+    torch.testing.assert_close(layer.bias.grad[0], bias_ref_E.grad.bfloat16())
 
 
 @pytest.mark.parametrize(
@@ -73,15 +73,17 @@ def test_router_gate_linear_uses_fp32_if_either_operand_is_fp32(
     output_TE.backward(grad_output_TE)
 
     input_ref_TD = input_TD.detach().float().requires_grad_()
-    weight_ref_ED = layer.weight.detach().float().requires_grad_()
-    bias_ref_E = layer.bias.detach().float().requires_grad_()
+    weight_ref_ED = layer.weight[0].detach().float().requires_grad_()
+    bias_ref_E = layer.bias[0].detach().float().requires_grad_()
     output_ref_TE = input_ref_TD @ weight_ref_ED.T + bias_ref_E
     output_ref_TE.backward(grad_output_TE)
 
     torch.testing.assert_close(output_TE, output_ref_TE)
     torch.testing.assert_close(input_TD.grad, input_ref_TD.grad.to(input_dtype))
-    torch.testing.assert_close(layer.weight.grad, weight_ref_ED.grad.to(weight_dtype))
-    torch.testing.assert_close(layer.bias.grad, bias_ref_E.grad.to(weight_dtype))
+    torch.testing.assert_close(
+        layer.weight.grad[0], weight_ref_ED.grad.to(weight_dtype)
+    )
+    torch.testing.assert_close(layer.bias.grad[0], bias_ref_E.grad.to(weight_dtype))
 
 
 def test_router_gate_linear_preserves_linear_state_dict():

@@ -33,6 +33,25 @@ _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
 
 
+def linear_param_shard_placements(module: nn.Module) -> dict[nn.Parameter, Shard]:
+    """Shard each Linear parameter along its logical matrix dimension.
+
+    Linear stores weight as ``[N, F, D]`` and bias as ``[N, F]``, including
+    the common ``N == 1`` case. FSDP's default ``Shard(0)`` would split the
+    small logical-projection dimension, so shard ``F`` instead.
+    """
+    placements: dict[nn.Parameter, Shard] = {}
+    for child in module.modules():
+        if not isinstance(child, nn.Linear) or child.weight.ndim == 2:
+            continue
+        weight = cast(nn.Parameter, child.weight)
+        placements[weight] = Shard(weight.ndim - 2)
+        if child.bias is not None:
+            bias = child.bias
+            placements[bias] = Shard(bias.ndim - 1)
+    return placements
+
+
 def resolve_fsdp_mesh(
     parallel_dims: ParallelDims,
 ) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
@@ -173,7 +192,11 @@ def apply_fsdp_to_vision_encoder(
     }
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
-    fully_shard(vision_encoder, **fsdp_config)
+    fully_shard(
+        vision_encoder,
+        **fsdp_config,
+        shard_placement_fn=linear_param_shard_placements(vision_encoder).get,
+    )
 
 
 def apply_fsdp_to_decoder(
@@ -244,6 +267,7 @@ def apply_fsdp_to_decoder(
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled
     )
+    root_param_placements = linear_param_shard_placements(model)
 
     if model.enable_weight_tying:
         # When weights are tied, tok_embeddings and output share the same parameter.
@@ -257,6 +281,7 @@ def apply_fsdp_to_decoder(
             modules,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
+            shard_placement_fn=root_param_placements.get,
         )
     else:
         if model.tok_embeddings is not None:
@@ -272,21 +297,14 @@ def apply_fsdp_to_decoder(
                 [model.norm, model.lm_head],
                 **fsdp_config,
                 reshard_after_forward=reshard_after_forward_policy == "always",
+                shard_placement_fn=root_param_placements.get,
             )
 
     for layer_id, transformer_block in model.layers.items():
         # A stacked Linear keeps small selector dimensions (for example W1/W3
         # or Q/K/V) separate from the matrix-row dimension. Shard matrix rows so
         # every rank retains all selectors and can run the fused projection.
-        stacked_param_placements: dict[nn.Parameter, Shard] = {}
-        for module in transformer_block.modules():
-            if not isinstance(module, nn.Linear) or module.weight.ndim == 2:
-                continue
-            weight = cast(nn.Parameter, module.weight)
-            stacked_param_placements[weight] = Shard(weight.ndim - 2)
-            if module.bias is not None:
-                bias = module.bias
-                stacked_param_placements[bias] = Shard(bias.ndim - 1)
+        stacked_param_placements = linear_param_shard_placements(transformer_block)
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
@@ -379,7 +397,11 @@ def apply_fsdp_to_decoder(
                 shard_placement_fn=stacked_param_placements.get,
             )
 
-    fully_shard(model, **fsdp_config)
+    fully_shard(
+        model,
+        **fsdp_config,
+        shard_placement_fn=root_param_placements.get,
+    )
 
     enable_fsdp_symm_mem(model, symm_mem_scope)
 

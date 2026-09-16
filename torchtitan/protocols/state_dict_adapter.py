@@ -130,6 +130,46 @@ class StateDictAdapter(BaseStateDictAdapter):
                     f"got {type(rope).__qualname__}."
                 )
 
+    def _linear_state_dict_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Remove the physical singleton axis from ordinary Linear parameters."""
+        from torchtitan.models.common.linear import Linear
+
+        result = dict(state_dict)
+        for fqn, config, _, _ in self.model_config.traverse(Linear.Config):
+            assert isinstance(config, Linear.Config)
+            if config.num_linears != 1:
+                continue
+            for name, physical_ndim in (("weight", 3), ("bias", 2)):
+                key = f"{fqn}.{name}"
+                value = result.get(key)
+                if value is not None and value.ndim == physical_ndim:
+                    result[key] = value.squeeze(0)
+        if getattr(self.model_config, "enable_weight_tying", False):
+            value = result.get("tok_embeddings.weight")
+            if value is not None and value.ndim == 3:
+                result["tok_embeddings.weight"] = value.squeeze(0)
+        return result
+
+    def _linear_state_dict_from_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Restore the physical singleton axis on ordinary Linear parameters."""
+        from torchtitan.models.common.linear import Linear
+
+        result = dict(state_dict)
+        for fqn, config, _, _ in self.model_config.traverse(Linear.Config):
+            assert isinstance(config, Linear.Config)
+            if config.num_linears != 1:
+                continue
+            for name, hf_ndim in (("weight", 2), ("bias", 1)):
+                key = f"{fqn}.{name}"
+                value = result.get(key)
+                if value is not None and value.ndim == hf_ndim:
+                    result[key] = value.unsqueeze(0)
+        if getattr(self.model_config, "enable_weight_tying", False):
+            value = result.get("tok_embeddings.weight")
+            if value is not None and value.ndim == 2:
+                result["tok_embeddings.weight"] = value.unsqueeze(0)
+        return result
+
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
     ) -> HuggingFaceStorageReader:

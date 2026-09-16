@@ -79,10 +79,10 @@ def test_forward_matmul_runs_in_fp32():
     assert lm_head.weight.dtype == torch.bfloat16
 
     # Bitwise-matches an explicit fp32 matmul of the same bf16 operands...
-    ref_fp32 = F.linear(x.float(), lm_head.weight.float())
+    ref_fp32 = F.linear(x.float(), lm_head.weight.flatten(0, -2).float())
     assert torch.equal(out, ref_fp32)
     # ...and differs from a bf16-accumulated matmul, proving the cast matters.
-    ref_bf16 = F.linear(x, lm_head.weight)
+    ref_bf16 = F.linear(x, lm_head.weight.flatten(0, -2))
     assert not torch.equal(out, ref_bf16.float())
 
 
@@ -117,7 +117,7 @@ def test_compute_dtype_is_configurable():
     out = lm_head(x)
     # compute_dtype=bfloat16 is a pure bf16 matmul (matches plain Linear).
     assert out.dtype == torch.bfloat16
-    assert torch.equal(out, F.linear(x, lm_head.weight))
+    assert torch.equal(out, F.linear(x, lm_head.weight.flatten(0, -2)))
 
 
 def test_weight_tying_is_dtype_safe():

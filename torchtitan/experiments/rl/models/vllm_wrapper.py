@@ -593,12 +593,13 @@ class VLLMModelWrapper(Module):
                 )
                 if wqkv_sharding_config is None:
                     continue
-                for (
-                    state_name,
-                    layout,
-                ) in wqkv_sharding_config.state_shardings.items():
+                for state_name in wqkv_sharding_config.state_shardings:
                     for proj_name in ("wq", "wk", "wv"):
-                        layouts[f"{module_prefix}{proj_name}.{state_name}"] = layout
+                        # The physical [1, F, D] wqkv parameter is Shard(1),
+                        # while each exposed [F, D] projection is Shard(0).
+                        layouts[
+                            f"{module_prefix}{proj_name}.{state_name}"
+                        ] = dense_param_placement(tp=spmd.S(0))
 
             if module_fqn.rsplit(".", 1)[-1] == "vllm_attn":
                 for buffer_name, _ in module.named_buffers(recurse=False):

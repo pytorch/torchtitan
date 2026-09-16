@@ -119,7 +119,7 @@ def fused_qkv_param_init(
     ``R = heads_per_kv + 2``. This preserves logical initialization order and
     matches the packing used when loading separate checkpoint tensors.
 
-    Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) param --
+    Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) matrix --
     e.g. a ``Shard(0)`` DTensor for the colwise wqkv. ``t.new_empty(...)``
     returns ``Replicate`` DTensors, so each ``base_init`` runs on the full tensor
     and draws the same values on every rank (the weights do not depend on the

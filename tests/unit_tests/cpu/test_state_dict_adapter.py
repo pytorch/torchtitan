@@ -120,9 +120,9 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                     sink_key = f"mtp.{depth}.attn.attn_sink"
                     torch.testing.assert_close(
                         hf_state_dict[sink_key],
-                        state_dict[
-                            f"mtp_layers.{depth}.attention.attn_sink.weight"
-                        ].squeeze(-1),
+                        state_dict[f"mtp_layers.{depth}.attention.attn_sink.weight"]
+                        .squeeze(0)
+                        .squeeze(-1),
                         rtol=0,
                         atol=0,
                     )
