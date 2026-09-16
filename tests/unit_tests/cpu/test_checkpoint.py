@@ -43,11 +43,18 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
 
-def rendered_log_calls(mock_log_method) -> list[str]:
-    """Render every %-style call made to a mocked logger method."""
-    return [
+# These tests name the checkpoint folder after the running test, so a bare
+# "initial_load" also matches log lines that only echo that path back. Match on
+# a phrase from the message instead; spaces keep it from matching a path.
+INITIAL_LOAD_SKIP_MARKER = "ignoring initial_load_path"
+
+
+def initial_load_skip_logs(mock_log_method) -> list[str]:
+    """Render the %-style calls to a mocked logger and keep the skip messages."""
+    rendered = (
         fmt % tuple(args) for fmt, *args in (c.args for c in mock_log_method.mock_calls)
-    ]
+    )
+    return [msg for msg in rendered if INITIAL_LOAD_SKIP_MARKER in msg]
 
 
 class FakeOptimizersContainer:
@@ -490,9 +497,7 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertTrue(res)
         # The initial load actually happened, so there is no skip to report.
         for level in (mock_logger.info, mock_logger.warning):
-            self.assertFalse(
-                [msg for msg in rendered_log_calls(level) if "initial_load" in msg]
-            )
+            self.assertFalse(initial_load_skip_logs(level))
         manager.close()
 
     @mock.patch("torchtitan.components.checkpointer.base.logger")
@@ -532,19 +537,11 @@ class TestCheckpointManager(unittest.TestCase):
         mock_load.assert_called_once()
         _, kwargs = mock_load.call_args
         self.assertEqual(kwargs.get("checkpoint_id"), step_dir)
-        skip_messages = [
-            msg for msg in rendered_log_calls(mock_logger.info) if "initial_load" in msg
-        ]
+        skip_messages = initial_load_skip_logs(mock_logger.info)
         self.assertEqual(len(skip_messages), 1)
         self.assertIn("step 5", skip_messages[0])
         # The skip is the normal fault-tolerance restart, so it must not warn.
-        self.assertFalse(
-            [
-                msg
-                for msg in rendered_log_calls(mock_logger.warning)
-                if "initial_load" in msg
-            ]
-        )
+        self.assertFalse(initial_load_skip_logs(mock_logger.warning))
         manager.close()
 
     @mock.patch("torchtitan.components.checkpointer.base.logger")
@@ -579,19 +576,11 @@ class TestCheckpointManager(unittest.TestCase):
         mock_load.assert_called_once()
         _, kwargs = mock_load.call_args
         self.assertEqual(kwargs.get("checkpoint_id"), step_dir)
-        skip_messages = [
-            msg for msg in rendered_log_calls(mock_logger.info) if "initial_load" in msg
-        ]
+        skip_messages = initial_load_skip_logs(mock_logger.info)
         self.assertEqual(len(skip_messages), 1)
         self.assertIn("step 5", skip_messages[0])
         # The skip is the normal fault-tolerance restart, so it must not warn.
-        self.assertFalse(
-            [
-                msg
-                for msg in rendered_log_calls(mock_logger.warning)
-                if "initial_load" in msg
-            ]
-        )
+        self.assertFalse(initial_load_skip_logs(mock_logger.warning))
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
