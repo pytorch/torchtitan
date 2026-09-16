@@ -59,7 +59,7 @@ def _maybe_apply_numa_binding(device_index: int, device_type: str) -> None:
     logger.info("NUMA binding applied for GPU %d", device_index)
 
 
-def make_fwd_bwd_step(model, loss_fn, *, accumulate_gradients: bool = False):
+def make_fwd_bwd_step(model, loss_fn):
     """Return a plain function that traces the entire fwd+loss+bwd step.
 
     ``model`` and ``loss_fn`` are captured in the closure so neither shows up
@@ -85,27 +85,11 @@ def make_fwd_bwd_step(model, loss_fn, *, accumulate_gradients: bool = False):
             if parameter.requires_grad
         ]
         grads = compute_parameter_gradients(loss, named_params)
-        return loss, named_params, grads
+        return loss, grads
 
-    if not accumulate_gradients:
-
-        def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
-            loss, _named_params, grads = compute_step(
-                inputs, labels, global_valid_tokens, extra_kwargs
-            )
-            return [loss, *grads]
-
-        return fwd_bwd_step
-
-    def fwd_bwd_step(
-        gradient_buffers, inputs, labels, global_valid_tokens, extra_kwargs
-    ):
-        loss, named_params, grads = compute_step(
-            inputs, labels, global_valid_tokens, extra_kwargs
-        )
-        for (fqn, _parameter), grad in zip(named_params, grads, strict=True):
-            gradient_buffers[fqn].add_(grad)
-        return [loss]
+    def fwd_bwd_step(inputs, labels, global_valid_tokens, extra_kwargs):
+        loss, grads = compute_step(inputs, labels, global_valid_tokens, extra_kwargs)
+        return [loss, *grads]
 
     return fwd_bwd_step
 
