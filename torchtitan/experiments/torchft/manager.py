@@ -79,6 +79,19 @@ class TorchFTManager(Configurable):
         (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
         """
 
+        use_async_quorum: bool = True
+        """
+        Whether to run the quorum asynchronously, in the background of the step.
+        When False, the step blocks until the quorum, including any state export
+        or load it performs for healing, completes before the forward and
+        backward passes run. This serializes the quorum with training but keeps
+        the state export from overlapping the model's forward pass.
+
+        This is ignored when semi_sync_method is set, since semi-sync training
+        manages the quorum through its own synchronization hooks and always
+        requires a synchronous quorum.
+        """
+
     def __init__(
         self,
         config: Config,
@@ -111,7 +124,13 @@ class TorchFTManager(Configurable):
             raise ValueError(f"Unsupported process group: {config.process_group}")
 
         # If the training method is specific, then the quorum should be synchronous
-        self.use_async_quorum = config.semi_sync_method is None
+        self.use_async_quorum = (
+            config.use_async_quorum and config.semi_sync_method is None
+        )
+        # Semi-sync methods synchronize replicas through their own hooks instead
+        # of the replicate process group, which every other mode relies on for
+        # cross-replica gradient and loss synchronization.
+        self.replicate_pg_enabled = config.semi_sync_method is None
 
         self._manager = torchft.Manager(
             pg=pg,
@@ -124,7 +143,7 @@ class TorchFTManager(Configurable):
         self.group_size = config.group_size
         self.replica_id = config.replica_id
 
-        if self.use_async_quorum:
+        if self.replicate_pg_enabled:
             self.replicate_pg = torchft.process_group.ManagedProcessGroup(self._manager)
             self.replicate_pg.register("dp_replicate")
 
@@ -144,7 +163,7 @@ class TorchFTManager(Configurable):
             return dp_degree, dp_rank
 
     def maybe_set_all_reduce_hook(self, model_parts: list[torch.nn.Module]) -> None:
-        if self.enabled and self.use_async_quorum:
+        if self.enabled and self.replicate_pg_enabled:
 
             def all_reduce_hook(output):
                 dist.all_reduce(output, group=self.replicate_pg, op=ReduceOp.AVG)
@@ -162,7 +181,7 @@ class TorchFTManager(Configurable):
     def loss_sync_pg(
         self,
     ) -> "torchft.process_group.ManagedProcessGroup" | None:
-        if self.enabled and self.use_async_quorum:
+        if self.enabled and self.replicate_pg_enabled:
             return self.replicate_pg
         else:
             # skip loss sync when using semi-sync training

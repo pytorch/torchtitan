@@ -41,9 +41,10 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         for optim in self.optimizers:
             init_optim_state(optim)
         self.cache_state_dict: dict[str, Any] = {}
-        # Semi-sync algorithms manage quorum in their own synchronization hooks.
+        # Semi-sync algorithms manage quorum in their own synchronization hooks,
+        # every other mode drives the quorum from this container once per step.
         self._quorum_manager = (
-            ft_manager.manager if ft_manager.use_async_quorum else None
+            ft_manager.manager if ft_manager.replicate_pg_enabled else None
         )
 
     def init_cache_state_dict(self) -> None:

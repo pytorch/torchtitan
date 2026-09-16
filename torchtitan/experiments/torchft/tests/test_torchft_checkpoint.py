@@ -256,7 +256,7 @@ class TestFTCheckpointManager(unittest.TestCase):
     def _build_replica(self, replica_id):
         model = nn.Linear(1, 1, bias=False)
         ft_manager = DummyFTManager(replica_id=replica_id)
-        ft_manager.use_async_quorum = True
+        ft_manager.replicate_pg_enabled = True
         ft_manager.manager.should_commit.return_value = True
         optimizers = TorchFTOptimizersContainer(
             TorchFTOptimizersContainer.Config(
@@ -396,7 +396,7 @@ class TestFTManager(unittest.TestCase):
         model = nn.Sequential(_FSDPModuleWithParamGroups([dense_group, expert_group]))
         ft_manager = TorchFTManager(TorchFTManager.Config(enable=False))
         ft_manager._manager = mock.sentinel.manager
-        ft_manager.use_async_quorum = True
+        ft_manager.replicate_pg_enabled = True
         ft_manager.replicate_pg = mock.sentinel.replicate_pg
         dense_gradient = torch.tensor([1.0, 2.0])
         expert_gradient = torch.tensor([3.0, 4.0])
