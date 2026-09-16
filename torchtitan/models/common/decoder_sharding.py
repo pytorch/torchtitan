@@ -173,6 +173,7 @@ def column_parallel_config(*, input_layout: SpmdType) -> ShardingConfig:
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
     )
 
+
 def row_parallel_config(
     *,
     output_layout: SpmdType,
