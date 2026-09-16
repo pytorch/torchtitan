@@ -20,7 +20,12 @@ from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RouterGateLinear,
+    RowParallelLinear,
+)
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
@@ -198,8 +203,8 @@ def _linear_config(in_features: int, out_features: int) -> Linear.Config:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w13=_linear_config(4, 16),
-        w2=_linear_config(8, 4),
+        w13=ColumnParallelLinear.Config(in_features=4, out_features=16),
+        w2=RowParallelLinear.Config(in_features=8, out_features=4),
     )
 
 
