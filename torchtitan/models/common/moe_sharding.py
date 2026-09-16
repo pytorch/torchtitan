@@ -15,8 +15,14 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
+    row_parallel_config,
+    stacked_column_parallel_config,
     stacked_colwise_config,
     token_id_placement,
+)
+from torchtitan.models.common.linear import (
+    is_column_parallel_linear_config,
+    is_row_parallel_linear_config,
 )
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -135,7 +141,7 @@ def _router_gate_sharding_config() -> ShardingConfig:
     )
 
 
-def _shared_expert_colwise_config() -> ShardingConfig:
+def _legacy_shared_expert_colwise_config() -> ShardingConfig:
     """Colwise shared-expert FFN (w13).
 
     Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
@@ -144,7 +150,7 @@ def _shared_expert_colwise_config() -> ShardingConfig:
     return stacked_colwise_config()
 
 
-def _shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
+def _legacy_shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
     """Rowwise shared-expert FFN (w2).
 
     Mirrors ``RowwiseParallel``: input is Shard(1) on the feature dim from
@@ -167,15 +173,14 @@ def _shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
 
 
 def _shared_experts_sharding_configs(
+    shared_experts_cfg,
     *,
     enable_ep: bool,
     enable_sp: bool,
 ) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig]:
     """Configs for shared FeedForward parent and w13/w2 linears."""
-    # The parent FeedForward converts its input to Replicate once before w13.
-    # w2 reduces its Partial output to the final MoE boundary layout
-    # used for the routed + shared add: sequence-sharded when SP is enabled and
-    # Partial when SP is disabled.
+    # The shared path must produce the layout used for the routed + shared add:
+    # sequence-sharded when SP is enabled and Partial when SP is disabled.
     input_layout = (
         dense_sequence_parallel_placement()
         if enable_ep and enable_sp
@@ -189,13 +194,38 @@ def _shared_experts_sharding_configs(
         if enable_sp
         else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
+
+    column_parallel = is_column_parallel_linear_config(shared_experts_cfg.w13)
+    row_parallel = is_row_parallel_linear_config(shared_experts_cfg.w2)
+    if column_parallel != row_parallel:
+        raise ValueError(
+            "Tensor parallelism must configure both shared-expert w13 and w2 "
+            "projections"
+        )
+    if column_parallel:
+        return (
+            ShardingConfig(
+                in_src_shardings={"x": input_layout},
+                out_src_shardings=desired_output_layout,
+            ),
+            stacked_column_parallel_config(input_layout=input_layout),
+            row_parallel_config(
+                output_layout=desired_output_layout,
+                # Shared output can stay Partial until it is added to the
+                # routed-expert output, so its rowwise bias remains Replicate.
+                bias_tp=spmd.R,
+            ),
+        )
+
+    # TODO: Delete this fallback after every shared-expert construction path
+    # applies TensorParallelTransform.
     return (
         ShardingConfig(
             in_src_shardings={"x": input_layout},
             in_dst_shardings={"x": desired_input_layout},
         ),
-        _shared_expert_colwise_config(),
-        _shared_expert_rowwise_config(output_layout=desired_output_layout),
+        _legacy_shared_expert_colwise_config(),
+        _legacy_shared_expert_rowwise_config(output_layout=desired_output_layout),
     )
 
 
@@ -358,6 +388,7 @@ def set_moe_sharding_config(
     shared = moe_cfg.shared_experts
     if shared is not None:
         (shared_config, w13_config, w2_config,) = _shared_experts_sharding_configs(
+            shared,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
         )
