@@ -204,6 +204,55 @@ class DSV4FlexAttention(FlexAttention):
             seq_lengths=(seqlen, kv_len),
         )
 
+    # Kept out of torch.compile on purpose, and called OUTSIDE spmd.no_typecheck():
+    # job 413 (TORCH_LOGS=graph_breaks) showed the only graph break in the block
+    # was this construction, and it broke *inside* the no_typecheck context
+    # manager -- "Attempted to graph break in an active context manager that
+    # doesn't support graph breaking" -- so Dynamo abandoned the whole block
+    # frame and nothing compiled (job 408's profile: eager launches unchanged).
+    # Built eagerly here, the mask enters the flex region as a graph input and
+    # the rest of the block is compilable.
+    @torch.compiler.disable
+    def _eager_block_mask(self, *, seqlen, n_cmp, kv_len, idx_q, idx_k, idx_w, device):
+        with spmd.no_typecheck():
+            selected_indices = [
+                self.get_window_topk_idxs(bsz=1, seqlen=seqlen, device=device)
+            ]
+            if self.compress_ratio == 4:
+                if idx_q is None or idx_k is None or idx_w is None:
+                    raise ValueError(
+                        "DSV4FlexAttention requires idx_q, idx_k, "
+                        "and idx_w when compress_ratio=4"
+                    )
+                cmp_topk = Indexer.select(
+                    idx_q,
+                    idx_k,
+                    idx_w,
+                    seqlen=seqlen,
+                    ratio=self.compress_ratio,
+                    topk=self.index_topk,
+                ).unsqueeze(0)
+                causal_limit = (
+                    torch.arange(1, seqlen + 1, device=device).unsqueeze(1)
+                    // self.compress_ratio
+                )
+                cmp_topk = torch.where(
+                    cmp_topk < causal_limit.unsqueeze(0), seqlen + cmp_topk, -1
+                )
+                selected_indices.append(cmp_topk)
+            elif self.compress_ratio > 1:
+                selected_indices.append(
+                    self.get_compress_topk_idxs(
+                        bsz=1, seqlen=seqlen, n_cmp=n_cmp, device=device
+                    )
+                )
+            selected_indices = torch.cat(selected_indices, dim=-1)
+
+            block_mask = self._build_block_mask(
+                1, seqlen, kv_len, selected_indices, device
+            )
+            return block_mask
+
     def _forward_impl(
         self,
         q,
@@ -233,43 +282,17 @@ class DSV4FlexAttention(FlexAttention):
             kv = torch.cat([kv, cmp_k.unsqueeze(1)], dim=0)
         kv = kv.expand(-1, q.size(1), -1)
 
-        with spmd.no_typecheck():
-            selected_indices = [
-                self.get_window_topk_idxs(bsz=1, seqlen=seqlen, device=q.device)
-            ]
-            if self.compress_ratio == 4:
-                if idx_q is None or idx_k is None or idx_w is None:
-                    raise ValueError(
-                        "DSV4FlexAttention requires idx_q, idx_k, "
-                        "and idx_w when compress_ratio=4"
-                    )
-                cmp_topk = Indexer.select(
-                    idx_q,
-                    idx_k,
-                    idx_w,
-                    seqlen=seqlen,
-                    ratio=self.compress_ratio,
-                    topk=self.index_topk,
-                ).unsqueeze(0)
-                causal_limit = (
-                    torch.arange(1, seqlen + 1, device=q.device).unsqueeze(1)
-                    // self.compress_ratio
-                )
-                cmp_topk = torch.where(
-                    cmp_topk < causal_limit.unsqueeze(0), seqlen + cmp_topk, -1
-                )
-                selected_indices.append(cmp_topk)
-            elif self.compress_ratio > 1:
-                selected_indices.append(
-                    self.get_compress_topk_idxs(
-                        bsz=1, seqlen=seqlen, n_cmp=n_cmp, device=q.device
-                    )
-                )
-            selected_indices = torch.cat(selected_indices, dim=-1)
+        block_mask = self._eager_block_mask(
+            seqlen=seqlen,
+            n_cmp=n_cmp,
+            kv_len=kv.size(0),
+            idx_q=idx_q,
+            idx_k=idx_k,
+            idx_w=idx_w,
+            device=q.device,
+        )
 
-            block_mask = self._build_block_mask(
-                1, seqlen, kv.size(0), selected_indices, q.device
-            )
+        with spmd.no_typecheck():
 
             def apply_sink(out_THV, lse_TH):
                 return apply_attention_sink_rescale(out_THV, lse_TH, attn_sink)
