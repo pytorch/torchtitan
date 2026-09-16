@@ -180,23 +180,39 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
 
 
 def column_parallel_config(*, input_layout: SpmdType) -> ShardingConfig:
-    """Sharding contract for an explicit column-parallel ``Linear``."""
-    sharding = colwise_config()
+    """Sharding contract for an explicit column-parallel ``Linear``.
+
+    Unlike ``colwise_config``, this records the input layout consumed by
+    ``ColumnParallelLinear`` when it performs its own all-gather. The older
+    helper remains for model-specific projections whose parent still owns the
+    redistribution, and can be removed after those projections migrate.
+    """
     return ShardingConfig(
-        state_shardings=sharding.state_shardings,
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(0)),
+            "bias": dense_param_placement(tp=spmd.S(0)),
+        },
+        # ColumnParallelLinear reads this source layout to choose the explicit
+        # input redistribution to Replicate before calling Linear.forward().
         in_src_shardings={"input": input_layout},
-        out_src_shardings=sharding.out_src_shardings,
+        out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
     )
 
 
 def stacked_column_parallel_config(*, input_layout: SpmdType) -> ShardingConfig:
     """Sharding contract for an explicit stacked column-parallel ``Linear``."""
-    sharding = stacked_colwise_config()
+    output_layout = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        partition_spec=spmd.PartitionSpec((DP, CP), None, TP),
+    )
     return ShardingConfig(
-        state_shardings=sharding.state_shardings,
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.S(1)),
+        },
         in_src_shardings={"input": input_layout},
-        out_src_shardings=sharding.out_src_shardings,
-        local_spmd=sharding.local_spmd,
+        out_src_shardings=output_layout,
+        local_spmd=True,
     )
 
 

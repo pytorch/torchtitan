@@ -16,6 +16,8 @@ from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     ContextParallelTransform,
     convert_config_type,
+    LinearLoRAHandler,
+    LoRATransform,
     ModelConfigTransform,
     transform_model_config_,
 )
@@ -361,6 +363,18 @@ class TestTensorParallelModules(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "converted w13 projections"):
             AsyncTensorParallelTransform().transform(config)
+
+    def test_async_transform_conflicts_with_lora(self):
+        config = self._config().model_spec.model
+
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            transform_model_config_(
+                config,
+                [
+                    AsyncTensorParallelTransform(),
+                    LoRATransform(handlers=(LinearLoRAHandler(),)),
+                ],
+            )
 
     def test_sharding_leaves_collectives_to_transformed_feed_forward(self):
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
