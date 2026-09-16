@@ -47,9 +47,9 @@ def _ordered(
 
 
 def _reject_conflicts(transforms: list[ModelConfigTransform]) -> None:
-    for transform in transforms:
-        for other in transforms:
-            if other is transform:
+    for i, transform in enumerate(transforms):
+        for j, other in enumerate(transforms):
+            if i == j:
                 continue
             if isinstance(other, transform.conflicts_with):
                 raise ValueError(

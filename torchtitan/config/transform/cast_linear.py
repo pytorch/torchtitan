@@ -20,7 +20,7 @@ class LMHeadCastConverter(ModelConfigConverter):
 
     Walks the model config tree and replaces the ``lm_head`` node in place.
     Targets only the lm_head, so every other Linear stays a plain ``Linear``
-    and LoRA and quantization converters are unaffected.
+    and LoRA transforms and quantization converters are unaffected.
 
     Note on trainer/inference bitwise parity: because the same ``model_spec``
     backs both the trainer and the vLLM generator, the lm_head sees a matched
