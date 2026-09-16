@@ -360,6 +360,12 @@ class GraphPipelineStage(PipelineStage):
         self.saved_values_for_backward_weight_cache: dict[int, tuple[Any, ...]] = {}
         self._graph_pp_grads_scaled = False
 
+    def _to_tensor(self, arg: Any) -> Any:
+        """Materialize nested tuple values during PP metadata inference."""
+        if isinstance(arg, tuple):
+            return tuple(self._to_tensor(value) for value in arg)
+        return super()._to_tensor(arg)
+
     def set_graphs(
         self,
         graphs: GraphPPStageGraphs,

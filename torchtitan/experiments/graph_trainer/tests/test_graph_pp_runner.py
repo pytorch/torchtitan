@@ -46,11 +46,15 @@ from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
 )
 
 from torchtitan.experiments.graph_trainer.graph_pp.runner import (
+    _bind_structured_args_as_kwargs,
     _post_fwd_common,
     _prepare_fwd_user_args,
     GraphPipelineRuntime,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPPStageRuntimeState
+from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+    GraphPipelineStage,
+    GraphPPStageRuntimeState,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     normalize_graph_pp_microbatch_inputs,
 )
@@ -154,6 +158,35 @@ def _trace_mask_mod_replay(mask0: Any, mask1: Any) -> tuple[bool, bool]:
 
 
 class GraphPipelineRuntimeTraceTest(unittest.TestCase):
+    def test_structured_positional_input_moves_to_model_kwarg(self) -> None:
+        class StructuredInputModel(nn.Module):
+            def forward(self, tokens, positions=None):
+                return tokens[0] + tokens[1] + positions
+
+        stage = types.SimpleNamespace(submod=StructuredInputModel())
+        tokens = (torch.ones(2), torch.ones(2))
+        positions = torch.arange(2)
+
+        arg_mbs, kwarg_mbs = _bind_structured_args_as_kwargs(
+            stage,
+            [(tokens,)],
+            [{"positions": positions}],
+        )
+
+        self.assertEqual(arg_mbs, [()])
+        self.assertEqual(kwarg_mbs, [{"tokens": tokens, "positions": positions}])
+
+    def test_stage_materializes_tuple_target_metadata(self) -> None:
+        stage = GraphPipelineStage.__new__(GraphPipelineStage)
+        targets = (torch.ones(2, requires_grad=True), torch.zeros(2))
+
+        materialized = stage._to_tensor(targets)
+
+        self.assertIsInstance(materialized, tuple)
+        self.assertIsNot(materialized[0], targets[0])
+        self.assertTrue(torch.equal(materialized[0], targets[0]))
+        self.assertTrue(torch.equal(materialized[1], targets[1]))
+
     def test_non_last_graph_build_does_not_run_real_pretrace_forward(self) -> None:
         from torch._subclasses.fake_tensor import FakeTensor
 

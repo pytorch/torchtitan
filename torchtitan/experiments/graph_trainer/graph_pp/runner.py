@@ -10,6 +10,7 @@ microbatch splitting, and stage metadata initialization. This module only maps
 schedule actions onto bound stage graph executors.
 """
 
+import inspect
 from typing import Any, cast
 
 import torch
@@ -150,6 +151,60 @@ def _prepare_fwd_user_args(
         )
     target = ctx.target_mbs[mb_index] if stage.is_last and ctx.target_mbs else None
     return tuple(args), kwargs, target
+
+
+def _bind_structured_args_as_kwargs(
+    stage: GraphPipelineStage,
+    arg_mbs: list[tuple[Any, ...]],
+    kwarg_mbs: list[dict[str, Any]] | None,
+) -> tuple[list[tuple[Any, ...]], list[dict[str, Any]]]:
+    """Bind structured positional inputs as kwargs accepted by upstream PP."""
+    if kwarg_mbs is None:
+        kwarg_mbs = [{} for _ in arg_mbs]
+    if len(kwarg_mbs) != len(arg_mbs):
+        raise ValueError("arg_mbs and kwarg_mbs must have the same length")
+
+    signature = inspect.signature(stage.submod.forward)
+    normalized_kwargs = []
+    for args, kwargs in zip(arg_mbs, kwarg_mbs, strict=True):
+        bound = signature.bind_partial(*args, **kwargs)
+        bound_kwargs = {}
+        for name, value in bound.arguments.items():
+            kind = signature.parameters[name].kind
+            if kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            ):
+                bound_kwargs[name] = value
+            elif kind is inspect.Parameter.VAR_KEYWORD:
+                bound_kwargs.update(value)
+            else:
+                raise ValueError(
+                    "Structured GraphPP inputs require named forward arguments"
+                )
+        normalized_kwargs.append(bound_kwargs)
+    return [() for _ in arg_mbs], normalized_kwargs
+
+
+def _normalize_schedule_input_kwargs(
+    schedule: _PipelineScheduleRuntime,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    arg_mbs = kwargs.get("arg_mbs")
+    if arg_mbs is None or all(
+        all(isinstance(arg, torch.Tensor) for arg in args) for args in arg_mbs
+    ):
+        return kwargs
+    first_stage = next((stage for stage in schedule._stages if stage.is_first), None)
+    if first_stage is None:
+        raise ValueError("Structured GraphPP inputs require a local first stage")
+
+    arg_mbs, kwarg_mbs = _bind_structured_args_as_kwargs(
+        cast(GraphPipelineStage, first_stage),
+        arg_mbs,
+        kwargs.get("kwarg_mbs"),
+    )
+    return {**kwargs, "arg_mbs": arg_mbs, "kwarg_mbs": kwarg_mbs}
 
 
 def _stage_map_and_stage_from_action(
@@ -682,6 +737,7 @@ class GraphPipelineRuntime:
                 GraphPP reads ``loss_kwargs`` from this mapping and forwards
                 all kwargs to the upstream schedule unchanged.
         """
+        kwargs = _normalize_schedule_input_kwargs(self.schedule, kwargs)
         self._graph_pp_ready = False
         self.loss_kwargs = kwargs.get("loss_kwargs") or {}
         step_succeeded = False
@@ -713,6 +769,7 @@ class GraphPipelineRuntime:
         Returns:
             Any: The value returned by ``schedule.eval``.
         """
+        kwargs = _normalize_schedule_input_kwargs(self.schedule, kwargs)
         self._graph_pp_ready = False
         self.loss_kwargs = kwargs.get("loss_kwargs") or {}
         try:
