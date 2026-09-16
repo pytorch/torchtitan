@@ -23,6 +23,7 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
+    Sigmoid,
     SwiGLU,
     UnaryActivationFn,
 )
@@ -37,6 +38,7 @@ from .token_dispatcher import LocalTokenDispatcher
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
 #   T = num tokens, D = model dimension,
 #   F = hidden (FFN intermediate) dimension, E = num experts,
+#   B = histogram bins,
 #   e = num local experts (E / EP, used in token dispatcher for
 #       per-local-expert token counts after EP dispatch /_permute),
 #   K = top-k, N = routed tokens (T*K),
@@ -279,6 +281,19 @@ class TokenChoiceTopKRouter(Module):
         # RouterGateLinear returns FP32, so configured scoring runs in FP32.
         scores_TE = self.score_func(self.gate(x_TD))
 
+        if padding_mask_T is not None:
+            if padding_mask_T.dtype != torch.bool:
+                raise ValueError(
+                    "padding_mask_T must have dtype bool, "
+                    f"got {padding_mask_T.dtype}."
+                )
+            if padding_mask_T.shape != scores_TE.shape[:-1]:
+                raise ValueError(
+                    "padding_mask_T must have shape matching the routing-map "
+                    f"token axis, got {tuple(padding_mask_T.shape)} for scores "
+                    f"{tuple(scores_TE.shape)}."
+                )
+
         if self._debug_force_load_balance:
             topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
                 scores_TE
@@ -289,7 +304,12 @@ class TokenChoiceTopKRouter(Module):
                 self._select_experts,
                 "routing_decision",
                 recompute=False,
-            )(scores_TE, expert_bias_E, **router_kwargs)
+            )(
+                scores_TE,
+                expert_bias_E,
+                padding_mask_T=padding_mask_T,
+                **router_kwargs,
+            )
 
             # The expert bias is only used for routing. The gating value is
             # still derived from the original scores.
@@ -312,18 +332,6 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK,
             True,
         )
-        if padding_mask_T is not None:
-            if padding_mask_T.dtype != torch.bool:
-                raise ValueError(
-                    "padding_mask_T must have dtype bool, "
-                    f"got {padding_mask_T.dtype}."
-                )
-            if padding_mask_T.shape != routing_map_TE.shape[:-1]:
-                raise ValueError(
-                    "padding_mask_T must have shape matching the routing-map "
-                    f"token axis, got {tuple(padding_mask_T.shape)} for routing "
-                    f"map {tuple(routing_map_TE.shape)}."
-                )
         # Keep the full routing map for dispatch, and build the masked view once
         # for all load-balancing statistics. The auxiliary-loss gradient is
         # injected into topk_scores_TK on backward; see ``AuxLoss.inject``.
@@ -350,6 +358,157 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK,
             routing_map_TE,
         )
+
+
+class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
+    """Top-k router that uses a biased Top-(k+1) cutoff during training."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(TokenChoiceTopKRouter.Config):
+        num_bins: int
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        if not isinstance(self.score_func, Sigmoid):
+            raise ValueError("Quantile balancing requires sigmoid router scores.")
+        if self._debug_force_load_balance:
+            raise ValueError(
+                "Quantile balancing does not support forced debug load balancing."
+            )
+        self.quantile_balancer = QuantileBalancer.Config(
+            num_experts=self.num_experts,
+            top_k=self.top_k,
+            num_bins=config.num_bins,
+        ).build()
+
+    def _select_experts(
+        self,
+        scores_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        padding_mask_T: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        if expert_bias_E is None:
+            raise ValueError("Quantile balancing requires an expert bias.")
+        if not self.training:
+            return super()._select_experts(
+                scores_TE,
+                expert_bias_E,
+                **router_kwargs,
+            )
+
+        biased_scores_TE = scores_TE + expert_bias_E
+        topk_plus_one_scores, topk_plus_one_expert_ids = torch.topk(
+            biased_scores_TE,
+            k=self.top_k + 1,
+            dim=-1,
+            sorted=True,
+        )
+        self.quantile_balancer.observe(
+            scores_TE,
+            topk_plus_one_scores[:, self.top_k :],
+            expert_bias_E,
+            padding_mask_T,
+        )
+        return topk_plus_one_expert_ids[:, : self.top_k].contiguous()
+
+
+class QuantileBalancer(Module):
+    """Accumulate and recover histogram-based quantile bias updates.
+
+    For scores bounded between zero and one, required expert biases lie between
+    the current minimum bias minus one and maximum bias plus one. Each training
+    micro-batch is accumulated into uniform bins over that interval.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        num_experts: int
+        top_k: int
+        num_bins: int
+
+    def __init__(self, config: Config):
+        super().__init__()
+        if not 0 < config.top_k < config.num_experts:
+            raise ValueError("top_k must be between zero and num_experts.")
+        self.num_experts = config.num_experts
+        self.top_k = config.top_k
+        self.num_bins = config.num_bins
+        self.register_buffer(
+            "required_bias_histogram_EB",
+            torch.zeros(config.num_experts, config.num_bins, dtype=torch.int32),
+            persistent=False,
+        )
+
+    def observe(
+        self,
+        scores_TE: torch.Tensor,
+        cutoff_T1: torch.Tensor,
+        expert_bias_E: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
+    ) -> None:
+        """Accumulate required-bias histograms for one local micro-batch."""
+        if not self.training:
+            return
+
+        with spmd.no_typecheck(), torch.no_grad():
+            if padding_mask_T is not None:
+                valid_mask_T = ~padding_mask_T
+                scores_TE = scores_TE[valid_mask_T]
+                cutoff_T1 = cutoff_T1[valid_mask_T]
+
+            lower_bound = expert_bias_E.min() - 1.0
+            bin_width = (
+                expert_bias_E.max() - expert_bias_E.min() + 2.0
+            ) / self.num_bins
+            required_bias_TE = cutoff_T1 - scores_TE
+            bin_indices_TE = torch.floor(
+                (required_bias_TE - lower_bound) / bin_width
+            ).to(torch.int64)
+            bin_indices_ET = bin_indices_TE.clamp_(0, self.num_bins - 1).transpose(0, 1)
+            self.required_bias_histogram_EB.scatter_add_(
+                1,
+                bin_indices_ET,
+                torch.ones_like(
+                    bin_indices_ET,
+                    dtype=self.required_bias_histogram_EB.dtype,
+                ),
+            )
+
+    def estimate_expert_bias(
+        self,
+        histogram_EB: torch.Tensor,
+        expert_bias_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """Estimate the next mean-centered expert bias from the histogram."""
+        counts_E = histogram_EB.sum(dim=-1, dtype=torch.int64)
+        target_count_E = counts_E.float() * (self.top_k / self.num_experts)
+        cumulative_counts_EB = histogram_EB.cumsum(dim=-1, dtype=torch.int64)
+        target_rank_E = target_count_E.ceil().to(torch.int64)
+        target_bin_E = (cumulative_counts_EB < target_rank_E.unsqueeze(-1)).sum(dim=-1)
+
+        target_bin_E1 = target_bin_E.unsqueeze(-1)
+        counts_in_bin_E = histogram_EB.gather(-1, target_bin_E1).squeeze(-1)
+        counts_before_E = (
+            cumulative_counts_EB.gather(-1, target_bin_E1).squeeze(-1) - counts_in_bin_E
+        )
+        fraction_E = (
+            target_count_E - counts_before_E.float()
+        ) / counts_in_bin_E.float()
+
+        bin_width = (expert_bias_E.max() - expert_bias_E.min() + 2.0) / self.num_bins
+        quantile_position_E = target_bin_E.float() + fraction_E
+        return (quantile_position_E - quantile_position_E.mean()) * bin_width
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        if buffer_device is None:
+            buffer_device = self.required_bias_histogram_EB.device
+        with torch.device(buffer_device):
+            self.required_bias_histogram_EB = torch.zeros(
+                self.num_experts,
+                self.num_bins,
+                dtype=torch.int32,
+            )
 
 
 class MicrobatchWiseLoadBalanceLoss(AuxLoss):

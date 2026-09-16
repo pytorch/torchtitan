@@ -33,7 +33,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
-    LoRAConverter,
+    LinearLoRAHandler,
+    LoRATransform,
     TensorParallelTransform,
     transform_model_config_,
 )
@@ -161,7 +162,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
     def test_projection_boundaries_survive_lora_config_wrappers(self):
         """The transformed FFN boundary encloses LoRA projection work."""
         model = TensorParallelTransform().transform(self._model_config())
-        model = LoRAConverter.Config().build().convert(model)
+        model = LoRATransform(handlers=(LinearLoRAHandler(),)).transform(model)
         layer = model.layers[0]
         set_gqa_attention_sharding(layer.attention, enable_sp=True)
         set_dense_ffn_sharding(
@@ -181,14 +182,11 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         """Async QKV does not support a converter-defined projection."""
         model = self._model_config()
         qkv = model.layers[0].attention.qkv_linear
-        qkv.wqkv = (
-            LoRAConverter.Config(
-                rank=2,
-                alpha=4,
-            )
-            .build()
-            .convert(qkv.wqkv)
-        )
+        qkv.wqkv = LoRATransform(
+            handlers=(LinearLoRAHandler(),),
+            rank=2,
+            alpha=4,
+        ).transform(qkv.wqkv)
         with self.assertRaisesRegex(ValueError, "converted QKV projections"):
             transform_model_config_(model, [AsyncTensorParallelTransform()])
 
