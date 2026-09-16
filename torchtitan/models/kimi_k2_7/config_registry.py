@@ -381,51 +381,33 @@ def _dist_muon_optimizer(
             )
         return shardings
 
-    compute_sharding_by_fqn_per_layer = tuple(
-        compute_shardings_for_layer(layer_id) for layer_id in range(num_layers)
-    )
-    compute_sharding_by_fqn = {
-        fqn: compute_sharding
-        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
-        for fqn, compute_sharding in layer_compute_sharding_by_fqn.items()
-    }
-    layer_bucket_fqns = tuple(
-        tuple(layer_compute_sharding_by_fqn)
-        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
-    )
+    compute_sharding_by_fqn: dict[str, ComputeLayout] = {}
+    layer_fqns = []
+    for layer_id in range(num_layers):
+        layer_shardings = compute_shardings_for_layer(layer_id)
+        compute_sharding_by_fqn.update(layer_shardings)
+        layer_fqns.append(tuple(layer_shardings))
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
     # collective launch overhead across pairs of MoE layers.
-    bucket_layer_ids = ((0,),) + tuple(
+    bucket_layer_ids = [(0,)] + [
         tuple(range(first_layer_id, min(first_layer_id + 2, num_layers)))
         for first_layer_id in range(1, num_layers, 2)
-    )
-    bucket_fqns = tuple(
-        tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
-        for layer_ids in bucket_layer_ids
-    )
-    bucket_configs_list = []
-    for layer_ids, fqns in zip(bucket_layer_ids, bucket_fqns, strict=True):
+    ]
+    bucket_configs = []
+    for layer_ids in bucket_layer_ids:
         name = "layers." + "-".join(map(str, layer_ids))
+        fqns = [fqn for layer_id in layer_ids for fqn in layer_fqns[layer_id]]
         routed_fqns = tuple(
             fqn for fqn in fqns if compute_sharding_by_fqn[fqn] is per_expert
         )
         non_routed_fqns = tuple(
             fqn for fqn in fqns if compute_sharding_by_fqn[fqn] is not per_expert
         )
-        bucket_configs_list.append(
-            BucketConfig(
-                name=name,
-                patterns=non_routed_fqns,
-            )
-        )
+        bucket_configs.append(BucketConfig(name=name, patterns=non_routed_fqns))
         if routed_fqns:
-            bucket_configs_list.append(
-                BucketConfig(
-                    name=f"{name}.routed-experts",
-                    patterns=routed_fqns,
-                )
+            bucket_configs.append(
+                BucketConfig(name=f"{name}.routed-experts", patterns=routed_fqns)
             )
-    bucket_configs = tuple(bucket_configs_list)
     # Muon is designed for matrix parameters; Moonlight uses AdamW for
     # non-matrix parameters such as RMSNorm, LM head, and embeddings. Expert
     # tensors below are batch-first stacks of matrices. See Sec. 2.2:
@@ -459,7 +441,7 @@ def _dist_muon_optimizer(
         ],
         optimizer_factory_kwargs_by_name={
             "DistMuon": {
-                "bucket_configs": bucket_configs,
+                "bucket_configs": tuple(bucket_configs),
                 "compute_sharding_by_fqn": compute_sharding_by_fqn,
             }
         },
