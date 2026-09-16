@@ -546,6 +546,57 @@ class TestPrecompileLossSetup(unittest.TestCase):
         self.assertTrue(model._skip_lm_head)
 
 
+class TestCooRVocabParallelism(unittest.TestCase):
+    def test_embedding_and_loss_use_runtime_tp_coordinate(self):
+        import torch.distributed as dist
+        from torch.distributed.device_mesh import init_device_mesh
+
+        from torchtitan.components.loss import cross_entropy_loss
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            minimal_fx_tracer,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import _register_coor_ops
+        from torchtitan.models.common.embedding import Embedding
+
+        self.assertFalse(dist.is_initialized())
+        previous_backend = get_spmd_backend()
+        dist.init_process_group("fake", rank=0, world_size=2)
+        try:
+            _register_coor_ops()
+            set_spmd_backend("spmd_types")
+            mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
+            embedding = Embedding(Embedding.Config(num_embeddings=8, embedding_dim=3))
+            embedding.weight = torch.nn.Parameter(torch.randn(4, 3))
+            embedding.tp_group = mesh.get_group("tp")
+
+            def step(token_ids, labels):
+                hidden = embedding(token_ids)
+                logits = torch.cat((hidden, hidden[:, :1]), dim=-1)
+                return cross_entropy_loss(logits, labels, global_vocab_size=8)
+
+            token_ids = torch.tensor([0, 3, 4, 7])
+            with (
+                torch.compiler.config.patch(compile_on_one_rank=True),
+                set_current_spmd_mesh(mesh),
+            ):
+                traced = minimal_fx_tracer(
+                    step,
+                    module=embedding,
+                    precompile_meshes=[mesh],
+                )(token_ids, token_ids)
+        finally:
+            set_spmd_backend(previous_backend)
+            dist.destroy_process_group()
+
+        coordinate_op = torch.ops.device_mesh._runtime_compute_coordinate_on_dim.default
+        coordinate_nodes = [
+            node for node in traced.gm.graph.nodes if node.target is coordinate_op
+        ]
+        self.assertEqual(len(coordinate_nodes), 2)
+
+
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
     def test_loaded_artifact_supports_traced_execution(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (

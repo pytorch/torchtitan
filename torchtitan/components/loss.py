@@ -20,7 +20,7 @@ from torch.distributed.tensor.experimental import local_map
 
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import get_spmd_backend
+from torchtitan.distributed.utils import device_mesh_axis_coordinate, get_spmd_backend
 from torchtitan.tools.logging import logger
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -45,13 +45,18 @@ def cross_entropy_loss(
                 pred.device_mesh.get_group("tp"),
                 pred.shape[-1],
                 "sum",
+                device_mesh_axis_coordinate(pred.device_mesh, "tp"),
             )
     elif get_spmd_backend() == "spmd_types" and spmd_mesh_size("tp") > 1:
+        mesh = current_spmd_mesh()
+        assert mesh is not None
         return _LossParallelCrossEntropy.apply(
             pred.float(),
             labels,
-            current_spmd_mesh().get_group("tp"),  # pyrefly: ignore[missing-attribute]
+            mesh.get_group("tp"),
             global_vocab_size,
+            "sum",
+            device_mesh_axis_coordinate(mesh, "tp"),
         )
 
     return torch.nn.functional.cross_entropy(
@@ -107,6 +112,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         tp_group: dist.ProcessGroup,
         global_vocab_size: int,
         reduction: str = "sum",
+        tp_rank: int | torch.SymInt | None = None,
     ) -> torch.Tensor:
         """Compute exact CE from local vocab shards via TP all-reduces.
 
@@ -119,17 +125,21 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
 
         # Compute this rank's vocab shard bounds for the local logits.
         tp_world_size = dist.get_world_size(tp_group)
-        tp_rank = dist.get_rank(tp_group)
+        if tp_rank is None:
+            tp_rank = dist.get_rank(tp_group)
         chunk_size = (global_vocab_size + tp_world_size - 1) // tp_world_size
-        vocab_start = min(global_vocab_size, chunk_size * tp_rank)
-        vocab_end = min(global_vocab_size, vocab_start + chunk_size)
-        local_vocab_size = max(0, vocab_end - vocab_start)
-        if logits.shape[-1] != local_vocab_size:
-            raise ValueError(
-                "_LossParallelCrossEntropy expected local vocab size "
-                f"{local_vocab_size} for global vocab size {global_vocab_size}, "
-                f"got {logits.shape[-1]}."
+        vocab_start = chunk_size * tp_rank
+        local_vocab_size = logits.shape[-1]
+        if isinstance(tp_rank, int):
+            expected_local_vocab_size = min(
+                chunk_size, global_vocab_size - chunk_size * tp_rank
             )
+            if local_vocab_size != expected_local_vocab_size:
+                raise ValueError(
+                    "_LossParallelCrossEntropy expected local vocab size "
+                    f"{expected_local_vocab_size} for global vocab size "
+                    f"{global_vocab_size}, got {logits.shape[-1]}."
+                )
         if local_vocab_size == 0:
             raise ValueError(
                 "_LossParallelCrossEntropy does not support empty vocab shards."
@@ -190,7 +200,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
     def backward(  # pyrefly: ignore[bad-override]
         ctx,
         grad_output: torch.Tensor,
-    ) -> tuple[torch.Tensor, None, None, None, None]:
+    ) -> tuple[torch.Tensor, None, None, None, None, None]:
         log_probs, labels = ctx.saved_tensors
         safe_labels = torch.where(labels != IGNORE_INDEX, labels, 0)
         out_of_range = (safe_labels < ctx.vocab_start) | (
@@ -214,7 +224,7 @@ class _LossParallelCrossEntropy(torch.autograd.Function):
         )
         grad_logits = (grad_input + torch.exp(log_probs)) * grad_output
         grad_logits = grad_logits.to(ctx.logits_dtype)
-        return grad_logits, None, None, None, None
+        return grad_logits, None, None, None, None, None
 
 
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:

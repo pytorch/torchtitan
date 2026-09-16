@@ -15,6 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.distributed.utils import device_mesh_axis_coordinate, get_spmd_backend
 from torchtitan.protocols.module import Module
 
 if TYPE_CHECKING:
@@ -46,9 +48,8 @@ class Embedding(nn.Embedding, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Runs vocab-parallel embedding when the module has a TP group."""
-        weight = (
-            self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
-        )
+        parameter = self.weight
+        weight = parameter.to_local() if isinstance(parameter, DTensor) else parameter
         if self.tp_group is None:
             return F.embedding(
                 input,
@@ -64,7 +65,15 @@ class Embedding(nn.Embedding, Module):
         tp_size = dist.get_world_size(tp_pg)
         weight = weight.to_local() if isinstance(weight, DTensor) else weight
         chunk_size = (self.num_embeddings + tp_size - 1) // tp_size
-        offset = dist.get_rank(tp_pg) * chunk_size
+        if isinstance(parameter, DTensor):
+            tp_rank = device_mesh_axis_coordinate(parameter.device_mesh, "tp")
+        elif get_spmd_backend() == "spmd_types":
+            mesh = current_spmd_mesh()
+            assert mesh is not None
+            tp_rank = device_mesh_axis_coordinate(mesh, "tp")
+        else:
+            tp_rank = dist.get_rank(tp_pg)
+        offset = tp_rank * chunk_size
         mask = (input >= offset) & (input < offset + weight.shape[0])
         local_input = (input - offset).clamp(0, weight.shape[0] - 1)
         out = F.embedding(

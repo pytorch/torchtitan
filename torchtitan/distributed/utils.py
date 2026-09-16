@@ -47,6 +47,14 @@ def get_spmd_backend() -> str:
     return _spmd_backend
 
 
+def device_mesh_axis_coordinate(mesh: DeviceMesh, axis_name: str) -> int | torch.SymInt:
+    """Return this rank's coordinate on a named device-mesh axis."""
+    mesh_axis_names = mesh.mesh_dim_names or ()
+    if axis_name not in mesh_axis_names:
+        raise ValueError(f"Device mesh has no {axis_name!r} axis")
+    return mesh._sym_get_coordinate(mesh_axis_names.index(axis_name))
+
+
 def check_dtensor_placements_match(
     actual: tuple[Placement, ...],
     expected: tuple[Placement, ...],
