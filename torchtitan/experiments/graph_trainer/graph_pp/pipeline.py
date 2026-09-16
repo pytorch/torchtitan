@@ -131,17 +131,12 @@ def _validate_pp1_vpp1_graph_pipeline_compile_config(
 ) -> None:
     if compile_config.mode != "aot_fx_trace":
         raise ValueError("GraphPipelineRuntime requires --compile.mode aot_fx_trace")
-    if compile_config.ep_overlap.enabled:
-        raise ValueError(
-            "GraphPipelineRuntime does not support --compile.ep_overlap.enabled "
-            "yet. GraphPP stage tracing does not apply the EP-overlap trace-input "
-            "preparers."
-        )
     if compile_config.pass_pipeline in PASS_PIPELINE_REGISTRY:
         raise ValueError(
             "GraphPipelineRuntime does not support custom pass pipelines yet"
         )
     trace_preparer_names = set(trace_input_preparer_keys(compile_config))
+    trace_preparer_names.discard("ep_overlap")
     unsupported_preparers = trace_preparer_names.intersection(
         TRACE_INPUT_PREPARERS.keys() | TRACE_CALL_INPUT_PREPARERS.keys()
     )

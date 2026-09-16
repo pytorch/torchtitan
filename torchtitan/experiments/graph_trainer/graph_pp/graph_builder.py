@@ -20,6 +20,7 @@ Flat calling convention and wrapping contract:
 """
 
 import dataclasses
+import functools
 import types
 import warnings
 from collections.abc import Callable
@@ -43,6 +44,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
+    prepare_ep_overlap_trace_call_inputs,
+    prepare_ep_overlap_trace_inputs,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
     split_backward_fsdp_collectives,
     split_forward_fsdp_collectives,
@@ -114,6 +119,49 @@ class _StageGraphModules:
     bw_dw: fx.GraphModule | None = None
     unshard: fx.GraphModule | None = None
     reduce_grad: fx.GraphModule | None = None
+
+
+def _prepare_ep_overlap_stage_trace_inputs(
+    compile_config: GraphTrainerCompileConfig,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> None:
+    stage_args, stage_kwargs, target, loss_kwargs = args
+    prepare_ep_overlap_trace_inputs(
+        compile_config,
+        (
+            stage_args[0],
+            target,
+            loss_kwargs.get("global_valid_tokens"),
+            stage_kwargs,
+        ),
+        kwargs,
+    )
+
+
+def _prepare_ep_overlap_stage_trace_call_inputs(
+    compile_config: GraphTrainerCompileConfig,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
+    stage_args, stage_kwargs, target, loss_kwargs = args
+    prepared = prepare_ep_overlap_trace_call_inputs(
+        compile_config,
+        (
+            stage_args[0],
+            target,
+            loss_kwargs.get("global_valid_tokens"),
+            stage_kwargs,
+        ),
+        kwargs,
+    )
+    if prepared is None:
+        return None
+    prepared_args, prepared_kwargs = prepared
+    return (
+        (stage_args, prepared_args[3], target, loss_kwargs),
+        prepared_kwargs,
+    )
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -1002,6 +1050,20 @@ def _build_stage_graphs(
     num_state_buffer_values = len(flatten_graph_values(state_buffers))
     num_grad_params = len(grad_params)
     num_input_grad_leaves = len(_grad_input_leaves(stage_args, stage_kwargs))
+    prepare_inputs = None
+    prepare_call_inputs = None
+    if (
+        compile_config.ep_overlap.enabled
+        and compile_config.ep_overlap.strategy == "graph"
+        and stage.is_first
+        and stage.is_last
+    ):
+        prepare_inputs = functools.partial(
+            _prepare_ep_overlap_stage_trace_inputs, compile_config
+        )
+        prepare_call_inputs = functools.partial(
+            _prepare_ep_overlap_stage_trace_call_inputs, compile_config
+        )
 
     # 2. Trace the stage calling convention. Last stages differentiate a scalar
     # loss. Non-last stages differentiate stage outputs against runtime
@@ -1044,6 +1106,8 @@ def _build_stage_graphs(
             stage_step,
             module=stage.submod,
             precompile_meshes=precompile_meshes,
+            prepare_inputs=prepare_inputs,
+            prepare_call_inputs=prepare_call_inputs,
         )(
             stage_args,
             stage_kwargs,
@@ -1083,6 +1147,8 @@ def _build_stage_graphs(
             stage_step,
             module=stage.submod,
             precompile_meshes=precompile_meshes,
+            prepare_inputs=prepare_inputs,
+            prepare_call_inputs=prepare_call_inputs,
         )(
             stage_args,
             stage_kwargs,

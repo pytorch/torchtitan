@@ -31,7 +31,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     ensure_boxed_graph_module,
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    EpOverlapConfig,
+    GraphTrainerCompileConfig,
+)
 from torchtitan.experiments.graph_trainer.graph_pp import multiplex_fw_bw_graph
 from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
     _build_graph_pp_overlap_graphs,
@@ -43,6 +46,7 @@ from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
 )
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     _validate_graph_pp_config,
+    _validate_pp1_vpp1_graph_pipeline_compile_config,
 )
 
 from torchtitan.experiments.graph_trainer.graph_pp.runner import (
@@ -158,6 +162,14 @@ def _trace_mask_mod_replay(mask0: Any, mask1: Any) -> tuple[bool, bool]:
 
 
 class GraphPipelineRuntimeTraceTest(unittest.TestCase):
+    def test_pp1_accepts_ep_overlap(self) -> None:
+        for strategy in ("eager", "graph"):
+            _validate_pp1_vpp1_graph_pipeline_compile_config(
+                GraphTrainerCompileConfig(
+                    ep_overlap=EpOverlapConfig(enabled=True, strategy=strategy)
+                )
+            )
+
     def test_structured_positional_input_moves_to_model_kwarg(self) -> None:
         class StructuredInputModel(nn.Module):
             def forward(self, tokens, positions=None):
