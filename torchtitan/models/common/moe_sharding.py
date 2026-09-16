@@ -20,10 +20,7 @@ from torchtitan.models.common.decoder_sharding import (
     stacked_colwise_config,
     token_id_placement,
 )
-from torchtitan.models.common.linear import (
-    is_column_parallel_linear_config,
-    is_row_parallel_linear_config,
-)
+from torchtitan.models.common.linear import is_column_parallel_linear_config
 from torchtitan.protocols.sharding import ShardingConfig
 
 
@@ -141,7 +138,7 @@ def _router_gate_sharding_config() -> ShardingConfig:
     )
 
 
-def _legacy_shared_expert_colwise_config() -> ShardingConfig:
+def _shared_expert_colwise_config() -> ShardingConfig:
     """Colwise shared-expert FFN (w13).
 
     Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
@@ -150,7 +147,7 @@ def _legacy_shared_expert_colwise_config() -> ShardingConfig:
     return stacked_colwise_config()
 
 
-def _legacy_shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
+def _shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
     """Rowwise shared-expert FFN (w2).
 
     Mirrors ``RowwiseParallel``: input is Shard(1) on the feature dim from
@@ -195,14 +192,7 @@ def _shared_experts_sharding_configs(
         else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
 
-    column_parallel = is_column_parallel_linear_config(shared_experts_cfg.w13)
-    row_parallel = is_row_parallel_linear_config(shared_experts_cfg.w2)
-    if column_parallel != row_parallel:
-        raise ValueError(
-            "Tensor parallelism must configure both shared-expert w13 and w2 "
-            "projections"
-        )
-    if column_parallel:
+    if is_column_parallel_linear_config(shared_experts_cfg.w13):
         return (
             ShardingConfig(
                 in_src_shardings={"x": input_layout},
@@ -217,15 +207,15 @@ def _shared_experts_sharding_configs(
             ),
         )
 
-    # TODO: Delete this fallback after every shared-expert construction path
-    # uses explicit tensor-parallel projection boundaries.
+    # Qwen3.5 shares x between w13 and its sigmoid gate, so the parent keeps
+    # their single input redistribution.
     return (
         ShardingConfig(
             in_src_shardings={"x": input_layout},
             in_dst_shardings={"x": desired_input_layout},
         ),
-        _legacy_shared_expert_colwise_config(),
-        _legacy_shared_expert_rowwise_config(output_layout=desired_output_layout),
+        _shared_expert_colwise_config(),
+        _shared_expert_rowwise_config(output_layout=desired_output_layout),
     )
 
 
