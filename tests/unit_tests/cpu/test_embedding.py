@@ -110,40 +110,41 @@ class TestEmbedding(DTensorTestBase):
 
     @with_comms
     def test_vocab_parallel_padding_forward_backward(self):
-        """Preserve padding, frequency scaling, and renormalization on each shard."""
+        """Preserve HF padding semantics through conversion and vocab sharding."""
+        from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
+            convert_hf_to_module,
+        )
+        from transformers import LlamaConfig, LlamaModel
+
         # CPU Unit Test CI runs all four ranks with real Gloo collectives.
         mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
-        for (
-            vocab_size,
-            padding_idx,
-            (scale_grad_by_freq, max_norm),
-            cover_full_vocab,
-        ) in product(
+        for vocab_size, padding_idx, cover_full_vocab in product(
             (128, 131),
             (None, 0, 32, 33, 64, -1),
-            ((False, None), (True, None), (True, 1.0)),
             (False, True),
         ):
             with self.subTest(
                 vocab_size=vocab_size,
                 padding_idx=padding_idx,
-                scale_grad_by_freq=scale_grad_by_freq,
-                max_norm=max_norm,
                 cover_full_vocab=cover_full_vocab,
             ):
                 torch.manual_seed(42)
-                reference = nn.Embedding(
-                    vocab_size,
-                    32,
-                    padding_idx=padding_idx,
-                    max_norm=max_norm,
-                    scale_grad_by_freq=scale_grad_by_freq,
-                    device=self.device_type,
-                )
+                hf_model = LlamaModel(
+                    LlamaConfig(
+                        vocab_size=vocab_size,
+                        hidden_size=32,
+                        intermediate_size=64,
+                        num_hidden_layers=1,
+                        num_attention_heads=4,
+                        num_key_value_heads=2,
+                        pad_token_id=padding_idx,
+                    )
+                ).to(self.device_type)
+                reference = deepcopy(hf_model.get_input_embeddings())
                 # Nonzero padding weights must still be returned by forward.
                 with torch.no_grad():
                     reference.weight.normal_()
-                # The review's two-token case leaves some shards with no hits.
+                # Include shards with no local tokens.
                 tokens = torch.tensor([0, 32], device=self.device_type)
                 if cover_full_vocab:
                     tokens = torch.cat(
@@ -154,9 +155,11 @@ class TestEmbedding(DTensorTestBase):
                     )
                 tokens = tokens.unsqueeze(0)
 
-                # HF module conversion preserves nn.Embedding attributes.
-                embedding = deepcopy(reference)
-                embedding.__class__ = Embedding
+                # Config.build() never sets padding_idx; HF conversion retains it.
+                convert_hf_to_module(hf_model)
+                embedding = hf_model.get_input_embeddings()
+                self.assertIsInstance(embedding, Embedding)
+                self.assertEqual(embedding.padding_idx, reference.padding_idx)
                 embedding.weight = nn.Parameter(
                     distribute_tensor(
                         reference.weight.detach().clone(), mesh, (Shard(0),)

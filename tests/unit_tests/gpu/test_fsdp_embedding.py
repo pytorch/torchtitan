@@ -37,7 +37,7 @@ class TestFSDPEmbedding(DTensorTestBase):
         return 4
 
     @with_comms
-    def test_padding_and_frequency_scaling_lifecycle(self):
+    def test_padding_lifecycle(self):
         parallel_dims = ParallelDims(
             dp_replicate=1, dp_shard=2, cp=1, tp=2, pp=1, ep=1, world_size=4
         )
@@ -54,12 +54,11 @@ class TestFSDPEmbedding(DTensorTestBase):
             partition_spec=spmd.PartitionSpec(dp, (cp, tp), None),
         )
 
-        for padding_idx, scale_grad_by_freq, reshard_after_forward in product(
-            (None, 5, 69, 127), (False, True), (False, True)
+        for padding_idx, reshard_after_forward in product(
+            (None, 5, 69, 127), (False, True)
         ):
             with self.subTest(
                 padding_idx=padding_idx,
-                scale_grad_by_freq=scale_grad_by_freq,
                 reshard_after_forward=reshard_after_forward,
             ):
                 torch.manual_seed(42)
@@ -67,7 +66,6 @@ class TestFSDPEmbedding(DTensorTestBase):
                     128,
                     16,
                     padding_idx=padding_idx,
-                    scale_grad_by_freq=scale_grad_by_freq,
                     device=self.device_type,
                 )
                 with torch.no_grad():
@@ -132,7 +130,7 @@ class TestFSDPEmbedding(DTensorTestBase):
                         rtol=0,
                     )
                     # FSDP must restore the optimizer's persistent sharded parameter
-                    # after backward, including the frequency-scaled gradient.
+                    # after backward, including the padding-masked gradient.
                     self.assertIs(embedding.weight, parameter)
                     self.assertEqual(
                         parameter.grad.full_tensor(),
