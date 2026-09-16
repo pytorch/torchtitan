@@ -77,6 +77,7 @@ jobs:
             --test_suite b200 \
             --execution_mode real_pg \
             --gpu_arch_type cuda \
+            --gpu_arch b200 \
             --ngpu 8
 
           rm -rf "$RUNNER_TEMP/artifacts-to-be-uploaded/b200"/*/checkpoint
