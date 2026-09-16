@@ -36,11 +36,14 @@ class Embedding(nn.Embedding, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         """Run vocab-parallel embedding when the active mesh has a TP group."""
+        # Weight tying may replace the standard [V, D] embedding parameter with
+        # a Linear's [1, V, D] parameter. Both represent the same lookup table.
+        weight_VD = self.weight.flatten(0, -2)
         tp_group = spmd_mesh_group("tp")
         if tp_group is None:
             return F.embedding(
                 input,
-                self.weight,
+                weight_VD,
                 self.padding_idx,
                 self.max_norm,
                 self.norm_type,
@@ -49,20 +52,21 @@ class Embedding(nn.Embedding, Module):
             )
 
         tp_size = dist.get_world_size(tp_group)
+        local_num_embeddings = weight_VD.shape[0]
         chunk_size = (self.num_embeddings + tp_size - 1) // tp_size
         offset = dist.get_rank(tp_group) * chunk_size
-        mask = (input >= offset) & (input < offset + self.weight.shape[0])
-        local_input = (input - offset).clamp(0, self.weight.shape[0] - 1)
+        mask = (input >= offset) & (input < offset + local_num_embeddings)
+        local_input = (input - offset).clamp(0, local_num_embeddings - 1)
         # padding_idx is global; only its owning shard should suppress gradients.
         local_padding_idx = None
         if (
             self.padding_idx is not None
-            and offset <= self.padding_idx < offset + self.weight.shape[0]
+            and offset <= self.padding_idx < offset + local_num_embeddings
         ):
             local_padding_idx = self.padding_idx - offset
         out = F.embedding(
             local_input,
-            self.weight,
+            weight_VD,
             local_padding_idx,
             self.max_norm,
             self.norm_type,

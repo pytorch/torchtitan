@@ -66,7 +66,7 @@ def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     w3_HD = torch.randn(8, 4)
     state_dict = {
         "w1.weight": w1_HD,
-        "w2.weight": torch.randn(4, 8),
+        "w2.weight": torch.randn(1, 4, 8),
         "w3.weight": w3_HD,
     }
     feed_forward.load_state_dict(state_dict)
@@ -74,7 +74,7 @@ def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     x_TD = torch.randn(3, 4, requires_grad=True)
     reference_x_TD = x_TD.detach().clone().requires_grad_()
     w1_HD = w1_HD.detach().clone().requires_grad_()
-    w2_DH = state_dict["w2.weight"].detach().clone().requires_grad_()
+    w2_DH = state_dict["w2.weight"][0].detach().clone().requires_grad_()
     w3_HD = w3_HD.detach().clone().requires_grad_()
     expected_TD = F.linear(
         F.silu(F.linear(reference_x_TD, w1_HD)) * F.linear(reference_x_TD, w3_HD),
@@ -90,7 +90,7 @@ def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     w13_grad_2HD = feed_forward.w13.weight.grad
     torch.testing.assert_close(w13_grad_2HD[0], w1_HD.grad)
     torch.testing.assert_close(w13_grad_2HD[1], w3_HD.grad)
-    torch.testing.assert_close(feed_forward.w2.weight.grad, w2_DH.grad)
+    torch.testing.assert_close(feed_forward.w2.weight.grad[0], w2_DH.grad)
 
 
 def test_feed_forward_uses_configured_activation():
@@ -104,7 +104,7 @@ def test_feed_forward_uses_configured_activation():
     feed_forward.load_state_dict(
         {
             "w1.weight": torch.randn(8, 4),
-            "w2.weight": torch.randn(4, 8),
+            "w2.weight": torch.randn(1, 4, 8),
             "w3.weight": torch.randn(8, 4),
         }
     )

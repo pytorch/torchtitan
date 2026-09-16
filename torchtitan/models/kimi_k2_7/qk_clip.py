@@ -88,17 +88,19 @@ def _scale_mla_heads(
 ) -> None:
     """Scale the NoPE and remaining rows of every MLA head in place.
 
-    ``weight`` is viewed as ``[num_heads, rows_per_head, in_features]``, and
-    ``scales_H`` contains one scale per head. The remaining rows are unchanged
+    The Linear ``weight`` is flattened to its matrix view, then viewed as
+    ``[num_heads, rows_per_head, in_features]``. ``scales_H`` contains one
+    scale per head. The remaining rows are unchanged
     when ``remaining_scale_exponent`` is ``None``.
     """
     num_heads = scales_H.numel()
-    if weight.ndim != 2 or weight.shape[0] != num_heads * rows_per_head:
+    weight_FD = cast(DTensor, weight.flatten(0, -2))
+    if weight_FD.shape[0] != num_heads * rows_per_head:
         raise ValueError("QK clip scales do not match the MLA weight shape.")
-    _validate_head_sharding(weight)
+    _validate_head_sharding(weight_FD)
 
-    scales_H11 = _replicated_scales(scales_H, weight).view(-1, 1, 1)
-    heads_HDI = weight.view(num_heads, rows_per_head, weight.shape[1])
+    scales_H11 = _replicated_scales(scales_H, weight_FD).view(-1, 1, 1)
+    heads_HDI = weight_FD.view(num_heads, rows_per_head, weight_FD.shape[1])
     heads_HDI[:, :nope_rows_per_head].mul_(scales_H11.pow(nope_scale_exponent))
     if remaining_scale_exponent is not None:
         heads_HDI[:, nope_rows_per_head:].mul_(scales_H11.pow(remaining_scale_exponent))

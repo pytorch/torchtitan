@@ -33,14 +33,13 @@ from torchtitan.protocols.module import Module
 
 
 class Linear(nn.Linear, Module):
-    """Configurable linear with optional stacked output projections.
+    """Configurable linear with a leading logical-projection dimension.
 
-    With ``num_linears == 1``, the parameter and output use the standard
-    ``[out_features, in_features]`` and ``[..., out_features]`` shapes. With
-    ``num_linears > 1``, they use ``[num_linears, out_features, in_features]``
-    and ``[..., num_linears, out_features]``. The stacked parameter is flattened
-    without a copy for the GEMM, so each projection remains contiguous for
-    blockwise weight quantization.
+    Parameters use ``[num_linears, out_features, in_features]``. The leading
+    dimension keeps each projection contiguous for blockwise weight
+    quantization. It is flattened without a copy for the GEMM. A single
+    projection retains the standard ``[..., out_features]`` output shape;
+    multiple projections return ``[..., num_linears, out_features]``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -58,14 +57,13 @@ class Linear(nn.Linear, Module):
         )
         self.out_features = config.out_features
         self.num_linears = config.num_linears
-        if config.num_linears > 1:
-            self.weight = nn.Parameter(
-                self.weight.detach().unflatten(
-                    0, (config.num_linears, config.out_features)
-                ),
-                requires_grad=self.weight.requires_grad,
-            )
-        if config.num_linears > 1 and self.bias is not None:
+        self.weight = nn.Parameter(
+            self.weight.detach().unflatten(
+                0, (config.num_linears, config.out_features)
+            ),
+            requires_grad=self.weight.requires_grad,
+        )
+        if self.bias is not None:
             self.bias = nn.Parameter(
                 self.bias.detach().unflatten(
                     0, (config.num_linears, config.out_features)
@@ -74,28 +72,34 @@ class Linear(nn.Linear, Module):
             )
 
     def reset_parameters(self) -> None:
-        # nn.Linear.__init__ calls this override before self.num_linears is set,
-        # so select the initialization path from the physical weight shape.
-        if self.weight.ndim == 2:
-            nn.Linear.reset_parameters(self)
-            return
-        # init_states() calls this after meta materialization, when a stacked
-        # weight is already 3D. Flatten first so fan-in remains in_features;
-        # PyTorch's generic 3D fan calculation would incorrectly use
-        # out_features * in_features.
+        # nn.Linear.__init__ calls this while weight is temporarily 2D;
+        # init_states() calls it after the logical projection axis is restored.
+        # Flattening handles both and keeps fan-in equal to in_features.
         nn.init.kaiming_uniform_(self.weight.flatten(0, -2), a=math.sqrt(5))
         if self.bias is not None:
             bound = 1 / math.sqrt(self.in_features)
             nn.init.uniform_(self.bias, -bound, bound)
 
+    def _init_param(self, name: str, param: torch.Tensor) -> None:
+        """Initialize a single projection through its standard parameter view."""
+        if self.num_linears == 1:
+            param = param.flatten(0, -2) if name == "weight" else param.flatten()
+        Module._init_param(self, name, param)
+
     def _flatten_weight_and_bias(
         self,
+        *,
+        weight: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Flatten stacked parameters for one linear operation."""
-        if self.num_linears == 1:
-            return self.weight, self.bias
+        """Flatten stacked parameters for one linear operation.
+
+        Tensor-subclass consumers may pass a weight they have already read so
+        a parameterization is not evaluated a second time.
+        """
+        if weight is None:
+            weight = self.weight
         bias = None if self.bias is None else self.bias.flatten()
-        return self.weight.flatten(0, -2), bias
+        return weight.flatten(0, -2), bias
 
     def _unflatten_output(self, output: torch.Tensor) -> torch.Tensor:
         """Restore the logical stacked output dimensions after a linear operation."""
