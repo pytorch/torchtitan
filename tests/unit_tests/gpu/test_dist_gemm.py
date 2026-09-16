@@ -39,7 +39,7 @@ from torchtitan.config.transform import (
     transform_model_config_,
 )
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.common.attention import QKVLinear, TensorParallelGQAttention
+from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_dense_ffn_sharding,
@@ -49,7 +49,7 @@ from torchtitan.models.common.dist_gemm import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
-from torchtitan.models.common.feed_forward import TensorParallelFeedForward
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
 DIM = 256
@@ -78,13 +78,11 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             [AsyncTensorParallelTransform()],
         )
         for layer in model.layers:
-            self.assertIsInstance(layer.attention, TensorParallelGQAttention.Config)
             self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
             self.assertIsInstance(
                 layer.attention.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
             )
             self.assertIsInstance(layer.attention.wo, AsyncRowParallelLinear.Config)
-            self.assertIsInstance(layer.feed_forward, TensorParallelFeedForward.Config)
             self.assertIsInstance(
                 layer.feed_forward.w13, AsyncColumnParallelLinear.Config
             )
@@ -140,8 +138,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         self.assertIsNone(async_layer.attention.sharding_config.out_dst_shardings)
 
         self.assertIsNone(stock_layer.attention.qkv_linear.sharding_config)
+        self.assertIsNone(async_layer.attention.qkv_linear.sharding_config)
+        self.assertIsNotNone(
+            async_layer.attention.qkv_linear.wqkv.sharding_config.in_src_shardings
+        )
         self.assertIsNone(
-            async_layer.attention.qkv_linear.sharding_config.in_dst_shardings
+            async_layer.attention.qkv_linear.wqkv.sharding_config.in_dst_shardings
         )
         self.assertIsNotNone(stock_layer.attention.wo.sharding_config.out_src_shardings)
         self.assertIsNotNone(stock_layer.attention.wo.sharding_config.out_dst_shardings)
@@ -161,8 +163,13 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
     def test_projection_boundaries_survive_lora_config_wrappers(self):
         """The transformed FFN boundary encloses LoRA projection work."""
-        model = TensorParallelTransform().transform(self._model_config())
-        model = LoRATransform(handlers=(LinearLoRAHandler(),)).transform(model)
+        model = transform_model_config_(
+            self._model_config(),
+            [
+                TensorParallelTransform(),
+                LoRATransform(handlers=(LinearLoRAHandler(),)),
+            ],
+        )
         layer = model.layers[0]
         set_gqa_attention_sharding(layer.attention, enable_sp=True)
         set_dense_ffn_sharding(
@@ -172,11 +179,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         )
 
         self.assertIsNone(layer.attention.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(
-            layer.attention.qkv_linear.sharding_config.in_dst_shardings
+        self.assertIsNone(layer.attention.qkv_linear.sharding_config)
+        self.assertIsNone(
+            layer.attention.qkv_linear.wqkv.sharding_config.in_dst_shardings
         )
         self.assertIsNone(layer.feed_forward.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
+        self.assertIsNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
 
     def test_qkv_converter_is_rejected(self):
         """Async QKV does not support a converter-defined projection."""
@@ -236,7 +244,8 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
 
         self.assertIsNone(attn._sharding_config.in_dst_shardings)
         self.assertIsNone(attn._sharding_config.out_dst_shardings)
-        self.assertIsNone(attn.qkv_linear._sharding_config.in_dst_shardings)
+        self.assertIsNone(attn.qkv_linear._sharding_config)
+        self.assertIsNone(attn.qkv_linear.wqkv._sharding_config.in_dst_shardings)
         self.assertIsNotNone(attn.wo._sharding_config.out_src_shardings)
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
@@ -436,7 +445,7 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
         async_config = AsyncTensorParallelTransform().transform(make())
         async_config.activation_fn = fused_swiglu(async_config.activation_fn)
         fused = async_config.build().to(dev)
-        self.assertIsInstance(fused, TensorParallelFeedForward)
+        self.assertIsInstance(fused, FeedForward)
         self.assertIsInstance(fused.w13, AsyncColumnParallelLinear)
         self.assertIsInstance(fused.w2, AsyncRowParallelLinear)
 

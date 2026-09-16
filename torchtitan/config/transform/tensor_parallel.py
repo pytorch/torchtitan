@@ -17,24 +17,23 @@
 from dataclasses import dataclass
 from typing import cast
 
-from torchtitan.models.common.attention import (
-    GQAttention,
-    QKVLinear,
-    TensorParallelGQAttention,
-)
+from torchtitan.models.common.attention import GQAttention, QKVLinear
 from torchtitan.models.common.dist_gemm import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
-from torchtitan.models.common.feed_forward import FeedForward, TensorParallelFeedForward
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
+    specialize_column_parallel_linear,
+    specialize_row_parallel_linear,
 )
 from torchtitan.protocols.module import Module
 
 from .base import convert_config_type, ModelConfigTransform
+from .lora import LoRATransform
 
 __all__ = ["AsyncTensorParallelTransform", "TensorParallelTransform"]
 
@@ -46,71 +45,57 @@ def _convert_linear(
     async_tp: bool,
     projection_name: str,
 ) -> Linear.Config:
-    if type(config) is Linear.Config:
-        return cast(Linear.Config, convert_config_type(config, replacement))
     if async_tp:
+        if type(config) is Linear.Config:
+            return cast(Linear.Config, convert_config_type(config, replacement))
         raise ValueError(
             "Async tensor parallelism does not support converted "
             f"{projection_name} projections"
         )
-    return config
+
+    assert config._owner is not None
+    if replacement is ColumnParallelLinear:
+        specialized = specialize_column_parallel_linear(config._owner, type(config))
+    else:
+        assert replacement is RowParallelLinear
+        specialized = specialize_row_parallel_linear(config._owner, type(config))
+    return cast(Linear.Config, convert_config_type(config, specialized))
 
 
 def _transform_attention(model: Module.Config, *, async_tp: bool) -> Module.Config:
     """Select TP projection roles for common GQA blocks.
 
-    Synchronous TP keeps the inner QKV projection unchanged because the
-    ``QKVLinear`` boundary owns its input redistribution. Async TP replaces
-    that projection so the all-gather can overlap its GEMM. Both modes mark
-    the output projection with the corresponding row-parallel implementation.
+    Both modes put the input collective on ``wqkv`` and the output collective
+    on ``wo``. Synchronous modules call explicit ``spmd.redistribute``
+    collectives, while async modules overlap those collectives with their GEMMs.
     Model-specific ``GQAttention`` subclasses retain their existing behavior.
     """
     output_linear = AsyncRowParallelLinear if async_tp else RowParallelLinear
     for _, traversed, parent, attr in model.traverse(GQAttention.Config):
-        is_root = parent is None
         existing = cast(GQAttention.Config, traversed)
-        if type(existing) is not GQAttention.Config:
+        if existing._owner is not GQAttention:
             continue
 
-        attention = convert_config_type(existing, TensorParallelGQAttention)
-        assert isinstance(attention, TensorParallelGQAttention.Config)
-
-        # Synchronous TP attaches the input redistribution to QKVLinear, so
-        # its inner wqkv receives replicated input and remains a normal Linear.
-        # Async TP must replace wqkv because it fuses that all-gather with the
-        # projection GEMM itself.
-        if async_tp:
-            if attention.qkv_linear._owner is not QKVLinear:
+        if existing.qkv_linear._owner is not QKVLinear:
+            if async_tp:
                 raise ValueError(
                     "Async tensor parallelism requires the common QKVLinear "
                     "implementation"
                 )
-            if (
-                type(attention.qkv_linear) is not QKVLinear.Config
-                or type(attention.qkv_linear.wqkv) is not Linear.Config
-            ):
-                raise ValueError(
-                    "Async tensor parallelism does not support converted "
-                    "QKV projections"
-                )
-            attention.qkv_linear.wqkv = _convert_linear(
-                attention.qkv_linear.wqkv,
-                AsyncColumnParallelLinear,
-                async_tp=True,
-                projection_name="QKV",
-            )
-        attention.wo = _convert_linear(
-            attention.wo,
+            continue
+        input_linear = AsyncColumnParallelLinear if async_tp else ColumnParallelLinear
+        existing.qkv_linear.wqkv = _convert_linear(
+            existing.qkv_linear.wqkv,
+            input_linear,
+            async_tp=async_tp,
+            projection_name="QKV",
+        )
+        existing.wo = _convert_linear(
+            existing.wo,
             output_linear,
             async_tp=async_tp,
             projection_name="attention output",
         )
-        if is_root:
-            model = attention
-        else:
-            assert parent is not None
-            assert isinstance(attr, str)
-            setattr(parent, attr, attention)
     return model
 
 
@@ -123,9 +108,8 @@ def _transform_feed_forward(
 
     Only configs stored as ``feed_forward`` fields, plus a root FFN config, are
     transformed; shared-expert FFNs are intentionally left unchanged. The
-    outer ``TensorParallelFeedForward`` marker records that projection leaves
-    own the collectives even when a converter preserves a different Linear
-    implementation for ``w13`` or ``w2``.
+    synchronous transform specializes the final projection implementation, so
+    the collective encloses converted compute such as quantization or LoRA.
     """
     input_linear = AsyncColumnParallelLinear if async_tp else ColumnParallelLinear
     output_linear = AsyncRowParallelLinear if async_tp else RowParallelLinear
@@ -134,35 +118,21 @@ def _transform_feed_forward(
         if not is_root and attr != "feed_forward":
             continue
         existing = cast(FeedForward.Config, traversed)
-        if type(existing) is not FeedForward.Config:
-            if async_tp and existing._owner is FeedForward:
-                raise ValueError(
-                    "Async tensor parallelism does not support converted "
-                    "FeedForward configs"
-                )
+        if existing._owner is not FeedForward:
             continue
 
-        replacement = convert_config_type(existing, TensorParallelFeedForward)
-        assert isinstance(replacement, TensorParallelFeedForward.Config)
-        replacement.w13 = _convert_linear(
-            replacement.w13,
+        existing.w13 = _convert_linear(
+            existing.w13,
             input_linear,
             async_tp=async_tp,
             projection_name="w13",
         )
-        replacement.w2 = _convert_linear(
-            replacement.w2,
+        existing.w2 = _convert_linear(
+            existing.w2,
             output_linear,
             async_tp=async_tp,
             projection_name="w2",
         )
-
-        if is_root:
-            model = replacement
-        else:
-            assert parent is not None
-            assert isinstance(attr, str)
-            setattr(parent, attr, replacement)
     return model
 
 
@@ -189,3 +159,9 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
 
     def transform(self, model: Module.Config) -> Module.Config:
         return _transform_tensor_parallel(model, async_tp=True)
+
+
+TensorParallelTransform.run_after = (LoRATransform,)
+AsyncTensorParallelTransform.run_after = (LoRATransform,)
+TensorParallelTransform.conflicts_with = (AsyncTensorParallelTransform,)
+AsyncTensorParallelTransform.conflicts_with = (TensorParallelTransform,)

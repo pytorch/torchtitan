@@ -14,6 +14,7 @@
 """
 
 from dataclasses import dataclass
+from functools import cache
 
 import spmd_types as spmd
 import torch
@@ -22,7 +23,8 @@ import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import _per_axis_types, spmd_mesh_group
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend for the router gate:
@@ -72,31 +74,147 @@ class CastLinear(Linear):
         )
 
 
-class ColumnParallelLinear(Linear):
-    """Column-parallel linear with an input redistribution boundary.
+def _tp_type(layout) -> spmd.PerMeshAxisSpmdType:
+    """Return the TP-axis type from a boundary layout."""
+    tp_type = _per_axis_types(layout).get(MeshAxisName.TP)
+    assert tp_type is not None
+    return tp_type
 
-    The computation is inherited from ``Linear``. Sharding setup places the
-    required SP or TP input redistribution on this module's forward wrapper.
-    """
+
+class _ColumnParallelLinearMixin(Module):
+    """All-gather a TP-sharded input before the composed projection."""
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            sharding_config = self._sharding_config
+            assert sharding_config is not None
+            assert sharding_config.in_src_shardings is not None
+            input_layout = sharding_config.in_src_shardings["input"]
+            input = spmd.redistribute(
+                input,
+                tp_group,
+                src=_tp_type(input_layout),
+                dst=spmd.R,
+                backward_options={"op_dtype": input.dtype},
+            )
+        return super().forward(input)
+
+
+class _RowParallelLinearMixin(Module):
+    """Reduce a TP-partial output after the composed projection."""
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = super().forward(input)
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return output
+
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        output_layout = sharding_config.out_src_shardings
+        assert output_layout is not None and not isinstance(output_layout, tuple)
+        return spmd.redistribute(
+            output,
+            tp_group,
+            src=spmd.P,
+            dst=_tp_type(output_layout),
+            backward_options={"op_dtype": output.dtype},
+        )
+
+
+class ColumnParallelLinear(_ColumnParallelLinearMixin, Linear):
+    """Linear that explicitly all-gathers its TP-sharded input."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         pass
 
 
-class RowParallelLinear(Linear):
-    """Row-parallel linear with an output reduction boundary.
-
-    The subclass keeps ``Linear`` computation unchanged. Its distinct config
-    type lets sharding setup attach the output reduction to this module and lets
-    transforms replace only projections with this communication role. The
-    resulting ``ShardingConfig`` installs a reduce-scatter for SP or an
-    all-reduce otherwise.
-    """
+class RowParallelLinear(_RowParallelLinearMixin, Linear):
+    """Linear that explicitly reduces its TP-partial output."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         pass
+
+
+@cache
+def specialize_column_parallel_linear(
+    parent_cls: type[Module],
+    parent_config_cls: type[Module.Config] | None = None,
+) -> type[Module]:
+    """Add an outer input all-gather boundary to a Linear implementation."""
+    parent_config_cls = parent_config_cls or parent_cls.Config
+    if (
+        issubclass(parent_cls, _ColumnParallelLinearMixin)
+        and parent_config_cls is parent_cls.Config
+    ):
+        return parent_cls
+    if parent_cls is Linear and parent_config_cls is Linear.Config:
+        return ColumnParallelLinear
+
+    bases = (
+        (parent_cls,)
+        if issubclass(parent_cls, _ColumnParallelLinearMixin)
+        else (_ColumnParallelLinearMixin, parent_cls)
+    )
+
+    class SpecializedColumnParallelLinear(*bases):  # type: ignore[misc, valid-type]
+        @dataclass(kw_only=True, slots=True)
+        class Config(parent_config_cls):  # type: ignore[misc]
+            pass
+
+    SpecializedColumnParallelLinear.__name__ = f"ColumnParallel{parent_cls.__name__}"
+    SpecializedColumnParallelLinear.__qualname__ = (
+        f"ColumnParallel{parent_cls.__qualname__}"
+    )
+    return SpecializedColumnParallelLinear
+
+
+@cache
+def specialize_row_parallel_linear(
+    parent_cls: type[Module],
+    parent_config_cls: type[Module.Config] | None = None,
+) -> type[Module]:
+    """Add an outer output-reduction boundary to a Linear implementation."""
+    parent_config_cls = parent_config_cls or parent_cls.Config
+    if (
+        issubclass(parent_cls, _RowParallelLinearMixin)
+        and parent_config_cls is parent_cls.Config
+    ):
+        return parent_cls
+    if parent_cls is Linear and parent_config_cls is Linear.Config:
+        return RowParallelLinear
+
+    bases = (
+        (parent_cls,)
+        if issubclass(parent_cls, _RowParallelLinearMixin)
+        else (_RowParallelLinearMixin, parent_cls)
+    )
+
+    class SpecializedRowParallelLinear(*bases):  # type: ignore[misc, valid-type]
+        @dataclass(kw_only=True, slots=True)
+        class Config(parent_config_cls):  # type: ignore[misc]
+            pass
+
+    SpecializedRowParallelLinear.__name__ = f"RowParallel{parent_cls.__name__}"
+    SpecializedRowParallelLinear.__qualname__ = f"RowParallel{parent_cls.__qualname__}"
+    return SpecializedRowParallelLinear
+
+
+def is_column_parallel_linear_config(config: Module.Config) -> bool:
+    """Return whether a config builds an explicit column-parallel boundary."""
+    return config._owner is not None and issubclass(
+        config._owner, _ColumnParallelLinearMixin
+    )
+
+
+def is_row_parallel_linear_config(config: Module.Config) -> bool:
+    """Return whether a config builds an explicit row-parallel boundary."""
+    return config._owner is not None and issubclass(
+        config._owner, _RowParallelLinearMixin
+    )
 
 
 @spmd.register_local_autograd_function
@@ -204,4 +322,8 @@ __all__ = [
     "RowParallelLinear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
+    "is_column_parallel_linear_config",
+    "is_row_parallel_linear_config",
+    "specialize_column_parallel_linear",
+    "specialize_row_parallel_linear",
 ]
