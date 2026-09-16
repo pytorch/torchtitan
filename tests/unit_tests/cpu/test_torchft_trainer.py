@@ -14,7 +14,7 @@ import torch
 import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import override
-from torchtitan.config.transform import LoRAConverter
+from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import model_registry
@@ -26,7 +26,9 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
 
     @override(target=FeedForward.Config)
     def ffn_lora(config):
-        return LoRAConverter(LoRAConverter.Config(rank=1, alpha=1.0)).convert(config)
+        return LoRATransform(
+            handlers=(LinearLoRAHandler(),), rank=1, alpha=1.0
+        ).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
         model_spec=model_registry("debugmodel"),
