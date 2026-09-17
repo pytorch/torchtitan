@@ -19,6 +19,8 @@ import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from torchtitan.components.checkpointer import CheckpointManager
+
 from torchtitan.components.optimizer import LRSchedulersContainer, ParamGroupConfig
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
@@ -214,7 +216,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             self.assertIs(False, bystander.save(curr_step=5))
             bystander.close()
 
-    def test_load_restores_ft_checkpoint_before_main_checkpoint(self):
+    def test_load_restores_ft_checkpoint_after_main_checkpoint(self):
         manager = self._manager(participating_rank=0)
         main_checkpoint_id = manager._create_checkpoint_id(5)
         os.makedirs(main_checkpoint_id)
@@ -235,16 +237,16 @@ class TestFTCheckpointManager(unittest.TestCase):
                 ft_grad_enabled.append(torch.is_grad_enabled())
 
         with mock.patch.object(
-            manager,
+            CheckpointManager,
             "_load_checkpoint",
             side_effect=load_checkpoint,
         ):
             self.assertTrue(manager.load())
 
-        self.assertEqual(["ft", "main"], calls)
+        self.assertEqual(["main", "ft"], calls)
         self.assertEqual(
             loaded_checkpoint_ids,
-            [manager._create_checkpoint_id(5, folder=ft_folder), main_checkpoint_id],
+            [main_checkpoint_id, manager._create_checkpoint_id(5, folder=ft_folder)],
         )
         self.assertEqual([False], ft_grad_enabled)
         manager.close()

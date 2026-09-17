@@ -242,7 +242,9 @@ class BaseCheckpointManager(Configurable, ABC):
             from_quantized = False
 
             has_checkpoint_folder = self._storage.isdir(self.folder)
-            load_step = self._resolve_load_step(step, has_checkpoint_folder)
+            load_step = -1
+            if has_checkpoint_folder:
+                load_step = self._find_load_step() if step == -1 else step
 
             if step != -1 and not has_checkpoint_folder:
                 raise FileNotFoundError(
@@ -318,12 +320,6 @@ class BaseCheckpointManager(Configurable, ABC):
                 time.monotonic() - begin,
             )
             return True
-
-    def _resolve_load_step(self, step: int, has_checkpoint_folder: bool) -> int:
-        """Resolve the training checkpoint step selected by ``load``."""
-        if not has_checkpoint_folder:
-            return -1
-        return self._find_load_step() if step == -1 else step
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> bool:

@@ -21,7 +21,6 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, cast
 
-import torch
 import torch.distributed as dist
 import torch.nn as nn
 
@@ -171,16 +170,24 @@ class TorchFTCheckpointManager(CheckpointManager):
         # full save reports False.
         return False
 
-    @torch.no_grad()
-    def load(self, step: int = -1) -> bool:
-        if self.enable and self.enable_ft_dataloader_checkpoints:
-            has_checkpoint_folder = self._storage.isdir(self.folder)
-            load_step = self._resolve_load_step(step, has_checkpoint_folder)
-            if load_step != -1:
-                main_checkpoint_id = self._create_checkpoint_id(load_step)
-                if self._storage.isdir(main_checkpoint_id):
-                    self._ft_load(load_step)
-        return super().load(step)
+    def _load_checkpoint(
+        self,
+        states: dict[str, Any],
+        checkpoint_id: str,
+        *,
+        from_hf: bool,
+        from_quantized: bool,
+    ) -> None:
+        super()._load_checkpoint(
+            states,
+            checkpoint_id,
+            from_hf=from_hf,
+            from_quantized=from_quantized,
+        )
+        if self.enable_ft_dataloader_checkpoints and not from_hf:
+            load_step = self._parse_step(checkpoint_id.rsplit("/", 1)[-1])
+            if load_step is not None:
+                self._ft_load(load_step)
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
         states = super()._states_to_load(model_only)
@@ -233,7 +240,7 @@ class TorchFTCheckpointManager(CheckpointManager):
         begin = time.monotonic()
         logger.info(f"Loading the FT checkpoint at step {step}.")
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        self._load_checkpoint(
+        super()._load_checkpoint(
             self.ft_states,
             checkpoint_id=checkpoint_id,
             from_hf=False,
