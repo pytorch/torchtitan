@@ -25,6 +25,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.models.common.activation import Sigmoid
 
 from torchtitan.models.common.aux_loss import (
     _zero_aux_losses,
@@ -55,6 +56,7 @@ def _reference_loss(
     top_k: int,
     *,
     coeff: float = 1.0,
+    padding_mask_T: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Explicit DeepSeek-V3 Eqs 17-20 reference, in the loss's token-mode form.
 
@@ -63,9 +65,11 @@ def _reference_loss(
     input's token count; the sum-type (token-mode) form multiplies ``T`` back
     in, and ``coeff`` stands for the framework's ``coeff / denominator``.
     """
-    E, T = scores_TE.size(-1), scores_TE.size(0)
+    E = scores_TE.size(-1)
+    T = scores_TE.size(0) if padding_mask_T is None else (~padding_mask_T).sum()
     counts_E = routing_map_TE.sum(dim=0).to(scores_TE.dtype)
-    probs_TE = scores_TE / scores_TE.sum(dim=-1, keepdim=True)
+    probs_TE = scores_TE if padding_mask_T is None else scores_TE[~padding_mask_T]
+    probs_TE = probs_TE / probs_TE.sum(dim=-1, keepdim=True)
     f_E = counts_E * (E / (top_k * T))
     p_E = probs_TE.sum(dim=0) / T
     return (f_E * p_E).sum() * T * coeff
@@ -171,6 +175,48 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         )
         self.assertEqual(loss.instance_acc.item(), 0.0)
 
+    def test_masked_routing_rows_do_not_affect_aux_loss(self):
+        scores_TE, carrier_TK, routing_map_TE = _make_inputs(self.T, self.E, self.K)
+        full_routing_map_TE = routing_map_TE.clone()
+        routing_map_TE[self.T // 2 :] = False
+        loss = _make_loss(self.coeff, self.denominator)
+
+        padding_mask_T = ~routing_map_TE.any(dim=-1)
+        out_TK = loss(
+            scores_TE,
+            routing_map_TE,
+            carrier=carrier_TK,
+            padding_mask_T=padding_mask_T,
+        )
+        out_TK.sum().backward()
+        _zero_aux_losses([loss])
+
+        ref_scores_TE = scores_TE.detach().clone().requires_grad_(True)
+        ref_aux = _reference_loss(
+            ref_scores_TE,
+            routing_map_TE,
+            self.K,
+            coeff=self.coeff / self.denominator,
+            padding_mask_T=padding_mask_T,
+        )
+        (ref_aux + (ref_scores_TE * full_routing_map_TE).sum()).backward()
+
+        ref_metric = _reference_loss(
+            scores_TE.detach(),
+            routing_map_TE,
+            self.K,
+            padding_mask_T=padding_mask_T,
+        )
+        self.assertAlmostEqual(
+            AuxLoss.group_acc[_METRIC_KEY].item(),
+            ref_metric.item() / self.denominator,
+            places=4,
+        )
+        self.assertLess(
+            (scores_TE.grad - ref_scores_TE.grad).abs().max().item(),
+            1e-10,
+        )
+
     def test_no_double_count_with_remat_checkpointing(self):
         """inject() keeps the accumulation in its own retained remat region, so
         replaying an enclosing checkpoint counts each forward exactly once."""
@@ -208,7 +254,12 @@ class TestMicrobatchWiseLoadBalanceLossConfig(_AuxLossTestCase):
 
         moe_cfg = make_moe_config(
             num_experts=4,
-            router=make_router_config(dim=8, num_experts=4, gate_param_init={}),
+            router=make_router_config(
+                dim=8,
+                num_experts=4,
+                gate_param_init={},
+                score_func=Sigmoid.Config(),
+            ),
             routed_experts=make_routed_experts_config(
                 dim=8,
                 hidden_dim=16,

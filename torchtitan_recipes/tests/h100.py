@@ -36,7 +36,7 @@ def llama3_debugmodel_dist_gemm_tp2() -> Trainer.Config:
 
 def llama3_debugmodel_fsdp_symm_mem() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
-    config.parallelism.enable_fsdp_symm_mem = True
+    config.parallelism.fsdp_symm_mem_scope = "all"
     return config
 
 

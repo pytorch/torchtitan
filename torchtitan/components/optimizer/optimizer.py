@@ -35,6 +35,7 @@ __all__ = [
     "ParamGroupConfig",
     "default_adamw",
     "register_moe_load_balancing_hook",
+    "register_moe_quantile_balancing_hook",
 ]
 
 
@@ -71,10 +72,14 @@ class ParamGroupConfig:
 T = TypeVar("T", bound=Optimizer)
 
 
+class _MoERouterLike(Protocol):
+    tokens_per_expert_E: torch.Tensor  # noqa: N815
+
+
 class _MoELike(Protocol):
     load_balance_coeff: float | None
-    tokens_per_expert_E: torch.Tensor  # noqa: N815
     expert_bias_E: torch.Tensor  # noqa: N815
+    router: _MoERouterLike
 
 
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
@@ -97,7 +102,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
     Args:
         config (Config): Optimizer configuration with param group definitions.
-        model_parts (List[nn.Module]): List of model parts to be optimized.
+        model_parts (list[nn.Module]): Model parts to optimize.
+        capturable (bool): Whether optimizer steps can run in a CUDA graph.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -121,7 +127,8 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         - 'fused_opt_states_bf16': Like 'fused', but initialize Adam/AdamW
           momentum and variance in bfloat16 via a step pre-hook so the fused
           CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
-          Only supported for Adam/AdamW. See docs/bf16_optimizer_states.md.
+          Only supported for Adam/AdamW. See
+          torchtitan/components/optimizer/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
@@ -216,12 +223,17 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
         return groups, patterns
 
-    def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        model_parts: list[nn.Module],
+        capturable: bool = False,
+    ) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
         param_group_configs = config.param_groups
         all_params = []
         self.optimizers = []
-        self._cuda_graph_checkpoint_capturable: list[list[bool]] | None = None
         self.model_parts = model_parts
 
         for part_idx, model in enumerate(self.model_parts):
@@ -229,14 +241,29 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 model, param_group_configs, impl_kwargs
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
+                if opt_name in ("Adam", "AdamW"):
+                    for group in opt_param_groups:
+                        group["capturable"] = capturable
                 optimizer = self._resolve_optimizer_factory(opt_name)(
                     opt_param_groups,
                     **config.optimizer_factory_kwargs_by_name.get(opt_name, {}),
                 )
+                if capturable:
+                    if not isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):
+                        raise ValueError(
+                            "Optimizer CUDA graphs support only Adam and AdamW."
+                        )
+                    if any(not group.get("fused") for group in optimizer.param_groups):
+                        raise ValueError(
+                            "Optimizer CUDA graphs require the fused implementation."
+                        )
                 self.optimizers.append(cast(T, optimizer))
                 self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
+
+                if opt_name in ("Adam", "AdamW") and capturable:
+                    self._register_cuda_graph_state_dict_hook(optimizer)
 
         self._validate_params(all_params)
 
@@ -298,6 +325,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
         assert closure is None, "OptimizersContainer does not support closures"
         for optimizer in self.optimizers:
+            # The first eager step creates the stable device LR used by replay.
+            for group in optimizer.param_groups:
+                lr = group["lr"]
+                if group.get("capturable") and not isinstance(lr, torch.Tensor):
+                    group["lr"] = torch.tensor(
+                        lr,
+                        dtype=torch.float32,
+                        device=group["params"][0].device,
+                    )
             optimizer.step()
         return None
 
@@ -305,62 +341,18 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         for optimizer in self.optimizers:
             optimizer.zero_grad(set_to_none=set_to_none)
 
-    def prepare_for_cuda_graph(self) -> None:
-        """Make fused Adam optimizers safe to capture.
-
-        ``state_dict`` saves the CUDA graph-only values in their host form.
-        """
-        for optimizer in self.optimizers:
-            if not isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):
-                raise ValueError("Optimizer CUDA graphs support only Adam and AdamW.")
-            for group in optimizer.param_groups:
-                if not group.get("fused"):
-                    raise ValueError(
-                        "Optimizer CUDA graphs require the fused implementation."
-                    )
-
-        if self._cuda_graph_checkpoint_capturable is None:
-            self._cuda_graph_checkpoint_capturable = [
-                [group["capturable"] for group in optimizer.param_groups]
-                for optimizer in self.optimizers
-            ]
-        for optimizer in self.optimizers:
-            for group in optimizer.param_groups:
-                parameters = group["params"]
-                group["capturable"] = True
-                group["lr"] = torch.tensor(
-                    float(group["lr"]),
-                    dtype=torch.float32,
-                    device=parameters[0].device,
-                )
-
     def state_dict(self) -> dict[str, Any]:
         """Return a flat, FQN-keyed optimizer state dict for all optimizers.
 
-        If an optimizer's state does not exist, ``init_optim_state`` materializes
-        it without changing parameters. CUDA graph learning rates are saved as
-        host floats with the original ``capturable`` setting.
+        Side effect: if an optimizer's state has not been created yet (no training
+        step taken), ``init_optim_state`` materializes it with a zero-gradient,
+        zero-lr step before reading. The step leaves parameters unchanged, and the
+        call is a no-op once state exists.
         """
         result: dict[str, Any] = {}
-        for optimizer_index, optim in enumerate(self.optimizers):
+        for optim in self.optimizers:
             init_optim_state(optim)
-            param_group_value_overrides = None
-            if self._cuda_graph_checkpoint_capturable is not None:
-                # Capture puts lr on the device. Checkpoints keep the host form.
-                param_group_value_overrides = [
-                    {"lr": float(group["lr"]), "capturable": capturable}
-                    for group, capturable in zip(
-                        optim.param_groups,
-                        self._cuda_graph_checkpoint_capturable[optimizer_index],
-                        strict=True,
-                    )
-                ]
-            result.update(
-                get_flat_optim_state_dict(
-                    optim,
-                    param_group_value_overrides=param_group_value_overrides,
-                )
-            )
+            result.update(get_flat_optim_state_dict(optim))
         return result
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -374,6 +366,20 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
         # functionality such as hooks (e.g. register_step_pre_hook for MoE load balancing).
         Optimizer.__init__(self, all_params, {})
+
+    @staticmethod
+    def _register_cuda_graph_state_dict_hook(optimizer: Optimizer) -> None:
+        """Save device learning rates as host floats."""
+
+        def _save_host_lr(
+            _optimizer: Optimizer, state_dict: dict[str, Any]
+        ) -> dict[str, Any]:
+            for group in state_dict["param_groups"]:
+                if isinstance(group["lr"], torch.Tensor):
+                    group["lr"] = float(group["lr"])
+            return state_dict
+
+        optimizer.register_state_dict_post_hook(_save_host_lr)
 
     def _register_bf16_optimizer_state_hook(self) -> None:
         """Create and restore Adam optimizer states in bfloat16.
@@ -521,7 +527,7 @@ def register_moe_load_balancing_hook(
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
         for transformer_block, moe in _iter_moe_layers(model_parts):
-            tokens_per_expert_E = moe.tokens_per_expert_E
+            tokens_per_expert_E = moe.router.tokens_per_expert_E
             if _is_recomputation_enabled(transformer_block):
                 # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
                 # This does not affect to expert choice, but affects the experts usage metrics.
@@ -564,7 +570,7 @@ def register_moe_load_balancing_hook(
                 )
                 expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
                 moe.expert_bias_E.add_(expert_bias_delta_E)
-                moe.tokens_per_expert_E.zero_()
+                moe.router.tokens_per_expert_E.zero_()
 
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(
@@ -572,3 +578,66 @@ def register_moe_load_balancing_hook(
                 model_parts, parallel_dims=parallel_dims
             )
         )
+
+
+def register_moe_quantile_balancing_hook(
+    optimizers: OptimizersContainer,
+    model_parts: list[nn.Module],
+    parallel_dims: ParallelDims,
+) -> None:
+    """Update quantile-balanced expert biases before each optimizer step."""
+    from torchtitan.models.common.moe import MoE, QuantileBalancedTopKRouter
+
+    moe_layers: list[tuple[MoE, QuantileBalancedTopKRouter]] = []
+    for model_part in model_parts:
+        for module in model_part.modules():
+            if isinstance(module, MoE) and isinstance(
+                module.router, QuantileBalancedTopKRouter
+            ):
+                moe_layers.append((module, module.router))
+
+    if not moe_layers:
+        return
+
+    @torch.no_grad()
+    def _update_expert_bias() -> None:
+        reduction_groups = []
+        # With EP, the router is token-sharded on the dense TP axis even when
+        # model-wide sequence parallelism is disabled.
+        if parallel_dims.ep_enabled and parallel_dims.tp > 1:
+            reduction_groups.append(parallel_dims.get_dense_tp_mesh().get_group())
+        loss_mesh = parallel_dims.get_optional_mesh("loss")
+        if loss_mesh is not None:
+            reduction_groups.append(loss_mesh.get_group())
+
+        histograms = [
+            router.quantile_balancer.required_bias_histogram_EB
+            for _moe, router in moe_layers
+        ]
+        if reduction_groups:
+            reduced_histograms_LEB = torch.stack(histograms)
+            for group in reduction_groups:
+                torch.distributed.all_reduce(
+                    reduced_histograms_LEB,
+                    group=group,
+                    op=torch.distributed.ReduceOp.SUM,
+                )
+            histograms = list(reduced_histograms_LEB.unbind())
+
+        for histogram_EB, (moe, router) in zip(
+            histograms,
+            moe_layers,
+            strict=True,
+        ):
+            expert_bias_E = moe.expert_bias_E
+            assert expert_bias_E is not None
+            quantile_balancer = router.quantile_balancer
+            next_expert_bias_E = quantile_balancer.estimate_expert_bias(
+                histogram_EB,
+                expert_bias_E,
+            )
+            expert_bias_E.copy_(next_expert_bias_E)
+            quantile_balancer.required_bias_histogram_EB.zero_()
+            router.tokens_per_expert_E.zero_()
+
+    optimizers.register_step_pre_hook(lambda *args, **kwargs: _update_expert_bias())

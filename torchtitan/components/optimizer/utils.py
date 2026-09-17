@@ -85,11 +85,7 @@ def init_optim_state(optim: torch.optim.Optimizer) -> None:
         param.grad = grad
 
 
-def get_flat_optim_state_dict(
-    optim: torch.optim.Optimizer,
-    *,
-    param_group_value_overrides: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+def get_flat_optim_state_dict(optim: torch.optim.Optimizer) -> dict[str, Any]:
     """Return a flat, FQN-keyed optimizer state dict ready for DCP.
 
     Output keys are ``state.{fqn}.{state_name}`` and ``param_groups.{fqn}.{key}``.
@@ -97,22 +93,18 @@ def get_flat_optim_state_dict(
     pipeline-parallel checkpoints (multiple chunks reusing index 0).
 
     The optimizer state must already exist; call ``init_optim_state`` first.
-    ``param_group_value_overrides`` replaces values by param-group position.
+    ``capturable`` is omitted because the runtime selects it.
     """
     fqn_sd = _optim_state_dict_to_fqn_keys(optim.state_dict())
-    if param_group_value_overrides is None:
-        param_group_value_overrides = [{} for _ in fqn_sd["param_groups"]]
 
     flat: dict[str, Any] = {}
     for fqn, state in fqn_sd["state"].items():
         _flatten_state_nested(state, f"state.{fqn}", flat)
-    for param_group, value_overrides in zip(
-        fqn_sd["param_groups"], param_group_value_overrides, strict=True
-    ):
+    for param_group in fqn_sd["param_groups"]:
         for fqn in param_group["params"]:
             for key, value in param_group.items():
                 if key != "params":
-                    flat[f"param_groups.{fqn}.{key}"] = value_overrides.get(key, value)
+                    flat[f"param_groups.{fqn}.{key}"] = value
     return flat
 
 
@@ -125,6 +117,7 @@ def load_flat_optim_state_dict(
     exist (it tells us which state tensors to expect); call ``init_optim_state``
     first. Keys in ``flat_sd`` that this optimizer does not own are ignored, so a
     single flat dict covering several optimizers can be passed to each of them.
+    A saved ``capturable`` value is ignored because the runtime selects it.
     """
     optim.load_state_dict(_unflatten_optim_state_dict(optim, flat_sd))
 
@@ -147,7 +140,11 @@ def _optim_state_dict_to_fqn_keys(optim_sd: dict[str, Any]) -> dict[str, Any]:
         fqns = param_group["param_names"]
         for param_id, fqn in zip(param_group["params"], fqns):
             id_to_fqn[param_id] = fqn
-        new_group = {k: v for k, v in param_group.items() if k != "param_names"}
+        new_group = {
+            key: value
+            for key, value in param_group.items()
+            if key not in ("param_names", "capturable")
+        }
         new_group["params"] = list(fqns)
         new_param_groups.append(new_group)
 
@@ -201,6 +198,9 @@ def _unflatten_optim_state_dict(
         new_group: dict[str, Any] = {"params": ids}
         for key in param_group:
             if key in ("params", "param_names"):
+                continue
+            if key == "capturable":
+                new_group[key] = param_group[key]
                 continue
             flat_key = f"param_groups.{fqns[0]}.{key}"
             if flat_key not in flat_sd:

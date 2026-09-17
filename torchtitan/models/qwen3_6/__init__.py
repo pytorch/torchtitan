@@ -7,6 +7,10 @@
 from functools import partial
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.qwen3_5 import (
     _27b,
@@ -18,8 +22,6 @@ from torchtitan.models.qwen3_5 import (
     QWEN3_5_SPECIAL_TOKENS,
 )
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 __all__ = [
@@ -65,7 +67,7 @@ def model_registry(
         ),
     )
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for converter_config in converters:
             config = converter_config.build().convert(config)
 

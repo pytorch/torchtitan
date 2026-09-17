@@ -233,7 +233,11 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
     )
 
     torch.testing.assert_close(result, torch.tensor(0.0))
-    arg_mbs, kwarg_mbs, target_mbs, passed_valid_tokens = fwd_bwd_fn.call_args.args
+    call_kwargs = fwd_bwd_fn.call_args.kwargs
+    arg_mbs = call_kwargs["arg_mbs"]
+    kwarg_mbs = call_kwargs["kwarg_mbs"]
+    target_mbs = call_kwargs["target_mbs"]
+    passed_valid_tokens = call_kwargs["global_valid_tokens"]
     torch.testing.assert_close(arg_mbs[0][0], torch.tensor(2))
     torch.testing.assert_close(arg_mbs[1][0], torch.tensor(3))
     torch.testing.assert_close(kwarg_mbs[0]["positions"], torch.tensor(13))
@@ -244,7 +248,7 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
     assert trainer.ntokens_seen == 2
 
 
-def test_forward_backward_step_counts_cp_local_tokens_and_forwards_inputs():
+def test_forward_backward_step_counts_preprocessed_tokens_and_forwards_inputs():
     captured: dict[str, Any] = {}
 
     class _FakeModel:
@@ -392,7 +396,6 @@ def test_cuda_graph_passes_local_gradient_state() -> None:
         Trainer._init_gradient_accumulation(trainer)
 
     gradient_state = wrap.call_args.kwargs["gradient_state"]
-    assert trainer._cudagraph_gradient_state is gradient_state
     assert gradient_state.parameters == tuple(model.parameters())
 
 
@@ -432,32 +435,6 @@ def test_optimizer_step_body_clips_before_update() -> None:
     assert events == ["clip", "step"]
 
 
-def test_optimizer_cuda_graph_waits_for_forward_backward_capture() -> None:
-    model = torch.nn.Linear(2, 2)
-    trainer = _make_trainer(
-        config=SimpleNamespace(
-            training=SimpleNamespace(disable_cuda_graphs=False),
-            sdc_replayer=None,
-        ),
-        parallel_dims=SimpleNamespace(pp_enabled=False),
-        model_parts=[model],
-        optimizers=MagicMock(),
-    )
-    with patch(
-        "torchtitan.trainer.wrap_with_cuda_graph",
-        side_effect=lambda fn, **kwargs: fn,
-    ):
-        Trainer._init_gradient_accumulation(trainer)
-
-    with pytest.raises(AssertionError, match="forward-backward CUDA graph"):
-        Trainer._prepare_optimizer_cuda_graph(trainer)
-
-    assert trainer._cudagraph_gradient_state is not None
-    trainer._cudagraph_gradient_state.record()
-    Trainer._prepare_optimizer_cuda_graph(trainer)
-    trainer.optimizers.prepare_for_cuda_graph.assert_called_once_with()
-
-
 def test_optimizer_step_is_wrapped_separately() -> None:
     trainer = _make_trainer(
         config=SimpleNamespace(
@@ -472,9 +449,20 @@ def test_optimizer_step_is_wrapped_separately() -> None:
     assert wrap.call_args.args == (trainer._optimizer_step_body,)
     assert wrap.call_args.kwargs["sdc_num_steps"] == 0
     assert wrap.call_args.kwargs["sdc_num_replays"] == 0
-    assert (
-        wrap.call_args.kwargs["capture_setup"] == trainer._prepare_optimizer_cuda_graph
+
+
+def test_optimizer_step_uses_eager_body_without_cuda_graph() -> None:
+    trainer = _make_trainer(
+        config=SimpleNamespace(
+            training=SimpleNamespace(enable_optimizer_cuda_graph=False)
+        )
     )
+
+    with patch("torchtitan.trainer.wrap_with_cuda_graph") as wrap:
+        Trainer._init_optimizer_step_function(trainer)
+
+    assert trainer.optimizer_step_fn == trainer._optimizer_step_body
+    wrap.assert_not_called()
 
 
 def test_cuda_graph_wrapper_returns_graph_owned_output():
@@ -486,12 +474,10 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             *,
             num_warmup_iterations=1,
             gradient_state=None,
-            capture_setup=None,
         ):
             self.fn = fn
             assert num_warmup_iterations == 2
             assert gradient_state is None
-            assert capture_setup is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -540,12 +526,10 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
             *,
             num_warmup_iterations=1,
             gradient_state=None,
-            capture_setup=None,
         ):
             self.fn = fn
             assert num_warmup_iterations == 2
             assert gradient_state is None
-            assert capture_setup is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -722,6 +706,9 @@ def test_train_step_replay_checks_whole_accumulation():
         metrics_processor=SimpleNamespace(should_log=MagicMock(return_value=False)),
         step=1,
         ntokens_seen=0,
+    )
+    trainer.optimizer_step_fn = lambda loss_is_finite: Trainer._optimizer_step_body(
+        trainer, loss_is_finite
     )
 
     with patch(

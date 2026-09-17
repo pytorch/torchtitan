@@ -213,14 +213,39 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-`ChatProcessor` applies the tokenizer's chat template to a single-turn
+Without a renderer, `ChatProcessor` applies the tokenizer's chat template to a single-turn
 `[user, assistant]` pair, creates next-token input and label pairs, and sets
 prompt labels to `IGNORE_INDEX`. It locates the prompt/response boundary by
 rendering the prompt with `add_generation_prompt=True` and requiring that to be
 an exact token prefix of the full render, raising a `ValueError` when it is not.
 Templates that rewrite earlier turns, or turn separators that only merge in
-context, break that assumption; multi-turn support needs per-turn spans that do
-not rely on prefix rendering.
+context, break that assumption.
+
+For multi-turn conversations, select the model's renderer explicitly:
+
+```python
+from renderers import Qwen3RendererConfig
+
+from torchtitan.components.renderer import from_renderers
+
+processor = ChatProcessor.Config(
+    messages_fn=lambda row: row["messages"],
+    renderer=from_renderers(Qwen3RendererConfig()),
+)
+```
+
+The renderer uses TorchTitan's loaded tokenizer and returns tokens with a loss
+mask in one pass. The mask supervises model-generated tokens, including turn
+terminators, and excludes prompt tokens and template scaffolding. Conversations
+must end with an assistant message. Each conversation is one sample; packing
+resets positions between conversations, not between turns. Samples exceeding
+`max_context_length` are dropped whole.
+
+Formatting and reasoning retention follow the selected renderer. For example,
+Qwen3 omits reasoning from assistant turns before the last user query. Those
+omitted tokens receive no loss. To train on each turn's reasoning, prepare
+separate conversation prefixes in the source dataset. `thinking_retention`
+controls the renderer's rollout bridging, not the full renders used here.
 
 # Mixing datasets
 

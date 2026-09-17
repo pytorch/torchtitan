@@ -10,9 +10,29 @@ Together, the unified model, batch-invariant mode, and single training stack pro
 
 Note: Unified-model performance varies by model, input shape, and parallelism: it can trail native vLLM in inference-only workloads but outperform it end to end in some RL configurations. Batch invariance trades throughput for exact numerics and can be used for debugging or controlled on-policy studies.
 
-[Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Verifiers](./examples/verifiers/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
+[Model support](#model-support) · [Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Verifiers](./examples/verifiers/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
 
 > **Note:** TitanRL is under active development. APIs and configurations may change.
+
+## Model support
+
+Supported entries completed a two-step end-to-end RL run with a representative
+debug model, including rollout generation, training, and weight synchronization.
+Generator DP and TP were tested together at degree 2; EP was tested at degree 4
+for MoE models. Generator sequence parallelism was disabled.
+
+| Model | RL support |
+|---|---|
+| Llama 3 | ✅ Supported |
+| Muse Glimmer | ✅ Supported |
+| Qwen 3 | ✅ Supported |
+| Qwen 3.5/3.6/3.8 | ✅ Supported (text only) |
+| GPT-OSS | ✅ Supported |
+| DeepSeek V3 | Not supported |
+| DeepSeek V4 | Support coming soon |
+| FLUX | Not supported |
+| Kimi K2.7 | Not supported |
+| Kimi K3 | Support coming soon |
 
 ## Architecture
 
@@ -71,9 +91,7 @@ def my_experiment() -> Controller.Config:
     return Controller.Config(
         model_spec=...,
         rollouter=MyRollouter.Config(),
-        renderer=RenderersLibraryConfig(
-            renderers_config=Qwen3RendererConfig(enable_thinking=False)
-        ),
+        renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         trainer=PolicyTrainer.Config(...),
         generator=VLLMGenerator.Config(...),
     )
@@ -131,7 +149,8 @@ uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/t
 
 # Blackwell (GB200/GB300, SM100): Flash Attention 4
 # Newer FA4 betas require apache-tvm-ffi>=0.1.12, but vLLM pins 0.1.11.
-uv pip install "flash-attn-4[cu13]==4.0.0b19"
+# Qwen3.5 hd256 paged attention requires the fixes in FA4 b31.
+uv pip install "flash-attn-4[cu13]>=4.0.0b31"
 ```
 
 TorchTitan selects FA4 on Blackwell, FA3 on Hopper, and the FA2 implementation

@@ -9,11 +9,14 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
+
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.utils import validate_converter_order
 
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model.autoencoder import AutoEncoder
@@ -572,7 +575,7 @@ def model_registry(
         )
     config = get_config()
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
     return ModelSpec(

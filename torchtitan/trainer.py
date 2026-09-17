@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from typing import Annotated, Any, cast, ClassVar
+from typing import Annotated, Any, cast, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -25,6 +25,7 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
     PipelineScheduleMulti,
 )
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
@@ -72,6 +73,12 @@ from torchtitan.tools import utils
 
 logger = logging.getLogger(__name__)
 
+_PreprocessedMicrobatch: TypeAlias = tuple[
+    torch.Tensor | tuple[torch.Tensor, ...],
+    torch.Tensor | tuple[torch.Tensor, ...],
+    dict[str, Any],
+]
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     """Run model training.
@@ -95,8 +102,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 |
                 +-- _forward_backward_body
     """
-
-    _use_accumulation_cuda_graph: ClassVar[bool] = True
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -385,7 +390,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     _run_gradient_accumulation: Callable[
         [list[tuple[Any, ...]], torch.Tensor], torch.Tensor
     ]
-    _cudagraph_gradient_state: CUDAGraphGradientState | None
     _pp_loss_sentinel_on_non_last_stage: torch.Tensor
     gradient_accumulation_steps: int
     num_pp_microbatches: int
@@ -671,7 +675,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         )
 
         # build optimizer after applying parallelisms to the model
-        self.optimizers = config.optimizer.build(model_parts=self.model_parts)
+        self.optimizers = config.optimizer.build(
+            model_parts=self.model_parts,
+            capturable=config.training.enable_optimizer_cuda_graph,
+        )
         if model_spec.post_optimizer_build_fn is not None:
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, parallel_dims
@@ -772,13 +779,9 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     def _init_gradient_accumulation(self) -> None:
         config = self.config
-        self._cudagraph_gradient_state = None
-        if (
-            self._use_accumulation_cuda_graph
-            and not config.training.disable_cuda_graphs
-        ):
+        if not config.training.disable_cuda_graphs:
             sdc_config = config.sdc_replayer
-            self._cudagraph_gradient_state = CUDAGraphGradientState(
+            gradient_state = CUDAGraphGradientState(
                 parameter
                 for model_part in self.model_parts
                 for parameter in model_part.parameters()
@@ -789,29 +792,20 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 sdc_num_replays=(
                     sdc_config.num_replays if sdc_config is not None else 0
                 ),
-                gradient_state=self._cudagraph_gradient_state,
+                gradient_state=gradient_state,
             )
         else:
             self._run_gradient_accumulation = self._gradient_accumulation_body
 
     def _init_optimizer_step_function(self) -> None:
-        if not self.config.training.enable_optimizer_cuda_graph:
-            return
-
-        self.optimizer_step_fn = wrap_with_cuda_graph(
-            self._optimizer_step_body,
-            sdc_num_steps=0,
-            sdc_num_replays=0,
-            capture_setup=self._prepare_optimizer_cuda_graph,
-        )
-
-    def _prepare_optimizer_cuda_graph(self) -> None:
-        gradient_state = self._cudagraph_gradient_state
-        assert gradient_state is not None and gradient_state.is_recorded, (
-            "The forward-backward CUDA graph must be captured before the "
-            "optimizer CUDA graph."
-        )
-        self.optimizers.prepare_for_cuda_graph()
+        if self.config.training.enable_optimizer_cuda_graph:
+            self.optimizer_step_fn = wrap_with_cuda_graph(
+                self._optimizer_step_body,
+                sdc_num_steps=0,
+                sdc_num_replays=0,
+            )
+        else:
+            self.optimizer_step_fn = self._optimizer_step_body
 
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:
@@ -871,10 +865,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if parallel_dims.pp_enabled:
             arg_mbs, kwarg_mbs, target_mbs = prepared_inputs
             return self._pp_forward_backward_body(
-                arg_mbs,
-                kwarg_mbs,
-                target_mbs,
-                global_valid_tokens,
+                arg_mbs=arg_mbs,
+                kwarg_mbs=kwarg_mbs,
+                target_mbs=target_mbs,
+                global_valid_tokens=global_valid_tokens,
                 finalize_gradients=finalize_gradients,
             )
 
@@ -890,7 +884,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         microbatches: list[TrainerBatch],
     ) -> tuple[Any, ...]:
         """Move and preprocess one accumulation step's inputs outside capture."""
-        prepared_microbatches: list[tuple[Any, Any, dict[str, Any]]] = []
+        prepared_microbatches: list[_PreprocessedMicrobatch] = []
         for input_dict in microbatches:
             for key, value in input_dict.items():
                 if isinstance(value, torch.Tensor):
@@ -958,11 +952,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     def _pp_forward_backward_body(
         self,
+        *,
         arg_mbs: list[tuple[torch.Tensor, ...]] | None,
         kwarg_mbs: list[dict[str, Any]],
         target_mbs: list[torch.Tensor] | None,
         global_valid_tokens: torch.Tensor,
-        *,
         finalize_gradients: bool = True,
     ) -> torch.Tensor:
         """Run one PP schedule and optionally finalize its FSDP gradients."""
@@ -1124,6 +1118,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # Auxiliary losses normalize by the same per-step token count as the
         # main loss, so their scale is independent of parallelism degrees.
+        # TODO(sdmyzlp): Each MTP depth can have a different valid-token count
+        # after shifting and should use its own auxiliary-loss denominator.
         AuxLoss.set_step_denominator(global_valid_tokens)
 
         accumulation_step_inputs = [
@@ -1150,15 +1146,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         # int32 is supported by NCCL reductions, unlike bool.
         loss_is_finite = torch.isfinite(local_loss).all().to(torch.int32)
         with sl.log_trace_span("optim"):
-            if self.config.training.enable_optimizer_cuda_graph:
-                self.checkpointer.maybe_wait_for_staging()
-                grad_norm = self.optimizer_step_fn(loss_is_finite)
-            else:
-                grad_norm = self._clip_and_validate_gradients(loss_is_finite)
-                # Eager clipping can overlap checkpoint staging. The captured
-                # optimizer step cannot be split, so it waits before replay.
-                self.checkpointer.maybe_wait_for_staging()
-                self.optimizers.step()
+            self.checkpointer.maybe_wait_for_staging()
+            grad_norm = self.optimizer_step_fn(loss_is_finite)
             self.lr_schedulers.step()
 
         # log metrics

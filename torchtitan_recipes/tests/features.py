@@ -10,18 +10,27 @@ import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
+from renderers import Message, Qwen3RendererConfig
 from torch.distributed.tensor import DTensor
+from torchtitan.components.data import (
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    SingleDatasetConfig,
+)
+from torchtitan.components.renderer import from_renderers
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
+    UlyssesCPVarlenInnerAttention,
 )
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
@@ -31,6 +40,7 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel_varlen_attn,
     sft_debugmodel,
 )
+from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 
@@ -260,23 +270,29 @@ def llama3_debugmodel_fsdp2_pp2_1f1b() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.Config:
-    config = llama3_debugmodel_fsdp2_pp2_1f1b()
+def muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction(
+) -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.fsdp_defer_gradient_reduction = True
     config.parallelism.fsdp_reshard_after_forward = "never"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.num_tokens_per_train_step = 65536
     return config
 
 
-def llama3_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
-    config = llama3_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
+def muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
+    config = muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
     config.training.enable_optimizer_cuda_graph = True
     return config
 
 
-def llama3_debugmodel_fsdp2_optimizer_cuda_graph() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
-    config.parallelism.data_parallel_shard_degree = 2
+def muse_glimmer_debugmodel_fsdp2_optimizer_cuda_graph() -> Trainer.Config:
+    config = muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction()
     config.training.enable_optimizer_cuda_graph = True
     return config
 
@@ -379,9 +395,10 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_optimizer_bf16_states() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
+    config.training.mixed_precision_reduce = "float32"
     config.optimizer.implementation = "fused_opt_states_bf16"
     return config
 
@@ -422,6 +439,20 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     return apply_transforms(
         config,
         [ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention)],
+    )
+
+
+def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
+    """Llama 3 with varlen Ulysses CP."""
+    config = llama3_debugmodel_varlen_attn()
+    # Packed varlen metadata lacks SPMD annotations.
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.context_parallel_degree = 2
+    # Ulysses does not support token reordering.
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
     )
 
 
@@ -506,10 +537,14 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Config:
-    config = llama3_debugmodel_gradient_accumulation()
+def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction(
+) -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.fsdp_defer_gradient_reduction = True
     config.parallelism.fsdp_reshard_after_forward = "never"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    config.training.num_tokens_per_train_step = 65536
     return config
 
 
@@ -571,6 +606,26 @@ def llama3_debugmodel_float8_emulate_lora_tp2_pp2() -> Trainer.Config:
 def llama3_debugmodel_sft() -> Trainer.Config:
     config = sft_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
+    return config
+
+
+def llama3_debugmodel_sft_multiturn() -> Trainer.Config:
+    config = llama3_debugmodel_sft()
+
+    def messages(sample) -> list[Message]:
+        return [
+            {"role": "user", "content": sample["question"]},
+            {"role": "assistant", "content": sample["answer"]},
+            {"role": "user", "content": "Repeat your answer."},
+            {"role": "assistant", "content": sample["answer"]},
+        ]
+
+    dataloader = cast(GrainDataLoader.Config, config.dataloader)
+    packing = cast(FirstFitPackingConfig, dataloader.dataset)
+    dataset = cast(SingleDatasetConfig, packing.dataset)
+    processor = cast(ChatProcessor.Config, dataset.processor)
+    processor.messages_fn = messages
+    processor.renderer = from_renderers(Qwen3RendererConfig())
     return config
 
 

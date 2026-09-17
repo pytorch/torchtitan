@@ -133,13 +133,15 @@ def make_fwd_bwd_step(model, loss_fn, *, accumulate_gradients: bool = False):
 
 
 class GraphTrainer(Trainer):
-    _use_accumulation_cuda_graph = False
-
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
         compile: GraphTrainerCompileConfig = field(
             default_factory=GraphTrainerCompileConfig
         )
+
+    def _init_gradient_accumulation(self) -> None:
+        """Keep CUDA graph ownership in GraphTrainer."""
+        self._run_gradient_accumulation = self._gradient_accumulation_body
 
     def __init__(self, config):
         if config.training.enable_optimizer_cuda_graph:

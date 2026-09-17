@@ -240,7 +240,12 @@ class TestConfigManager(unittest.TestCase):
         for reshard_after_forward in ("always", "default"):
             with self.subTest(reshard_after_forward=reshard_after_forward):
                 config = ConfigManager().parse_args(
-                    ["--module", "llama3", "--config", "llama3_debugmodel"]
+                    [
+                        "--module",
+                        "muse_glimmer",
+                        "--config",
+                        "muse_glimmer_debugmodel",
+                    ]
                 )
                 config.parallelism.fsdp_defer_gradient_reduction = True
                 config.parallelism.fsdp_reshard_after_forward = reshard_after_forward
@@ -250,7 +255,7 @@ class TestConfigManager(unittest.TestCase):
 
     def test_optimizer_cuda_graph_requires_cuda_graphs_enabled(self):
         config = ConfigManager().parse_args(
-            ["--module", "llama3", "--config", "llama3_debugmodel"]
+            ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
         config.training.enable_optimizer_cuda_graph = True
         config.training.disable_cuda_graphs = True
@@ -260,7 +265,7 @@ class TestConfigManager(unittest.TestCase):
 
     def test_optimizer_cuda_graph_requires_fused_adam(self):
         config = ConfigManager().parse_args(
-            ["--module", "llama3", "--config", "llama3_debugmodel"]
+            ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
         config.training.enable_optimizer_cuda_graph = True
         config.optimizer.implementation = "foreach"
@@ -397,7 +402,7 @@ class TestConfigManager(unittest.TestCase):
             ]
         )
         config.sdc_replayer = SDCReplayer.Config()
-        config.parallelism.enable_fsdp_symm_mem = True
+        config.parallelism.fsdp_symm_mem_scope = "all"
         config.compile.enable_async_tensor_parallel = True
         configs = {
             "symm_mem_async_tp": config,

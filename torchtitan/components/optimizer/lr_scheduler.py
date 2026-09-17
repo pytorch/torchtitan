@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import LambdaLR, LRScheduler
 from torchtitan.config import Configurable
 
 from .optimizer import OptimizersContainer
@@ -26,10 +26,10 @@ __all__ = [
 ]
 
 
-class _HostLambdaLR(LambdaLR):
+class _HostLRScheduler(LRScheduler):
     """Expose the latest learning rates as host floats."""
 
-    host_lrs: list[float] = []
+    host_lrs: list[float]
 
     def get_lr(self) -> list[float | Tensor]:
         lrs = super().get_lr()
@@ -40,6 +40,10 @@ class _HostLambdaLR(LambdaLR):
 
     def get_last_host_lrs(self) -> list[float]:
         return list(self.host_lrs)
+
+
+class _HostLambdaLR(_HostLRScheduler, LambdaLR):
+    pass
 
 
 class LRSchedulersContainer(Stateful, Configurable):
@@ -213,7 +217,7 @@ class LRSchedulersContainer(Stateful, Configurable):
             )
             return LRSchedulersContainer(optimizers, lr_lambda)
 
-    schedulers: list[_HostLambdaLR]
+    schedulers: list[_HostLRScheduler]
 
     def __init__(self, optimizers: OptimizersContainer, lr_lambda: Callable) -> None:
         assert (
@@ -224,7 +228,7 @@ class LRSchedulersContainer(Stateful, Configurable):
             _HostLambdaLR(optimizer, lr_lambda) for optimizer in optimizers
         ]
 
-    def __iter__(self) -> Iterator[_HostLambdaLR]:
+    def __iter__(self) -> Iterator[LRScheduler]:
         return iter(self.schedulers)
 
     def __len__(self) -> int:
