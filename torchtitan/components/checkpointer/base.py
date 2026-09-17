@@ -240,7 +240,7 @@ class BaseCheckpointManager(Configurable, ABC):
 
             if step != -1 and not has_checkpoint_folder:
                 raise FileNotFoundError(
-                    f"--checkpointer.load_step={step} not found because "
+                    f"checkpointer.load_step={step} not found because "
                     f"checkpointer.folder {self.folder} does not exist"
                 )
 
@@ -268,7 +268,7 @@ class BaseCheckpointManager(Configurable, ABC):
                     if from_hf:
                         logger.info(
                             "Loading from HF safetensors from "
-                            f"--checkpointer.initial_load_path: {checkpoint_id}"
+                            f"checkpointer.initial_load_path: {checkpoint_id}"
                         )
                 elif from_hf:
                     assert (
@@ -295,7 +295,7 @@ class BaseCheckpointManager(Configurable, ABC):
                 checkpoint_id = self._create_checkpoint_id(step)
                 if not self._storage.isdir(checkpoint_id):
                     raise FileNotFoundError(
-                        f"--checkpointer.load_step={step} not found at {checkpoint_id}"
+                        f"checkpointer.load_step={step} not found at {checkpoint_id}"
                     )
                 # Fault-tolerance restart: an existing folder checkpoint wins
                 # over initial_* so the same job args can be reused. This is

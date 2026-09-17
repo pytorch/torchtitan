@@ -72,11 +72,11 @@ class Trainer(Configurable):
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
-        compile: CompileConfig | None = None
-        validator: Validator.Config | None = None
+        compile: Annotated[CompileConfig | None, tyro.conf.AvoidSubcommands] = None
+        validator: Annotated[Validator.Config | None, tyro.conf.AvoidSubcommands] = None
         dump_folder: str = "./outputs"
 
-        create_seed_checkpoint: bool = False
+        create_seed_checkpoint: Annotated[bool, tyro.conf.Suppress] = False
         """Initialize and save an unsharded model-only checkpoint, then exit."""
 
         def __post_init__(self):

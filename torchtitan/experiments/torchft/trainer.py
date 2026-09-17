@@ -10,9 +10,10 @@ import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import Annotated, Any
 
 import torch
+import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
@@ -153,7 +154,9 @@ class FaultTolerantTrainingEngine(TrainingEngine):
 class FaultTolerantTrainer(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
-        checkpointer: TorchFTCheckpointManager.Config | None = None
+        checkpointer: Annotated[
+            TorchFTCheckpointManager.Config | None, tyro.conf.AvoidSubcommands
+        ] = None
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
     engine: FaultTolerantTrainingEngine

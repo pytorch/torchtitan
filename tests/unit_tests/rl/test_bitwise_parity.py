@@ -78,7 +78,6 @@ from torchtitan.rl.examples.alphabet_sort.config_registry import (
     rl_grpo_qwen3_5_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
-from torchtitan.rl.generator import get_vllm_compilation_config
 from torchtitan.rl.model.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -244,7 +243,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         worker_cls=TORCHTITAN_WORKER_CLS,
         distributed_executor_backend="external_launcher",
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.cuda_graph is None,
+        enforce_eager=gen_config.cuda_graph.mode == "NONE",
         hf_overrides={"architectures": [VLLM_MODEL_NAME]},
         attention_config=AttentionConfig(backend=backend_enum),
         disable_log_stats=True,
@@ -269,8 +268,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
-    vllm_compilation_config = get_vllm_compilation_config(
-        gen_config.cuda_graph,
+    vllm_compilation_config = gen_config.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
@@ -664,7 +662,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         # The graph-break decorator reads this env var at import time, and
         # register_to_vllm below triggers that import, so set it first.
         gen_cuda_graph = config.generator.cuda_graph
-        if gen_cuda_graph is not None and gen_cuda_graph.mode == "FULL_AND_PIECEWISE":
+        if gen_cuda_graph.mode == "FULL_AND_PIECEWISE":
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
         register_to_vllm(

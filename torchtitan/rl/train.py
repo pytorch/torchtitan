@@ -51,12 +51,7 @@ def breakable_cuda_graph_env(generator_cfg) -> dict[str, str]:
     prompt -> coherent-but-unrelated output. FULL_DECODE_ONLY never captures prefill so it needs
     nothing. Shared so the OSS spawn path and the fbcode MAST launcher use one source of truth.
     """
-    cg = getattr(generator_cfg, "cuda_graph", None)
-    if (
-        cg is not None
-        and getattr(cg, "enable", False)
-        and getattr(cg, "mode", "") == "FULL_AND_PIECEWISE"
-    ):
+    if generator_cfg.cuda_graph.mode == "FULL_AND_PIECEWISE":
         return {"VLLM_USE_BREAKABLE_CUDAGRAPH": "1"}
     return {}
 

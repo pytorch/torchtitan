@@ -83,7 +83,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
-        checkpointer: CheckpointManager.Config | None = None
+        checkpointer: Annotated[
+            CheckpointManager.Config | None, tyro.conf.AvoidSubcommands
+        ] = None
         activation_checkpoint: ActivationCheckpointingConfig = field(
             default_factory=SelectiveAC.Config
         )

@@ -16,7 +16,12 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import (
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
@@ -68,6 +73,14 @@ def transformers_modeling_backend_debugmodel(
     )
 
 
+def transformers_modeling_backend_debugmodel_compile(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> TransformersBackendConfig:
+    config = transformers_modeling_backend_debugmodel(seq_len=seq_len)
+    config.compile = CompileConfig()
+    return config
+
+
 def transformers_modeling_backend_debugmodel_moe(
     seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> TransformersBackendConfig:
@@ -100,6 +113,14 @@ def transformers_modeling_backend_debugmodel_moe(
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def transformers_modeling_backend_debugmodel_moe_compile(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> TransformersBackendConfig:
+    config = transformers_modeling_backend_debugmodel_moe(seq_len=seq_len)
+    config.compile = CompileConfig()
+    return config
 
 
 def transformers_modeling_backend_full_moe(

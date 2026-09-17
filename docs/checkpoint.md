@@ -11,7 +11,7 @@ checkpointer=CheckpointManager.Config(
     interval=500,
 ),
 ```
-Or via CLI: `checkpointer:config --checkpointer.interval 500`
+Checkpointing is configured in the config registry rather than on the CLI.
 
 2. SAVE MODEL ONLY
 By setting `last_save_model_only` to `True`, the checkpoint will only contain the model and exclude the optimizer state and extra train states, resulting in a smaller checkpoint size.
@@ -39,7 +39,6 @@ checkpointer=CheckpointManager.Config(
     exclude_from_loading=["dataloader", "lr_scheduler"],
 ),
 ```
-When used in command line: `checkpointer:config --checkpointer.exclude_from_loading dataloader,lr_scheduler`.
 
 5. EXAMPLE CHECKPOINT CONFIGURATION
 ```python
@@ -58,18 +57,16 @@ Sometimes one needs to create a seed checkpoint to initialize a model from step 
 E.g. it is hard, if not impossible, for meta initialization on multiple devices to reproduce the initialization on a single device.
 A seed checkpoint does initialization of the model on a single CPU, and can be loaded from another job on an arbitrary number of GPUs via DCP resharding.
 
-To create a seed checkpoint, use the same model config as you use for training.
-e.g.
-```bash
-NGPU=1 ./run_train.sh --module <module_name> --config <config_name> --create-seed-checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
-```
+To create a seed checkpoint, define a config registry entry with
+`create_seed_checkpoint=True`, a non-`None` `checkpointer`, and every
+parallelism degree set to 1. Then run that configuration on one device.
 
 ## Conversion support
 
 ### HuggingFace
 `torchtitan` offers two ways to work with Hugging Face models: either by directly saving and loading a Hugging Face checkpoint during training, or by using an example conversion script to directly reformat the model weights on cpu.
 
-1. You can directly save huggingface model weights during training by selecting `checkpointer:config` and using the `--checkpointer.last_save_in_hf` and `--checkpointer.last_save_model_only` options together. To directly load a `torchtitan` training session from a huggingface safetensors file, enable `--checkpointer.initial_load_in_hf`, and set either `--hf_assets_path` or `--checkpointer.initial_load_path` to the directory containing the huggingface checkpointer. `--checkpointer.initial_load_path` overrides `--hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
+1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the config registry. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
 
 2. To directly reformat the weights without the need to run a training loop, run the corresponding conversion script. The naming scheme is `torchtitan`-centric, e.g. convert_from_hf means convert hf->tt.
 
@@ -100,7 +97,7 @@ Once the above have been set, the final checkpoint at the end of the training st
 Finally, once you have obtained the last checkpoint, you can use the following command to convert the sharded checkpoints to a single .pt file.
 
 ```bash
-python -m torch.distributed.checkpointer.format_utils dcp_to_torch torchtitan/outputs/checkpoint/step-1000 checkpointer.pt
+python -m torch.distributed.checkpoint.format_utils dcp_to_torch torchtitan/outputs/checkpoint/step-1000 checkpoint.pt
 ```
 
 

@@ -161,32 +161,6 @@ def _prepare_generation_request_metrics(
 _DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 
 
-def get_vllm_compilation_config(
-    cuda_graph_config: "VLLMCudaGraphConfig | None",
-    *,
-    max_num_seqs: int,
-    expert_sequence_parallel_size: int,
-    enable_sequence_parallel: bool,
-    max_num_batched_tokens: int | None = None,
-) -> CompilationConfig:
-    """Build the vLLM compilation config, including the eager configuration."""
-    if cuda_graph_config is None:
-        return CompilationConfig(
-            cudagraph_mode=CUDAGraphMode.NONE,
-            mode=CompilationMode.NONE,
-            pass_config=PassConfig(
-                enable_sp=enable_sequence_parallel,
-                sp_min_token_num=1 if enable_sequence_parallel else None,
-            ),
-        )
-    return cuda_graph_config.get_vllm_compilation_config(
-        max_num_seqs=max_num_seqs,
-        expert_sequence_parallel_size=expert_sequence_parallel_size,
-        enable_sequence_parallel=enable_sequence_parallel,
-        max_num_batched_tokens=max_num_batched_tokens,
-    )
-
-
 @dataclass(kw_only=True, slots=True)
 class VLLMCudaGraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
@@ -200,9 +174,10 @@ class VLLMCudaGraphConfig:
     ``FULL``, graphs the whole forward (prefill included).
     """
 
-    mode: Literal["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "FULL"] = "FULL"
+    mode: Literal["NONE", "FULL_DECODE_ONLY", "FULL_AND_PIECEWISE", "FULL"] = "FULL"
     """Which vLLM CUDA graph mode to capture:
 
+    - ``"NONE"``: disable compilation and CUDA graph capture.
     - ``"FULL_DECODE_ONLY"``: graph pure-decode batches; prefill / mixed
       batches run eager. Cheap (no inductor compile).
     - ``"FULL_AND_PIECEWISE"``: FULL graph for pure single-token decode (whole
@@ -264,6 +239,15 @@ class VLLMCudaGraphConfig:
         CUDA graph, which requires ``VLLM_USE_BREAKABLE_CUDAGRAPH=1`` (vLLM itself
         also forces ``mode=NONE`` when that env is set) (#3709).
         """
+        if self.mode == "NONE":
+            return CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.NONE,
+                mode=CompilationMode.NONE,
+                pass_config=PassConfig(
+                    enable_sp=enable_sequence_parallel,
+                    sp_min_token_num=1 if enable_sequence_parallel else None,
+                ),
+            )
         if max_num_seqs <= 0:
             raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
         if expert_sequence_parallel_size <= 0:
@@ -745,12 +729,12 @@ class VLLMGenerator(Configurable):
         (prefill + decode, summed over the batch). ``None`` (default) leaves
         vLLM's own engine default in place."""
 
-        cuda_graph: VLLMCudaGraphConfig | None = field(
-            default_factory=VLLMCudaGraphConfig
-        )
+        cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
-        checkpointer: CheckpointManager.Config | None = None
+        checkpointer: Annotated[
+            CheckpointManager.Config | None, tyro.conf.AvoidSubcommands
+        ] = None
         """Optional initial-weight loader for the vLLM wrapper.
 
         In the RL loop this stays ``None`` because weights arrive from
@@ -858,10 +842,7 @@ class VLLMGenerator(Configurable):
         # @eager_break_during_capture decorator in rl/model/attention.py, which
         # reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time -- so the env must be
         # set before register_to_vllm imports that module (#3709).
-        if (
-            config.cuda_graph is not None
-            and config.cuda_graph.mode == "FULL_AND_PIECEWISE"
-        ):
+        if config.cuda_graph.mode == "FULL_AND_PIECEWISE":
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
         # Register TorchTitan model + parser with vLLM
@@ -919,7 +900,7 @@ class VLLMGenerator(Configurable):
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=config.cuda_graph is None,
+            enforce_eager=config.cuda_graph.mode == "NONE",
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
@@ -941,8 +922,7 @@ class VLLMGenerator(Configurable):
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
         expert_sequence_parallel_size = config.parallelism.expert_sequence_parallel_size
-        vllm_compilation_config = get_vllm_compilation_config(
-            config.cuda_graph,
+        vllm_compilation_config = config.cuda_graph.get_vllm_compilation_config(
             max_num_seqs=self._max_num_seqs,
             max_num_batched_tokens=config.max_num_batched_tokens,
             expert_sequence_parallel_size=expert_sequence_parallel_size,

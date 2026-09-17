@@ -6,6 +6,7 @@
 
 from functools import partial
 
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.configs import (
@@ -42,6 +43,33 @@ def graph_trainer_llama3_debugmodel_sdc_replay() -> GraphTrainer.Config:
     config.training.disable_cuda_graphs = True
     config.training.steps = 2
     config.sdc_replayer = SDCReplayer.Config()
+    return config
+
+
+def graph_trainer_llama3_debugmodel_jit_checkpoint_save() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_debugmodel()
+    config.compile.mode = "jit"
+    config.checkpointer = CheckpointManager.Config()
+    config.training.steps = 10
+    return config
+
+
+def graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp2() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_debugmodel_jit_checkpoint_save()
+    config.checkpointer.exclude_from_loading = [
+        "lr_scheduler",
+        "dataloader",
+        "optimizer",
+    ]
+    config.parallelism.tensor_parallel_degree = 2
+    config.training.steps = 20
+    return config
+
+
+def graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp4() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp2()
+    config.parallelism.tensor_parallel_degree = 4
+    config.training.steps = 30
     return config
 
 

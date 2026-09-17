@@ -12,7 +12,7 @@ import pytest
 from torchtitan.rl import train
 from torchtitan.rl.controller import AsyncLoopConfig
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
+from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.observability.rollout_recorder import RolloutSampleRecorder
 
 
@@ -67,7 +67,9 @@ class _FakeConfig:
     dump_folder = "/tmp/test_rl"
     trainer = _FakeTrainerConfig()
     # main() also reads config.generator.parallelism (same stubbing applies).
-    generator = SimpleNamespace(parallelism=None)
+    generator = SimpleNamespace(
+        parallelism=None, cuda_graph=VLLMCudaGraphConfig(mode="NONE")
+    )
     num_generators = 1
 
     @property

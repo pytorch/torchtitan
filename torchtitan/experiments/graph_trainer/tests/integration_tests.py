@@ -164,41 +164,13 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             disabled=_JIT_DISABLED,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode jit",
-                    "",
-                    "--training.steps 10",
-                    "checkpointer:config",
-                ],
-                # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
-                # excluded during loading to avoid errors caused by mismatched dp_degree.
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode jit",
-                    "",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--training.steps 20",
-                    "checkpointer:config",
-                    "--checkpointer.exclude_from_loading lr_scheduler,dataloader,optimizer",
-                ],
-                # load at [tp:4].
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode jit",
-                    "",
-                    "--parallelism.tensor_parallel_degree 4",
-                    "--training.steps 30",
-                    "checkpointer:config",
-                    "--checkpointer.exclude_from_loading lr_scheduler,dataloader,optimizer",
-                ],
+            configs=[
+                llama3_recipes.graph_trainer_llama3_debugmodel_jit_checkpoint_save,
+                llama3_recipes.graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp2,
+                llama3_recipes.graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp4,
             ],
-            "JIT Optional checkpoint",
-            "jit_optional_checkpoint",
+            test_descr="JIT Optional checkpoint",
+            test_name="jit_optional_checkpoint",
             ngpu=4,
             disabled=_JIT_DISABLED,
         ),

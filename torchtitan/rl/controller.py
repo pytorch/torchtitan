@@ -309,7 +309,7 @@ class Controller(Configurable):
         )
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
-        compile: CompileConfig | None = None
+        compile: Annotated[CompileConfig | None, tyro.conf.AvoidSubcommands] = None
         """torch.compile config shared by trainer and generator."""
 
         trainer: Trainer.Config

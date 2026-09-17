@@ -75,6 +75,13 @@ import unittest
 from collections.abc import Sequence
 from typing import Any
 
+if __package__:
+    from scripts.checkpoint_config import configure_checkpoint
+else:
+    from checkpoint_config import (  # pyrefly: ignore [missing-import]
+        configure_checkpoint,
+    )
+
 # =============================================================================
 # GLOBAL CONFIGURATION
 # =============================================================================
@@ -361,7 +368,6 @@ def build_training_command(
     config: str,
     options: str,
     steps: int,
-    enable_seed_checkpoint: bool,
     job_dump_folder: str,
     tb_folder: str = "tb",
 ) -> str:
@@ -376,12 +382,6 @@ def build_training_command(
     cmd += f" --metrics.save_tb_folder={tb_folder}"
     if options:
         cmd += f" {options}"
-    if enable_seed_checkpoint:
-        cmd += (
-            " checkpointer:config"
-            " --checkpointer.export_dtype=bfloat16"
-            " --checkpointer.load_only"
-        )
     return cmd
 
 
@@ -419,7 +419,6 @@ def print_configuration(
         baseline_config,
         baseline_options,
         steps,
-        enable_seed_checkpoint,
         job_dump_folder,
         tb_folder=baseline_tb_folder,
     )
@@ -434,7 +433,6 @@ def print_configuration(
             test_config,
             test_options,
             steps,
-            enable_seed_checkpoint,
             job_dump_folder,
             tb_folder=test_tb_folder,
         )
@@ -545,16 +543,22 @@ def create_seed_checkpoint(
         log_file = get_log_path("seed", output_folder)
         log_print(f"Creating seed checkpoint and logging output to {log_file}")
 
+        env = os.environ.copy()
+        module, config = configure_checkpoint(
+            env,
+            module=module,
+            config=config,
+            mode="seed",
+            export_dtype="bfloat16",
+        )
+
         # Build seed checkpoint command
         seed_cmd = (
             f"MODULE='{module}' CONFIG='{config}' "
             f"./run_train.sh --dump_folder={job_dump_folder} "
-            f"--create-seed-checkpoint "
-            f"{FIXED_OPTIONS} {SEED_PARALLELISM_OPTIONS} "
-            f"checkpointer:config --checkpointer.last_save_model_only"
+            f"{FIXED_OPTIONS} {SEED_PARALLELISM_OPTIONS}"
         )
 
-        env = os.environ.copy()
         env["NGPU"] = "1"
 
         run_with_realtime_output(seed_cmd, log_file, env)
@@ -584,18 +588,25 @@ def run_training(
         log_print(f"Removing stale TensorBoard directory: {tb_dir}")
         shutil.rmtree(tb_dir)
 
+    env = os.environ.copy()
+    if enable_seed_checkpoint:
+        module, config = configure_checkpoint(
+            env,
+            module=module,
+            config=config,
+            mode="load",
+        )
+
     # Build the final command
     full_cmd = build_training_command(
         module,
         config,
         options,
         steps,
-        enable_seed_checkpoint,
         job_dump_folder,
         tb_folder=tb_folder,
     )
 
-    env = os.environ.copy()
     env["NGPU"] = str(ngpus)
 
     run_with_realtime_output(full_cmd, log_file, env)

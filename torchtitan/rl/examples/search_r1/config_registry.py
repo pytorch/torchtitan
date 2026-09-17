@@ -140,7 +140,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            cuda_graph=VLLMCudaGraphConfig(),
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -369,7 +369,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,  # <= 2 KV heads
             ),
-            cuda_graph=None,
+            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,

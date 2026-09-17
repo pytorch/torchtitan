@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import typing
 import unittest
 import uuid
 from concurrent.futures import Future
@@ -23,6 +24,7 @@ import fsspec
 import torch
 import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
+import tyro
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 
@@ -196,10 +198,13 @@ class TestCheckpointManager(unittest.TestCase):
     def test_trainer_uses_optional_checkpointer_interface(self):
         from torchtitan.training_engine import TrainingEngine
 
+        annotation = typing.get_type_hints(TrainingEngine.Config, include_extras=True)[
+            "checkpointer"
+        ]
         self.assertEqual(
-            TrainingEngine.Config.__annotations__["checkpointer"],
-            CheckpointManager.Config | None,
+            typing.get_args(annotation)[0], CheckpointManager.Config | None
         )
+        self.assertIn(tyro.conf.AvoidSubcommands, annotation.__metadata__)
         checkpointer_field = next(
             field
             for field in fields(TrainingEngine.Config)
@@ -430,7 +435,7 @@ class TestCheckpointManager(unittest.TestCase):
             sd_adapter=None,
             base_folder=self.trainer_config.dump_folder,
         )
-        with self.assertRaisesRegex(FileNotFoundError, "--checkpointer.load_step=5"):
+        with self.assertRaisesRegex(FileNotFoundError, "checkpointer.load_step=5"):
             manager.load(step=5)
         manager.close()
 
@@ -601,7 +606,7 @@ class TestCheckpointManager(unittest.TestCase):
             base_folder=self.trainer_config.dump_folder,
         )
 
-        with self.assertRaisesRegex(FileNotFoundError, "--checkpointer.load_step=5"):
+        with self.assertRaisesRegex(FileNotFoundError, "checkpointer.load_step=5"):
             manager.load(step=5)
 
         mock_load.assert_not_called()

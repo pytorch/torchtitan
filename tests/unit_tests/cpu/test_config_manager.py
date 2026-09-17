@@ -451,48 +451,19 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.parallelism.module_fqns_per_model_part is None
 
-    def test_parse_exclude_from_loading(self):
-        """exclude_from_loading defaults to [] and can be overridden."""
+    def test_optional_component_configs_do_not_add_cli_subcommands(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
         assert config.checkpointer is None
+        assert config.compile is None
+        assert config.validator is None
 
-        config_manager = ConfigManager()
-        config = config_manager.parse_args(
-            [
-                "--module",
-                "llama3",
-                "--config",
-                "llama3_debugmodel",
-                "checkpointer:config",
-                "--checkpointer.exclude_from_loading",
-                "optimizer,lr_scheduler",
-            ]
-        )
-        assert config.checkpointer.exclude_from_loading == [
-            "optimizer",
-            "lr_scheduler",
-        ]
-
-    def test_concrete_checkpoint_fields_remain_overridable(self):
-        from torchtitan.components.checkpointer import CheckpointManager
-
-        config = ConfigManager().parse_args(
-            [
-                "--module",
-                "llama3",
-                "--config",
-                "llama3_debugmodel",
-                "checkpointer:config",
-                "--checkpointer.async_mode",
-                "async",
-            ]
-        )
-
-        assert isinstance(config.checkpointer, CheckpointManager.Config)
-        assert config.checkpointer.async_mode == "async"
+        hints = typing.get_type_hints(Trainer.Config, include_extras=True)
+        for field_name in ("checkpointer", "compile", "validator"):
+            assert tyro.conf.AvoidSubcommands in hints[field_name].__metadata__
+        assert tyro.conf.Suppress in hints["create_seed_checkpoint"].__metadata__
 
     def test_trainer_config_quantization_default(self):
         from torchtitan.quantization.utils import has_quantization

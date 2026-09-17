@@ -153,7 +153,7 @@ def _qwen3_4b_dapo_math_config(
                 data_parallel_degree=1,
                 tensor_parallel_degree=1,
             ),
-            cuda_graph=VLLMCudaGraphConfig(),
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,

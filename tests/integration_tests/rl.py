@@ -44,7 +44,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen",
+                    "--config rl_grpo_qwen3_0_6b_varlen_no_compile",
                     "--async-loop.num-training-steps 5",
                     # trainer FSDP=2 (dp_shard=2, tp=1) + 3 generators TP=2 = 8 GPUs.
                     "--trainer.parallelism.data_parallel_shard_degree 2",
@@ -57,8 +57,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
-                    "compile:none",
-                    "generator.cuda-graph:none",
                     "--metrics.no-enable-wandb",
                 ],
             ],
@@ -94,7 +92,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_gpt_oss_debug_varlen",
+                    "--config rl_grpo_gpt_oss_debug_varlen_no_compile",
                     "--async-loop.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--trainer.parallelism.tensor_parallel_degree 4",
@@ -109,10 +107,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
-                    "trainer.checkpointer:none",  # use random-init weights
-                    "generator.checkpointer:none",  # use random-init weights
-                    "compile:none",
-                    "generator.cuda-graph:none",
                     "--metrics.no-enable-wandb",
                 ],
             ],
@@ -135,7 +129,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen",
+                    "--config rl_grpo_qwen3_0_6b_varlen_checkpoint_test",
                     "--async-loop.num-training-steps 2",
                     "--num_generators 2",
                     "--trainer.parallelism.data_parallel_shard_degree 2",
@@ -148,12 +142,10 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--metrics.no-enable-wandb",
-                    "--trainer.checkpointer.interval 2",
-                    "--trainer.lr_scheduler.total_steps 4",
                 ],
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen",
+                    "--config rl_grpo_qwen3_0_6b_varlen_checkpoint_test",
                     "--async-loop.num-training-steps 4",
                     "--num_generators 1",
                     "--trainer.parallelism.data_parallel_shard_degree 1",
@@ -166,8 +158,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--metrics.no-enable-wandb",
-                    "--trainer.checkpointer.interval 2",
-                    "--trainer.lr_scheduler.total_steps 4",
                 ],
             ],
             "RL GRPO checkpoint save + resume (resharding)",
@@ -211,8 +201,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--generator.sampling.max_tokens 256",
-                    "trainer.checkpointer:none",  # use random-init weights
-                    "generator.checkpointer:none",
                     "--metrics.no-enable-wandb",
                 ],
             ],
@@ -237,8 +225,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 1024",
                     "--generator.sampling.max_tokens 128",
-                    "trainer.checkpointer:none",  # random-init weights
-                    "generator.checkpointer:none",
                     "--metrics.no-enable-wandb",
                 ],
             ],

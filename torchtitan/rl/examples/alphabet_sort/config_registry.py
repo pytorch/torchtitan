@@ -160,6 +160,20 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
     )
 
 
+def rl_grpo_qwen3_0_6b_varlen_no_compile() -> Controller.Config:
+    config = rl_grpo_qwen3_0_6b_varlen()
+    config.compile = None
+    return config
+
+
+def rl_grpo_qwen3_0_6b_varlen_checkpoint_test() -> Controller.Config:
+    config = rl_grpo_qwen3_0_6b_varlen()
+    assert config.trainer.checkpointer is not None
+    config.trainer.checkpointer.interval = 2
+    config.trainer.lr_scheduler.total_steps = 4
+    return config
+
+
 def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     num_samples_per_prompt = 8
@@ -395,6 +409,12 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
             ),
         ),
     )
+
+
+def rl_grpo_gpt_oss_debug_varlen_no_compile() -> Controller.Config:
+    config = rl_grpo_gpt_oss_debug_varlen()
+    config.compile = None
+    return config
 
 
 def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
@@ -664,7 +684,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             # Disable torch.compile + CUDA graph capture: the EP all-to-all
             # path issues an unpinned D2H copy of split sizes that the
             # piecewise/full graph capture rejects.
-            cuda_graph=None,
+            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
@@ -810,7 +830,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cuda_graph=None,
+            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
@@ -882,7 +902,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cuda_graph=None,
+            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
