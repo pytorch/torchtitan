@@ -145,11 +145,25 @@ def test_generation_server_forwards_token_request() -> None:
                 finish_reason="stop",
             )
 
-        server = GenerationServer.Config().build()
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
         server.set_generate_fn(generate_fn)
         await server.start()
         try:
             async with ClientSession() as session:
+                response = await session.get(f"{server.base_url}/models")
+                assert response.status == 200
+                assert await response.json() == {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "torchtitan",
+                            "object": "model",
+                            "created": 0,
+                            "owned_by": "torchtitan",
+                            "max_model_len": 40960,
+                        }
+                    ],
+                }
                 for _ in range(2):
                     response = await session.post(
                         f"http://{server.host}:{server.port}/inference/v1/generate",

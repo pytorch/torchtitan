@@ -28,6 +28,7 @@ from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrategy
 from torchtitan.rl.examples.verifiers import (
+    GenerationServer,
     RewardFromVerifiers,
     VerifiersEnvServer,
     VerifiersRollouter,
@@ -52,7 +53,9 @@ def _math_taskset_config(
     return VerifiersMathTasksetConfig(id=taskset_id, dataset=dataset)
 
 
-def _verifiers_math_rollouter_config() -> VerifiersRollouter.Config:
+def _verifiers_math_rollouter_config(
+    *, max_rollout_tokens: int
+) -> VerifiersRollouter.Config:
     return VerifiersRollouter.Config(
         train_dataset=VerifiersTaskDataset.Config(
             verifiers_taskset=_math_taskset_config("dapo_math"),
@@ -79,6 +82,9 @@ def _verifiers_math_rollouter_config() -> VerifiersRollouter.Config:
         rubric=Rubric.Config(
             reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
             error_reward=0.0,
+        ),
+        generation_server=GenerationServer.Config(
+            max_rollout_tokens=max_rollout_tokens
         ),
     )
 
@@ -109,7 +115,9 @@ def _qwen3_4b_verifiers_config(
             validation=ValidationConfig(num_samples=num_validation_samples),
         ),
         compile=CompileConfig(backend="aot_eager"),
-        rollouter=_verifiers_math_rollouter_config(),
+        rollouter=_verifiers_math_rollouter_config(
+            max_rollout_tokens=max_total_tokens
+        ),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         generator_router=InterGeneratorRouter.Config(
