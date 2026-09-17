@@ -40,7 +40,7 @@ def _convert_linear(
         if replacement is AsyncColumnParallelLinear
         else RowParallelLinear.Config
     )
-    if type(config) is expected:
+    if type(config) is expected and not config._module_decorators:
         return cast(Linear.Config, convert_config_type(config, replacement))
     raise ValueError(
         "Async tensor parallelism does not support converted "
