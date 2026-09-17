@@ -193,7 +193,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_optimizer_bf16_states],
+            configs=[recipes.muse_glimmer_debugmodel_optimizer_bf16_states],
             test_descr="BF16 Optimizer States Test",
             test_name="optimizer_bf16_states",
             ngpu=2,
@@ -233,6 +233,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="Ulysses CP",
             test_name="cp_ulysses",
             ngpu=2,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_ulysses_cp2_varlen],
+            test_descr="Ulysses CP with varlen attention",
+            test_name="cp_ulysses_varlen",
+            ngpu=2,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_ddp2_cp2],
@@ -316,7 +323,15 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="SFT ChatDataset integration and numerics test",
             test_name="sft",
             ngpu=2,
-            golden_numerics_path=("tests/assets/losses/{execution_mode}/sft_a10g.txt"),
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/sft.txt"
+            ),
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_sft_multiturn],
+            test_descr="Multi-turn SFT with renderer-provided loss masks",
+            test_name="sft_multiturn",
+            ngpu=2,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_seed_checkpoint],

@@ -11,7 +11,10 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     CosSinRoPE,
@@ -20,6 +23,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    Softmax,
     TransformerBlock,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
@@ -201,7 +205,7 @@ def _build_gptoss_layers(
             routed_experts=routed_experts_cfg,
             router=TokenChoiceTopKRouter.Config(
                 num_experts=num_experts,
-                score_func="softmax",
+                score_func=Softmax.Config(),
                 route_norm=True,
                 gate=RouterGateLinear.Config(
                     in_features=dim,
@@ -385,7 +389,7 @@ def model_registry(
         seq_len=context_len,
     )
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
     return ModelSpec(
