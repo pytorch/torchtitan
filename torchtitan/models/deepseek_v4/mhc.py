@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
 from dataclasses import dataclass
 
 import torch
@@ -12,6 +11,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.protocols.module import Module
+from torchtitan.tools.leaf_compile import leaf_compile
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ from torchtitan.protocols.module import Module
 #
 # ``fullgraph=True`` makes a graph break an error rather than a silent
 # fallback to eager. ``dynamic=False``: shapes are fixed per rank.
-# HC_COMPILE=0 runs the same functions eagerly (numerics reference).
+# HC_COMPILE=0 / TORCHTITAN_LEAF_COMPILE=0 run the same functions eagerly.
 # ---------------------------------------------------------------------------
 
 
@@ -91,18 +91,9 @@ def _hc_head_math(x, hc_fn, hc_scale, hc_base, *, norm_eps, eps):
     return y.to(dtype)
 
 
-_HC_COMPILE = os.environ.get("HC_COMPILE", "1") == "1"
-
-
-def _maybe_compile(fn):
-    if not _HC_COMPILE:
-        return fn
-    return torch.compile(fn, fullgraph=True, dynamic=False)
-
-
-_hc_pre = _maybe_compile(_hc_pre_math)
-_hc_post = _maybe_compile(_hc_post_math)
-_hc_head = _maybe_compile(_hc_head_math)
+_hc_pre = leaf_compile(_hc_pre_math, group="hc")
+_hc_post = leaf_compile(_hc_post_math, group="hc")
+_hc_head = leaf_compile(_hc_head_math, group="hc")
 
 
 

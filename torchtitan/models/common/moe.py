@@ -20,6 +20,7 @@ from torchtitan.distributed.utils import get_spmd_backend
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
+from torchtitan.tools.leaf_compile import leaf_compile
 
 from .token_dispatcher import LocalTokenDispatcher
 
@@ -35,6 +36,17 @@ from .token_dispatcher import LocalTokenDispatcher
 #       (roles, not model dims: the _grouped_mm seam takes the expert
 #        weight in its stored (E, O, I) orientation, which is (E, F, D)
 #        for the up/gate projections and (E, D, F) for the down one)
+
+
+@leaf_compile(group="moe", dynamic=True)
+def _silu_mul(gate_RF: torch.Tensor, up_RF: torch.Tensor) -> torch.Tensor:
+    """SwiGLU gate between the expert GEMMs, fused into one kernel.
+
+    Eager this is two passes over the [R, F] bf16 hidden (silu, then mul) plus
+    three in backward; the routed-token count R changes every step, hence
+    ``dynamic=True``.
+    """
+    return F.silu(gate_RF) * up_RF
 
 
 class GroupedExperts(Module):
@@ -96,11 +108,9 @@ class GroupedExperts(Module):
                 # TODO(pianpwk): likely relax this in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
-        h_RF = F.silu(
-            self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E)
-        )
-        h_RF = h_RF * self._grouped_mm(
-            A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E
+        h_RF = _silu_mul(
+            self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w1_EFD, offs=offsets_E),
+            self._grouped_mm(A=x_RD.bfloat16(), weight_EOI=w3_EFD, offs=offsets_E),
         )
         return self._grouped_mm(A=h_RF, weight_EOI=w2_EDF, offs=offsets_E).type_as(x_RD)
 

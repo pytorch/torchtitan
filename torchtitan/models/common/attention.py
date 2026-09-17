@@ -48,6 +48,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
+from torchtitan.tools.leaf_compile import leaf_compile
 from torchtitan.tools.utils import round_up
 
 
@@ -221,10 +222,15 @@ class VarlenAttention(Module):
         return out_transform(out_THV, lse_TH)
 
 
+@leaf_compile(group="sink")
 def apply_attention_sink_rescale(
     out: torch.Tensor, lse: torch.Tensor, sinks: torch.Tensor
 ) -> torch.Tensor:
-    """Rescale attention output by the learned per-head sink term."""
+    """Rescale attention output by the learned per-head sink term.
+
+    Leaf-compiled: sigmoid, cast and the multiply over the [T, H, V] output
+    become one kernel (see torchtitan/tools/leaf_compile.py).
+    """
     sinks = sinks.view(*([1] * (lse.ndim - 1)), -1)
     sink_scale = torch.sigmoid(lse - sinks).unsqueeze(-1)
     return out * sink_scale.to(out.dtype)

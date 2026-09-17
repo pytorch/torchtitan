@@ -19,6 +19,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
+from torchtitan.tools.leaf_compile import leaf_compile
 
 from .compressor import Compressor, Indexer
 
@@ -29,6 +30,47 @@ def _assert_spmd_attention_type(tensor, *, tp):
             tensor,
             {"dp": spmd.S(0), "cp": spmd.S(1), "tp": tp},
         )
+
+
+
+# ---------------------------------------------------------------------------
+# Leaf-compiled attention pre/post-processing (see torchtitan/tools/leaf_compile.py).
+#
+# Eager, the q path is: per-head RMS normalisation (3 passes over the
+# [T, H, 512] bf16 q), split, fp32 upcast + complex rotation of the rope tail,
+# cast back, and a cat that copies the whole q again; the output path repeats
+# the split / inverse rotation / cat on o. In the 8-node profile the cat and
+# split copies alone were 5.6 % of kernel time. Each function below is one
+# graph, so Inductor writes q (or o) exactly once. The rotation is the
+# complex product written in real arithmetic -- (a + bi)(c + di) -- on the
+# same adjacent-pair layout ComplexRoPE.apply_rotary_emb uses, so the math is
+# unchanged; the complex cache is passed as its real view because Inductor
+# does not lower complex tensors.
+# ---------------------------------------------------------------------------
+
+
+def _rotate_tail(x, cache_ri, *, rd, inverse):
+    """Rotate the last ``rd`` features of ``x`` [T, H, D] by the RoPE cache
+    given as ``view_as_real`` of the complex cache, shape [T, 1, rd // 2, 2]."""
+    head, tail = x[..., :-rd], x[..., -rd:]
+    pairs = tail.float().unflatten(-1, (-1, 2))
+    a, b = pairs[..., 0], pairs[..., 1]
+    c, d = cache_ri[..., 0], cache_ri[..., 1]
+    if inverse:
+        d = -d
+    rotated = torch.stack((a * c - b * d, a * d + b * c), dim=-1)
+    return torch.cat([head, rotated.flatten(-2).type_as(tail)], dim=-1)
+
+
+@leaf_compile(group="attn")
+def _q_norm_rope(q, cache_ri, *, rd, norm_eps):
+    q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + norm_eps)
+    return _rotate_tail(q, cache_ri, rd=rd, inverse=False)
+
+
+@leaf_compile(group="attn")
+def _o_rope_inverse(o, cache_ri, *, rd):
+    return _rotate_tail(o, cache_ri, rd=rd, inverse=True)
 
 
 class DSV4FlexAttention(FlexAttention):
@@ -468,14 +510,16 @@ class Attention(BaseAttention):
         with spmd.local():
             q = q.view(num_tokens, -1, self.head_dim)
             _assert_spmd_attention_type(q, tp=spmd.S(1))
-        q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps)
-        q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
+        # Complex cache for these positions, as a real [T, 1, rd/2, 2] view;
+        # shared by the q path here and the inverse rotation of o below.
+        rope_cache_ri = torch.view_as_real(
+            self.rope._reshape_cache(q[..., -rd:], positions)
+        )
+        q = _q_norm_rope(q, rope_cache_ri, rd=rd, norm_eps=self.norm_eps)
 
         kv = self.kv_norm(self.wkv(x))
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
-
-        q_rope, kv_rope = self.rope(q_rope, kv_rope.unsqueeze(1), positions)
-        q = torch.cat([q_nope, q_rope], dim=-1)
+        kv_rope = self.rope(kv_rope.unsqueeze(1), positions=positions)
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
 
         cmp_k = idx_q = idx_k = idx_w = None
@@ -516,9 +560,7 @@ class Attention(BaseAttention):
                 attention_masks=attention_masks,
             )
 
-        o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
-        o_rope = self.rope(o_rope, positions=positions, inverse=True)
-        o = torch.cat([o_nope, o_rope], dim=-1)
+        o = _o_rope_inverse(o, rope_cache_ri, rd=rd)
 
         with spmd.local():
             n_local_heads = o.shape[1]

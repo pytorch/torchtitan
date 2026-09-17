@@ -1203,3 +1203,15 @@ def deepseek_v4_flash_best_hc_compile(seq_len: int | None = 8192) -> Trainer.Con
     alias exists only to give the run log and ledger a self-describing name.
     """
     return deepseek_v4_flash_pr18_asyncep_bf16reduce(seq_len)
+
+
+def deepseek_v4_flash_best_leaf_compile(seq_len: int | None = 8192) -> Trainer.Config:
+    """The 100.09 recipe, unchanged; the levers are code-level leaf compiles
+    (torchtitan/tools/leaf_compile.py): groups ``hc`` (mhc.py, the +24 %
+    measured as ``best_hc_compile``), ``attn`` (q RMS-norm + rope + cat and the
+    inverse rope on o, deepseek_v4/attention.py), ``moe`` (SwiGLU between the
+    expert grouped GEMMs, common/moe.py) and ``sink`` (attention sink rescale,
+    common/attention.py). All on by default; ablate with
+    ``TORCHTITAN_LEAF_COMPILE=hc,attn`` etc. in the job environment.
+    """
+    return deepseek_v4_flash_pr18_asyncep_bf16reduce(seq_len)
