@@ -549,7 +549,6 @@ def create_seed_checkpoint(
             module=module,
             config=config,
             mode="seed",
-            export_dtype="bfloat16",
         )
 
         # Build seed checkpoint command
@@ -595,6 +594,7 @@ def run_training(
             module=module,
             config=config,
             mode="load",
+            export_dtype="bfloat16",
         )
 
     # Build the final command

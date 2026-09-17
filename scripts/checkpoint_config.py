@@ -42,12 +42,13 @@ def checkpoint_test_config():
     if hasattr(checkpointer, "enable"):
         checkpointer.enable = True
 
+    export_dtype = os.environ.get("TORCHTITAN_CHECKPOINT_EXPORT_DTYPE")
+    if export_dtype is not None:
+        checkpointer.export_dtype = export_dtype
+
     mode = os.environ["TORCHTITAN_CHECKPOINT_MODE"]
     if mode == "seed":
         checkpointer.last_save_model_only = True
-        export_dtype = os.environ.get("TORCHTITAN_CHECKPOINT_EXPORT_DTYPE")
-        if export_dtype is not None:
-            checkpointer.export_dtype = export_dtype
         if hasattr(config, "create_seed_checkpoint"):
             config.create_seed_checkpoint = True
         else:
