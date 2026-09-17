@@ -29,7 +29,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="llama3_fsdp+tp+cp",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/llama3.txt"
             ),
             loss_compare_seed_config=llama3_debugmodel,
         ),
@@ -39,7 +39,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="llama3_fsdp+tp+cp+region_ac",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/llama3_a10g.txt"
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/llama3.txt"
             ),
             loss_compare_seed_config=llama3_debugmodel,
         ),
@@ -48,7 +48,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_descr="Llama 3 FSDP+TP+PP",
             test_name="llama3_fsdp+tp+pp",
             ngpu=8,
-            golden_numerics_path="tests/assets/losses/real_pg/llama3_pp_a10g.txt",
+            golden_numerics_path="tests/assets/losses/real_pg/{gpu_arch}/llama3_pp.txt",
             use_real_pg=True,
         ),
         # Integration Test Cases for DeepSeek V3
@@ -74,7 +74,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="deepseek_v3_fsdp+ep",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/deepseek_v3_a10g.txt"
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/deepseek_v3.txt"
             ),
         ),
         OverrideDefinitions(
@@ -83,7 +83,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="deepseek_v3_fsdp+cp+pp+ep",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/real_pg/deepseek_v3_cp_pp_a10g.txt"
+                "tests/assets/losses/real_pg/{gpu_arch}/deepseek_v3_cp_pp.txt"
             ),
             loss_compare_seed_config=deepseek_v3_debugmodel,
             use_real_pg=True,
@@ -124,7 +124,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="qwen3_moe_fsdp+tp+cp+ep_param_groups",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/qwen3_a10g.txt"
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/qwen3.txt"
             ),
             loss_compare_seed_config=qwen3_debugmodel_moe_param_groups,
         ),
@@ -154,6 +154,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
             use_real_pg=True,
+            # short_conv's CuTe/CUTLASS kernel (attn_gym) is CUDA-only.
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4],
@@ -162,6 +164,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ngpu=8,
             # NOTE: This topology is not bitwise deterministic with Real PG on
             # A10G, so this case provides end-to-end coverage without a golden.
+            # short_conv's CuTe/CUTLASS kernel (attn_gym) is CUDA-only.
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac],
@@ -184,7 +188,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="gpt_oss_fsdp+tp+ep",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/gpt_oss_a10g.txt"
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/gpt_oss.txt"
             ),
         ),
         OverrideDefinitions(
@@ -192,7 +196,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_descr="GPT-OSS PP+FSDP+CP+EP+SACOP",
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
-            golden_numerics_path="tests/assets/losses/real_pg/gpt_oss_pp_a10g.txt",
+            golden_numerics_path="tests/assets/losses/real_pg/{gpu_arch}/gpt_oss_pp.txt",
             loss_compare_seed_config=gpt_oss_debugmodel_flex,
             use_real_pg=True,
         ),
@@ -225,7 +229,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             test_name="muse_glimmer_text_fsdp",
             ngpu=8,
             golden_numerics_path=(
-                "tests/assets/losses/{execution_mode}/muse_glimmer_a10g.txt"
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/muse_glimmer.txt"
             ),
         ),
         OverrideDefinitions(

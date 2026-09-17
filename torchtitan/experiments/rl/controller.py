@@ -104,6 +104,8 @@ import tyro
 from monarch.actor import ProcMesh, this_host
 from monarch.spmd import setup_torch_elastic_env_async
 
+from torchtitan.components.renderer import RendererConfig
+
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
@@ -126,7 +128,6 @@ from torchtitan.experiments.rl.controller_metrics import (
 )
 from torchtitan.experiments.rl.losses import GRPOLoss
 from torchtitan.experiments.rl.observability import metrics as m
-from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout import RolloutGroup
 from torchtitan.experiments.rl.rollout.rollouter import Rollouter
 from torchtitan.experiments.rl.rollout.types import GenerateFn
@@ -305,7 +306,7 @@ class Controller(Configurable):
 
         renderer: RendererConfig
         """The model's chat template; renders messages to token ids and parses completions
-        back. E.g. `RenderersLibraryConfig(renderers_config=Qwen3RendererConfig(enable_thinking=False))`."""
+        back. E.g. `from_renderers(Qwen3RendererConfig(enable_thinking=False))`."""
 
         rollout_recorder: RolloutSampleRecorder.Config = field(
             default_factory=RolloutSampleRecorder.Config

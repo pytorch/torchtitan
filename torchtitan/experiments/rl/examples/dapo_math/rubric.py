@@ -6,16 +6,24 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from math_verify import parse, verify
-from math_verify.errors import TimeoutException
 
 from torchtitan.experiments.rl.examples.dapo_math.data import DapoMathSample
+from torchtitan.experiments.rl.examples.dapo_math.thread_timeout import (
+    ThreadTimeout,
+    ThreadTimeoutError,
+)
 from torchtitan.experiments.rl.rollout import Rollout
 from torchtitan.experiments.rl.rubrics import RewardFn
 
+logger = logging.getLogger(__name__)
+
 _BOXED_START = r"\boxed{"
+# Match the default timeout used by Math-Verify 0.9.0.
+_MATH_VERIFY_TIMEOUT_SECONDS = 5
 
 
 def _last_boxed_expression(text: str) -> str | None:
@@ -48,14 +56,21 @@ def score_math_response(response: str, ground_truth: str) -> float:
         return 0.0
 
     try:
-        # TODO: Re-enable Math-Verify timeouts after resolving its signal-based
-        # timeout failure in rollout worker threads (signals require the main thread).
-        gold = parse(ground_truth, parsing_timeout=None)
-        prediction = parse(prediction, parsing_timeout=None)
-        return float(bool(gold) and verify(gold, prediction, timeout_seconds=None))
-    except (Exception, TimeoutException):
-        # Model output is untrusted; malformed LaTeX is an incorrect answer, not a
-        # training-loop failure. Math-Verify raises `TimeoutException` from BaseException.
+        # Math-Verify uses SIGALRM for timeouts, which does not work in monarch
+        # worker threads. Apply the same deadline with a thread-targeted timeout.
+        with ThreadTimeout(_MATH_VERIFY_TIMEOUT_SECONDS):
+            gold = parse(ground_truth, parsing_timeout=None)
+            prediction = parse(prediction, parsing_timeout=None)
+            return float(bool(gold) and verify(gold, prediction, timeout_seconds=None))
+    except ThreadTimeoutError:
+        logger.warning(
+            "Math-Verify timed out after %s seconds; assigning zero reward",
+            _MATH_VERIFY_TIMEOUT_SECONDS,
+        )
+        return 0.0
+    except Exception:
+        # Model output is untrusted; malformed LaTeX produces a zero reward
+        # rather than failing the training loop.
         return 0.0
 
 

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 import torch
 import torch_remat as remat
 
-from torchtitan.models.common.activation import ActivationFn, SwiGLU
+from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
@@ -47,7 +47,7 @@ class FeedForward(Module):
     class Config(Module.Config):
         w13: Linear.Config
         w2: Linear.Config
-        activation_fn: ActivationFn.Config = field(default_factory=SwiGLU.Config)
+        activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
 
     def __init__(self, config: Config):
         super().__init__()

@@ -391,7 +391,10 @@ class PolicyTrainer(Actor, Configurable):
         with self.train_context():
             with sl.log_trace_span("model_forward"):
                 pred = model(
-                    token_ids, attention_masks=attention_masks, positions=positions
+                    token_ids,
+                    attention_masks=attention_masks,
+                    positions=positions,
+                    padding_mask=padding_mask,
                 )
 
             with sl.log_trace_span("loss_fn"):

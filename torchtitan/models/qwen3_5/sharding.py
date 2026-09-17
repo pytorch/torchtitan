@@ -36,7 +36,10 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_spmd,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
     set_vision_transformer_block_sharding_config,
@@ -195,6 +198,7 @@ def _set_qwen35_layer_sharding(
         )
 
     if layer_cfg.moe is not None:
+        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,

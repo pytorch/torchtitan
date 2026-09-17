@@ -8,6 +8,8 @@ import unittest
 
 import torch
 
+from torchtitan.models.common.activation import Sigmoid
+
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
@@ -18,6 +20,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         router = DeepSeekV3Router.Config(
             num_experts=4,
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            score_func=Sigmoid.Config(),
             num_expert_groups=2,
             num_limited_groups=1,
             top_k=1,
