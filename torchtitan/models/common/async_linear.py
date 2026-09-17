@@ -301,6 +301,8 @@ def validate_async_tp_preconditions(*, enable_sp: bool) -> None:
 class AsyncColumnParallelLinear(ColumnParallelLinear):
     """Overlap an input all-gather with a column-parallel GEMM."""
 
+    _register_sync_tp_collective_hooks = False
+
     @dataclass(kw_only=True, slots=True)
     class Config(ColumnParallelLinear.Config):
         pass
@@ -325,6 +327,8 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
 
 class AsyncRowParallelLinear(RowParallelLinear):
     """Overlap a row-parallel GEMM with its output reduce-scatter."""
+
+    _register_sync_tp_collective_hooks = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(RowParallelLinear.Config):
