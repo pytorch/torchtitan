@@ -316,8 +316,8 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             return super().forward(input)
         return AsyncAllGatherLinear.apply(
             input,
-            self.weight,
-            self.bias,
+            self.linear.weight,
+            self.linear.bias,
             tp_group,
             tp_group.group_name,
         )
@@ -341,8 +341,8 @@ class AsyncRowParallelLinear(RowParallelLinear):
             return super().forward(input)
         return AsyncLinearReduceScatter.apply(
             input,
-            self.weight,
-            self.bias,
+            self.linear.weight,
+            self.linear.bias,
             tp_group,
             tp_group.group_name,
         )
