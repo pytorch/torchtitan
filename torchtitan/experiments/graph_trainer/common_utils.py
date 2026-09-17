@@ -26,7 +26,11 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_PARAM_FQNS_META,
     MixedPrecisionPolicy,
 )
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+from torchtitan.models.common.attention import (
+    materialize_mla_kv,
+    MLAInnerAttention,
+    ScaledDotProductInnerAttention,
+)
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
 
@@ -77,6 +81,31 @@ class GraphTrainerScaledDotProductInnerAttention(ScaledDotProductInnerAttention)
         return out_1THV.squeeze(0)
 
 
+class GraphTrainerMLAScaledDotProductInnerAttention(
+    MLAInnerAttention, GraphTrainerScaledDotProductInnerAttention
+):
+    """Adapt compact MLA inputs to graph-trainer SDPA."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(
+        MLAInnerAttention.Config,
+        GraphTrainerScaledDotProductInnerAttention.Config,
+    ):
+        pass
+
+    def forward(  # pyrefly: ignore[bad-override-param-name]
+        self,
+        q_THK: torch.Tensor,
+        kv_THP: torch.Tensor,
+        k_shared_TR: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
+        return GraphTrainerScaledDotProductInnerAttention.forward(
+            self, q_THK, k_THK, v_THV, **kwargs
+        )
+
+
 @contextmanager
 def log_timer(label: str):
     start = time.perf_counter()
@@ -101,19 +130,23 @@ def build_decoder_config_for_backend(
     input), and overflows the fp32 Triton shared-memory limit on large head dims.
 
     For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``.
-    The adapter adds a singleton batch around the flat graph-trainer inputs and
-    delegates to the common batched SDPA implementation. Production code never
-    reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
-    registry can construct an SDPA language model outside these tests.
+    ``inner_attention`` to the corresponding graph-trainer SDPA adapter. The MLA
+    adapter first materializes compact K/V inputs. Both adapters add a singleton
+    batch around the flat graph-trainer inputs and delegate to the common batched
+    SDPA implementation. Production code never reaches this path:
+    ``get_attention_config`` still rejects ``sdpa``, so no model registry can
+    construct an SDPA language model outside these tests.
     """
     if attn_backend != "sdpa":
         return config_builder(attn_backend=attn_backend, **builder_kwargs)
 
     config = config_builder(attn_backend="flex", **builder_kwargs)
     for layer in config.layers:
+        inner_attention = layer.attention.inner_attention
         layer.attention.inner_attention = (
-            GraphTrainerScaledDotProductInnerAttention.Config()
+            GraphTrainerMLAScaledDotProductInnerAttention.Config()
+            if isinstance(inner_attention, MLAInnerAttention.Config)
+            else GraphTrainerScaledDotProductInnerAttention.Config()
         )
     return config
 

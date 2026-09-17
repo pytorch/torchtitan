@@ -30,6 +30,7 @@ from torchtitan.models.common.async_linear import (
 )
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
+    MLAFlexInnerAttention,
     SlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
@@ -38,6 +39,7 @@ from torchtitan.models.common.attention.cp_attention import (
     UlyssesCPFlexInnerAttention,
     UlyssesCPSlidingWindowFlexInnerAttention,
 )
+from torchtitan.models.common.attention.cp_mla import KVAllGatherCPMLAFlexInnerAttention
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
@@ -549,7 +551,7 @@ class TestContextParallelTransform(unittest.TestCase):
 
         ContextParallelTransform(
             inner_attention_map={
-                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                MLAFlexInnerAttention: KVAllGatherCPMLAFlexInnerAttention,
             }
         ).transform(model)
 
@@ -558,7 +560,7 @@ class TestContextParallelTransform(unittest.TestCase):
             for layer in layers:
                 self.assertIsInstance(
                     layer.attention.inner_attention,
-                    KVAllGatherCPFlexInnerAttention.Config,
+                    KVAllGatherCPMLAFlexInnerAttention.Config,
                 )
 
     def test_lora_runs_after_context_parallelism(self):

@@ -27,7 +27,7 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_spmd,
+    set_mla_inner_attention_local_spmd,
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
@@ -36,11 +36,8 @@ from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.common.attention.kda import KDA
-    from torchtitan.models.kimi_k3.model import (
-        KimiK3Model,
-        KimiK3TransformerBlock,
-        KimiMLAAttention,
-    )
+    from torchtitan.models.kimi_k3.attention import KimiMLAAttention
+    from torchtitan.models.kimi_k3.model import KimiK3Model, KimiK3TransformerBlock
     from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 
 
@@ -155,7 +152,7 @@ def _set_mla_sharding(
         input_layout=replicated_input_layout
     )
     attention_cfg.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
-    set_gqa_inner_attention_local_spmd(attention_cfg.inner_attention)
+    set_mla_inner_attention_local_spmd(attention_cfg.inner_attention)
 
 
 def _set_kda_sharding(

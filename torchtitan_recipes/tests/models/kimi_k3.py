@@ -44,7 +44,7 @@ from torchtitan.models.kimi_k3 import (
     KIMI_K3_SPECIAL_TOKENS,
     KimiK3Model,
 )
-from torchtitan.models.kimi_k3.model import KimiMLAAttention
+from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
