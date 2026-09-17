@@ -30,6 +30,9 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     Owned,
 )
+from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
+    _CommunicationContext,
+)
 from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
@@ -37,6 +40,21 @@ from torchtitan.distributed.flex_shard.dist_muon import (
 
 
 pytestmark = pytest.mark.multi_gpu
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class TestDistMuonStreamDevice(unittest.TestCase):
+    def test_noncurrent_device_preserves_caller_streams(self):
+        caller_stream = torch.cuda.Stream(device=0)
+        target_stream = torch.cuda.Stream(device=1)
+        target_device = torch.device("cuda", 1)
+
+        with torch.cuda.stream(target_stream), torch.cuda.stream(caller_stream):
+            context = _CommunicationContext.create(target_device)
+            self.assertEqual(context.transfer_stream.device, target_device)
+            self.assertEqual(torch.cuda.current_device(), 0)
+            self.assertEqual(torch.cuda.current_stream(0), caller_stream)
+            self.assertEqual(torch.cuda.current_stream(1), target_stream)
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")

@@ -20,9 +20,6 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     dist_muon,
 )
-from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
-    _BucketedRedistributionRuntime,
-)
 
 
 class TestMuonPlanConstruction(unittest.TestCase):
@@ -49,16 +46,12 @@ class TestMuonPlanConstruction(unittest.TestCase):
             for _ in names
         ]
 
-        with (
-            # CPU stream setup does not support the runtime's device argument.
-            patch.object(_BucketedRedistributionRuntime, "reserve_buffers"),
-            patch.object(
-                dist_muon,
-                "_build_parameter_redistribution_plan",
-                wraps=dist_muon._build_parameter_redistribution_plan,
-            ) as build_plan,
-        ):
-            build_dist_muon(
+        with patch.object(
+            dist_muon,
+            "_build_parameter_redistribution_plan",
+            wraps=dist_muon._build_parameter_redistribution_plan,
+        ) as build_plan:
+            optimizer = build_dist_muon(
                 [{"params": params, "param_names": names}],
                 compute_sharding_by_fqn={
                     name: ComputeLayout(
@@ -69,6 +62,7 @@ class TestMuonPlanConstruction(unittest.TestCase):
                 bucket_configs=[BucketConfig(patterns=(name,)) for name in names],
             )
         build_plan.assert_called_once()
+        self.assertIsNotNone(optimizer._redistribution_runtime._context)
 
 
 if __name__ == "__main__":
