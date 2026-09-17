@@ -299,10 +299,12 @@ class Batcher(Configurable):
     def _assign_training_samples_to_microbatches(
         self, training_samples: list[TrainingSample]
     ) -> list[list[list[TrainingSample]]]:
-        """Pack samples into fixed-capacity DP inputs with first-fit decreasing.
+        """Pack with FFD, align by LPT splitting, then sort by attention work.
 
-        Samples are placed longest-first into the first eligible DP rank input.
-        A new microbatch is added only when no existing input has capacity.
+        FFD first determines the minimum number of fixed-capacity bins. The
+        heaviest splittable bins are recursively divided until the bin count is
+        a multiple of the DP degree. Finally, sorting all bins by workload puts
+        similarly expensive bins in the same outer gradient accumulation step.
         """
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
         ordered_samples = sorted(
@@ -310,38 +312,85 @@ class Batcher(Configurable):
             key=self.num_tokens_to_pack,
             reverse=True,
         )
-        microbatches: list[list[list[TrainingSample]]] = [
-            [[] for _ in range(self._dp_degree)]
-        ]
-        rank_num_tokens = [[0] * self._dp_degree]
+        bins: list[list[TrainingSample]] = []
+        bin_num_tokens: list[int] = []
 
         for training_sample in ordered_samples:
             num_tokens = self.num_tokens_to_pack(training_sample)
             destination = next(
                 (
-                    (microbatch, rank)
-                    for microbatch in range(len(microbatches))
-                    for rank in range(self._dp_degree)
-                    if rank_num_tokens[microbatch][rank] + num_tokens
-                    <= num_tokens_per_rank
+                    index
+                    for index, bin_ in enumerate(bins)
+                    if bin_num_tokens[index] + num_tokens <= num_tokens_per_rank
                     and (
                         self._max_num_documents is None
-                        or len(microbatches[microbatch][rank]) < self._max_num_documents
+                        or len(bin_) < self._max_num_documents
                     )
                 ),
                 None,
             )
             if destination is None:
-                microbatches.append([[] for _ in range(self._dp_degree)])
-                rank_num_tokens.append([0] * self._dp_degree)
-                destination = (len(microbatches) - 1, 0)
+                bins.append([])
+                bin_num_tokens.append(0)
+                destination = len(bins) - 1
 
-            microbatch, rank = destination
-            microbatches[microbatch][rank].append(training_sample)
-            rank_num_tokens[microbatch][rank] += num_tokens
+            bins[destination].append(training_sample)
+            bin_num_tokens[destination] += num_tokens
 
-        self._fill_empty_rank_assignments(microbatches)
-        return microbatches
+        target_num_bins = math.ceil(len(bins) / self._dp_degree) * self._dp_degree
+        self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
+        bins.sort(key=self._attention_workload, reverse=True)
+
+        num_microbatches = len(bins) // self._dp_degree
+        return [
+            bins[microbatch * self._dp_degree : (microbatch + 1) * self._dp_degree]
+            for microbatch in range(num_microbatches)
+        ]
+
+    def _attention_workload(self, training_samples: list[TrainingSample]) -> int:
+        """Estimate packed full-attention work as the sum of squared lengths."""
+        return sum(self.num_tokens_to_pack(sample) ** 2 for sample in training_samples)
+
+    def _split_by_attention_workload(
+        self, training_samples: list[TrainingSample]
+    ) -> tuple[list[TrainingSample], list[TrainingSample]]:
+        """Split one bin into two with longest-processing-time scheduling."""
+        assert len(training_samples) > 1
+        splits: tuple[list[TrainingSample], list[TrainingSample]] = ([], [])
+        workloads = [0, 0]
+        for training_sample in sorted(
+            training_samples,
+            key=lambda sample: self.num_tokens_to_pack(sample) ** 2,
+            reverse=True,
+        ):
+            destination = 0 if workloads[0] <= workloads[1] else 1
+            splits[destination].append(training_sample)
+            workloads[destination] += self.num_tokens_to_pack(training_sample) ** 2
+        assert splits[0] and splits[1]
+        return splits
+
+    def _expand_bins_by_splitting(
+        self,
+        bins: list[list[TrainingSample]],
+        *,
+        target_num_bins: int,
+    ) -> None:
+        """Split the heaviest multi-sample bins until reaching the target count."""
+        while len(bins) < target_num_bins:
+            candidates = [
+                (self._attention_workload(bin_), index)
+                for index, bin_ in enumerate(bins)
+                if len(bin_) > 1
+            ]
+            if not candidates:
+                break
+            _, donor_index = max(candidates)
+            bins[donor_index], new_bin = self._split_by_attention_workload(
+                bins[donor_index]
+            )
+            bins.append(new_bin)
+
+        bins.extend([] for _ in range(target_num_bins - len(bins)))
 
     def _fill_empty_rank_assignments(
         self, assignments: list[list[list[TrainingSample]]]
