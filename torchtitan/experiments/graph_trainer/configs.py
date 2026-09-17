@@ -86,17 +86,30 @@ class GraphTrainerCompileConfig(CompileConfig):
     partitioning contracts depend on canonical graph structure.
     """
 
-    enable_inplace_graph_gradient_accumulation: bool = False
-    """Accumulate SPMD AOT gradients in-place into trainer-owned buffers.
+    fsdp_param_unshard_mode: Literal[
+        "auto", "in_graph", "extracted_in_schedule_stage"
+    ] = "auto"
+    """Choose where FSDP parameter all-gathers run.
 
-    This makes gradient accumulation CUDA-graph safe by avoiding clones of
-    replay-owned gradient outputs.
+    - ``auto`` keeps all-gathers in each forward graph for PP=1, including
+      gradient accumulation. For PP>1, the schedule uses explicit ``UNSHARD``
+      actions.
+    - ``in_graph`` keeps all-gathers in the forward graph.
+    - ``extracted_in_schedule_stage`` uses explicit ``UNSHARD`` schedule
+      actions.
+    """
 
-    TODO: Add support for:
-        GraphPP
-        precompile
-        parameter aliases
-        custom pass pipelines.
+    fsdp_gradient_sync_mode: Literal[
+        "auto", "in_graph", "deferred_as_schedule_stage"
+    ] = "auto"
+    """Choose where FSDP gradient reduction runs.
+
+    - ``auto`` reduces gradients in each backward graph for PP=1, including
+      gradient accumulation. For PP>1, the schedule uses an explicit
+      ``REDUCE_GRAD`` action for each stage.
+    - ``in_graph`` reduces gradients in each backward graph.
+    - ``deferred_as_schedule_stage`` accumulates gradients across microbatches,
+      then reduces them with one ``REDUCE_GRAD`` action per stage.
     """
 
     disable_passes: list[str] = field(default_factory=list)

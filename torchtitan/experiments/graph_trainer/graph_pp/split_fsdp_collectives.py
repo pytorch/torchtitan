@@ -16,6 +16,7 @@ from torch.fx._lazy_graph_module import _make_graph_module
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_reduce_grad_input,
     find_fsdp_unshard_outputs_by_param,
+    is_all_gather_into_tensor,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     allow_fx_graph_extraction_of_side_effectful_ops,
@@ -77,12 +78,34 @@ class GraphPPFSDPBackwardSplit:
         reduce_grad_input_names (tuple[str, ...]): ``reduce_grad_module``
             placeholder names, or empty when ``reduce_grad_module`` is
             ``None``.
+        reduction_node_names (frozenset[str]): Nodes owned by the reduction
+            epilogue, including when extraction is disabled.
     """
 
     bw_no_fsdp_module: fx.GraphModule
     reduce_grad_module: fx.GraphModule | None
     bw_no_fsdp_output_names: tuple[str, ...]
     reduce_grad_input_names: tuple[str, ...]
+    reduction_node_names: frozenset[str] = frozenset()
+
+
+def _remove_dead_all_gather_launches(graph: fx.Graph) -> None:
+    """Remove all-gather branches whose waits were excluded from a subgraph."""
+    removable_inputs = set()
+    for node in reversed(list(graph.nodes)):
+        if not is_all_gather_into_tensor(node) or node.users:
+            continue
+        pending = list(node.all_input_nodes)
+        while pending:
+            input_node = pending.pop()
+            if input_node.op == "placeholder" or input_node in removable_inputs:
+                continue
+            removable_inputs.add(input_node)
+            pending.extend(input_node.all_input_nodes)
+        graph.erase_node(node)
+    for node in reversed(list(graph.nodes)):
+        if node in removable_inputs and not node.users:
+            graph.erase_node(node)
 
 
 def split_forward_fsdp_collectives(
@@ -92,6 +115,7 @@ def split_forward_fsdp_collectives(
     fwd_input_names: tuple[str, ...],
     fwd_flat_input_indices: tuple[int, ...],
     fwd_side_effect_output_names: tuple[str, ...] = (),
+    extract_fsdp_param_unshard: bool = True,
 ) -> GraphPPFSDPForwardSplit:
     """Split forward FSDP all-gather chains from a forward graph.
 
@@ -119,6 +143,7 @@ def split_forward_fsdp_collectives(
             each forward graph placeholder.
         fwd_side_effect_output_names (tuple[str, ...]): Mutation outputs kept
             live by forward partitioning.
+        extract_fsdp_param_unshard (bool): Whether to split the unshard graph.
 
     Returns:
         GraphPPFSDPForwardSplit: Forward split modules and calling-convention
@@ -153,6 +178,17 @@ def split_forward_fsdp_collectives(
     if invalid_indices:
         raise ValueError(
             "Forward flat input indices must be non-negative: " f"{invalid_indices}"
+        )
+    if not extract_fsdp_param_unshard:
+        return GraphPPFSDPForwardSplit(
+            unshard_module=None,
+            fw_no_fsdp_module=fw_module,
+            unshard_flat_param_indices=(),
+            unshard_output_names=(),
+            fw_no_fsdp_input_names=fwd_input_names,
+            fw_no_fsdp_flat_input_indices=fwd_flat_input_indices,
+            num_fw_param_inputs=0,
+            fw_no_fsdp_output_names=output_names(fw_module),
         )
 
     param_inputs: list[fx.Node] = []
@@ -273,6 +309,7 @@ def split_backward_fsdp_collectives(
     bw_module: fx.GraphModule,
     *,
     num_param_grads: int,
+    extract_grad_reduction: bool = True,
 ) -> GraphPPFSDPBackwardSplit:
     """Split backward FSDP/DDP/HSDP reduce-grad epilogues.
 
@@ -298,6 +335,7 @@ def split_backward_fsdp_collectives(
             partitioning.
         num_param_grads (int): Number of leading backward outputs that are
             parameter-gradient slots.
+        extract_grad_reduction (bool): Whether to split the reduction graph.
 
     Returns:
         GraphPPFSDPBackwardSplit: Backward split modules and
@@ -328,11 +366,13 @@ def split_backward_fsdp_collectives(
     remaining_output_descs = output_descs[num_param_grads:]
 
     reduce_grad_inputs = []
+    reduction_outputs = []
     found_collective = False
     for grad_output in grad_outputs:
         reduce_grad_input = find_fsdp_reduce_grad_input(grad_output)
         if reduce_grad_input is not None:
             found_collective = True
+            reduction_outputs.append((grad_output, frozenset((reduce_grad_input,))))
             reduce_grad_inputs.append(reduce_grad_input)
         else:
             reduce_grad_inputs.append(grad_output)
@@ -346,6 +386,30 @@ def split_backward_fsdp_collectives(
             reduce_grad_input_names=(),
         )
 
+    reduction_node_names = set()
+    for grad_output, boundaries in reduction_outputs:
+        pending = [grad_output]
+        while pending:
+            node = pending.pop()
+            if not isinstance(node, fx.Node) or node in boundaries:
+                continue
+            if node.name in reduction_node_names:
+                continue
+            reduction_node_names.add(node.name)
+            pending.extend(node.all_input_nodes)
+
+    if not extract_grad_reduction:
+        return GraphPPFSDPBackwardSplit(
+            bw_no_fsdp_module=bw_module,
+            reduce_grad_module=None,
+            bw_no_fsdp_output_names=output_names(bw_module),
+            reduce_grad_input_names=(),
+            reduction_node_names=frozenset(reduction_node_names),
+        )
+
+    _remove_dead_all_gather_launches(graph)
+    graph.eliminate_dead_code()
+    graph.lint()
     unique_reduce_grad_inputs = unique_in_order(
         input_node
         for input_node in reduce_grad_inputs
@@ -375,6 +439,14 @@ def split_backward_fsdp_collectives(
             ignore_must_be_in_fw_bw=True,
         )
 
+    # FX preserves mutation-only tails during DCE. Remove the reduction tail
+    # after its inputs become explicit outputs of the backward graph.
+    for node in reversed(list(bw_no_fsdp_graph.nodes)):
+        if node.name in reduction_node_names and not node.users:
+            bw_no_fsdp_graph.erase_node(node)
+    _remove_dead_all_gather_launches(bw_no_fsdp_graph)
+    bw_no_fsdp_graph.lint()
+
     bw_no_fsdp_module = _make_graph_module(bw_module, bw_no_fsdp_graph)
     reduce_grad_module = _make_graph_module(bw_module, reduce_grad_graph)
     trace_graph_pp_graph("graph_pp_fsdp_backward_no_fsdp", bw_no_fsdp_module)
@@ -384,4 +456,5 @@ def split_backward_fsdp_collectives(
         reduce_grad_module=reduce_grad_module,
         bw_no_fsdp_output_names=output_names(bw_no_fsdp_module),
         reduce_grad_input_names=placeholder_names(reduce_grad_module),
+        reduction_node_names=frozenset(reduction_node_names),
     )
