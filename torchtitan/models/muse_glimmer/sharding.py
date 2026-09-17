@@ -12,12 +12,12 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
+    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
-    implicit_colwise_config,
-    implicit_rowwise_config,
     norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_spmd,
@@ -169,7 +169,9 @@ def _set_muse_glimmer_layer_sharding(
     # Output gate: colwise so its Shard(-1) output aligns with the head-sharded
     # attention output before ``wo``.
     if attention.o_gate is not None:
-        attention.o_gate.sharding_config = implicit_colwise_config()
+        attention.o_gate.sharding_config = colwise_config(
+            input_layout=dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        )
 
     assert layer_cfg.feed_forward is not None
     set_dense_ffn_sharding(
@@ -191,8 +193,10 @@ def _set_attention_sharding(attention, *, enable_sp: bool) -> None:
         # qkv and o_gate both consume x, so gather once at their parent.
         in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
     )
-    attention.qkv_linear.wqkv.sharding_config = implicit_colwise_config()
-    attention.wo.sharding_config = implicit_rowwise_config(output_sp=enable_sp)
+    attention.qkv_linear.wqkv.sharding_config = colwise_config(
+        input_layout=dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    )
+    attention.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
     if attention.rope is not None:
         attention.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},

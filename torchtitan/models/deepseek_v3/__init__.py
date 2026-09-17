@@ -18,12 +18,14 @@ from torchtitan.config.transform import (
 )
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     ComplexRoPE,
     Embedding,
     Linear,
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    RowParallelLinear,
     Sigmoid,
     Softmax,
     TransformerBlock,
@@ -148,7 +150,7 @@ def make_mla_attention_config(
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     if q_lora_rank == 0:
-        wq = Linear.Config(
+        wq = ColumnParallelLinear.Config(
             in_features=dim,
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
@@ -165,7 +167,7 @@ def make_mla_attention_config(
             out_features=q_lora_rank,
             param_init=linear_init,
         )
-        wq_b = Linear.Config(
+        wq_b = ColumnParallelLinear.Config(
             in_features=q_lora_rank,
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
@@ -195,12 +197,12 @@ def make_mla_attention_config(
         kv_norm=RMSNorm.Config(
             normalized_shape=kv_lora_rank, eps=1e-6, param_init=norm_init
         ),
-        wkv_b=Linear.Config(
+        wkv_b=ColumnParallelLinear.Config(
             in_features=kv_lora_rank,
             out_features=n_heads * (qk_nope_head_dim + v_head_dim),
             param_init=linear_init,
         ),
-        wo=Linear.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * v_head_dim,
             out_features=dim,
             param_init=depth_init(layer_id),

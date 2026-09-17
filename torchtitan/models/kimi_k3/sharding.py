@@ -19,12 +19,12 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
+    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
-    implicit_colwise_config,
-    implicit_rowwise_config,
     norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_spmd,
@@ -145,6 +145,7 @@ def _set_mla_sharding(
         in_src_shardings={"x_TD": attn_x_layout},
         in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
     )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     replicate_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
@@ -152,10 +153,11 @@ def _set_mla_sharding(
     attention_cfg.q_norm.sharding_config = replicate_weight
     attention_cfg.wkv_a.sharding_config = replicate_weight
     attention_cfg.kv_norm.sharding_config = replicate_weight
-    attention_cfg.wq_b.sharding_config = implicit_colwise_config()
-    attention_cfg.wkv_b.sharding_config = implicit_colwise_config()
-    attention_cfg.gate.sharding_config = implicit_colwise_config()
-    attention_cfg.wo.sharding_config = implicit_rowwise_config(output_sp=enable_sp)
+    for projection in (attention_cfg.wq_b, attention_cfg.wkv_b, attention_cfg.gate):
+        projection.sharding_config = colwise_config(
+            input_layout=replicated_input_layout
+        )
+    attention_cfg.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
     set_gqa_inner_attention_local_spmd(attention_cfg.inner_attention)
 
 
@@ -168,14 +170,17 @@ def _set_kda_sharding(
     """Head-sharded TP for KDA, as Qwen3.5's GatedDeltaNet; low-rank ``forget_a`` is
     replicated.
     """
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     for name in ("q_proj", "k_proj", "v_proj", "forget_b", "beta", "output_gate"):
-        getattr(kda_cfg, name).sharding_config = implicit_colwise_config()
+        getattr(kda_cfg, name).sharding_config = colwise_config(
+            input_layout=replicated_input_layout
+        )
     replicate_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
     kda_cfg.forget_a.sharding_config = replicate_weight
     kda_cfg.output_norm.sharding_config = replicate_weight
-    kda_cfg.output_proj.sharding_config = implicit_rowwise_config(output_sp=enable_sp)
+    kda_cfg.output_proj.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
     projected_placement = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     head_placement = attention_activation_placement()

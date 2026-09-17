@@ -123,37 +123,6 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
     }
 
 
-def implicit_colwise_config() -> ShardingConfig:
-    """ColwiseParallel: weight S(0), output S(-1)."""
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(0)),
-            "bias": dense_param_placement(tp=spmd.S(0)),
-        },
-        out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
-    )
-
-
-def implicit_rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
-    """
-    RowwiseParallel: weight S(1), bias I (no-op if bias absent).
-    Output redistributes to S(1) (reduce-scatter) if SP on, else I (all-reduce).
-    """
-    out_dst = (
-        dense_sequence_parallel_placement()
-        if output_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-    )
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.I),
-        },
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=out_dst,
-    )
-
-
 def colwise_config(*, input_layout: SpmdType) -> ShardingConfig:
     """Sharding contract for a column-parallel projection boundary."""
     return ShardingConfig(

@@ -276,7 +276,7 @@ def _make_v4_attn_config(
             eps=norm_eps,
             param_init=_NORM_INIT,
         ),
-        wq_b=Linear.Config(
+        wq_b=ColumnParallelLinear.Config(
             in_features=q_lora_rank,
             out_features=n_heads * hd,
             bias=False,
@@ -299,7 +299,7 @@ def _make_v4_attn_config(
             bias=False,
             param_init=_LINEAR_INIT,
         ),
-        wo_b=Linear.Config(
+        wo_b=RowParallelLinear.Config(
             in_features=per_group_out,
             out_features=dim,
             bias=False,

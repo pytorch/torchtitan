@@ -11,12 +11,12 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
+    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
-    implicit_colwise_config,
-    implicit_rowwise_config,
     norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     token_id_placement,
@@ -128,6 +128,7 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
             "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
         },
     )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
     set_dsa_flex_attention_sharding(attention.inner_attention)
 
@@ -135,13 +136,17 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
     # can set sharding_config directly (same pattern as deepseek_v3).
     attention.wq_a.sharding_config = _replicate_weight
     attention.q_norm.sharding_config = _replicate_weight
-    attention.wq_b.sharding_config = implicit_colwise_config()
+    attention.wq_b.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
     attention.wkv.sharding_config = _replicate_weight
     attention.kv_norm.sharding_config = _replicate_weight
     # wo_a is a Linear holding a grouped LoRA-A weight used via einsum (not a
     # standard matmul). Colwise sharding distributes the weight along dim-0.
-    attention.wo_a.sharding_config = implicit_colwise_config()
-    attention.wo_b.sharding_config = implicit_rowwise_config(output_sp=enable_sp)
+    attention.wo_a.sharding_config = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))}
+    )
+    attention.wo_b.sharding_config = rowwise_config(output_layout=attn_x_layout)
     # attn_sink is a Linear holding a (n_heads, 1) weight used as a head-wise
     # vector in sparse attention, so shard it on the head dimension under TP.
     attention.attn_sink.sharding_config = ShardingConfig(

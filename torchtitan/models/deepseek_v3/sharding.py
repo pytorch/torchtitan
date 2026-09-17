@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
+    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
-    implicit_colwise_config,
-    implicit_rowwise_config,
     norm_config,
     pre_lm_head_norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_spmd,
@@ -96,6 +96,7 @@ def _set_deepseek_v3_layer_sharding(
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
     # MLA attention input: x is gathered to Replicate. RoPE is read from the
     # attention layer's local cache.
@@ -118,22 +119,28 @@ def _set_deepseek_v3_layer_sharding(
     attention.wkv_a.sharding_config = replicate_weight
     attention.kv_norm.sharding_config = replicate_weight
 
-    attention.wkv_b.sharding_config = implicit_colwise_config()
-    attention.wo.sharding_config = implicit_rowwise_config(output_sp=enable_sp)
+    attention.wkv_b.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    attention.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
     set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # Query projection: depends on q_lora_rank
     if attention.q_lora_rank == 0:
         assert attention.wq is not None
-        attention.wq.sharding_config = implicit_colwise_config()
+        attention.wq.sharding_config = colwise_config(
+            input_layout=replicated_input_layout
+        )
     else:
         # Low-rank: wq_a + q_norm stay replicated; wq_b is colwise.
         assert attention.wq_a is not None
         assert attention.wq_b is not None
         attention.wq_a.sharding_config = replicate_weight
         attention.q_norm.sharding_config = replicate_weight
-        attention.wq_b.sharding_config = implicit_colwise_config()
+        attention.wq_b.sharding_config = colwise_config(
+            input_layout=replicated_input_layout
+        )
 
     # Dense FFN (non-MoE layers only)
     if layer_cfg.feed_forward is not None:

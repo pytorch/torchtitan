@@ -17,6 +17,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     CosSinRoPE,
     Embedding,
     Linear,
@@ -101,7 +102,7 @@ def _make_gptoss_attn_config(
         head_dim=head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
-        wqkv=Linear.Config(
+        wqkv=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=(n_heads + 2 * n_kv_heads) * head_dim,
             bias=True,

@@ -28,8 +28,9 @@ from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import (
-    implicit_colwise_config,
-    implicit_rowwise_config,
+    colwise_config,
+    dense_sequence_parallel_placement,
+    rowwise_config,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
@@ -324,9 +325,13 @@ def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
 @pytest.mark.parametrize(
     "sharding_config_factory, input_tp",
     [
-        pytest.param(lambda: implicit_colwise_config(), spmd.R, id="colwise"),
         pytest.param(
-            lambda: implicit_rowwise_config(output_sp=True),
+            lambda: colwise_config(input_layout=dense_sequence_parallel_placement()),
+            spmd.R,
+            id="colwise",
+        ),
+        pytest.param(
+            lambda: rowwise_config(output_layout=dense_sequence_parallel_placement()),
             spmd.S(-1),
             id="rowwise",
         ),
@@ -616,8 +621,8 @@ def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
         )
 
     for sharding_config in (
-        implicit_colwise_config(),
-        implicit_rowwise_config(),
+        colwise_config(input_layout=dense_sequence_parallel_placement()),
+        rowwise_config(output_layout=dense_sequence_parallel_placement()),
     ):
         linear = MXFP8Linear.Config(
             in_features=128,

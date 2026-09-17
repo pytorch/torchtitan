@@ -17,10 +17,12 @@ from torchtitan.config.transform import (
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
+    ColumnParallelLinear,
     Conv1d,
     Embedding,
     Linear,
     PartialBiasRowwiseLinear,
+    RowParallelLinear,
     SigmoidGatedFeedForward,
     Softmax,
 )
@@ -138,14 +140,13 @@ def _shared_experts_config(
     depth_init = _depth_init(layer_id)
     return SigmoidGatedFeedForward.Config(
         # The gate and w13 share x, so the enclosing shared-expert boundary
-        # retains their single input all-gather until this module has an
-        # explicit shared-input TP implementation.
-        w13=Linear.Config(
+        # performs their input all-gather once.
+        w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=2 * hidden_dim,
             param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
         ),
-        w2=Linear.Config(
+        w2=RowParallelLinear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=depth_init,
@@ -233,22 +234,22 @@ def _qwen35_attention_config(
         head_dim=head_dim,
         rotary_dim=rotary_dim,
         rope=rope,
-        wq=Linear.Config(
+        wq=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=n_heads * head_dim * 2,
             param_init=_LINEAR_INIT,
         ),
-        wk=Linear.Config(
+        wk=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=n_kv_heads * head_dim,
             param_init=_LINEAR_INIT,
         ),
-        wv=Linear.Config(
+        wv=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=n_kv_heads * head_dim,
             param_init=_LINEAR_INIT,
         ),
-        wo=Linear.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             param_init=_depth_init(layer_id),
@@ -273,8 +274,13 @@ def _qwen35_deltanet_config(
     key_dim = n_key_heads * key_head_dim
     value_dim = n_value_heads * value_head_dim
 
-    def _proj(in_f: int, out_f: int, init: dict) -> Linear.Config:
-        return Linear.Config(
+    def _input_proj(in_f: int, out_f: int, init: dict) -> ColumnParallelLinear.Config:
+        return ColumnParallelLinear.Config(
+            in_features=in_f, out_features=out_f, bias=False, param_init=init
+        )
+
+    def _output_proj(in_f: int, out_f: int, init: dict) -> RowParallelLinear.Config:
+        return RowParallelLinear.Config(
             in_features=in_f, out_features=out_f, bias=False, param_init=init
         )
 
@@ -294,12 +300,12 @@ def _qwen35_deltanet_config(
         key_head_dim=key_head_dim,
         value_head_dim=value_head_dim,
         conv_kernel_size=conv_kernel_size,
-        in_proj_q=_proj(dim, key_dim, _LINEAR_INIT),
-        in_proj_k=_proj(dim, key_dim, _LINEAR_INIT),
-        in_proj_v=_proj(dim, value_dim, _LINEAR_INIT),
-        in_proj_z=_proj(dim, value_dim, _LINEAR_INIT),
-        in_proj_a=_proj(dim, n_value_heads, _LINEAR_INIT),
-        in_proj_b=_proj(dim, n_value_heads, _LINEAR_INIT),
+        in_proj_q=_input_proj(dim, key_dim, _LINEAR_INIT),
+        in_proj_k=_input_proj(dim, key_dim, _LINEAR_INIT),
+        in_proj_v=_input_proj(dim, value_dim, _LINEAR_INIT),
+        in_proj_z=_input_proj(dim, value_dim, _LINEAR_INIT),
+        in_proj_a=_input_proj(dim, n_value_heads, _LINEAR_INIT),
+        in_proj_b=_input_proj(dim, n_value_heads, _LINEAR_INIT),
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
@@ -311,7 +317,7 @@ def _qwen35_deltanet_config(
             eps=1e-6,
             param_init={"weight": nn.init.ones_},
         ),
-        out_proj=_proj(value_dim, dim, _depth_init(layer_id)),
+        out_proj=_output_proj(value_dim, dim, _depth_init(layer_id)),
         param_init={
             "A_log": _a_log_init,
             "dt_bias": nn.init.ones_,

@@ -17,11 +17,13 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     Conv1d,
     Embedding,
     FeedForward,
     Linear,
     RouterGateLinear,
+    RowParallelLinear,
     Sigmoid,
     SiTUGLU,
 )
@@ -124,6 +126,36 @@ def _linear(
     )
 
 
+def _column_parallel_linear(
+    in_features: int,
+    out_features: int,
+    *,
+    bias: bool = False,
+    param_init: dict[str, Callable] | None = None,
+) -> ColumnParallelLinear.Config:
+    return ColumnParallelLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=bias,
+        param_init=param_init or _LINEAR_INIT,
+    )
+
+
+def _row_parallel_linear(
+    in_features: int,
+    out_features: int,
+    *,
+    bias: bool = False,
+    param_init: dict[str, Callable] | None = None,
+) -> RowParallelLinear.Config:
+    return RowParallelLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=bias,
+        param_init=param_init or _LINEAR_INIT,
+    )
+
+
 def _norm(dim: int, eps: float = 1e-5) -> RMSNorm.Config:
     return RMSNorm.Config(
         normalized_shape=dim,
@@ -171,15 +203,15 @@ def _mla_config(
         v_head_dim=v_head_dim,
         wq_a=_linear(dim, q_lora_rank),
         q_norm=_norm(q_lora_rank),
-        wq_b=_linear(q_lora_rank, num_heads * q_head_dim),
+        wq_b=_column_parallel_linear(q_lora_rank, num_heads * q_head_dim),
         wkv_a=_linear(dim, kv_lora_rank + qk_rope_head_dim),
         kv_norm=_norm(kv_lora_rank),
-        wkv_b=_linear(
+        wkv_b=_column_parallel_linear(
             kv_lora_rank,
             num_heads * (qk_nope_head_dim + v_head_dim),
         ),
-        gate=_linear(dim, num_heads * v_head_dim),
-        wo=_linear(num_heads * v_head_dim, dim),
+        gate=_column_parallel_linear(dim, num_heads * v_head_dim),
+        wo=_row_parallel_linear(num_heads * v_head_dim, dim),
         inner_attention=inner_attention,
     )
 
@@ -207,16 +239,16 @@ def _kda_config(
         num_heads=num_heads,
         head_dim=head_dim,
         conv_kernel_size=conv_kernel_size,
-        q_proj=_linear(dim, projection_dim),
-        k_proj=_linear(dim, projection_dim),
-        v_proj=_linear(dim, projection_dim),
+        q_proj=_column_parallel_linear(dim, projection_dim),
+        k_proj=_column_parallel_linear(dim, projection_dim),
+        v_proj=_column_parallel_linear(dim, projection_dim),
         q_conv=conv(),
         k_conv=conv(),
         v_conv=conv(),
         forget_a=_linear(dim, head_dim),
-        forget_b=_linear(head_dim, projection_dim),
-        beta=_linear(dim, num_heads),
-        output_gate=_linear(dim, projection_dim),
+        forget_b=_column_parallel_linear(head_dim, projection_dim),
+        beta=_column_parallel_linear(dim, num_heads),
+        output_gate=_column_parallel_linear(dim, projection_dim),
         inner_kda=InnerKDA.Config(
             head_dim=head_dim,
             kernel=KDAKernel.Config(),
@@ -226,7 +258,7 @@ def _kda_config(
             eps=1e-5,
             param_init=_NORM_INIT,
         ),
-        output_proj=_linear(projection_dim, dim),
+        output_proj=_row_parallel_linear(projection_dim, dim),
         param_init={
             "A_log": _a_log_init,
             "dt_bias": nn.init.zeros_,

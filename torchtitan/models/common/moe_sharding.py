@@ -19,6 +19,7 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     token_id_placement,
 )
+from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -180,6 +181,24 @@ def set_shared_experts_sharding_config(
         enable_ep=enable_ep,
         enable_sp=enable_sp,
     )
+    if isinstance(shared_experts_cfg, SigmoidGatedFeedForward.Config):
+        replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        # The gate and w13 both consume x, so gather once at their parent.
+        shared_config.in_dst_shardings = {"x": replicated_input_layout}
+        w13_config = colwise_config(input_layout=replicated_input_layout)
+        gate_output_layout = (
+            dense_sequence_parallel_placement()
+            if enable_sp
+            else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        )
+        shared_experts_cfg.gate.sharding_config = ShardingConfig(
+            state_shardings={
+                "weight": dense_param_placement(tp=spmd.R),
+                "bias": dense_param_placement(tp=spmd.R),
+            },
+            out_src_shardings=replicated_input_layout,
+            out_dst_shardings=gate_output_layout,
+        )
     shared_experts_cfg.sharding_config = shared_config
     shared_experts_cfg.w13.sharding_config = w13_config
     # Shared output can stay Partial until it is added to the routed-expert
@@ -291,14 +310,14 @@ def _moe_sharding_config(
     )
 
 
-def set_moe_core_sharding_config(
+def set_moe_sharding_config(
     moe_cfg,
     *,
     enable_ep: bool,
     enable_sp: bool,
     expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
 ) -> None:
-    """Configure the MoE wrapper, router, and routed experts only.
+    """Populate ``sharding_config`` on every MoE submodule.
 
     Branches dense vs sparse family per Module:
 
@@ -307,6 +326,8 @@ def set_moe_core_sharding_config(
     - ``moe.router``: input and padding-mask redistribution to the router's
       token layout, plus the expert-count buffer placement.
     - ``moe.router.gate``: Replicate weights and output.
+    - ``moe.shared_experts``: explicit column-/row-parallel projections and,
+      for ``SigmoidGatedFeedForward``, its shared-input gate.
     - ``moe.routed_experts.inner_experts`` (``GroupedExperts``): expert-weight
       ``state_shardings`` -- sparse ``{EP}`` / dense ``{TP}`` / none. The parent
       ``routed_experts`` holds the activation shardings and local SPMD region.
@@ -348,22 +369,6 @@ def set_moe_core_sharding_config(
     )
     moe_cfg.routed_experts.sharding_config = routed_experts_config
     moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_config
-
-
-def set_moe_sharding_config(
-    moe_cfg,
-    *,
-    enable_ep: bool,
-    enable_sp: bool,
-    expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
-) -> None:
-    """Configure an MoE whose shared experts use the standard FeedForward."""
-    set_moe_core_sharding_config(
-        moe_cfg,
-        enable_ep=enable_ep,
-        enable_sp=enable_sp,
-        expert_param_layout=expert_param_layout,
-    )
     if moe_cfg.shared_experts is not None:
         set_shared_experts_sharding_config(
             moe_cfg.shared_experts,
