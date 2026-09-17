@@ -54,6 +54,35 @@ def _trainable_group(group_id: int, *, num_samples: int) -> TrainingSampleGroup:
     )
 
 
+def _variable_length_group(
+    group_id: int, *, token_lengths: list[int]
+) -> TrainingSampleGroup:
+    samples = []
+    for rollout_id, token_length in enumerate(token_lengths):
+        samples.append(
+            TrainingSample(
+                min_policy_version=0,
+                max_policy_version=0,
+                rollout_id=RolloutTurnID(
+                    group_id=group_id,
+                    rollout_id=rollout_id,
+                    turn_id=0,
+                ),
+                token_ids=list(range(token_length)),
+                loss_mask=[False] + [True] * (token_length - 1),
+                logprobs=[0.0] * token_length,
+                advantage=[0.0] + [1.0] * (token_length - 1),
+            )
+        )
+    return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
+
+
+def _metric_value(batch, key: str) -> float:
+    metric = next(metric for metric in batch.metrics if metric.key == key)
+    assert isinstance(metric.value, m.NoReduce)
+    return metric.value.value
+
+
 def _untrainable_group(group_id: int) -> TrainingSampleGroup:
     return TrainingSampleGroup(group_id=group_id, training_samples=[], metrics=[])
 
@@ -143,9 +172,9 @@ def test_batcher_raises_at_consecutive_untrainable_group_limit() -> None:
         batcher.add_training_samples(training_sample_group=_untrainable_group(19))
 
 
-def test_microbatch_grid_avoids_all_padding_cells_when_possible() -> None:
-    # 5 real rows, 2 rows/rank, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
-    # Redistributing one row into the fourth cell keeps every cell trainable.
+def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
+    # Five two-token samples need four rank inputs across two microbatches.
+    # Redistributing one sample keeps every rank input trainable.
     batcher = Batcher.Config(max_num_documents=4).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
@@ -166,9 +195,155 @@ def test_microbatch_grid_avoids_all_padding_cells_when_possible() -> None:
         assert not cell.padding_mask[cell.loss_mask].any()
 
 
+def test_batcher_uses_flat_rank_capacity_and_reports_padding_reduction() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=8,
+        max_context_length=4,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    batch, group_is_trainable = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(
+            0,
+            token_lengths=[4, 4, 3],
+        )
+    )
+
+    assert batch is not None
+    assert group_is_trainable
+    assert len(batch.microbatches) == 1
+    microbatch = batch.microbatches[0][0]
+    assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
+    assert not microbatch.padding_mask.any()
+    assert _metric_value(batch, "train_batch/padding_frac_before_load_balance") == 0.5
+    assert _metric_value(batch, "train_batch/padding_frac") == 0.0
+
+
+def test_flat_rank_packing_preserves_padding_mask() -> None:
+    batcher = Batcher.Config(per_sample_pad_multiple=4).build(
+        num_tokens_per_microbatch_per_dp_rank=8,
+        max_context_length=4,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    batch, _ = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(0, token_lengths=[4])
+    )
+
+    assert batch is not None
+    microbatch = batch.microbatches[0][0]
+    assert microbatch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
+    assert microbatch.padding_mask.tolist() == [
+        False,
+        False,
+        False,
+        True,
+        True,
+        True,
+        True,
+        True,
+    ]
+
+
+def test_batcher_uses_first_fit_decreasing_across_dp_ranks() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=8,
+        max_context_length=8,
+        num_prompts_per_train_step=1,
+        dp_degree=2,
+        pad_id=0,
+    )
+    batch, group_is_trainable = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(
+            0,
+            token_lengths=[5, 4, 4, 3],
+        )
+    )
+
+    assert batch is not None
+    assert group_is_trainable
+    assert [
+        [int((~rank.padding_mask).sum().item()) for rank in microbatch]
+        for microbatch in batch.microbatches
+    ] == [[7, 5]]
+
+
+def test_batcher_splits_bins_with_two_way_lpt() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=32,
+        max_context_length=32,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    samples = _variable_length_group(
+        0,
+        # Effective lengths and workloads are [8, 6, 5, 3] and
+        # [64, 36, 25, 9], respectively.
+        token_lengths=[9, 7, 6, 4],
+    ).training_samples
+
+    left, right = batcher._split_by_attention_workload(samples)
+
+    assert sorted(
+        [batcher._attention_workload(left), batcher._attention_workload(right)]
+    ) == [64, 70]
+
+
+def test_batcher_splits_and_sorts_by_attention_workload() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=10,
+        max_context_length=10,
+        num_prompts_per_train_step=1,
+        dp_degree=2,
+        pad_id=0,
+    )
+    samples = _variable_length_group(
+        0,
+        # Effective lengths are [6, 6, 6, 4, 4, 4]. FFD produces three bins,
+        # then LPT splitting aligns the count to four DP inputs.
+        token_lengths=[7, 7, 7, 5, 5, 5],
+    ).training_samples
+
+    assignments = batcher._assign_training_samples_to_microbatches(samples)
+    workloads = [
+        [batcher._attention_workload(rank_samples) for rank_samples in microbatch]
+        for microbatch in assignments
+    ]
+
+    # Global workload sorting puts similarly expensive bins in the same outer
+    # accumulation step.
+    assert workloads == [[52, 52], [36, 16]]
+
+
+def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> None:
+    batcher = Batcher.Config(max_num_documents=3).build(
+        num_tokens_per_microbatch_per_dp_rank=6,
+        max_context_length=3,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    batch, _ = batcher.add_training_samples(
+        training_sample_group=_variable_length_group(
+            0,
+            token_lengths=[2, 2, 4, 2, 2, 4],
+        )
+    )
+
+    assert batch is not None
+    assert len(batch.microbatches) == 3
+    assert _metric_value(
+        batch, "train_batch/padding_frac_before_load_balance"
+    ) == pytest.approx(1 / 6)
+    assert _metric_value(batch, "train_batch/padding_frac") == pytest.approx(4 / 9)
+
+
 def test_document_limit_applies_to_each_local_microbatch() -> None:
-    # Each row holds two documents, but a local microbatch is capped at three.
-    # The batcher must keep all five documents and split the rows 2 + 3.
+    # A local microbatch is capped at three documents. The batcher must keep all
+    # five documents and distribute them 2 + 3 across two microbatches.
     batcher = Batcher.Config(max_num_documents=3).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
@@ -187,7 +362,7 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
     for (microbatch,) in batch.microbatches:
         real_document_starts = (microbatch.positions == 0) & ~microbatch.padding_mask
         num_documents.append(int(real_document_starts.sum().item()))
-    assert num_documents == [2, 3]
+    assert sorted(num_documents) == [2, 3]
     assert sum(num_documents) == 5
 
 
