@@ -26,6 +26,10 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.lora import (
+    LoRAColumnParallelLinear,
+    LoRARowParallelLinear,
+)
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.module import Module
 
@@ -50,6 +54,10 @@ def test_lora_model_builds():
     model = model_spec.model.build()
     model.init_states()
 
+    for layer in model.layers.values():
+        assert isinstance(layer.attention.qkv_linear.wqkv, LoRAColumnParallelLinear)
+        assert isinstance(layer.attention.wo, LoRARowParallelLinear)
+
     lora_params = {
         n for n, p in model.named_parameters() if "lora_a" in n or "lora_b" in n
     }
@@ -59,7 +67,7 @@ def test_lora_model_builds():
     assert len(frozen_linears) > 0, "No frozen parameters found"
     lora_modules = {name.rsplit(".", 2)[0] for name in lora_params}
     assert lora_modules == {
-        f"layers.{layer}.attention.{projection}.linear"
+        f"layers.{layer}.attention.{projection}"
         for layer in range(6)
         for projection in ("qkv_linear.wqkv", "wo")
     }
@@ -161,7 +169,7 @@ def test_lora_targets_fused_feed_forward_projection():
 
 
 def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
-    """The nested LoRA projection inherits state sharding, not TP collectives."""
+    """The LoRA adapters inherit state sharding, not TP collectives."""
     init = {"weight": torch.nn.init.zeros_}
     config = make_ffn_config(
         dim=4,
@@ -187,7 +195,7 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
     assert feed_forward.w13._sharding_config.in_src_shardings is not None
     assert feed_forward.w13._sharding_config.in_dst_shardings is None
 
-    lora_b_sharding = feed_forward.w13.linear.lora_b._sharding_config
+    lora_b_sharding = feed_forward.w13.lora_b._sharding_config
     assert lora_b_sharding is not None
     assert lora_b_sharding.state_shardings["weight"] == dense_param_placement(
         tp=spmd.S(1)
@@ -240,7 +248,7 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
 
 def test_lora_class_is_reused_for_the_same_parent():
-    """Dynamic LoRA class creation is cached per parent class."""
+    """Linear uses the same explicit LoRA class across transformations."""
     first = LoRATransform(handlers=LINEAR_LORA_HANDLERS, rank=2, alpha=4.0).transform(
         Linear.Config(in_features=4, out_features=3)
     )

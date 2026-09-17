@@ -16,9 +16,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     row_parallel_config,
-    rowwise_compute_config,
     stacked_column_parallel_config,
-    stacked_colwise_config,
     token_id_placement,
 )
 from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
@@ -184,13 +182,10 @@ def set_shared_experts_sharding_config(
     )
     shared_experts_cfg.sharding_config = shared_config
     shared_experts_cfg.w13.sharding_config = w13_config
-    shared_experts_cfg.w13.linear.sharding_config = stacked_colwise_config()
-    shared_experts_cfg.w2.sharding_config = w2_config
     # Shared output can stay Partial until it is added to the routed-expert
     # output, so its rowwise bias remains Replicate.
-    shared_experts_cfg.w2.linear.sharding_config = rowwise_compute_config(
-        bias_tp=spmd.R
-    )
+    w2_config.state_shardings["bias"] = dense_param_placement(tp=spmd.R)
+    shared_experts_cfg.w2.sharding_config = w2_config
 
 
 def _routed_experts_sharding_configs(

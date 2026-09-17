@@ -567,8 +567,8 @@ def _build_mtp_layers(
                 shared_experts = block_cfg.moe.shared_experts
                 assert isinstance(shared_experts.w13, ColumnParallelLinear.Config)
                 assert isinstance(shared_experts.w2, RowParallelLinear.Config)
-                shared_experts.w2.linear.param_init = depth_init
-                shared_experts.w13.linear.param_init = fused_gate_up_param_init(
+                shared_experts.w2.param_init = depth_init
+                shared_experts.w13.param_init = fused_gate_up_param_init(
                     _LINEAR_INIT, depth_init
                 )
         mtp_layers.append(

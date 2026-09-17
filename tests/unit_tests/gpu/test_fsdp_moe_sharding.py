@@ -163,7 +163,7 @@ class TestApplyFsdpStackedWeightSharding(DTensorTestBase):
             pp_enabled=False,
         )
 
-        w13 = model.layers["0"].feed_forward.w13.linear
+        w13 = model.layers["0"].feed_forward.w13
         self.assertIsInstance(w13, Linear)
         shard_dims = {
             placement.dim
@@ -198,9 +198,7 @@ class TestApplyFsdpStackedWeightSharding(DTensorTestBase):
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
 
         sharded_config = model_registry("debugmodel").model
-        sharded_config.layers[
-            0
-        ].feed_forward.w13.linear.param_init = fused_gate_up_param_init(
+        sharded_config.layers[0].feed_forward.w13.param_init = fused_gate_up_param_init(
             {"weight": lambda tensor: torch.nn.init.constant_(tensor, 1)},
             {"weight": lambda tensor: torch.nn.init.constant_(tensor, 3)},
         )
@@ -217,9 +215,9 @@ class TestApplyFsdpStackedWeightSharding(DTensorTestBase):
             dp_mesh_dims=dp_mesh_dims,
         )
         sharded.to_empty(device=self.device_type)
-        sharded.layers["0"].feed_forward.w13.linear.init_states()
+        sharded.layers["0"].feed_forward.w13.init_states()
 
-        actual_w13 = sharded.layers["0"].feed_forward.w13.linear.weight.full_tensor()
+        actual_w13 = sharded.layers["0"].feed_forward.w13.weight.full_tensor()
         torch.testing.assert_close(actual_w13[0], torch.ones_like(actual_w13[0]))
         torch.testing.assert_close(actual_w13[1], 3 * torch.ones_like(actual_w13[1]))
 
