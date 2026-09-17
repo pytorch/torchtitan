@@ -153,6 +153,25 @@ class ValidationConfig:
 
 
 @dataclass(kw_only=True, slots=True)
+class LauncherConfig:
+    """Settings for how the trainer/generator procs are launched.
+
+    Monarch (unlike torchrun/Ray) does not cap BLAS/OMP threads on the procs it
+    spawns, so N co-located procs each size their thread pools to the whole host
+    and thrash the cores (measured: generator GPUs starved, ~1.3-2x slower). ``env``
+    is merged into every spawned proc's LAUNCH environment (see rl/train.py
+    ``spawn_proc_mesh``) on top of a default OMP/BLAS thread cap; any key set here
+    overrides that default. TODO: fold into a shared OSS launcher config once one
+    exists.
+    """
+
+    env: dict[str, str] = field(default_factory=dict)
+    """Extra environment variables applied to every spawned proc's launch env.
+    Overrides the launcher's default per-proc thread cap per key. Example TOML:
+    ``[launcher.env]`` with ``OMP_NUM_THREADS = "16"``."""
+
+
+@dataclass(kw_only=True, slots=True)
 class AsyncLoopConfig(Configurable.Config):
     num_training_steps: int = 10
     """Optimizer steps to run."""
@@ -291,6 +310,9 @@ class Controller(Configurable):
 
         dump_folder: str = "outputs/rl"
         """Root output folder for RL artifacts (temp weights, logs, etc.)."""
+
+        launcher: LauncherConfig = field(default_factory=LauncherConfig)
+        """How the trainer/generator procs are launched (per-proc env, thread cap)."""
 
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
