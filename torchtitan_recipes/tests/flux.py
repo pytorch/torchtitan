@@ -18,15 +18,11 @@ from torchtitan.models.flux.flux_datasets import (
     FluxSampleProcessor,
     FluxValidationDatasetConfig,
 )
+from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.models.flux.validate import FluxValidator
-from torchtitan.trainer import Trainer
 
 
-def flux_debugmodel_test() -> Trainer.Config:
-    """Flux debug model pointed at the offline test encoders and tokenizers."""
-    from torchtitan.models.flux.config_registry import flux_debugmodel
-
-    config = flux_debugmodel()
+def _use_offline_test_assets(config: FluxTrainer.Config) -> FluxTrainer.Config:
     config.hf_assets_path = "tests/assets/tokenizer"
     config.tokenizer.test_mode = True
     config.tokenizer.t5_tokenizer_path = "tests/assets/tokenizer"
@@ -39,7 +35,21 @@ def flux_debugmodel_test() -> Trainer.Config:
     return config
 
 
-def flux_debugmodel_hsdp2x2_cp2_validation() -> Trainer.Config:
+def flux_debugmodel_test() -> FluxTrainer.Config:
+    """Flux debug model pointed at the offline test encoders and tokenizers."""
+    from torchtitan.models.flux.config_registry import flux_debugmodel
+
+    return _use_offline_test_assets(flux_debugmodel())
+
+
+def flux_debugmodel_inference_test() -> FluxTrainer.Config:
+    """Flux inference config pointed at the offline test assets."""
+    from torchtitan.models.flux.config_registry import flux_debugmodel_inference
+
+    return _use_offline_test_assets(flux_debugmodel_inference())
+
+
+def flux_debugmodel_hsdp2x2_cp2_validation() -> FluxTrainer.Config:
     config = flux_debugmodel_test()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
@@ -72,7 +82,7 @@ def flux_debugmodel_hsdp2x2_cp2_validation() -> Trainer.Config:
     return config
 
 
-def flux_debugmodel_compile() -> Trainer.Config:
+def flux_debugmodel_compile() -> FluxTrainer.Config:
     config = flux_debugmodel_test()
     config.compile = CompileConfig()
     config.training.disable_cuda_graphs = True

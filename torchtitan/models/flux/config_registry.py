@@ -6,7 +6,13 @@
 
 from dataclasses import replace
 
-from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.checkpointer import (
+    CheckpointManager,
+    DATALOADER,
+    LR_SCHEDULER,
+    OPTIMIZER,
+    TRAIN_STATE,
+)
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -98,7 +104,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
 def flux_debugmodel_inference() -> FluxTrainer.Config:
     config = flux_debugmodel()
     config.checkpointer = CheckpointManager.Config(
-        exclude_from_loading=["lr_scheduler", "dataloader", "optimizer"],
+        exclude_from_loading=[DATALOADER, LR_SCHEDULER, OPTIMIZER, TRAIN_STATE],
     )
     return config
 
