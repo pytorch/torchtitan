@@ -41,6 +41,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
     construct_mandatory_graph_passes,
+    GraphPassRuntimeContext,
 )
 from torchtitan.experiments.graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
@@ -357,6 +358,12 @@ class GraphTrainingEngine(TrainingEngine):
                 passes,
                 compile_config=self.config.compile,
                 respect_disable_passes=self.config.compile.enable_passes,
+                runtime_context=GraphPassRuntimeContext(
+                    traced_result=self._traced_step,
+                    module=model,
+                    args=(inputs, labels, global_valid_tokens, extra_kwargs),
+                    train_context=self.train_context,
+                ),
             )
         assert self._traced_step is not None
         if self._graph_runner is None:

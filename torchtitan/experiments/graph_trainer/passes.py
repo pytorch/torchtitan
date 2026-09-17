@@ -33,8 +33,12 @@ import logging
 import time
 import warnings
 from collections.abc import Callable
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
+from typing import Any
 
 import torch
+import torch.nn as nn
 
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.configs import (
@@ -42,7 +46,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     MOE_BLOCK_FQN,
     validate_ep_overlap_config,
 )
-
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cuda_graph import (
     cuda_graph_pass,
@@ -100,6 +103,42 @@ logger = logging.getLogger(__name__)
 
 
 c10d = torch.ops._c10d_functional
+
+
+@dataclass(frozen=True)
+class GraphPassRuntimeContext:
+    """Live training state made available to explicitly opted-in graph passes.
+
+    Most graph passes should only use the graph and its fake example inputs.
+    Runtime-aware passes may use this context to evaluate graph candidates with
+    the model state and batch that produced the trace, without constructing a
+    second model or consuming another batch from the data loader.
+    """
+
+    traced_result: TracedResult
+    module: nn.Module
+    args: tuple[Any, ...]
+    train_context: Callable[[], AbstractContextManager[Any]]
+
+
+@dataclass(frozen=True)
+class RuntimeContextGraphPass:
+    """Opt a graph pass into receiving :class:`GraphPassRuntimeContext`."""
+
+    pass_fn: Callable
+
+    def __call__(
+        self,
+        gm: torch.fx.GraphModule,
+        example_inputs: tuple,
+        *,
+        runtime_context: GraphPassRuntimeContext,
+    ) -> torch.fx.GraphModule:
+        return self.pass_fn(
+            gm,
+            example_inputs,
+            runtime_context=runtime_context,
+        )
 
 
 def async_tensor_parallel_pass(
@@ -473,6 +512,8 @@ def construct_default_graph_passes(
 
 
 def _get_pass_name(pass_fn: Callable) -> str:
+    if isinstance(pass_fn, RuntimeContextGraphPass):
+        pass_fn = pass_fn.pass_fn
     return (
         pass_fn.func.__name__
         if isinstance(pass_fn, functools.partial)
@@ -505,20 +546,24 @@ def apply_graph_passes(
     *,
     compile_config: "GraphTrainerCompileConfig | None" = None,
     respect_disable_passes: bool = True,
+    runtime_context: GraphPassRuntimeContext | None = None,
 ) -> torch.fx.GraphModule:
     """Apply graph passes to the traced fwd+bwd graph.
 
     Args:
         gm: The traced forward+backward graph module.
         example_inputs: Example (fake) inputs matching the graph signature.
-        passes: Ordered list of pass callables, each with signature
-            ``(gm, example_inputs, **kwargs) -> gm``.
+        passes: Ordered list of ordinary ``(gm, example_inputs) -> gm`` pass
+            callables and, when live training state is needed, explicitly
+            wrapped :class:`RuntimeContextGraphPass` instances.
         compile_config: Optional compile config. When provided and
             ``debug_graph_passes`` is True, logs timing, op-count diffs,
             and before/after graphs to tlparse for each pass.
         respect_disable_passes: Whether ``compile_config.disable_passes`` may
             remove passes from this invocation. GraphPP sets this to ``False``
             for mandatory pre-partition normalization.
+        runtime_context: Live model state and inputs supplied only to passes
+            wrapped in :class:`RuntimeContextGraphPass`.
     """
     debug = compile_config is not None and compile_config.debug_graph_passes
     disable_patterns = (
@@ -526,6 +571,19 @@ def apply_graph_passes(
     )
     if respect_disable_passes and disable_patterns:
         passes = _filter_disabled_passes(passes, disable_patterns)
+    if runtime_context is None:
+        missing_context_pass = next(
+            (
+                _get_pass_name(pass_fn)
+                for pass_fn in passes
+                if isinstance(pass_fn, RuntimeContextGraphPass)
+            ),
+            None,
+        )
+        if missing_context_pass is not None:
+            raise RuntimeError(
+                f"Pass {missing_context_pass} requires a graph pass runtime context"
+            )
     pass_names = [_get_pass_name(pass_fn) for pass_fn in passes]
     pass_list = "\n  ".join(f"{i}. {name}" for i, name in enumerate(pass_names, 1))
     logger.info(f"Applying {len(passes)} graph passes:\n  {pass_list}")
@@ -541,7 +599,15 @@ def apply_graph_passes(
             tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}", debug=debug)
             before_snapshot = snapshot_graph(gm)
             start = time.perf_counter()
-        gm = pass_fn(gm, pass_example_inputs)
+        if isinstance(pass_fn, RuntimeContextGraphPass):
+            assert runtime_context is not None
+            gm = pass_fn(
+                gm,
+                pass_example_inputs,
+                runtime_context=runtime_context,
+            )
+        else:
+            gm = pass_fn(gm, pass_example_inputs)
         assert isinstance(
             gm, torch.fx.GraphModule
         ), f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
