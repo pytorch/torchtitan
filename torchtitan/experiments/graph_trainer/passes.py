@@ -13,7 +13,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
 - ``memory_policy.py`` - SAC and min-cut policy tagging and dispatch
 - ``decompositions.py`` — standalone graph decomposition
 - ``inductor_passes.py`` — regional and full Inductor compilation
-- ``cudagraph.py`` — cudagraph wrapping and kernel annotations
+- ``CUDA graph.py`` — CUDA graph wrapping and kernel annotations
 - ``fsdp_passes.py`` — FSDP bucketing and resharding
 - ``remove_noop_passes.py`` — mandatory gradient-marker cleanup plus graph
   cleanup bundled as ``canonicalize_graph_pass`` (detach, identity view/slice,
@@ -44,8 +44,8 @@ from torchtitan.experiments.graph_trainer.configs import (
 )
 
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
-from torchtitan.experiments.graph_trainer.cudagraph import (
-    cudagraph_pass,
+from torchtitan.experiments.graph_trainer.cuda_graph import (
+    cuda_graph_pass,
     insert_kernel_annotations_pass,
 )
 from torchtitan.experiments.graph_trainer.debug_utils import (
@@ -156,7 +156,7 @@ def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
     *,
-    use_cudagraph: bool = False,
+    use_cuda_graph: bool = False,
     parallel_dims=None,
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
@@ -167,7 +167,7 @@ def compile_time_passes(
     that compiled Triton kernels are baked into the artifact. Otherwise
     they run at trace time via ``construct_default_graph_passes``.
 
-    cudagraph is excluded because it needs to re-capture the graph into
+    CUDA graph is excluded because it needs to re-capture the graph into
     an in-memory CUDA graph at runtime.
 
     ``reassign_collective_pgs_pass`` runs just before bucketing to place
@@ -367,7 +367,7 @@ def compile_time_passes(
     passes.extend(
         final_inductor_compile_passes(
             config.compile,
-            use_cudagraph=use_cudagraph,
+            use_cuda_graph=use_cuda_graph,
         )
     )
     return passes
@@ -376,7 +376,7 @@ def compile_time_passes(
 def final_inductor_compile_passes(
     compile_config: GraphTrainerCompileConfig,
     *,
-    use_cudagraph: bool = False,
+    use_cuda_graph: bool = False,
     boxed_codegen: bool = False,
 ) -> list[Callable]:
     """Return the terminal Inductor passes for a traced graph.
@@ -421,7 +421,7 @@ def final_inductor_compile_passes(
                 boxed_codegen=boxed_codegen,
             )
         )
-        if use_cudagraph:
+        if use_cuda_graph:
             passes.append(insert_kernel_annotations_pass)
     else:
         raise ValueError(
@@ -440,12 +440,12 @@ def construct_default_graph_passes(
     """Build the pass list for the aot_fx_trace path.
 
     When ``precompile_artifact_dir`` is unset, returns the full list: cleanup,
-    FlexInnerAttention annotation, regional_inductor, and cudagraph.
+    FlexInnerAttention annotation, regional_inductor, and CUDA graph.
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
-    transformed during precompile phase, so only cudagraph is returned.
+    transformed during precompile phase, so only CUDA graph is returned.
     """
-    want_cudagraph = "cudagraph_pass" not in config.compile.disable_passes
+    want_cuda_graph = "cuda_graph_pass" not in config.compile.disable_passes
 
     has_precompile_artifact = bool(config.compile.precompile_artifact_dir)
 
@@ -455,16 +455,16 @@ def construct_default_graph_passes(
             compile_time_passes(
                 traced_result,
                 config,
-                use_cudagraph=want_cudagraph,
+                use_cuda_graph=want_cuda_graph,
                 parallel_dims=parallel_dims,
             )
         )
 
-    if want_cudagraph:
+    if want_cuda_graph:
         static_input_indices = list(range(traced_result.num_static_inputs))
         passes.append(
             functools.partial(
-                cudagraph_pass,
+                cuda_graph_pass,
                 static_input_indices=static_input_indices,
                 tensor_input_indices=traced_result.tensor_input_indices,
             )

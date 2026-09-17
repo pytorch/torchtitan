@@ -10,7 +10,6 @@ import torchtitan_recipes.tests.models as recipes
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
-from torchtitan.models.qwen3.config_registry import qwen3_debugmodel_moe_param_groups
 
 from tests.integration_tests import OverrideDefinitions
 
@@ -126,7 +125,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/{gpu_arch}/qwen3.txt"
             ),
-            loss_compare_seed_config=qwen3_debugmodel_moe_param_groups,
+            loss_compare_seed_config=recipes.qwen3_debugmodel_moe_param_groups_seed,
         ),
         OverrideDefinitions(
             configs=[

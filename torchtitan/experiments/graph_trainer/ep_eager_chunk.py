@@ -369,7 +369,7 @@ def maybe_apply_ep_overlap_eager_chunking(
     compile_config: GraphTrainerCompileConfig,
 ) -> None:
     """Wrap selected module forwards so tracing observes eager chunking."""
-    if not compile_config.enable or not compile_config.ep_overlap.enabled:
+    if compile_config is None or not compile_config.ep_overlap.enabled:
         return
     chunk_dim, chunk_strategy, module_fqn = validate_ep_overlap_config(
         compile_config.ep_overlap

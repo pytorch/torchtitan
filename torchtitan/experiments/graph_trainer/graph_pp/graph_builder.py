@@ -672,7 +672,7 @@ def _compile_graph_pp_module(
     graph_name: str,
 ) -> fx.GraphModule:
     """Compile one extracted GraphPP callable with GraphTrainer Inductor passes."""
-    if not compile_config.enable or not compile_config.enable_passes:
+    if compile_config is None or not compile_config.enable_passes:
         return ensure_boxed_graph_module(gm)
 
     example_inputs = example_inputs_from_placeholders(gm)
@@ -681,7 +681,7 @@ def _compile_graph_pp_module(
         example_inputs,
         final_inductor_compile_passes(
             compile_config,
-            use_cudagraph=False,
+            use_cuda_graph=False,
             boxed_codegen=True,
         ),
         compile_config=compile_config,
@@ -828,7 +828,7 @@ def _apply_graph_pp_pre_partition_passes(
             parallelism=parallelism,
             model_spec=types.SimpleNamespace(model=model_config),
         ),
-        use_cudagraph=False,
+        use_cuda_graph=False,
         include_inductor=False,
         include_mandatory_normalization=False,
     )
@@ -1292,24 +1292,24 @@ class GraphTrainerStageGraphProvider:
     compile_config: GraphTrainerCompileConfig
     model_config: BaseModel.Config | None
     parallelism: ParallelismConfig | None
-    _warned_cudagraph: bool = False
+    _warned_cuda_graph: bool = False
     _overlap_graphs: dict[tuple[int, int], GraphPPOverlapGraphs] | None = None
 
-    def _warn_if_cudagraph_pass_requested(self) -> None:
-        if self._warned_cudagraph:
+    def _warn_if_cuda_graph_pass_requested(self) -> None:
+        if self._warned_cuda_graph:
             return
-        if not self.compile_config.enable or not self.compile_config.enable_passes:
+        if self.compile_config.mode is None or not self.compile_config.enable_passes:
             return
-        if "cudagraph_pass" in self.compile_config.disable_passes:
+        if "cuda_graph_pass" in self.compile_config.disable_passes:
             return
         warnings.warn(
-            "GraphPP compiles extracted stage graphs with use_cudagraph=False "
-            "even though cudagraph_pass is enabled. CUDA graph capture needs "
+            "GraphPP compiles extracted stage graphs with use_cuda_graph=False "
+            "even though cuda_graph_pass is enabled. CUDA graph capture needs "
             "a separate GraphPP runtime integration. Pass "
-            "--compile.disable_passes cudagraph_pass to silence this warning.",
+            "--compile.disable_passes cuda_graph_pass to silence this warning.",
             stacklevel=3,
         )
-        self._warned_cudagraph = True
+        self._warned_cuda_graph = True
 
     def prepare_graphs(
         self,
@@ -1380,7 +1380,7 @@ class GraphTrainerStageGraphProvider:
                 compile_graphs=False,
             )
 
-        self._warn_if_cudagraph_pass_requested()
+        self._warn_if_cuda_graph_pass_requested()
         required_overlap_pairs = _required_multiplex_pairs(schedule)
         if not required_overlap_pairs:
             self._overlap_graphs = {}

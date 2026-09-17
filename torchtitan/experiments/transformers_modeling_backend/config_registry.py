@@ -16,7 +16,12 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import (
+    CompileConfig,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
@@ -63,12 +68,17 @@ def transformers_modeling_backend_debugmodel(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def transformers_modeling_backend_debugmodel_compile(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> TransformersBackendConfig:
+    config = transformers_modeling_backend_debugmodel(seq_len=seq_len)
+    config.compile = CompileConfig()
+    return config
 
 
 def transformers_modeling_backend_debugmodel_moe(
@@ -100,12 +110,17 @@ def transformers_modeling_backend_debugmodel_moe(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def transformers_modeling_backend_debugmodel_moe_compile(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> TransformersBackendConfig:
+    config = transformers_modeling_backend_debugmodel_moe(seq_len=seq_len)
+    config.compile = CompileConfig()
+    return config
 
 
 def transformers_modeling_backend_full_moe(
@@ -135,10 +150,7 @@ def transformers_modeling_backend_full_moe(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -172,10 +184,7 @@ def transformers_modeling_backend_full(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -228,8 +237,7 @@ def transformers_modeling_backend_sft_full(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            enable=True,
+        checkpointer=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_model_only=True,
             interval=10,
@@ -291,9 +299,6 @@ def transformers_modeling_backend_sft_debugmodel(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )

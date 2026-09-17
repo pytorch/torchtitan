@@ -7,10 +7,8 @@
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.components.validate import Validator
 from torchtitan.config import CommConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
@@ -59,10 +57,7 @@ def llama3_torchft_debugmodel(
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
-        checkpoint=TorchFTCheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
         comm=CommConfig(train_timeout_seconds=15),
         fault_tolerance=FaultTolerance(
@@ -73,8 +68,5 @@ def llama3_torchft_debugmodel(
             sync_steps=10,
             num_fragments=2,
         ),
-        validator=Validator.Config(
-            freq=5,
-            steps=10,
-        ),
+        validator=None,
     )
