@@ -331,10 +331,7 @@ class TestTensorParallelModules(unittest.TestCase):
         self.assertIsInstance(transformed.shared_experts.w2, RowParallelLinear.Config)
 
     def test_shared_expert_sharding_uses_projection_boundaries(self):
-        from torchtitan.models.common.moe_sharding import (
-            set_moe_sharding_config,
-            set_shared_experts_sharding_config,
-        )
+        from torchtitan.models.common.moe_sharding import set_moe_sharding_config
         from torchtitan.models.deepseek_v3 import model_registry
 
         model = model_registry("debugmodel", seq_len=128).model
@@ -347,12 +344,6 @@ class TestTensorParallelModules(unittest.TestCase):
             enable_sp=True,
             expert_param_layout={},
         )
-        set_shared_experts_sharding_config(
-            moe.shared_experts,
-            enable_ep=True,
-            enable_sp=True,
-        )
-
         self.assertIsNone(moe.shared_experts.sharding_config.in_dst_shardings)
         self.assertIsNone(moe.shared_experts.w13.sharding_config.in_dst_shardings)
         self.assertIsNone(moe.shared_experts.w2.sharding_config.out_dst_shardings)

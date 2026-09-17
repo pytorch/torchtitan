@@ -17,9 +17,9 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_attention_sharding,
     set_gqa_inner_attention_local_spmd,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
@@ -152,7 +152,7 @@ def _set_muse_glimmer_layer_sharding(
     layer_cfg.post_attention_norm.sharding_config = norm
     layer_cfg.post_ffn_norm.sharding_config = norm
 
-    set_gqa_attention_sharding(attention, enable_sp=enable_sp)
+    _set_attention_sharding(attention, enable_sp=enable_sp)
     set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # QK norms: shard on head dim (dim=1), independent of SP. Scaleless, so no
@@ -177,6 +177,28 @@ def _set_muse_glimmer_layer_sharding(
         attn_x_layout=sp_activation,
         enable_sp=enable_sp,
     )
+
+
+def _set_attention_sharding(attention, *, enable_sp: bool) -> None:
+    """Configure Muse Glimmer attention's shared qkv/gate input boundary."""
+    attn_x_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+    )
+    attention.sharding_config = ShardingConfig(
+        in_src_shardings={"x_TD": attn_x_layout},
+        # qkv and o_gate both consume x, so gather once at their parent.
+        in_dst_shardings={
+            "x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        },
+    )
+    attention.qkv_linear.wqkv.sharding_config = colwise_config()
+    attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+    if attention.rope is not None:
+        attention.rope.sharding_config = ShardingConfig(
+            state_shardings={"cache": dense_param_placement(tp=spmd.R)},
+        )
 
 
 def set_muse_glimmer_vision_sharding_config(
