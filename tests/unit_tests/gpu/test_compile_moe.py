@@ -13,6 +13,10 @@ from torchtitan.config import CompileConfig
 from torchtitan.distributed.compile import apply_compile
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
+from torchtitan.tools.utils import device_module, device_type
+
+
+device = torch.device(device_type)
 
 
 class TransformerBlock(Module):
@@ -90,9 +94,9 @@ class TestApplyCompile(unittest.TestCase):
         finally:
             torch._inductor.config._micro_pipeline_tp = previous_micro_pipeline_tp
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    @unittest.skipUnless(device_module.is_available(), "requires an accelerator")
     def test_grouped_mm_compiles_and_runs(self):
-        model = TinyModel(num_layers=2, dim=128).cuda()
+        model = TinyModel(num_layers=2, dim=128).to(device=device)
         compile_config = CompileConfig(backend="inductor")
 
         apply_compile(
@@ -112,12 +116,14 @@ class TestApplyCompile(unittest.TestCase):
                 hidden_dim=hidden_dim,
                 num_experts=num_experts,
             )
-        ).cuda()
+        ).to(device=device)
         num_tokens_per_expert = torch.tensor(
-            [10, 8, 12, 9, 11, 7, 10, 13], dtype=torch.int32, device="cuda"
+            [10, 8, 12, 9, 11, 7, 10, 13],
+            dtype=torch.int32,
+            device=device,
         )
         total_tokens = num_tokens_per_expert.sum().item()
-        x = torch.randn(total_tokens, dim, device="cuda")
+        x = torch.randn(total_tokens, dim, device=device)
 
         output = experts(x, num_tokens_per_expert)
 
