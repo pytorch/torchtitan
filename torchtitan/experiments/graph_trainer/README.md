@@ -66,7 +66,7 @@ GraphPP is the `aot_fx_trace` pipeline-parallel path for GraphTrainer models.
 It reuses TorchTitan's eager PP module splitting and PyTorch PP schedules, then
 traces one representative microbatch per local stage with GraphTrainer's
 `minimal_fx_tracer`. The resulting per-stage graph bundles are reused for later
-microbatches; `GraphPipelineRuntime` only executes the prebuilt callable for each PP
+microbatches; `GraphRuntime` only executes the prebuilt callable for each PP
 schedule action.
 
 Design references:
@@ -105,7 +105,7 @@ graph execution: saved-for-backward tensors, unsharded FSDP params, raw grad
 leaves, reduce-grad inputs, and multiplexed intermediate outputs.
 
 Current limitations: GraphPP does not load precompile artifacts yet, CUDA graph
-capture should target the `GraphPipelineRuntime` steady-state path in a future change,
+capture should target the `GraphRuntime` steady-state path in a future change,
 and EP-overlap annotations will be composed with GraphPP in a later PR.
 
 ### Compiler Optimizations

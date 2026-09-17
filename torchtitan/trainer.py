@@ -656,13 +656,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             parallel_dims=parallel_dims,
             spmd_typechecking=config.debug.spmd_typechecking,
         )
-        if parallel_dims.pp_enabled:
-            self.fwd_bwd_fn = self._pp_forward_backward_body
-            self._pp_loss_sentinel_on_non_last_stage = torch.full(
-                (1,), -1.0, device=self.device
-            )
-        else:
-            self.fwd_bwd_fn = self._forward_backward_body
+        self.fwd_bwd_fn = self._select_fwd_bwd_fn()
 
         if not config.training.disable_cuda_graphs:
             sdc_config = config.sdc_replayer
@@ -710,6 +704,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             f"total steps {config.training.steps} "
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )
+
+    def _select_fwd_bwd_fn(self) -> Callable[..., torch.Tensor]:
+        """Select the forward/backward callable before CUDA graph wrapping."""
+        if self.parallel_dims.pp_enabled:
+            self._pp_loss_sentinel_on_non_last_stage = torch.full(
+                (1,), -1.0, device=self.device
+            )
+            return self._pp_forward_backward_body
+        return self._forward_backward_body
 
     @sl.log_trace_span("torch_distributed_init")
     def init_distributed(self) -> ParallelDims:
@@ -925,7 +928,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                         input_dict[key] = value.to(self.device, non_blocking=True)
                 input_dict_mbs.append(input_dict)
 
-            if parallel_dims.pp_enabled:
+            if parallel_dims.pp_enabled or self.num_pp_microbatches > 1:
                 fwd_bwd_input_dict = input_dict_mbs
             else:
                 assert len(input_dict_mbs) == 1
