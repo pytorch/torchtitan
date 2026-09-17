@@ -19,12 +19,15 @@ from torchtitan.protocols.sharding import ShardingConfig
 def test_state_dict_layouts_include_split_feed_forward_weights():
     """Verify fused dense FFN layouts use the exposed w1/w3 state-dict keys."""
     colwise = dense_param_placement(tp=spmd.S(0))
-    rowwise = dense_param_placement(tp=spmd.S(1))
+    rowwise = dense_param_placement(tp=spmd.S(2))
     config = FeedForward.Config(
         w13=Linear.Config(
             in_features=16,
-            out_features=64,
-            sharding_config=ShardingConfig(state_shardings={"weight": colwise}),
+            out_features=32,
+            num_linears=2,
+            sharding_config=ShardingConfig(
+                state_shardings={"weight": dense_param_placement(tp=spmd.S(1))}
+            ),
         ),
         w2=Linear.Config(
             in_features=32,

@@ -12,11 +12,11 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 
 from torchtitan.models.common.decoder_sharding import (
-    column_parallel_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
     row_parallel_config,
+    stacked_column_parallel_config,
     token_id_placement,
 )
 from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
@@ -162,7 +162,7 @@ def _shared_experts_sharding_configs(
             in_src_shardings={"x": input_layout},
             out_src_shardings=desired_output_layout,
         ),
-        column_parallel_config(input_layout=input_layout),
+        stacked_column_parallel_config(input_layout=input_layout),
         row_parallel_config(output_layout=desired_output_layout),
     )
 

@@ -611,6 +611,18 @@ def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
             out_features=128,
             input_activation_format_for_backward="missing",
         )
+    with pytest.raises(ValueError, match="out_features divisible by 32"):
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=127,
+            num_linears=2,
+        )
+
+    local_stacked_weight = _LinearShardedTensorWithMXFP8Compute(
+        torch.empty(3, 16, 128, dtype=torch.bfloat16)
+    )
+    with pytest.raises(ValueError, match="local matrix out_features divisible by 32"):
+        local_stacked_weight._build_operands(local_stacked_weight._tensor)
 
     for sharding_config in (colwise_config(), rowwise_config()):
         linear = MXFP8Linear.Config(
@@ -650,7 +662,8 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
     assert converted.input_activation_format_for_backward == "bf16"
 
 
-def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch, wrapped):
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
@@ -660,13 +673,21 @@ def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
     head_dim = 48
     n_heads = 4
     n_kv_heads = 2
+    wqkv = Linear.Config(
+        in_features=128,
+        out_features=(n_heads + 2 * n_kv_heads) * head_dim,
+    )
     qkv_config = QKVLinear.Config(
         head_dim=head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
-        wqkv=Linear.Config(
-            in_features=128,
-            out_features=(n_heads + 2 * n_kv_heads) * head_dim,
+        wqkv=(
+            ColumnParallelLinear.Config(
+                in_features=wqkv.in_features,
+                out_features=wqkv.out_features,
+            )
+            if wrapped
+            else wqkv
         ),
     )
 
@@ -684,7 +705,7 @@ def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
     )
     converted = converter.convert(
         FeedForward.Config(
-            w13=Linear.Config(in_features=128, out_features=256),
+            w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
             w2=Linear.Config(in_features=128, out_features=128),
         )
     )
@@ -704,7 +725,7 @@ def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
         )
     )
     model_config = FeedForward.Config(
-        w13=Linear.Config(in_features=128, out_features=256),
+        w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
         w2=Linear.Config(in_features=128, out_features=128),
     )
 
@@ -774,7 +795,6 @@ def test_builtin_mxfp8_configs_assign_input_activation_format_for_backward(
         fqn: config.input_activation_format_for_backward
         for fqn, config, _parent, _attr in model_config.traverse(MXFP8Linear.Config)
     }
-
     assert assignments
     assert "bf16" in assignments.values()
     assert "mxfp8" in assignments.values()

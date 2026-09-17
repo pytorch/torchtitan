@@ -38,7 +38,7 @@ def compute_ffn_hidden_dim(
 class FeedForward(Module):
     """SwiGLU feed-forward with one physical gate-and-up projection.
 
-    ``w13`` stores the interleaved gate and up projections. Config takes the
+    ``w13`` stores the gate and up projections as ``[2, F, D]``. Config takes the
     **final** hidden_dim (no internal 2/3 scaling). Use
     compute_ffn_hidden_dim() for Llama3/4-style dim computation.
     """
@@ -64,9 +64,9 @@ class FeedForward(Module):
             fused_key = f"{prefix}w13.{param_name}"
             if fused_key not in state_dict:
                 continue
-            gate_up = state_dict.pop(fused_key).unflatten(0, (-1, 2))
-            state_dict[f"{prefix}w1.{param_name}"] = gate_up[:, 0].contiguous()
-            state_dict[f"{prefix}w3.{param_name}"] = gate_up[:, 1].contiguous()
+            gate_up = state_dict.pop(fused_key)
+            state_dict[f"{prefix}w1.{param_name}"] = gate_up[0]
+            state_dict[f"{prefix}w3.{param_name}"] = gate_up[1]
 
     @staticmethod
     def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
@@ -77,16 +77,16 @@ class FeedForward(Module):
             if gate_key not in state_dict or up_key not in state_dict:
                 continue
             state_dict[f"{prefix}w13.{param_name}"] = torch.stack(
-                [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=1
-            ).flatten(0, 1)
+                [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=0
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up_TF = remat.region(
+        gate_up_T2F = remat.region(
             self.w13,
             self.remat_region_name("w13"),
             recompute=self.remat_should_recompute("w13"),
         )(x)
-        gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
+        gate_TF, up_TF = gate_up_T2F.unbind(-2)
         remat.recompute_needs_tensor(gate_TF, up_TF)
         out_TD = remat.region(
             self.w2,

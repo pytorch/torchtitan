@@ -169,7 +169,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         )
         self.assertIsNone(async_layer.feed_forward.w2.sharding_config.out_dst_shardings)
 
-    def test_projection_boundaries_survive_lora_config_wrappers(self):
+    def test_projection_boundaries_survive_lora_specialization(self):
         """The transformed FFN boundary encloses LoRA projection work."""
         model = transform_model_config_(
             self._model_config(),
@@ -245,6 +245,9 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             .model_spec.model.layers[0]
             .attention
         )
+        local_qkv_out_features = (
+            attn_cfg.qkv_linear.wqkv.out_features // self.world_size
+        )
         set_gqa_attention_sharding(attn_cfg, enable_sp=True)
         attn = attn_cfg.build().to(self.device_type)
         attn.parallelize(parallel_dims)
@@ -256,6 +259,38 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         self.assertIsNotNone(attn.wo._sharding_config.out_src_shardings)
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
+        self.assertEqual(attn.qkv_linear.wqkv.weight.shape[0], 1)
+        self.assertEqual(attn.qkv_linear.wqkv.weight.shape[1], local_qkv_out_features)
+        self.assertEqual(attn.wo.weight.shape[0], 1)
+
+    @with_comms
+    def test_w13_tp_shards_the_matrix_row_dimension(self):
+        from torchtitan.models.common.config_utils import make_ffn_config
+
+        hidden_dim = 128
+        init = {"weight": torch.nn.init.zeros_}
+        ffn_config = make_ffn_config(
+            dim=DIM,
+            hidden_dim=hidden_dim,
+            w1_param_init=init,
+            w2w3_param_init=init,
+        )
+        set_dense_ffn_sharding(
+            ffn_config,
+            attn_x_layout=dense_sequence_parallel_placement(),
+            enable_sp=True,
+        )
+        feed_forward = ffn_config.build().to(self.device_type)
+        feed_forward.parallelize(self._parallel_dims())
+
+        self.assertEqual(
+            feed_forward.w13.weight.shape,
+            (2, hidden_dim // self.world_size, DIM),
+        )
+        self.assertEqual(
+            feed_forward.w2.weight.shape,
+            (1, DIM, hidden_dim // self.world_size),
+        )
 
 
 @unittest.skipUnless(
@@ -300,7 +335,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
         with torch.no_grad():
             stock.wqkv.weight.copy_(torch.randn_like(stock.wqkv.weight))
             async_qkv.wqkv.weight = torch.nn.Parameter(
-                stock.wqkv.weight.chunk(R, 0)[self.rank].contiguous()
+                stock.wqkv.weight.chunk(R, 1)[self.rank].contiguous()
             )
 
         x_TD = torch.randn(
@@ -334,7 +369,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
         )
         torch.testing.assert_close(
             async_qkv.wqkv.weight.grad,
-            stock.wqkv.weight.grad.chunk(R, 0)[self.rank],
+            stock.wqkv.weight.grad.chunk(R, 1)[self.rank],
             atol=2e-2,
             rtol=2e-2,
         )
@@ -395,10 +430,10 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
         # Shard the dist-GEMM module's weights: w13 colwise, w2 rowwise.
         with torch.no_grad():
             dist_gemm.w13.weight = torch.nn.Parameter(
-                standard.w13.weight.chunk(R, 0)[self.rank].contiguous()
+                standard.w13.weight.chunk(R, 1)[self.rank].contiguous()
             )
             dist_gemm.w2.weight = torch.nn.Parameter(
-                standard.w2.weight.chunk(R, 1)[self.rank].contiguous()
+                standard.w2.weight.chunk(R, 2)[self.rank].contiguous()
             )
 
         # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
@@ -464,14 +499,14 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
         x = torch.randn(num_tokens, dim, device=dev)
         ref = native(x)
 
-        # w13.weight is (2 * hidden/R, dim), with this rank's interleaved
-        # colwise slice of both halves.
+        # w13.weight is (2, hidden/R, dim), with this rank's colwise slice of
+        # both projections.
         with torch.no_grad():
             fused.w13.weight = torch.nn.Parameter(
-                native.w13.weight.chunk(R, 0)[self.rank].contiguous()
+                native.w13.weight.chunk(R, 1)[self.rank].contiguous()
             )
             fused.w2.weight = torch.nn.Parameter(
-                native.w2.weight.chunk(R, 1)[self.rank].contiguous()
+                native.w2.weight.chunk(R, 2)[self.rank].contiguous()
             )
 
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))

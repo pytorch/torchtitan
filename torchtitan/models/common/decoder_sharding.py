@@ -124,19 +124,44 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
 
 
 def colwise_config() -> ShardingConfig:
-    """ColwiseParallel: weight S(0), output S(-1)."""
+    """ColwiseParallel: weight matrix rows S(1), output S(-1)."""
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(0)),
-            "bias": dense_param_placement(tp=spmd.S(0)),
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.S(1)),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
     )
 
 
+def stacked_colwise_config() -> ShardingConfig:
+    """Shard each ``[F, D]`` matrix in a ``[N, F, D]`` weight over ``F``.
+
+    The input is ``[T, D]`` and the output is ``[T, N, F]``. DP and CP shard
+    tokens while TP shards the per-matrix output features.
+    """
+    input_TD_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    weight_NFD_layout = dense_param_placement(tp=spmd.S(1))
+    bias_NF_layout = dense_param_placement(tp=spmd.S(1))
+    output_TNF_layout = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        partition_spec=spmd.PartitionSpec((DP, CP), None, TP),
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": weight_NFD_layout,
+            "bias": bias_NF_layout,
+        },
+        in_src_shardings={"input": input_TD_layout},
+        in_dst_shardings={"input": input_TD_layout},
+        out_src_shardings=output_TNF_layout,
+        local_spmd=True,
+    )
+
+
 def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     """
-    RowwiseParallel: weight S(1), bias I (no-op if bias absent).
+    RowwiseParallel: weight matrix columns S(2), bias I (no-op if bias absent).
     Output redistributes to S(1) (reduce-scatter) if SP on, else I (all-reduce).
     """
     out_dst = (
@@ -146,7 +171,7 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     )
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
+            "weight": dense_param_placement(tp=spmd.S(2)),
             "bias": dense_param_placement(tp=spmd.I),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
@@ -158,11 +183,27 @@ def column_parallel_config(*, input_layout: SpmdType) -> ShardingConfig:
     """Sharding contract for a column-parallel projection boundary."""
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(0)),
-            "bias": dense_param_placement(tp=spmd.S(0)),
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.S(1)),
         },
         in_src_shardings={"input": input_layout},
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
+    )
+
+
+def stacked_column_parallel_config(*, input_layout: SpmdType) -> ShardingConfig:
+    """Sharding contract for a stacked column-parallel projection boundary."""
+    output_layout = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        partition_spec=spmd.PartitionSpec((DP, CP), None, TP),
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.S(1)),
+        },
+        in_src_shardings={"input": input_layout},
+        out_src_shardings=output_layout,
     )
 
 
@@ -173,7 +214,7 @@ def row_parallel_config(
     """Sharding contract for a row-parallel projection boundary."""
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
+            "weight": dense_param_placement(tp=spmd.S(2)),
             "bias": dense_param_placement(tp=spmd.I),
         },
         in_src_shardings={
@@ -311,7 +352,7 @@ def set_dense_ffn_sharding(
         in_src_shardings={"x": attn_x_layout},
         out_src_shardings=attn_x_layout,
     )
-    w13.sharding_config = column_parallel_config(input_layout=attn_x_layout)
+    w13.sharding_config = stacked_column_parallel_config(input_layout=attn_x_layout)
     feed_forward_cfg.w2.sharding_config = row_parallel_config(
         output_layout=attn_x_layout
     )
@@ -337,7 +378,11 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
     embed_out_src = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     embed_input = token_id_placement()
     config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        state_shardings={
+            "weight": dense_param_placement(
+                tp=spmd.S(1) if config.enable_weight_tying else spmd.S(0)
+            )
+        },
         in_src_shardings={"input": embed_input},
         in_dst_shardings={"input": embed_input},
         out_src_shardings=embed_out_src,
@@ -347,7 +392,7 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
     config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),

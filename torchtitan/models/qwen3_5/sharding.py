@@ -34,6 +34,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_spmd,
+    stacked_colwise_config,
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import (
@@ -240,10 +241,10 @@ def _set_shared_experts_sharding(
         # The gate and w13 both consume x, so gather once at their parent.
         in_dst_shardings={"x": replicated_input_layout},
     )
-    shared_experts.w13.sharding_config = colwise_config()
+    shared_experts.w13.sharding_config = stacked_colwise_config()
     shared_experts.w2.sharding_config = ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
+            "weight": dense_param_placement(tp=spmd.S(2)),
             "bias": dense_param_placement(tp=spmd.R),
         },
         in_src_shardings={

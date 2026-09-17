@@ -146,7 +146,11 @@ try:
                     # its sharding contract into a local SPMD region for the
                     # opaque nvfp4_linear operation.
                     weight_tp = sc.state_shardings["weight"].local_type.get(TP)
-                    rowwise = isinstance(weight_tp, spmd.Shard) and weight_tp.dim == 1
+                    rowwise = (
+                        self.num_linears == 1
+                        and isinstance(weight_tp, spmd.Shard)
+                        and weight_tp.dim == 2
+                    )
                     if rowwise:
                         in_layout = dense_activation_placement(
                             tp=spmd.S(-1), cp=spmd.S(0)
@@ -172,9 +176,24 @@ try:
             TorchAONVFP4Linear.__init__(
                 self,
                 config.in_features,
-                config.out_features,
+                config.num_linears * config.out_features,
                 bias=config.bias,
             )
+            self.out_features = config.out_features
+            self.num_linears = config.num_linears
+            self.weight = torch.nn.Parameter(
+                self.weight.detach().unflatten(
+                    0, (config.num_linears, config.out_features)
+                ),
+                requires_grad=self.weight.requires_grad,
+            )
+            if self.bias is not None:
+                self.bias = torch.nn.Parameter(
+                    self.bias.detach().unflatten(
+                        0, (config.num_linears, config.out_features)
+                    ),
+                    requires_grad=self.bias.requires_grad,
+                )
             # TorchAO created the runtime buffers on the (meta) build device.
             # Re-register them as None so ``_distribute_states`` skips them and
             # ``_init_self_buffers`` materializes them on the real device, per
@@ -244,16 +263,37 @@ try:
             self._refresh_rht_sign_vector_tuple()
 
         def _linear(self, input: torch.Tensor) -> torch.Tensor:
-            return nvfp4_linear(
+            local_out_features = self.weight.shape[-2]
+            if local_out_features % _NVFP4_BLOCK:
+                raise ValueError(
+                    "NVFP4 requires local out_features divisible by "
+                    f"{_NVFP4_BLOCK}; got {local_out_features}. Adjust the "
+                    "Linear out_features or TP degree so quantization blocks "
+                    "do not span projection boundaries."
+                )
+            weight = self.weight.flatten(0, -2)
+            bias = None if self.bias is None else self.bias.flatten()
+            output = nvfp4_linear(
                 input,
-                self.weight,
-                self.bias,
+                weight,
+                bias,
                 sr_seed=self._sr_seed,
                 sign_vector=self.rht_sign_vector,
             )
+            if self.num_linears == 1:
+                return output
+            return output.unflatten(-1, self.weight.shape[:-1])
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return self._linear(input)
+
+        def reset_parameters(self) -> None:
+            Linear.reset_parameters(self)
+
+        def _init_param(self, name: str, param: torch.Tensor) -> None:
+            if self.num_linears == 1:
+                param = param.flatten(0, -2) if name == "weight" else param.flatten()
+            Module._init_param(self, name, param)
 
     class NVFP4ColumnParallelLinear(ColumnParallelLinear, NVFP4Linear):
         """NVFP4 projection with a synchronous column-parallel boundary."""
