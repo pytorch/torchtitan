@@ -13,6 +13,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import Embedding, Linear
+from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.qwen3_5 import (
     _27b,
     _build_qwen35_moe_layers,
@@ -102,6 +103,12 @@ qwen3_8_configs = {
 }
 
 
+def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
+    """Register step pre-hooks for load balancing and aux-loss accumulators."""
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
+
+
 def model_registry(
     flavor: str,
     *,
@@ -141,6 +148,6 @@ def model_registry(
             pipeline_with_first_stage_modules,
             first_stage_module_fqns=("vision_encoder",),
         ),
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_post_optimizer_build_fn,
         state_dict_adapter=Qwen35StateDictAdapter,
     )

@@ -150,7 +150,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         # Integration Test Cases for Qwen3.5
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],
-            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP",
+            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP+global batch-wise aux loss",
             test_name="qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
             use_real_pg=True,
@@ -201,9 +201,9 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
-            configs=[recipes.gpt_oss_debugmodel_fsdp4_pp2_ep4_sac],
-            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenInnerAttention",
-            test_name="gpt_oss_pp+fsdp+ep+sacop",
+            configs=[recipes.gpt_oss_debugmodel_fsdp4_pp2_ep4],
+            test_descr="GPT-OSS PP+FSDP+EP+global batch-wise aux with VarlenInnerAttention",
+            test_name="gpt_oss_pp+fsdp+ep+global_aux",
             ngpu=8,
             use_real_pg=True,
         ),

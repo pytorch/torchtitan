@@ -41,7 +41,10 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.config.override import apply_overrides, OverrideConfig
-from torchtitan.config.validation import validate_context_parallel
+from torchtitan.config.validation import (
+    validate_context_parallel,
+    validate_global_batch_wise_aux_loss,
+)
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
@@ -480,6 +483,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             )
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
             num_tokens_per_dp_rank * dp_degree
+        )
+        validate_global_batch_wise_aux_loss(
+            model_config,
+            num_microbatches_per_step=(
+                self.num_pp_microbatches * self.gradient_accumulation_steps
+            ),
+            activation_checkpoint_enabled=config.activation_checkpoint is not None,
         )
         # apply parallelisms and initialization
         with sl.log_trace_span("model_parallelism_init"):

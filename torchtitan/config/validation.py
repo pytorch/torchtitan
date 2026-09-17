@@ -14,7 +14,31 @@ if TYPE_CHECKING:
     from torchtitan.config import ParallelismConfig
     from torchtitan.protocols.module import Module
 
-__all__ = ["validate_context_parallel"]
+__all__ = ["validate_context_parallel", "validate_global_batch_wise_aux_loss"]
+
+
+def validate_global_batch_wise_aux_loss(
+    model: "Module.Config",
+    *,
+    num_microbatches_per_step: int,
+    activation_checkpoint_enabled: bool,
+) -> None:
+    """Validate rolling global-batch MoE aux loss execution."""
+    from torchtitan.models.common.moe import GlobalBatchWiseLoadBalanceLoss
+
+    losses = list(model.traverse(GlobalBatchWiseLoadBalanceLoss.Config))
+    if not losses:
+        return
+
+    if num_microbatches_per_step > 1 and activation_checkpoint_enabled:
+        # TODO: Once activation checkpointing has migrated to torch_remat, use
+        # remat.is_recomputing() to keep replay from advancing rolling counts.
+        raise ValueError(
+            "GlobalBatchWiseLoadBalanceLoss with multiple microbatches is "
+            "incompatible with activation checkpointing because recomputation "
+            "would advance its rolling expert counts. Disable activation "
+            "checkpointing or use MicrobatchWiseLoadBalanceLoss."
+        )
 
 
 def validate_context_parallel(
