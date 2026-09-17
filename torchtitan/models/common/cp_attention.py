@@ -6,7 +6,9 @@
 
 """Context-parallel attention kernels.
 
-Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
+Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim,
+``P`` packed MLA K/V channels, ``R`` MLA's head-shared key channels, and ``F``
+fused communication features.
 """
 
 from abc import ABC, abstractmethod
@@ -38,6 +40,7 @@ __all__ = [
     "UlyssesCPInnerAttention",
     "UlyssesCPFlexInnerAttention",
     "UlyssesCPVarlenInnerAttention",
+    "all_gather_cp_tensors",
 ]
 
 _TOKEN_DIM = 0
@@ -45,6 +48,26 @@ _HEAD_DIM = 1
 
 _GlobalContextMetadataT = TypeVar("_GlobalContextMetadataT")
 _LocalContextMetadataT = TypeVar("_LocalContextMetadataT")
+
+
+def all_gather_cp_tensors(
+    tensors: tuple[torch.Tensor, ...],
+    *,
+    reduce_dtype: torch.dtype,
+) -> tuple[torch.Tensor, ...]:
+    cp_group = spmd_mesh_group(MeshAxisName.CP)
+    if cp_group is None:
+        raise RuntimeError("CP attention requires an active multi-rank CP mesh axis.")
+    return tuple(
+        spmd.redistribute(
+            tensor,
+            cp_group,
+            src=spmd.S(_TOKEN_DIM),
+            dst=spmd.R,
+            backward_options={"op_dtype": reduce_dtype},
+        )
+        for tensor in tensors
+    )
 
 
 class CPInnerAttention(ABC, Generic[_GlobalContextMetadataT, _LocalContextMetadataT]):
@@ -268,20 +291,8 @@ class KVAllGatherCPFlexInnerAttention(
         v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        cp_group = spmd_mesh_group(MeshAxisName.CP)
-        if cp_group is None:
-            raise RuntimeError(
-                "CP attention requires an active multi-rank CP mesh axis."
-            )
-        k_THK, v_THV = (
-            spmd.redistribute(
-                x,
-                cp_group,
-                src=spmd.S(_TOKEN_DIM),
-                dst=spmd.R,
-                backward_options={"op_dtype": self.reduce_dtype},
-            )
-            for x in (k_THK, v_THV)
+        k_THK, v_THV = all_gather_cp_tensors(
+            (k_THK, v_THV), reduce_dtype=self.reduce_dtype
         )
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 

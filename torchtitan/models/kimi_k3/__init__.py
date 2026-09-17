@@ -39,8 +39,9 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
+from .attention import KimiMLAAttention, MLAFlexInnerAttention, MLAVarlenInnerAttention
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
-from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
+from .model import KimiK3Model, KimiK3TransformerBlock
 from .moe import KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
@@ -150,7 +151,11 @@ def _mla_config(
     v_head_dim: int,
     attn_backend: str,
 ) -> KimiMLAAttention.Config:
-    inner_attention = get_attention_config(attn_backend)
+    inner_attention = get_attention_config(
+        attn_backend,
+        flex_attention=MLAFlexInnerAttention,
+        varlen_attention=MLAVarlenInnerAttention,
+    )
 
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
     return KimiMLAAttention.Config(
