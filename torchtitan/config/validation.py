@@ -6,7 +6,7 @@
 
 """Validation across configuration components."""
 
-from typing import cast, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from torchtitan.models.common.attention import BaseAttention
 
@@ -30,8 +30,7 @@ def validate_context_parallel(
     first_cp_config: tuple[str, type] | None = None
 
     for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
-        # traverse returns the base config type.
-        attention = cast(BaseAttention.Config, traversed)
+        attention = traversed
         inner_attention = attention.inner_attention
         is_cp_attention = isinstance(inner_attention, CPInnerAttention.Config)
         if cp > 1 and not is_cp_attention:

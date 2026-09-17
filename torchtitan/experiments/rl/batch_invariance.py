@@ -20,8 +20,10 @@ def force_logprobs_fn_for_batch_invariance() -> None:
     (``compute_token_logprobs`` -> ``_topk_log_softmax_kernel``) that inlines
     ``log(softmax(logits))`` and never calls PyTorch ops.
 
-    Swapping the kernel to routes the generator and the trainer through
-    the same set of ops, so logprobs match bit-for-bit.
+    Swapping the kernel routes the generator and the trainer through
+    the same set of ops, so logprobs match bit-for-bit. The wrapper supplies
+    full logits to vLLM outside the trainer's TP SPMD context, so the replicated
+    path is selected directly even though this patch omits ``global_vocab_size``.
     """
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
@@ -33,8 +35,8 @@ def force_logprobs_fn_for_batch_invariance() -> None:
         """Per-token logprobs for vLLM's v2 sampler (replaces its fused kernel).
 
         Args:
-            logits: ``[N, V]`` next-token logits for N sampled positions
-                (V = vocab_size).
+            logits: Full-vocabulary ``[N, V]`` next-token logits for N sampled
+                positions, already gathered by the vLLM model wrapper.
             token_ids: ``[N, K]`` the K token ids to score per position (vLLM
                 passes the sampled token's logprob plus any top-k logprobs it requested).
 
