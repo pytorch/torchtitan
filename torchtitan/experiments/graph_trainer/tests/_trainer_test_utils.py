@@ -21,8 +21,12 @@ from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
 )
-from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.experiments.graph_trainer.trainer import (
+    GraphTrainer,
+    GraphTrainingEngine,
+)
 from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 
 @contextmanager
@@ -77,21 +81,26 @@ def build_minimal_trainer(
 ) -> Trainer:
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
-    trainer.model_parts = [model]
-    trainer.loss_fn = CrossEntropyLoss.Config().build()
-    trainer.parallel_dims = parallel_dims
-    trainer.train_context = get_spmd_context(parallel_dims=parallel_dims)
-    trainer.fwd_bwd_fn = trainer._forward_backward_body
-    trainer.model_config = model_config
-    trainer.device = torch.device("cuda")
+    engine_cls = GraphTrainingEngine if trainer_cls is GraphTrainer else TrainingEngine
+    trainer.engine = engine = object.__new__(engine_cls)
+    engine.model_parts = [model]
+    engine.loss_fn = CrossEntropyLoss.Config().build()
+    engine.parallel_dims = parallel_dims
+    engine.train_context = get_spmd_context(parallel_dims=parallel_dims)
+    engine.forward_backward_body_fn = engine._non_pp_forward_backward_body
+    engine.model_config = model_config
+    engine.device = torch.device("cuda")
+    engine.preprocess_inputs_kwargs = {}
     trainer.tokenizer = tokenizer
     trainer.dataloader = SimpleNamespace(max_num_documents=None)
-    trainer.ntokens_seen = 0
+    engine.max_num_documents = None
+    engine.ntokens_seen = 0
+    engine.num_completed_steps = 0
+    engine.sdc_replayer = None
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
             compile=GraphTrainerCompileConfig(
-                enable=True,
                 mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
                 enable_inplace_graph_gradient_accumulation=(
@@ -128,16 +137,18 @@ def build_minimal_trainer(
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
             ),
         )
-        trainer._fwd_bwd_step_module = None
-        trainer._traced_step = None
-        trainer._graph_runner = None
-        trainer._trainable_params = None
-        trainer._graph_gradient_state = None
+        engine._traced_step = None
+        engine._graph_runner = None
+        engine._trainable_params = None
+        engine._graph_gradient_state = None
+        engine._pinned_pool_ctx = None
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
             training=TrainingConfig(),
             parallelism=SimpleNamespace(),
         )
+
+    engine.config = trainer.config
 
     return trainer

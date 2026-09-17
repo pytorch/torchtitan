@@ -13,11 +13,10 @@ set -ex
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 MODULE=${MODULE:-"flux"}
-CONFIG=${CONFIG:-"flux_debugmodel"}
+CONFIG=${CONFIG:-"flux_debugmodel_inference"}
 
 PYTORCH_ALLOC_CONF="expandable_segments:True" \
 torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
 --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
 -m torchtitan.models.flux.inference.infer --module ${MODULE} --config ${CONFIG} \
---checkpoint.enable \
---checkpoint.exclude_from_loading=lr_scheduler,dataloader,optimizer "$@"
+"$@"

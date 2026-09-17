@@ -12,8 +12,10 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
+from torchtitan.components.data.types import TrainingMicrobatch
+
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.cudagraph import cudagraph_teardown, CUDAGraphWrapper
+from torchtitan.distributed.cuda_graph import cuda_graph_teardown, CUDAGraphWrapper
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
@@ -51,6 +53,7 @@ from torchtitan.experiments.graph_trainer.runner import GraphRunner
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 
 logger = logging.getLogger(__name__)
@@ -132,25 +135,38 @@ def make_fwd_bwd_step(model, loss_fn, *, accumulate_gradients: bool = False):
     return fwd_bwd_step
 
 
-class GraphTrainer(Trainer):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Trainer.Config):
-        compile: GraphTrainerCompileConfig = field(
-            default_factory=GraphTrainerCompileConfig
+class GraphTrainingEngine(TrainingEngine):
+    """Training engine for the experimental whole-step graph backend.
+
+    TODO: Validate this as an optional execution backend for other workflows,
+    such as RL training.
+    """
+
+    def __init__(
+        self,
+        config: "GraphTrainer.Config",
+        *,
+        model_config: BaseModel.Config,
+        max_num_documents: int | None,
+        output_dir: str,
+    ) -> None:
+        validate_memory_policy_config(config.compile)
+        super().__init__(
+            config,
+            model_config=model_config,
+            max_num_documents=max_num_documents,
+            output_dir=output_dir,
         )
-
-    def __init__(self, config):
-        super().__init__(config)
-
-        validate_memory_policy_config(self.config.compile)
-
-        _maybe_apply_numa_binding(self.device.index, self.device.type)
-
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
         self._graph_runner: GraphRunner | None = None
         self._trainable_params: tuple[torch.Tensor, ...] | None = None
         self._graph_gradient_state: GraphGradientState | None = None
+        self._pinned_pool_ctx = None
+
+    def _initialize_forward_backward(self) -> None:
+        super()._initialize_forward_backward()
+        _maybe_apply_numa_binding(self.device.index, self.device.type)
         self._validate_inplace_graph_gradient_accumulation_config()
         if self.config.compile.enable_inplace_graph_gradient_accumulation:
             self._ensure_graph_gradient_state(self.model_parts[0])
@@ -165,47 +181,76 @@ class GraphTrainer(Trainer):
         else:
             self._pinned_pool_ctx = None
 
-        # Run post-init hook for the active pass pipeline
-        POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
-
-    def forward_backward_step(
+    def forward_backward_microbatch(
         self,
         *,
-        input_dict: dict[str, Any] | list[dict[str, Any]],
+        microbatch_group: list[TrainingMicrobatch],
         global_valid_tokens: torch.Tensor,
+        accumulation_index: int = 0,
     ) -> torch.Tensor:
         if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
-            return super().forward_backward_step(
-                input_dict=input_dict,
+            return super().forward_backward_microbatch(
+                microbatch_group=microbatch_group,
                 global_valid_tokens=global_valid_tokens,
+                accumulation_index=accumulation_index,
             )
 
-        assert isinstance(input_dict, dict)
-        assert len(self.model_parts) == 1
-        model = self.model_parts[0]
+        if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
+            raise ValueError(
+                "GraphTrainingEngine does not support per-microbatch loss arguments."
+            )
 
-        with sl.log_trace_span("preprocess_inputs"):
-            inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
-                input_dict,
-                parallel_dims=self.parallel_dims,
-                parallelism=self.config.parallelism,
+        # This intentionally duplicates the core engine's per-microbatch
+        # execution envelope instead of adding graph-specific hooks to core.
+        if accumulation_index == 0:
+            self.loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
+
+        if self.parallel_dims.dp_replicate_enabled and (
+            self.num_accumulation_steps == 1 or self.config.training.disable_cuda_graphs
+        ):
+            is_last = accumulation_index == self.num_accumulation_steps - 1
+            for part in self.model_parts:
+                part.set_requires_all_reduce(is_last)  # pyrefly: ignore[not-callable]
+
+        def compute_forward_backward() -> torch.Tensor:
+            assert len(microbatch_group) == 1
+            microbatch = microbatch_group[0]
+            assert len(self.model_parts) == 1
+            model = self.model_parts[0]
+
+            with sl.log_trace_span("preprocess_inputs"):
+                inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
+                    microbatch.to_input_dict(self.device, non_blocking=True),
+                    parallel_dims=self.parallel_dims,
+                    parallelism=self.config.parallelism,
+                )
+                # MTP returns one labels tensor per prediction; index 0 contains
+                # the complete main-model labels used for token accounting.
+                self.ntokens_seen += (
+                    self.config.training.num_tokens_per_microbatch_per_dp_rank
+                    // self.parallel_dims.cp
+                )
+            # remove_duplicate=False to preserve duplicate parameter entries
+            # from weight tying (e.g. shared embedding/output weights).
+            params = self._get_trainable_parameters(model)
+            return self._make_fx_forward_backward_microbatch(
+                model,
+                inputs,
+                labels,
+                global_valid_tokens,
+                params,
+                extra_kwargs,
             )
-            # MTP returns one labels tensor per prediction; index 0 contains
-            # the complete main-model labels used for token accounting.
-            self.ntokens_seen += (
-                labels[0].numel() if isinstance(labels, tuple) else labels.numel()
+
+        if self.sdc_replayer is not None and accumulation_index == 0:
+            loss = self.sdc_replayer.run_fwd_bwd(
+                compute_forward_backward, step=self.num_completed_steps + 1
             )
-        # remove_duplicate=False to preserve duplicate parameter entries
-        # from weight tying (e.g. shared embedding/output weights).
-        params = self._get_trainable_parameters(model)
-        return self._make_fx_forward_backward_step(
-            model,
-            inputs,
-            labels,
-            global_valid_tokens,
-            params,
-            extra_kwargs,
-        )
+        else:
+            loss = compute_forward_backward()
+        detached_loss = loss.detach()
+        self.loss_is_finite.logical_and_(torch.isfinite(detached_loss).all())
+        return detached_loss
 
     def _load_precompiled_fx_trace(
         self,
@@ -248,7 +293,7 @@ class GraphTrainer(Trainer):
             ),
         )
 
-    def _make_fx_forward_backward_step(
+    def _make_fx_forward_backward_microbatch(
         self,
         model: nn.Module,
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
@@ -434,14 +479,6 @@ class GraphTrainer(Trainer):
                     args, kwargs = prepared
         return args, kwargs
 
-    def train_step(self, data_iterator: Iterator[dict[str, Any]]):
-        PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
-            self
-        )
-        if self._graph_gradient_state is not None:
-            self._graph_gradient_state.validate_grad_bindings()
-        super().train_step(data_iterator)
-
     def close(self) -> None:
         if self._pinned_pool_ctx is not None:
             self._pinned_pool_ctx.__exit__(None, None, None)
@@ -452,5 +489,28 @@ class GraphTrainer(Trainer):
         self._graph_runner = None
         self._trainable_params = None
 
-        # See Note [explicit cudagraph teardown] in cudagraph.py
-        cudagraph_teardown()
+        # See Note [explicit CUDA graph teardown] in CUDA graph.py
+        cuda_graph_teardown()
+
+
+class GraphTrainer(Trainer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Trainer.Config):
+        compile: GraphTrainerCompileConfig = field(
+            default_factory=GraphTrainerCompileConfig
+        )
+
+    engine_cls = GraphTrainingEngine
+    engine: GraphTrainingEngine
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
+
+    def train_step(self, data_iterator: Iterator[dict[str, Any]]) -> None:
+        PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
+            self
+        )
+        if self.engine._graph_gradient_state is not None:
+            self.engine._graph_gradient_state.validate_grad_bindings()
+        super().train_step(data_iterator)
