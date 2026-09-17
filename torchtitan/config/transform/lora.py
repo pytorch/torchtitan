@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass, fields
 from typing import Any, cast, ClassVar, Protocol
 
-from torchtitan.models.common.linear import canonical_linear_fqn, Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.lora import specialize_lora_linear
 from torchtitan.protocols.module import Module
 
@@ -162,8 +162,7 @@ class LoRATransform(ModelConfigTransform):
 
         for fqn, cfg, parent, attr in reversed(configs):
             assert isinstance(cfg, Module.Config)
-            logical_fqn = canonical_linear_fqn(fqn, parent)
-            last_segment = logical_fqn.rsplit(".", 1)[-1]
+            last_segment = fqn.rsplit(".", 1)[-1]
             handler = next(
                 (
                     handler

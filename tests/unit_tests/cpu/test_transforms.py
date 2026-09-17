@@ -358,9 +358,9 @@ class TestTensorParallelModules(unittest.TestCase):
     def test_async_transform_rejects_converted_projection(self):
         config = copy.deepcopy(self._config().model_spec.model.layers[0].feed_forward)
         config.w13 = _ConvertedLinear.Config(
-            in_features=config.w13.linear.in_features,
-            out_features=config.w13.linear.out_features,
-            param_init=config.w13.linear.param_init,
+            in_features=config.w13.in_features,
+            out_features=config.w13.out_features,
+            param_init=config.w13.param_init,
         )
 
         with self.assertRaisesRegex(ValueError, "converted w13 projections"):

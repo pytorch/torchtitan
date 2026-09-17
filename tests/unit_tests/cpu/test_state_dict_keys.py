@@ -55,12 +55,12 @@ _LAYER0_ANCHORS = (
     # debugmodel uses fused QKV by default, so named_parameters() exposes the
     # single fused ``wqkv`` inside its TP boundary. state_dict() removes the
     # ``linear`` implementation segment and splits it back to wq/wk/wv.
-    "layers.0.attention.qkv_linear.wqkv.linear.weight",
-    "layers.0.attention.wo.linear.weight",
+    "layers.0.attention.qkv_linear.wqkv.weight",
+    "layers.0.attention.wo.weight",
     # FeedForward stores gate/up in one physical w13 parameter inside the TP
     # boundary. Its state-dict hook retains the existing logical keys.
-    "layers.0.feed_forward.w13.linear.weight",
-    "layers.0.feed_forward.w2.linear.weight",
+    "layers.0.feed_forward.w13.weight",
+    "layers.0.feed_forward.w2.weight",
     "layers.0.attention_norm.weight",
     "layers.0.ffn_norm.weight",
 )

@@ -26,7 +26,11 @@ from torchao.prototype.mx_formats.kernels import (
     triton_mx_block_rearrange,
 )
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RowParallelLinear,
+)
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
@@ -36,7 +40,12 @@ from .tensor import (
 )
 
 
-__all__ = ["InputActivationFormatForBackward", "MXFP8Linear"]
+__all__ = [
+    "InputActivationFormatForBackward",
+    "MXFP8ColumnParallelLinear",
+    "MXFP8Linear",
+    "MXFP8RowParallelLinear",
+]
 
 # Activation and gradient quantization takes a scaling mode; the 32x32 weight
 # cast hardcodes RCEIL. Pin the two to match, so both operands of a GEMM round
@@ -348,7 +357,7 @@ class MXFP8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _linear(self, input: torch.Tensor) -> torch.Tensor:
         # Always a plain tensor: spmd_types carries TP and EP as annotations
         # instead of wrapping the weight as a model-parallel DTensor.
         weight_NK = self.weight
@@ -391,3 +400,19 @@ class MXFP8Linear(Linear):
             self.bias,
             self.input_activation_format_for_backward,
         )
+
+
+class MXFP8ColumnParallelLinear(ColumnParallelLinear, MXFP8Linear):
+    """MXFP8 projection with a synchronous column-parallel boundary."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MXFP8Linear.Config, ColumnParallelLinear.Config):
+        pass
+
+
+class MXFP8RowParallelLinear(RowParallelLinear, MXFP8Linear):
+    """MXFP8 projection with a synchronous row-parallel boundary."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MXFP8Linear.Config, RowParallelLinear.Config):
+        pass

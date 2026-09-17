@@ -6,7 +6,13 @@
 
 from dataclasses import dataclass
 
-from torchtitan.models.common.linear import Linear
+import torch
+
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RowParallelLinear,
+)
 from torchtitan.protocols.module import Module
 
 
@@ -35,8 +41,42 @@ try:
                 config=config._torchao_config,
             )
 
+        def _linear(self, input: torch.Tensor) -> torch.Tensor:
+            return TorchAOFloat8Linear.forward(self, input)
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            return self._linear(input)
+
+    class Float8ColumnParallelLinear(ColumnParallelLinear, Float8Linear):
+        """Float8 projection with a synchronous column-parallel boundary."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(Float8Linear.Config, ColumnParallelLinear.Config):
+            pass
+
+        def __init__(self, config: Config):
+            Float8Linear.__init__(self, config)
+
+        def _linear(self, input: torch.Tensor) -> torch.Tensor:
+            return Float8Linear._linear(self, input)
+
+    class Float8RowParallelLinear(RowParallelLinear, Float8Linear):
+        """Float8 projection with a synchronous row-parallel boundary."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(Float8Linear.Config, RowParallelLinear.Config):
+            pass
+
+        def __init__(self, config: Config):
+            Float8Linear.__init__(self, config)
+
+        def _linear(self, input: torch.Tensor) -> torch.Tensor:
+            return Float8Linear._linear(self, input)
+
 except ImportError:
     Float8Linear = None
+    Float8ColumnParallelLinear = None
+    Float8RowParallelLinear = None
 
 
 _float8_experts_cache: dict[type, type] = {}
