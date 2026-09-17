@@ -19,6 +19,7 @@ from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     CosSinRoPE,
     Embedding,
+    GlobalBatchWiseLoadBalanceLoss,
     Linear,
     RMSNorm,
     RoPE,
@@ -27,6 +28,7 @@ from torchtitan.models.common import (
     TransformerBlock,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
+from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
@@ -170,7 +172,7 @@ def _build_gptoss_layers(
     hidden_dim: int,
     num_experts: int,
     top_k: int,
-    load_balance_coeff: float,
+    load_balance_coeff: float | None,
     attn_backend: str = "varlen",
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
@@ -214,6 +216,7 @@ def _build_gptoss_layers(
                     param_init=_depth_init(layer_id),
                 ),
                 top_k=top_k,
+                aux_loss=GlobalBatchWiseLoadBalanceLoss.Config(coeff=1e-3),
             ),
         )
         layer_cfg = GptOssTransformerBlock.Config(
@@ -253,7 +256,7 @@ def _debugmodel(
             hidden_dim=hidden_dim,
             num_experts=8,
             top_k=4,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
@@ -298,7 +301,7 @@ def _20b(
             hidden_dim=hidden_dim,
             num_experts=32,
             top_k=4,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
@@ -343,7 +346,7 @@ def _120b(
             hidden_dim=hidden_dim,
             num_experts=128,
             top_k=4,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
@@ -366,6 +369,12 @@ gptoss_configs = {
     "20b": (_20b, 131072),
     "120b": (_120b, 131072),
 }
+
+
+def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
+    """Register step pre-hooks for load balancing and aux-loss accumulators."""
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
 
 
 def model_registry(
@@ -399,6 +408,6 @@ def model_registry(
         max_context_length=context_len,
         parallelize_fn=parallelize_gptoss,
         pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_post_optimizer_build_fn,
         state_dict_adapter=GptOssStateDictAdapter,
     )

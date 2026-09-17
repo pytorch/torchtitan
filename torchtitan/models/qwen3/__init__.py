@@ -24,6 +24,7 @@ from torchtitan.models.common import (
     Softmax,
     TransformerBlock,
 )
+from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -187,6 +188,9 @@ def _build_qwen3_moe_layers(
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
+                    aux_loss_coeff=1e-3,
+                    aux_loss_type="global_batch_wise",
+                    load_balance_coeff=None,
                 ),
             )
         )
@@ -586,6 +590,12 @@ qwen3_configs = {
 }
 
 
+def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
+    """Register step pre-hooks for load balancing and aux-loss accumulators."""
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
+
+
 def model_registry(
     flavor: str,
     *,
@@ -619,6 +629,6 @@ def model_registry(
         max_context_length=context_len,
         parallelize_fn=parallelize_qwen3,
         pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_post_optimizer_build_fn,
         state_dict_adapter=Qwen3StateDictAdapter,
     )

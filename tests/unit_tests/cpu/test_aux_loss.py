@@ -42,7 +42,10 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.moe import (
     GlobalBatchWiseLoadBalanceLoss,
     MicrobatchWiseLoadBalanceLoss,
+    MoE,
 )
+from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
+from torchtitan.models.qwen3 import model_registry as qwen3_model_registry
 
 _COEFF = 0.1
 _METRIC_KEY = ("batch", "microbatch_wise_load_balance_loss")
@@ -333,6 +336,23 @@ class TestGlobalBatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
 
 class TestLoadBalanceLossConfig(_AuxLossTestCase):
+    def test_moe_models_default_to_global_batch_wise_loss(self):
+        for model_spec in (
+            gpt_oss_model_registry("debugmodel", seq_len=16),
+            qwen3_model_registry("debugmodel_moe", seq_len=16),
+        ):
+            losses = list(
+                model_spec.model.traverse(GlobalBatchWiseLoadBalanceLoss.Config)
+            )
+            self.assertTrue(losses)
+            self.assertTrue(all(loss.coeff == 1e-3 for _, loss, _, _ in losses))
+            self.assertTrue(
+                all(
+                    moe.load_balance_coeff is None
+                    for _, moe, _, _ in model_spec.model.traverse(MoE.Config)
+                )
+            )
+
     def test_config_builds_selected_loss(self):
         self.assertIs(
             type(MicrobatchWiseLoadBalanceLoss.Config(coeff=_COEFF).build()),

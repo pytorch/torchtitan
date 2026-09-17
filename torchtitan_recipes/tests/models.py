@@ -12,6 +12,7 @@ from torchtitan.config.transform import apply_transforms, ContextParallelTransfo
 from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
 
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_mtp,
@@ -269,6 +270,7 @@ def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
+    config.activation_checkpoint = None
     _set_spmd_typechecking(config, typechecking=False)
     config.training.disable_cuda_graphs = True
     return config
@@ -329,6 +331,10 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
 
 def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config = gpt_oss_debugmodel_flex(seq_len=2048)
+    assert config.model_spec is not None
+    for _, moe, _, _ in config.model_spec.model.traverse(MoE.Config):
+        moe.load_balance_coeff = 1e-3
+        moe.router.aux_loss = None
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -349,7 +355,7 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     )
 
 
-def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
+def gpt_oss_debugmodel_fsdp4_pp2_ep4() -> Trainer.Config:
     config = gpt_oss_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.training.num_tokens_per_microbatch_per_dp_rank = 1024
@@ -359,7 +365,7 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.expert_parallel_degree = 4
-    config.activation_checkpoint = SelectiveAC.Config()
+    config.activation_checkpoint = None
     config.training.disable_cuda_graphs = True
     return config
 
