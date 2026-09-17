@@ -28,24 +28,27 @@ class MoonEPTableBackend(Protocol):
     """Allocates this rank's bf16 ``[P + B]`` rows and fp32 grad rows, and moves
     slot weights in and slot gradients home."""
 
-    def configure(self, *, num_experts: int, num_slots: int, num_sms: int) -> None: ...
+    def configure(self, *, num_experts: int, num_slots: int, num_sms: int) -> None:
+        ...
 
-    def alloc_expert_rows(
-        self, name: str, in_dim: int, out_dim: int
-    ) -> torch.Tensor: ...
+    def alloc_expert_rows(self, name: str, in_dim: int, out_dim: int) -> torch.Tensor:
+        ...
 
     def alloc_grad_rows(
         self, name: str, in_dim: int, out_dim: int
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        ...
 
-    def prefetch(self, plan, tables: dict[str, torch.Tensor]) -> None: ...
+    def prefetch(self, plan, tables: dict[str, torch.Tensor]) -> None:
+        ...
 
-    def reduce_grad(self, plan, grads: dict[str, torch.Tensor]) -> None: ...
+    def reduce_grad(self, plan, grads: dict[str, torch.Tensor]) -> None:
+        ...
 
 
 class _MoonEPExpertFunction(torch.autograd.Function):
     @staticmethod
-    def forward(  # pyrefly: ignore[bad-override]
+    def forward(
         ctx, experts, x_RD, w1_l, w2_l, w3_l, offsets, plan
     ):
         experts._refresh_own_rows(w1_l, w2_l, w3_l)
@@ -147,9 +150,7 @@ class MoonEPGroupedExperts(GroupedExperts):
     def _refresh_own_rows(self, w1_l, w2_l, w3_l) -> None:
         rows = self.num_own_experts
         with torch.no_grad():
-            self._tables["gate"][:rows].copy_(
-                w1_l.transpose(-2, -1).to(torch.bfloat16)
-            )
+            self._tables["gate"][:rows].copy_(w1_l.transpose(-2, -1).to(torch.bfloat16))
             self._tables["up"][:rows].copy_(w3_l.transpose(-2, -1).to(torch.bfloat16))
             self._tables["down"][:rows].copy_(w2_l.transpose(-2, -1).to(torch.bfloat16))
 
@@ -335,5 +336,3 @@ class MoonEPTableBackendNVLink:
                 num_sms=self.num_sms,
                 **handles,
             )
-
-

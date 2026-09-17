@@ -210,9 +210,9 @@ class FakeMoonEPWorld:
             for (r, b), e in plan.dup_map.items():
                 home = self.home(e)
                 for name in ("gate", "up", "down"):
-                    self._own_grads[(home, name)][e - home * self.local] += (
-                        self._slot_grads[(r, name)][b]
-                    )
+                    self._own_grads[(home, name)][
+                        e - home * self.local
+                    ] += self._slot_grads[(r, name)][b]
                     self._slot_grads[(r, name)][b].zero_()
             return {r: None for r in range(self.R)}
 

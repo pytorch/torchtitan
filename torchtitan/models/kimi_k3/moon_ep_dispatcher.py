@@ -52,7 +52,7 @@ def padded_slot_count(base_slots: int, in_dim: int, out_dim: int) -> int:
 # Routing weights ride along as a second output so their gradient reaches the router.
 class _MoonEPDispatch(torch.autograd.Function):
     @staticmethod
-    def forward(  # pyrefly: ignore[bad-override]
+    def forward(
         ctx, buffer, plan_out, x_SH, weights_SK, ids_SK, counts_E
     ):
         hidden_nvsh, weights_nvs, cu_seqlens, plan = buffer.dispatch(
@@ -90,7 +90,7 @@ class _MoonEPDispatch(torch.autograd.Function):
 
 class _MoonEPCombine(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, buffer, plan, hidden_nvsh):  # pyrefly: ignore[bad-override]
+    def forward(ctx, buffer, plan, hidden_nvsh):
         out_SH, _, _ = buffer.combine(plan=plan, hidden_nvsh=hidden_nvsh)
         ctx.buffer = buffer
         ctx.plan = plan
@@ -205,6 +205,8 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
 
     def grad_reduce_handles(self) -> dict:
         """MoonEP's barrier handles, which only its ``Buffer`` context holds."""
+        if self._buffer is None:
+            raise RuntimeError("MoonEP dispatcher used before wire_meshes(); no buffer")
         ctx = self._buffer._require_ctx()
         return {
             "meta_buf": ctx["meta_buf"],
@@ -213,7 +215,6 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
             "grid_sync_bar": ctx["grid_sync_bar"],
         }
 
-    # pyrefly: ignore [bad-override]
     def dispatch(
         self,
         x_TD: torch.Tensor,
@@ -262,7 +263,6 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         self._current = (plan_box[0], cu_seqlens)
         return hidden_nvsh, num_tokens_per_row, metadata
 
-    # pyrefly: ignore [bad-override]
     def combine(
         self,
         routed_output_RD: torch.Tensor,
