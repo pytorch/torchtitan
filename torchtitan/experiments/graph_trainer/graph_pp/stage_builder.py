@@ -9,6 +9,7 @@ import dataclasses
 from collections.abc import Callable
 from typing import Any, cast, Protocol
 
+import torch
 import torch.fx as fx
 from torch.distributed.pipelining.schedules import (
     _PipelineContext,
@@ -74,6 +75,8 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
         runtime_validate: bool = False,
     ) -> list[Any]: ...
 
+    def _grad_accumulator_args(self) -> list[torch.Tensor]: ...
+
     def _split_forward_outputs(
         self,
         fw_outputs: tuple[Any, ...],
@@ -111,17 +114,20 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
         """Run one multiplexed backward/forward graph.
 
         Calling convention:
-            ``(*backward_inputs, *forward_inputs)``
+            ``(*backward_inputs, *backward_grad_accumulators, *forward_inputs)``
             ``-> (*param_grads, *input_grads, *user_outputs,``
             ``    *saved_for_backward, *side_effect_outputs)``
         """
 
-        bw_args = self.bw_graphs._backward_args(
-            backward_stage_output,
-            backward_saved_values_for_backward,
-            output_grads_from_next,
-            runtime_validate=runtime_validate,
-        )
+        bw_args = [
+            *self.bw_graphs._backward_args(
+                backward_stage_output,
+                backward_saved_values_for_backward,
+                output_grads_from_next,
+                runtime_validate=runtime_validate,
+            ),
+            *self.bw_graphs._grad_accumulator_args(),
+        ]
         fw_args = self.fw_graphs._forward_args(
             forward_args,
             forward_kwargs,

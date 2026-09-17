@@ -222,6 +222,16 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         )
         self.assertTrue(torch.equal(param.grad, torch.tensor([4.0, 5.0])))
 
+    def test_accumulate_param_grads_does_not_add_buffer_to_itself(self):
+        param = nn.Parameter(torch.zeros(2))
+        graph_grad = torch.tensor([1.0, 2.0])
+
+        accumulate_param_grads_([param], [graph_grad])
+        self.assertIs(param.grad, graph_grad)
+
+        accumulate_param_grads_([param], [graph_grad.view_as(graph_grad)])
+        self.assertTrue(torch.equal(param.grad, torch.tensor([1.0, 2.0])))
+
 
 class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
     def _trace_mark_dynamic_value_range(self, *, min_value=None, max_value=None):

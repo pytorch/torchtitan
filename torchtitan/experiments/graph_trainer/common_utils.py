@@ -141,6 +141,27 @@ def _maybe_materialize_grad_for_param_layout(
     return materialized_grad
 
 
+def _is_same_tensor_view(lhs: torch.Tensor, rhs: torch.Tensor) -> bool:
+    if lhs is rhs:
+        return True
+    if isinstance(lhs, DTensor):
+        if not isinstance(rhs, DTensor):
+            return False
+        if lhs.device_mesh != rhs.device_mesh or lhs.placements != rhs.placements:
+            return False
+        lhs = lhs._local_tensor
+        rhs = rhs._local_tensor
+    elif isinstance(rhs, DTensor):
+        return False
+    return (
+        lhs.shape == rhs.shape
+        and lhs.stride() == rhs.stride()
+        and lhs.storage_offset() == rhs.storage_offset()
+        # pyrefly: ignore [missing-attribute]
+        and torch._C._is_alias_of(lhs, rhs)
+    )
+
+
 def set_graph_module_boxed_codegen(
     gm: torch.fx.GraphModule,
     *,
@@ -209,11 +230,21 @@ def compute_parameter_gradients(
     gradients = torch.autograd.grad(
         loss, tuple(parameter for _, parameter in named_parameters)
     )
-    tagged_gradients = []
-    for (parameter_fqn, _), gradient in zip(named_parameters, gradients, strict=True):
-        with annotate({PARAMETER_GRADIENT_FQNS_META: (parameter_fqn,)}):
-            tagged_gradients.append(torch.ops.aten.alias.default(gradient))
-    return tuple(tagged_gradients)
+    return tuple(
+        annotate_parameter_gradient(gradient, parameter_fqn)
+        for (parameter_fqn, _), gradient in zip(
+            named_parameters, gradients, strict=True
+        )
+    )
+
+
+def annotate_parameter_gradient(
+    gradient: torch.Tensor,
+    parameter_fqn: str,
+) -> torch.Tensor:
+    """Attach a parameter identity to one gradient in the traced graph."""
+    with annotate({PARAMETER_GRADIENT_FQNS_META: (parameter_fqn,)}):
+        return torch.ops.aten.alias.default(gradient)
 
 
 def compute_annotated_loss(
@@ -256,6 +287,9 @@ def accumulate_param_grads_(
         grad = _maybe_materialize_grad_for_param_layout(param, grad)
         if param.grad is None:
             param.grad = grad.clone() if clone_grads_to_initialize_param_grad else grad
+        # The graph-owned buffer may already be the optimizer-visible gradient.
+        elif _is_same_tensor_view(param.grad, grad):
+            continue
         else:
             param.grad += grad
 
