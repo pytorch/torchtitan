@@ -1192,3 +1192,14 @@ def deepseek_v4_flash_pr18_best_profile(seq_len: int | None = 8192) -> Trainer.C
     config.profiler.profiler_warmup = 3
     config.profiler.profiler_active = 2
     return config
+
+
+# --- round 5: HC-branch elementwise work, on the 100.09 config -----------------
+
+
+def deepseek_v4_flash_best_hc_compile(seq_len: int | None = 8192) -> Trainer.Config:
+    """The 100.09 recipe, unchanged. The lever on this branch is in
+    torchtitan/models/deepseek_v4/mhc.py (see the branch's commit), so this
+    alias exists only to give the run log and ledger a self-describing name.
+    """
+    return deepseek_v4_flash_pr18_asyncep_bf16reduce(seq_len)

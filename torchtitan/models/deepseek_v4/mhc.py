@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -11,6 +12,98 @@ import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.protocols.module import Module
+
+
+# ---------------------------------------------------------------------------
+# The HC math as plain tensor functions, compiled individually.
+#
+# Why here and not through the trainer's ``compile.enable``: compiling the
+# whole transformer block never fused anything on the flash recipe -- Dynamo
+# hit a graph break inside an SPMD typecheck context manager in the attention
+# path and left the block body eager (four attempts, profile-verified). These
+# functions contain nothing but tensor ops, so each is its own small graph:
+# the fp32 upcast, RMS statistic, mixing linear, sinkhorn and the
+# broadcast-multiply-sum become a handful of fused kernels instead of ~20
+# separate passes over a [T, hc_mult*D] fp32 tensor per call.
+#
+# ``fullgraph=True`` makes a graph break an error rather than a silent
+# fallback to eager. ``dynamic=False``: shapes are fixed per rank.
+# HC_COMPILE=0 runs the same functions eagerly (numerics reference).
+# ---------------------------------------------------------------------------
+
+
+def _sinkhorn_split(mixes, hc_scale, hc_base, *, hc_mult, sinkhorn_iters, eps):
+    pre, post, comb = mixes.split([hc_mult, hc_mult, hc_mult * hc_mult], dim=-1)
+    comb = comb.unflatten(-1, (hc_mult, hc_mult))
+
+    pre = (
+        torch.sigmoid(
+            pre * hc_scale[0]
+            + hc_base[:hc_mult].view(*([1] * (pre.ndim - 1)), hc_mult)
+        )
+        + eps
+    )
+    post = 2 * torch.sigmoid(
+        post * hc_scale[1]
+        + hc_base[hc_mult : 2 * hc_mult].view(*([1] * (post.ndim - 1)), hc_mult)
+    )
+    comb = comb * hc_scale[2] + hc_base[2 * hc_mult :].view(
+        *([1] * (comb.ndim - 2)), hc_mult, hc_mult
+    )
+
+    row_max = comb.max(dim=-1, keepdim=True).values
+    comb = torch.exp(comb - row_max)
+    comb = comb / (comb.sum(dim=-1, keepdim=True) + eps)
+    comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
+    for _ in range(sinkhorn_iters - 1):
+        comb = comb / (comb.sum(dim=-1, keepdim=True) + eps)
+        comb = comb / (comb.sum(dim=-2, keepdim=True) + eps)
+    return pre, post, comb
+
+
+def _hc_pre_math(x, hc_fn, hc_scale, hc_base, *, hc_mult, sinkhorn_iters, eps, norm_eps):
+    shape, dtype = x.size(), x.dtype
+    x = x.flatten(-2).float()
+    rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + norm_eps)
+    mixes = F.linear(x, hc_fn.float()) * rsqrt
+    pre, post, comb = _sinkhorn_split(
+        mixes.float(), hc_scale.float(), hc_base.float(),
+        hc_mult=hc_mult, sinkhorn_iters=sinkhorn_iters, eps=eps,
+    )
+    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
+    return y.to(dtype), post, comb
+
+
+def _hc_post_math(x, residual, post, comb):
+    y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
+        comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
+    )
+    return y.type_as(x)
+
+
+def _hc_head_math(x, hc_fn, hc_scale, hc_base, *, norm_eps, eps):
+    shape, dtype = x.size(), x.dtype
+    x = x.flatten(-2).float()
+    rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + norm_eps)
+    mixes = F.linear(x, hc_fn.float()) * rsqrt
+    pre = torch.sigmoid(mixes * hc_scale + hc_base) + eps
+    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
+    return y.to(dtype)
+
+
+_HC_COMPILE = os.environ.get("HC_COMPILE", "1") == "1"
+
+
+def _maybe_compile(fn):
+    if not _HC_COMPILE:
+        return fn
+    return torch.compile(fn, fullgraph=True, dynamic=False)
+
+
+_hc_pre = _maybe_compile(_hc_pre_math)
+_hc_post = _maybe_compile(_hc_post_math)
+_hc_head = _maybe_compile(_hc_head_math)
+
 
 
 class HcSplitSinkhorn(Module):
@@ -40,33 +133,10 @@ class HcSplitSinkhorn(Module):
             ``pre`` and ``post`` tensors of shape ``[T, hc_mult]`` and
             ``comb`` of shape ``[T, hc_mult, hc_mult]``.
         """
-        hc_mult = self.hc_mult
-        pre, post, comb = mixes.split([hc_mult, hc_mult, hc_mult * hc_mult], dim=-1)
-        comb = comb.unflatten(-1, (hc_mult, hc_mult))
-
-        pre = (
-            torch.sigmoid(
-                pre * hc_scale[0]
-                + hc_base[:hc_mult].view(*([1] * (pre.ndim - 1)), hc_mult)
-            )
-            + self.eps
+        return _sinkhorn_split(
+            mixes, hc_scale, hc_base,
+            hc_mult=self.hc_mult, sinkhorn_iters=self.sinkhorn_iters, eps=self.eps,
         )
-        post = 2 * torch.sigmoid(
-            post * hc_scale[1]
-            + hc_base[hc_mult : 2 * hc_mult].view(*([1] * (post.ndim - 1)), hc_mult)
-        )
-        comb = comb * hc_scale[2] + hc_base[2 * hc_mult :].view(
-            *([1] * (comb.ndim - 2)), hc_mult, hc_mult
-        )
-
-        row_max = comb.max(dim=-1, keepdim=True).values
-        comb = torch.exp(comb - row_max)
-        comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)
-        comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
-        for _ in range(self.sinkhorn_iters - 1):
-            comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)
-            comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
-        return pre, post, comb
 
 
 class HcPre(Module):
@@ -106,15 +176,13 @@ class HcPre(Module):
             Tuple ``(y, post, comb)`` where ``y`` has shape ``[T, D]`` and
             ``post``/``comb`` are consumed by ``HcPost``.
         """
-        shape, dtype = x.size(), x.dtype
-        x = x.flatten(-2).float()
-        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, self.hc_fn.float()) * rsqrt
-        pre, post, comb = self.sinkhorn(
-            mixes.float(), self.hc_scale.float(), self.hc_base.float()
+        return _hc_pre(
+            x, self.hc_fn, self.hc_scale, self.hc_base,
+            hc_mult=self.hc_mult,
+            sinkhorn_iters=self.sinkhorn.sinkhorn_iters,
+            eps=self.sinkhorn.eps,
+            norm_eps=self.norm_eps,
         )
-        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
-        return y.to(dtype), post, comb
 
 
 class HcPost(Module):
@@ -139,10 +207,7 @@ class HcPost(Module):
         Returns:
             Hidden states of shape ``[T, hc_mult, D]``.
         """
-        y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(
-            comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2
-        )
-        return y.type_as(x)
+        return _hc_post(x, residual, post, comb)
 
 
 class HcHead(Module):
@@ -175,10 +240,7 @@ class HcHead(Module):
         Returns:
             Hidden states of shape ``[T, D]``.
         """
-        shape, dtype = x.size(), x.dtype
-        x = x.flatten(-2).float()
-        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, self.hc_fn.float()) * rsqrt
-        pre = torch.sigmoid(mixes * self.hc_scale + self.hc_base) + self.eps
-        y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
-        return y.to(dtype)
+        return _hc_head(
+            x, self.hc_fn, self.hc_scale, self.hc_base,
+            norm_eps=self.norm_eps, eps=self.eps,
+        )
