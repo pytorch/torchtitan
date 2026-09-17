@@ -9,7 +9,7 @@
 import logging
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, cast
 
 import torch
@@ -545,7 +545,8 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
 def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
-    config.validator = Validator.Config()
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.validator = Validator.Config(dataloader=replace(config.dataloader))
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
