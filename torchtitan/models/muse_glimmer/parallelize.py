@@ -9,6 +9,9 @@
 # Muse Glimmer model.
 
 import logging
+from typing import cast
+
+from torch.distributed.fsdp import FSDPModule
 
 from torchtitan.config import (
     CompileConfig,
@@ -42,6 +45,16 @@ def parallelize_muse_glimmer(
     dump_folder: str,
     skip_dp: bool = False,
 ):
+    model_config = cast(MuseGlimmerModel.Config, model.config)
+    if (
+        not skip_dp
+        and model_config.vision_encoder is not None
+        and not training.disable_cuda_graphs
+    ):
+        raise ValueError(
+            "Muse Glimmer multimodal training requires CUDA graphs to be disabled"
+        )
+
     # When the model owns the vision stack (multimodal flavor), the encoder +
     # adapter are submodules: TP is applied by ``model.parallelize`` (driven by
     # the sharding configs set in update_from_config), and AC/compile/FSDP are
@@ -127,6 +140,10 @@ def parallelize_muse_glimmer(
         dp_mesh_dims=dp_mesh_dims,
         symm_mem_scope=parallelism.fsdp_symm_mem_scope,
     )
+    if has_vision:
+        for module in (model, model.vision_encoder, model.vision_adapter):
+            assert isinstance(module, FSDPModule)
+            module.set_reduce_scatter_unused_params(True, recurse=False)
 
     logger.info("Applied fully_shard to the model")
 

@@ -416,10 +416,21 @@ class MuseGlimmerVisionEncoder(Module):
     # ------------------------------------------------------------------
 
     def forward(
-        self, pixel_values: torch.Tensor, *, grid_thw: torch.Tensor
+        self,
+        pixel_values: torch.Tensor | None,
+        *,
+        grid_thw: torch.Tensor | None,
     ) -> torch.Tensor:
         device = self.conv1_linear.weight.device
         dtype = self.conv1_linear.weight.dtype
+        if pixel_values is None:
+            empty_TO = self.conv1_linear.weight.new_empty(
+                (0, self.output_dim),
+                requires_grad=torch.is_grad_enabled(),
+            )
+            return _annotate_vision_activation_type(empty_TO)
+
+        assert grid_thw is not None
         sf = self.sparse_attention_factor
 
         # Patches per image. The temporal grid dim is always 1 (temporal is

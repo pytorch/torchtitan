@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import Mock, patch
 
 import torch
@@ -18,6 +19,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torchtitan.components.optimizer import (
     default_adamw,
     LRSchedulersContainer,
+    optimizer as optimizer_module,
     OptimizersContainer,
     ParamGroupConfig,
     register_moe_load_balancing_hook,
@@ -50,6 +52,19 @@ class SimpleModel(nn.Module):
         x = self.layers["0"]["norm"](x)
         x = self.layers["0"]["ff"](x)
         return self.output(x)
+
+
+class ConditionalModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.always = nn.Linear(4, 4, bias=False)
+        self.conditional = nn.Linear(4, 4, bias=False)
+
+    def forward(self, x: torch.Tensor, *, conditional_active: bool) -> torch.Tensor:
+        x = self.always(x)
+        if conditional_active:
+            return self.conditional(x)
+        return x + 0.0 * self.conditional.weight.sum()
 
 
 class FakeRouter(nn.Module):
@@ -213,6 +228,77 @@ def _run_torchft_moe_load_balancing_step(rank, store_path):
         manager.start_quorum.assert_called_once_with()
         manager.should_commit.assert_called_once_with()
         torch.testing.assert_close(model.weight, torch.tensor([0.9]))
+    finally:
+        dist.destroy_process_group()
+
+
+def _run_conditional_optimizer_global_activity(rank, store_path):
+    dist.init_process_group(
+        backend="gloo",
+        init_method=f"file://{store_path}",
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=60),
+    )
+    try:
+        torch.manual_seed(0)
+        loss_mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("loss",))
+        model = ConditionalModel()
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 0.1, "weight_decay": 0.1},
+                ),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        local_activity = rank == 0
+
+        def consume_local_activity() -> bool:
+            nonlocal local_activity
+            result = local_activity
+            local_activity = False
+            return result
+
+        register = optimizer_module.register_conditional_optimizer_groups
+        register(
+            container,
+            [
+                optimizer_module.ConditionalOptimizerGroup(
+                    name="conditional",
+                    parameters=tuple(model.conditional.parameters()),
+                    consume_activity=consume_local_activity,
+                )
+            ],
+            FakeParallelDims(loss_mesh=loss_mesh),
+        )
+
+        parameter = model.conditional.weight
+        initial_parameter = parameter.detach().clone()
+        parameter.grad = torch.zeros_like(parameter)
+        container.step()
+        assert not torch.equal(parameter, initial_parameter)
+        assert container.optimizers[0].state[parameter]["step"].item() == 1.0
+
+        gathered_parameters = [torch.empty_like(parameter) for _ in range(2)]
+        dist.all_gather(gathered_parameters, parameter)
+        torch.testing.assert_close(gathered_parameters[0], gathered_parameters[1])
+
+        parameter_before_inactive_step = parameter.detach().clone()
+        step_before_inactive_step = (
+            container.optimizers[0].state[parameter]["step"].clone()
+        )
+        parameter.grad = torch.zeros_like(parameter)
+        container.step()
+        torch.testing.assert_close(parameter, parameter_before_inactive_step)
+        torch.testing.assert_close(
+            container.optimizers[0].state[parameter]["step"],
+            step_before_inactive_step,
+        )
+        assert parameter.grad is None
     finally:
         dist.destroy_process_group()
 
@@ -737,6 +823,292 @@ class TestMixedOptimizers(unittest.TestCase):
             v2 = state_dict2[key]
             if isinstance(v1, torch.Tensor):
                 self.assertTrue(torch.equal(v1, v2), f"State mismatch for key {key}")
+
+
+class TestConditionalOptimizerGroups(unittest.TestCase):
+    def _build_container(
+        self,
+        model: nn.Module,
+        *,
+        optimizer_name: str = "AdamW",
+        implementation: Literal[
+            "for-loop", "foreach", "fused", "fused_opt_states_bf16"
+        ] = "for-loop",
+    ) -> OptimizersContainer:
+        config = OptimizersContainer.Config(
+            implementation=implementation,
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name=optimizer_name,
+                    optimizer_kwargs={"lr": 0.1, "weight_decay": 0.1},
+                ),
+            ],
+        )
+        return config.build(model_parts=[model])
+
+    def test_conditional_group_api_is_exported(self):
+        import torchtitan.components.optimizer as optimizer_package
+
+        self.assertIs(
+            optimizer_package.ConditionalOptimizerGroup,
+            optimizer_module.ConditionalOptimizerGroup,
+        )
+        self.assertIs(
+            optimizer_package.register_conditional_optimizer_groups,
+            optimizer_module.register_conditional_optimizer_groups,
+        )
+
+    def test_globally_inactive_group_skips_adamw_update(self):
+        model = ConditionalModel()
+        container = self._build_container(model)
+        local_activity = True
+
+        def consume_local_activity() -> bool:
+            nonlocal local_activity
+            result = local_activity
+            local_activity = False
+            return result
+
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=tuple(model.conditional.parameters()),
+            consume_activity=consume_local_activity,
+        )
+        optimizer_module.register_conditional_optimizer_groups(
+            container,
+            [group],
+            FakeParallelDims(),
+        )
+
+        inputs = torch.randn(2, 4)
+        model(inputs, conditional_active=True).sum().backward()
+        container.step()
+
+        optimizer = container.optimizers[0]
+        parameter = model.conditional.weight
+        weight_before_inactive_step = parameter.detach().clone()
+        always_weight_before_inactive_step = model.always.weight.detach().clone()
+        state_before_inactive_step = {
+            name: value.clone() for name, value in optimizer.state[parameter].items()
+        }
+
+        container.zero_grad(set_to_none=False)
+        model(inputs, conditional_active=False).sum().backward()
+        self.assertIsNotNone(parameter.grad)
+        torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter))
+        container.step()
+
+        torch.testing.assert_close(parameter, weight_before_inactive_step)
+        self.assertFalse(
+            torch.equal(model.always.weight, always_weight_before_inactive_step)
+        )
+        for name, value in state_before_inactive_step.items():
+            torch.testing.assert_close(optimizer.state[parameter][name], value)
+        self.assertIsNone(parameter.grad)
+
+    def test_adam_is_supported(self):
+        model = ConditionalModel()
+        container = self._build_container(model, optimizer_name="Adam")
+        parameter = model.conditional.weight
+        parameter_before_step = parameter.detach().clone()
+        parameter.grad = torch.zeros_like(parameter)
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=(parameter,),
+            consume_activity=lambda: False,
+        )
+        optimizer_module.register_conditional_optimizer_groups(
+            container,
+            [group],
+            FakeParallelDims(),
+        )
+
+        container.step()
+
+        torch.testing.assert_close(parameter, parameter_before_step)
+        self.assertIsNone(parameter.grad)
+
+    def test_foreach_adamw_is_supported(self):
+        model = ConditionalModel()
+        container = self._build_container(model, implementation="foreach")
+        parameter = model.conditional.weight
+        parameter_before_step = parameter.detach().clone()
+        parameter.grad = torch.zeros_like(parameter)
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=(parameter,),
+            consume_activity=lambda: False,
+        )
+        optimizer_module.register_conditional_optimizer_groups(
+            container,
+            [group],
+            FakeParallelDims(),
+        )
+
+        container.step()
+
+        torch.testing.assert_close(parameter, parameter_before_step)
+        self.assertIsNone(parameter.grad)
+
+    def test_duplicate_conditional_parameter_is_rejected(self):
+        model = ConditionalModel()
+        container = self._build_container(model)
+        parameter = model.conditional.weight
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=(parameter, parameter),
+            consume_activity=lambda: False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "conditional.*duplicate"):
+            optimizer_module.register_conditional_optimizer_groups(
+                container,
+                [group],
+                FakeParallelDims(),
+            )
+
+    def test_unsupported_optimizer_is_rejected(self):
+        model = ConditionalModel()
+        container = self._build_container(model)
+        container.optimizers = [torch.optim.SGD(model.parameters(), lr=0.1)]
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=tuple(model.conditional.parameters()),
+            consume_activity=lambda: False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "conditional.*SGD"):
+            optimizer_module.register_conditional_optimizer_groups(
+                container,
+                [group],
+                FakeParallelDims(),
+            )
+
+    def test_empty_conditional_group_is_rejected(self):
+        model = ConditionalModel()
+        container = self._build_container(model)
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=(),
+            consume_activity=lambda: False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "conditional.*no parameters"):
+            optimizer_module.register_conditional_optimizer_groups(
+                container,
+                [group],
+                FakeParallelDims(),
+            )
+
+    def test_frozen_conditional_parameter_is_rejected(self):
+        model = ConditionalModel()
+        container = self._build_container(model)
+        model.conditional.weight.requires_grad_(False)
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=(model.conditional.weight,),
+            consume_activity=lambda: False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "conditional.*not trainable"):
+            optimizer_module.register_conditional_optimizer_groups(
+                container,
+                [group],
+                FakeParallelDims(),
+            )
+
+    def test_parameter_without_optimizer_owner_is_rejected(self):
+        model = ConditionalModel()
+        container = self._build_container(model)
+        unowned_parameter = nn.Parameter(torch.ones(1))
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=(unowned_parameter,),
+            consume_activity=lambda: False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "exactly one optimizer.*found 0"):
+            optimizer_module.register_conditional_optimizer_groups(
+                container,
+                [group],
+                FakeParallelDims(),
+            )
+
+    def test_parameter_with_multiple_optimizer_owners_is_rejected(self):
+        model = ConditionalModel()
+        container = self._build_container(model)
+        parameter = model.conditional.weight
+        container.optimizers.append(torch.optim.AdamW([parameter], lr=0.1))
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=(parameter,),
+            consume_activity=lambda: False,
+        )
+
+        with self.assertRaisesRegex(ValueError, "exactly one optimizer.*found 2"):
+            optimizer_module.register_conditional_optimizer_groups(
+                container,
+                [group],
+                FakeParallelDims(),
+            )
+
+    def test_state_dict_materialization_does_not_consume_activity(self):
+        model = ConditionalModel()
+        container = self._build_container(model)
+        parameter = model.conditional.weight
+        parameter_before_state_dict = parameter.detach().clone()
+        local_activity = True
+        num_activity_consumptions = 0
+
+        def consume_local_activity() -> bool:
+            nonlocal local_activity, num_activity_consumptions
+            num_activity_consumptions += 1
+            result = local_activity
+            local_activity = False
+            return result
+
+        group = optimizer_module.ConditionalOptimizerGroup(
+            name="conditional",
+            parameters=(parameter,),
+            consume_activity=consume_local_activity,
+        )
+        optimizer_module.register_conditional_optimizer_groups(
+            container,
+            [group],
+            FakeParallelDims(),
+        )
+
+        container.state_dict()
+
+        torch.testing.assert_close(parameter, parameter_before_state_dict)
+        self.assertEqual(num_activity_consumptions, 0)
+        self.assertEqual(container.optimizers[0].state[parameter]["step"].item(), 0.0)
+
+        parameter.grad = torch.zeros_like(parameter)
+        container.step()
+        self.assertEqual(num_activity_consumptions, 1)
+        self.assertFalse(torch.equal(parameter, parameter_before_state_dict))
+        self.assertEqual(container.optimizers[0].state[parameter]["step"].item(), 1.0)
+
+        parameter_before_inactive_step = parameter.detach().clone()
+        parameter.grad = torch.zeros_like(parameter)
+        container.step()
+        torch.testing.assert_close(parameter, parameter_before_inactive_step)
+        self.assertEqual(container.optimizers[0].state[parameter]["step"].item(), 1.0)
+
+    @unittest.skipUnless(
+        dist.is_available() and dist.is_gloo_available(),
+        "Requires Gloo for the two-rank conditional activity test.",
+    )
+    def test_activity_is_reduced_across_the_loss_mesh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            mp.spawn(
+                _run_conditional_optimizer_global_activity,
+                args=(f"{directory}/rendezvous",),
+                nprocs=2,
+                join=True,
+            )
 
 
 class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):

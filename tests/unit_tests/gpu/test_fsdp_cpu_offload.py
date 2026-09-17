@@ -7,16 +7,24 @@
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import CPUOffloadPolicy
 from torch.distributed.fsdp._fully_shard._fsdp_state import _get_module_fsdp_state
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.components.optimizer import (
+    ConditionalOptimizerGroup,
+    OptimizersContainer,
+    ParamGroupConfig,
+    register_conditional_optimizer_groups,
+)
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
 )
+from torchtitan.models.muse_glimmer import muse_glimmer_vision_encoder_config
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -38,6 +46,14 @@ class _Block(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w(x)
+
+
+class _LossMeshParallelDims:
+    def __init__(self, loss_mesh):
+        self.loss_mesh = loss_mesh
+
+    def get_optional_mesh(self, name):
+        return self.loss_mesh if name == "loss" else None
 
 
 class _TinyVLM(nn.Module):
@@ -145,3 +161,206 @@ class TestVisionEncoderCPUOffload(DTensorTestBase):
         model = self._build(cpu_offload=False)
         assert not isinstance(_offload_policy(model.vision_encoder), CPUOffloadPolicy)
         assert not isinstance(_offload_policy(model.tok_embeddings), CPUOffloadPolicy)
+
+
+class TestConditionalVisionFSDP(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def _run_mixed_rank_image_presence(self, *, cpu_offload: bool) -> None:
+        mesh = self.build_device_mesh()
+        with torch.device("meta"):
+            encoder = muse_glimmer_vision_encoder_config(
+                latent_dim=8,
+                num_layers=0,
+                num_heads=2,
+                mlp_ratio=2.0,
+                patch_size=2,
+                patch_temporal=1,
+                downsample_factor=2,
+                sparse_attention_factor=1,
+                pos_emb_grid_h=2,
+                pos_emb_grid_w=2,
+            ).build()
+        apply_fsdp_to_vision_encoder(
+            encoder,
+            mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            reshard_after_forward_policy="always",
+            cpu_offload=cpu_offload,
+        )
+        encoder.set_reduce_scatter_unused_params(True, recurse=False)
+        encoder.to_empty(device="cpu" if cpu_offload else self.device_type)
+        with torch.no_grad():
+            for parameter in encoder.parameters():
+                nn.init.normal_(parameter, std=0.02)
+            encoder.rope_freq.init_states(
+                buffer_device=torch.device(self.device_type) if cpu_offload else None
+            )
+
+        if self.rank == 0:
+            pixel_values = torch.randn(
+                4,
+                12,
+                device=self.device_type,
+                dtype=torch.bfloat16,
+            )
+            grid_thw = torch.tensor(
+                [[1, 2, 2]],
+                device=self.device_type,
+                dtype=torch.int64,
+            )
+        else:
+            pixel_values = None
+            grid_thw = None
+
+        output_TO = encoder(pixel_values, grid_thw=grid_thw)
+        self.assertEqual(output_TO.device.type, self.device_type)
+        output_TO.sum().backward()
+
+        for name, parameter in encoder.named_parameters():
+            self.assertIsNotNone(parameter.grad, name)
+            self.assertEqual(parameter.grad.device, parameter.device)
+
+    @with_comms
+    def test_mixed_rank_image_presence_completes_backward(self) -> None:
+        self._run_mixed_rank_image_presence(cpu_offload=False)
+
+    @with_comms
+    def test_mixed_rank_image_presence_completes_backward_with_cpu_offload(
+        self,
+    ) -> None:
+        self._run_mixed_rank_image_presence(cpu_offload=True)
+
+
+class TestConditionalVisionHSDP(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    @with_comms
+    def test_accumulation_orders_and_globally_inactive_step(self) -> None:
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        loss_mesh = mesh._flatten("loss")
+        with torch.device("meta"):
+            encoder = muse_glimmer_vision_encoder_config(
+                latent_dim=8,
+                num_layers=0,
+                num_heads=2,
+                mlp_ratio=2.0,
+                patch_size=2,
+                patch_temporal=1,
+                downsample_factor=2,
+                sparse_attention_factor=1,
+                pos_emb_grid_h=2,
+                pos_emb_grid_w=2,
+            ).build()
+        apply_fsdp_to_vision_encoder(
+            encoder,
+            mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            reshard_after_forward_policy="always",
+        )
+        encoder.set_reduce_scatter_unused_params(True, recurse=False)
+        encoder.to_empty(device=self.device_type)
+        with torch.no_grad():
+            for parameter in encoder.parameters():
+                nn.init.normal_(parameter, std=0.02)
+            encoder.rope_freq.init_states()
+
+        optimizer_config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r".*",
+                    optimizer_name="AdamW",
+                    optimizer_kwargs={"lr": 0.1, "weight_decay": 0.1},
+                ),
+            ],
+        )
+        optimizers = optimizer_config.build(model_parts=[encoder])
+        local_activity = False
+
+        def consume_local_activity() -> bool:
+            nonlocal local_activity
+            result = local_activity
+            local_activity = False
+            return result
+
+        register_conditional_optimizer_groups(
+            optimizers,
+            [
+                ConditionalOptimizerGroup(
+                    name="vision",
+                    parameters=tuple(encoder.parameters()),
+                    consume_activity=consume_local_activity,
+                )
+            ],
+            _LossMeshParallelDims(loss_mesh),
+        )
+
+        tracked_parameter = encoder.conv1_linear.weight
+        for activity_order, expect_update in (
+            ((True, False), True),
+            ((False, True), True),
+            ((False, False), False),
+        ):
+            optimizers.zero_grad()
+            for microbatch_index, globally_active in enumerate(activity_order):
+                encoder.set_requires_all_reduce(
+                    microbatch_index == len(activity_order) - 1
+                )
+                locally_active = globally_active and self.rank == 0
+                local_activity = local_activity or locally_active
+                if locally_active:
+                    pixel_values = torch.randn(
+                        4,
+                        12,
+                        device=self.device_type,
+                        dtype=torch.bfloat16,
+                    )
+                    grid_thw = torch.tensor(
+                        [[1, 2, 2]],
+                        device=self.device_type,
+                        dtype=torch.int64,
+                    )
+                else:
+                    pixel_values = None
+                    grid_thw = None
+                output_TO = encoder(pixel_values, grid_thw=grid_thw)
+                output_TO.float().sum().backward()
+
+            self.assertTrue(
+                all(parameter.grad is not None for parameter in encoder.parameters())
+            )
+            parameter_before_step = tracked_parameter.to_local().detach().clone()
+            optimizer_state_before_step = {
+                name: value.clone()
+                for name, value in optimizers.optimizers[0]
+                .state.get(tracked_parameter, {})
+                .items()
+            }
+            optimizers.step()
+            if expect_update:
+                self.assertFalse(
+                    torch.equal(tracked_parameter.to_local(), parameter_before_step)
+                )
+            else:
+                torch.testing.assert_close(
+                    tracked_parameter.to_local(), parameter_before_step
+                )
+                self.assertTrue(
+                    all(parameter.grad is None for parameter in encoder.parameters())
+                )
+                for name, value in optimizer_state_before_step.items():
+                    torch.testing.assert_close(
+                        optimizers.optimizers[0].state[tracked_parameter][name],
+                        value,
+                    )
