@@ -3,4 +3,3 @@ opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-http
 pygtrie
 portpicker
-renderers==0.1.11

@@ -494,6 +494,7 @@ class MuseGlimmerModel(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         *,
+        padding_mask: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         pixel_values_videos: torch.Tensor | None = None,
@@ -501,7 +502,7 @@ class MuseGlimmerModel(Decoder):
         vision_bank_indices_T: torch.Tensor | None = None,
     ):
         # Video inputs are rejected by preprocess_inputs.
-        del pixel_values_videos, grid_thw_videos
+        del padding_mask, pixel_values_videos, grid_thw_videos
 
         # Embedding stage: embed tokens (the scaleless norm is bundled inside
         # tok_embeddings) and inject vision features before the decoder layers.

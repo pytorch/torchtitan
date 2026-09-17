@@ -11,9 +11,9 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from monarch.actor import Actor, concurrent_endpoint
+from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.rollouter import RolloutWorker
 from torchtitan.experiments.rl.rollout.types import RolloutGroup
 from torchtitan.observability import structured_logger as sl

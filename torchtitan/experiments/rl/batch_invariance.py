@@ -4,54 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Batch-invariance helpers for bitwise trainer/generator numerics parity.
-
-Groups the pieces that make the vLLM generator match the trainer op-for-op under
-batch-invariant mode: a model-config converter that pins FlexInnerAttention kernel
-options, plus a runtime patch for the v2 logprob kernel.
-"""
+"""Runtime helper for bitwise trainer/generator numerics parity."""
 
 import logging
-from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.protocols.model import ModelConfigConverter
-
 logger = logging.getLogger(__name__)
-
-
-class BatchInvariantFlexConverter(ModelConfigConverter):
-    """Pin flex attention kernel options for batch-invariant mode.
-
-    Sets fixed BLOCK_M/BLOCK_N=16 and BACKEND=TRITON on all
-    FlexInnerAttention layers.
-
-    BACKEND=TRITON is to avoid flex_decode kernel.
-    """
-
-    # the triton BLOCK_N tile size needs to be pinned for stable numerics and
-    # needs to match vLLM's for identical results, today vLLM default is 16
-    # TODO: run some experiments to determine impact of small vs large tile sizes
-    _BLOCK_M = 16
-    _BLOCK_N = 16
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelConfigConverter.Config):
-        pass
-
-    def __init__(self, config: Config):
-        pass
-
-    def convert(self, model_config):
-        for layer_cfg in model_config.layers:
-            inner = layer_cfg.attention.inner_attention
-            if isinstance(inner, FlexInnerAttention.Config):
-                inner.kernel_options["BACKEND"] = "TRITON"
-                inner.kernel_options["BLOCK_M"] = self._BLOCK_M
-                inner.kernel_options["BLOCK_N"] = self._BLOCK_N
-        return model_config
 
 
 def force_logprobs_fn_for_batch_invariance() -> None:
@@ -61,8 +20,10 @@ def force_logprobs_fn_for_batch_invariance() -> None:
     (``compute_token_logprobs`` -> ``_topk_log_softmax_kernel``) that inlines
     ``log(softmax(logits))`` and never calls PyTorch ops.
 
-    Swapping the kernel to routes the generator and the trainer through
-    the same set of ops, so logprobs match bit-for-bit.
+    Swapping the kernel routes the generator and the trainer through
+    the same set of ops, so logprobs match bit-for-bit. The wrapper supplies
+    full logits to vLLM outside the trainer's TP SPMD context, so the replicated
+    path is selected directly even though this patch omits ``global_vocab_size``.
     """
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
@@ -74,8 +35,8 @@ def force_logprobs_fn_for_batch_invariance() -> None:
         """Per-token logprobs for vLLM's v2 sampler (replaces its fused kernel).
 
         Args:
-            logits: ``[N, V]`` next-token logits for N sampled positions
-                (V = vocab_size).
+            logits: Full-vocabulary ``[N, V]`` next-token logits for N sampled
+                positions, already gathered by the vLLM model wrapper.
             token_ids: ``[N, K]`` the K token ids to score per position (vLLM
                 passes the sampled token's logprob plus any top-k logprobs it requested).
 
