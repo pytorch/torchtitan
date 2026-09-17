@@ -15,7 +15,7 @@ _MODULE_NAME = "_torchtitan_checkpoint_test_config"
 _CONFIG_NAME = "checkpoint_test_config"
 _MODULE_DIR = tempfile.TemporaryDirectory(prefix="torchtitan_checkpoint_config_")
 
-_MODULE_SOURCE = r'''
+_MODULE_SOURCE = r"""
 import os
 
 from torchtitan.components.checkpointer import CheckpointManager
@@ -65,7 +65,7 @@ def checkpoint_test_config():
     else:
         raise ValueError(f"Unknown checkpoint test mode: {mode}")
     return config
-'''
+"""
 
 
 def configure_checkpoint(
