@@ -75,19 +75,17 @@ class SDCReplayMismatchTrainingEngine(TrainingEngine):
         )
         self._num_forward_backward_calls = 0
 
-    def _forward_backward_body(
+    def _non_pp_forward_backward_body(
         self,
         *,
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor,
         model_kwargs: dict[str, Any],
         loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        loss = super()._forward_backward_body(
+        loss = super()._non_pp_forward_backward_body(
             inputs=inputs,
             labels=labels,
-            global_valid_tokens=global_valid_tokens,
             model_kwargs=model_kwargs,
             loss_kwargs=loss_kwargs,
         )
@@ -135,6 +133,7 @@ class SDCReplayMismatchTrainer(Trainer):
             assert self.engine.sdc_replayer is not None
             assert self.engine.sdc_replayer.steps_since_reset == 0
             logger.info("Detected expected %s", error)
+            self.engine.num_completed_steps = error.step
             return
         raise AssertionError("Expected SDC replay to detect the injected mismatch.")
 
@@ -224,7 +223,10 @@ def llama3_debugmodel_tp2_asynctp_compile_spmd_types() -> Trainer.Config:
 def llama3_debugmodel_full_checkpoint_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.checkpointer = CheckpointManager.Config()
+    config.checkpointer = CheckpointManager.Config(
+        interval=10,
+        last_save_model_only=False,
+    )
     return config
 
 
@@ -319,7 +321,10 @@ def llama3_debugmodel_tp2_pp2_gpipe() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
-    config.checkpointer = CheckpointManager.Config()
+    config.checkpointer = CheckpointManager.Config(
+        interval=10,
+        last_save_model_only=False,
+    )
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.data_parallel_shard_degree = 2
@@ -512,7 +517,10 @@ def llama3_debugmodel_fsdp_reshard_always() -> Trainer.Config:
 def llama3_debugmodel_optional_checkpoint_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.checkpointer = CheckpointManager.Config()
+    config.checkpointer = CheckpointManager.Config(
+        interval=10,
+        last_save_model_only=False,
+    )
     return config
 
 
@@ -546,7 +554,11 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     assert isinstance(config.dataloader, GrainDataLoader.Config)
-    config.validator = Validator.Config(dataloader=replace(config.dataloader))
+    config.validator = Validator.Config(
+        freq=5,
+        steps=10,
+        dataloader=replace(config.dataloader),
+    )
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2

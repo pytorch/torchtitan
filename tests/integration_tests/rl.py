@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 _KEEP_ZERO_STD_REWARD_GROUPS = (
     "--async-loop.training-sample-builder.no-drop-zero-std-reward-groups"
 )
+_VLLM_GPU_MEMORY_LIMIT = "--generator.gpu-memory-limit 0.89"
 
 
 def build_rl_test_list() -> list[OverrideDefinitions]:
@@ -246,6 +247,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "policy from stalling the trainer"
                 )
                 override_args = [*override_args, _KEEP_ZERO_STD_REWARD_GROUPS]
+            if _VLLM_GPU_MEMORY_LIMIT not in override_args:
+                override_args = [*override_args, _VLLM_GPU_MEMORY_LIMIT]
             updated_override_args.append(override_args)
         test.override_args = updated_override_args
 
