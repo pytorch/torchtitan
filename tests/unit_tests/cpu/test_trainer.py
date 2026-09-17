@@ -221,7 +221,11 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
     )
 
     torch.testing.assert_close(result, torch.tensor(0.0))
-    arg_mbs, kwarg_mbs, target_mbs, passed_valid_tokens = fwd_bwd_fn.call_args.args
+    call_kwargs = fwd_bwd_fn.call_args.kwargs
+    arg_mbs = call_kwargs["arg_mbs"]
+    kwarg_mbs = call_kwargs["kwarg_mbs"]
+    target_mbs = call_kwargs["target_mbs"]
+    passed_valid_tokens = call_kwargs["global_valid_tokens"]
     torch.testing.assert_close(arg_mbs[0][0], torch.tensor(2))
     torch.testing.assert_close(arg_mbs[1][0], torch.tensor(3))
     torch.testing.assert_close(kwarg_mbs[0]["positions"], torch.tensor(13))
@@ -232,7 +236,7 @@ def test_pp_forward_backward_step_prepares_structured_inputs() -> None:
     assert trainer.ntokens_seen == 2
 
 
-def test_forward_backward_step_counts_cp_local_tokens_and_forwards_inputs():
+def test_forward_backward_step_counts_preprocessed_tokens_and_forwards_inputs():
     captured: dict[str, Any] = {}
 
     class _FakeModel:

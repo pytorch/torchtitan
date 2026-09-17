@@ -108,7 +108,7 @@ class FluxTrainer(Trainer):
             clip_model=self.clip_encoder,
             parallel_dims=self.parallel_dims,
             training=config.training,
-            enable_symm_mem=config.parallelism.enable_fsdp_symm_mem,
+            symm_mem_scope=config.parallelism.fsdp_symm_mem_scope,
         )
 
         if config.validator.enable:

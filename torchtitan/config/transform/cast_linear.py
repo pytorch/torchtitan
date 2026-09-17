@@ -4,60 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Linear that runs its matmul in a fixed compute dtype, plus the converter
-that swaps the decoder lm_head to it.
-
-RL training (logprob / KL / advantage math) is sensitive to the precision of
-the lm_head logits. A bf16 matmul already accumulates in fp32 on GPU, but it
-rounds each output logit back to bf16 before the softmax / log-softmax. That
-per-logit bf16 rounding is what we avoid here: ``CastLinear`` casts the input
-and weight to a higher-precision ``compute_dtype`` (fp32 by default) so the
-logits stay in that dtype, independent of the dtype the parameters are stored
-/ all-gathered in.
-
-This lives under ``experiments/rl`` because only RL configs opt into it; core
-models keep the plain ``Linear`` so LoRA / quantization converters compose
-with them unchanged.
-"""
+"""Model-config converter for fixed-dtype output projections."""
 
 from dataclasses import dataclass, fields
 
-import torch
-import torch.nn.functional as F
+from torchtitan.models.common.linear import CastLinear, Linear
 
-from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.model import ModelConfigConverter
+from .converter import ModelConfigConverter
 
-
-class CastLinear(Linear):
-    """``Linear`` whose forward matmul runs in ``compute_dtype``.
-
-    Inputs, weight, and bias are cast to ``compute_dtype`` before
-    ``F.linear`` and the output is returned in that dtype. Because the cast
-    happens in ``forward`` (not on the stored parameter), this is safe under
-    weight tying -- the shared embedding/lm_head parameter keeps its original
-    dtype and only the lm_head matmul sees the cast.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        compute_dtype: str = "float32"
-        """Dtype for the forward matmul (key into ``TORCH_DTYPE_MAP``)."""
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.compute_dtype = TORCH_DTYPE_MAP[config.compute_dtype]
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # The weight is re-cast on every call. In training that is unavoidable:
-        # the optimizer updates the weight each step. TODO: for inference the
-        # weight is fixed between weight syncs, so the upcast copy could be
-        # cached to avoid repeating the cast on every forward.
-        bias = None if self.bias is None else self.bias.to(self.compute_dtype)
-        return F.linear(
-            input.to(self.compute_dtype), self.weight.to(self.compute_dtype), bias
-        )
+__all__ = ["LMHeadCastConverter"]
 
 
 class LMHeadCastConverter(ModelConfigConverter):
@@ -65,7 +20,7 @@ class LMHeadCastConverter(ModelConfigConverter):
 
     Walks the model config tree and replaces the ``lm_head`` node in place.
     Targets only the lm_head, so every other Linear stays a plain ``Linear``
-    and LoRA / quantization converters are unaffected.
+    and LoRA transforms and quantization converters are unaffected.
 
     Note on trainer/inference bitwise parity: because the same ``model_spec``
     backs both the trainer and the vLLM generator, the lm_head sees a matched
@@ -73,7 +28,7 @@ class LMHeadCastConverter(ModelConfigConverter):
     goes fp32 (trainer) -> bf16 (weight-sync) -> fp32 (lm_head cast); the
     trainer's own lm_head input follows the analogous fp32 (FSDP-sharded
     params) -> bf16 (all-gather) -> fp32 (lm_head cast). Both paths share the
-    same lossy bf16 round-trip, so trainer<->inference bitwise agreement is
+    same lossy bf16 round-trip, so trainer/inference bitwise agreement is
     preserved rather than broken. TODO: investigate whether this
     fp32->bf16->fp32 cast pair can be removed (keep the weight in fp32 end to
     end) once that path is supported on both sides.
