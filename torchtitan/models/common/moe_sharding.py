@@ -18,9 +18,10 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     row_parallel_config,
+    rowwise_compute_config,
     token_id_placement,
 )
-from torchtitan.models.common.linear import is_column_parallel_linear_config
+from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 from torchtitan.protocols.sharding import ShardingConfig
 
 
@@ -138,39 +139,7 @@ def _router_gate_sharding_config() -> ShardingConfig:
     )
 
 
-def _shared_expert_colwise_config() -> ShardingConfig:
-    """Colwise shared-expert FFN (w13).
-
-    Mirrors ``ColwiseParallel(input_layouts=...)``: input is all-gathered
-    to Replicate for the column-sharded matmul; output is Shard(1) on features.
-    """
-    return colwise_config()
-
-
-def _shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
-    """Rowwise shared-expert FFN (w2).
-
-    Mirrors ``RowwiseParallel``: input is Shard(1) on the feature dim from
-    upstream colwise; rowwise matmul produces Partial, then redistributes to
-    ``output_layout``.
-    """
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            # Rowwise bias is Replicate; addmm implicitly converts to Partial
-            # to match the rowwise matmul output placement.
-            "bias": dense_param_placement(tp=spmd.R),
-        },
-        in_src_shardings={
-            "input": dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
-        },
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=output_layout,
-    )
-
-
 def _shared_experts_sharding_configs(
-    shared_experts_cfg,
     *,
     enable_ep: bool,
     enable_sp: bool,
@@ -185,37 +154,42 @@ def _shared_experts_sharding_configs(
             tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
         )
     )
-    desired_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     desired_output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
-
-    if is_column_parallel_linear_config(shared_experts_cfg.w13):
-        return (
-            ShardingConfig(
-                in_src_shardings={"x": input_layout},
-                out_src_shardings=desired_output_layout,
-            ),
-            column_parallel_config(input_layout=input_layout),
-            row_parallel_config(
-                output_layout=desired_output_layout,
-                # Shared output can stay Partial until it is added to the
-                # routed-expert output, so its rowwise bias remains Replicate.
-                bias_tp=spmd.R,
-            ),
-        )
-
-    # Qwen3.5 shares x between w13 and its sigmoid gate, so the parent keeps
-    # their single input redistribution.
     return (
         ShardingConfig(
             in_src_shardings={"x": input_layout},
-            in_dst_shardings={"x": desired_input_layout},
+            out_src_shardings=desired_output_layout,
         ),
-        _shared_expert_colwise_config(),
-        _shared_expert_rowwise_config(output_layout=desired_output_layout),
+        column_parallel_config(input_layout=input_layout),
+        row_parallel_config(output_layout=desired_output_layout),
+    )
+
+
+def set_shared_experts_sharding_config(
+    shared_experts_cfg,
+    *,
+    enable_ep: bool,
+    enable_sp: bool,
+) -> None:
+    """Configure a standard FeedForward used as an MoE shared expert."""
+    assert isinstance(shared_experts_cfg.w13, ColumnParallelLinear.Config)
+    assert isinstance(shared_experts_cfg.w2, RowParallelLinear.Config)
+    shared_config, w13_config, w2_config = _shared_experts_sharding_configs(
+        enable_ep=enable_ep,
+        enable_sp=enable_sp,
+    )
+    shared_experts_cfg.sharding_config = shared_config
+    shared_experts_cfg.w13.sharding_config = w13_config
+    shared_experts_cfg.w13.linear.sharding_config = colwise_config()
+    shared_experts_cfg.w2.sharding_config = w2_config
+    # Shared output can stay Partial until it is added to the routed-expert
+    # output, so its rowwise bias remains Replicate.
+    shared_experts_cfg.w2.linear.sharding_config = rowwise_compute_config(
+        bias_tp=spmd.R
     )
 
 
@@ -329,7 +303,11 @@ def set_moe_sharding_config(
     enable_sp: bool,
     expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
 ) -> None:
-    """Populate ``sharding_config`` on every MoE submodule.
+    """Configure the MoE wrapper, router, and routed experts.
+
+    Shared experts are configured separately because their input-sharing
+    contract is model-specific. Standard ``FeedForward`` shared experts use
+    :func:`set_shared_experts_sharding_config`.
 
     Branches dense vs sparse family per Module:
 
@@ -338,9 +316,6 @@ def set_moe_sharding_config(
     - ``moe.router``: input and padding-mask redistribution to the router's
       token layout, plus the expert-count buffer placement.
     - ``moe.router.gate``: Replicate weights and output.
-    - ``moe.shared_experts.{w1,w2,w3}``: dense-family TP plan with
-      Partial-flow grad annotations (when ``moe_cfg.shared_experts is not
-      None``).
     - ``moe.routed_experts.inner_experts`` (``GroupedExperts``): expert-weight
       ``state_shardings`` -- sparse ``{EP}`` / dense ``{TP}`` / none. The parent
       ``routed_experts`` holds the activation shardings and local SPMD region.
@@ -373,18 +348,6 @@ def set_moe_sharding_config(
     )
 
     moe_cfg.router.gate.sharding_config = _router_gate_sharding_config()
-
-    # Shared experts: SwiGLU FFN run in parallel with the routed experts.
-    shared = moe_cfg.shared_experts
-    if shared is not None:
-        (shared_config, w13_config, w2_config,) = _shared_experts_sharding_configs(
-            shared,
-            enable_ep=enable_ep,
-            enable_sp=enable_sp,
-        )
-        shared.sharding_config = shared_config
-        shared.w13.sharding_config = w13_config
-        shared.w2.sharding_config = w2_config
 
     # RoutedExperts local SPMD region: activation in/out, no params.
     routed_experts_config, inner_experts_config = _routed_experts_sharding_configs(

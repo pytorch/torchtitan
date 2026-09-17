@@ -19,6 +19,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
+    LinearConfig,
     RowParallelLinear,
 )
 from torchtitan.protocols.module import Module
@@ -30,18 +31,21 @@ __all__ = ["AsyncTensorParallelTransform"]
 
 
 def _convert_linear(
-    config: Linear.Config,
-    replacement: type[Linear],
+    config: LinearConfig,
+    replacement: type[ColumnParallelLinear] | type[RowParallelLinear],
     *,
     projection_name: str,
-) -> Linear.Config:
+) -> ColumnParallelLinear.Config | RowParallelLinear.Config:
     expected = (
         ColumnParallelLinear.Config
         if replacement is AsyncColumnParallelLinear
         else RowParallelLinear.Config
     )
-    if type(config) is expected:
-        return cast(Linear.Config, convert_config_type(config, replacement))
+    if type(config) is expected and type(config.linear) is Linear.Config:
+        return cast(
+            ColumnParallelLinear.Config | RowParallelLinear.Config,
+            convert_config_type(config, replacement),
+        )
     raise ValueError(
         "Async tensor parallelism does not support converted "
         f"{projection_name} projections"

@@ -180,7 +180,7 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
         with torch.no_grad():
-            fused.w13.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
+            fused.w13.linear.weight.copy_(torch.randn(2 * _HIDDEN, _DIM))
         state_dict = fused.state_dict()
         self.assertEqual(set(state_dict), {"w1.weight", "w2.weight", "w3.weight"})
 
@@ -190,7 +190,7 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         reload_config.activation_fn = fused_swiglu(reload_config.activation_fn)
         reloaded = reload_config.build()
         reloaded.load_state_dict(state_dict)
-        torch.testing.assert_close(reloaded.w13.weight, fused.w13.weight)
+        torch.testing.assert_close(reloaded.w13.linear.weight, fused.w13.linear.weight)
 
 
 class TestFusedSwiGLUHFAdapter(unittest.TestCase):

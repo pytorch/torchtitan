@@ -29,9 +29,10 @@ from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import canonical_linear_fqn, Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
+from torchtitan.protocols.module import Module
 from torchtitan.quantization import Float8Linear, MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
@@ -107,8 +108,8 @@ def test_float8_applied_by_model_registry():
     ]
     assert len(converted) > 0
     lora_converted = {
-        fqn
-        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
+        canonical_linear_fqn(fqn, parent)
+        for fqn, lc, parent, _attr in model_config.traverse(Module.Config, recurse=True)
         if hasattr(lc, "rank") and hasattr(lc, "alpha")
     }
     assert lora_converted == {
@@ -373,7 +374,9 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     model_config = config.model_spec.model
     model = model_config.build()
     model.init_states()
-    assert isinstance(model.get_submodule("layers.0.feed_forward.w13"), NVFP4Linear)
+    assert isinstance(
+        model.get_submodule("layers.0.feed_forward.w13.linear"), NVFP4Linear
+    )
 
     sd = model.state_dict()
     # Both NVFP4 runtime buffers are non-persistent, so neither the RHT vector

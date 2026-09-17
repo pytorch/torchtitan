@@ -43,7 +43,7 @@ from torch.nn.attention.varlen import (
 
 from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import LinearConfig
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
@@ -726,7 +726,7 @@ class QKVLinear(Module):
         head_dim: int
         n_heads: int
         n_kv_heads: int
-        wqkv: Linear.Config
+        wqkv: LinearConfig
 
     def __init__(self, config: Config):
         super().__init__()
@@ -851,7 +851,7 @@ class GQAttention(BaseAttention):
         n_heads: int
         dim: int
         qkv_linear: QKVLinear.Config
-        wo: Linear.Config
+        wo: LinearConfig
         qk_norm: RMSNorm.Config | None = None
         n_kv_heads: int | None = None
         head_dim: int | None = None

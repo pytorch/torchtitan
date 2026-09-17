@@ -52,7 +52,7 @@ def test_lora_model_builds():
     assert len(frozen_linears) > 0, "No frozen parameters found"
     lora_modules = {name.rsplit(".", 2)[0] for name in lora_params}
     assert lora_modules == {
-        f"layers.{layer}.attention.{projection}"
+        f"layers.{layer}.attention.{projection}.linear"
         for layer in range(6)
         for projection in ("qkv_linear.wqkv", "wo")
     }

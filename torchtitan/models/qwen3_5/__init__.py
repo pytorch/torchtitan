@@ -17,10 +17,12 @@ from torchtitan.config.transform import (
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
+    ColumnParallelLinear,
     Conv1d,
     Embedding,
     Linear,
     PartialBiasRowwiseLinear,
+    RowParallelLinear,
     SigmoidGatedFeedForward,
     Softmax,
 )
@@ -140,22 +142,14 @@ def _shared_experts_config(
         w1_param_init=_LINEAR_INIT,
         w2w3_param_init=_depth_init(layer_id),
     )
+    assert isinstance(ffn.w13, ColumnParallelLinear.Config)
+    assert isinstance(ffn.w2, RowParallelLinear.Config)
     return SigmoidGatedFeedForward.Config(
         # The gate and w13 share x, so the enclosing shared-expert boundary
         # retains their single input all-gather until this module has an
         # explicit shared-input TP implementation.
-        w13=Linear.Config(
-            in_features=ffn.w13.in_features,
-            out_features=ffn.w13.out_features,
-            bias=ffn.w13.bias,
-            param_init=ffn.w13.param_init,
-        ),
-        w2=Linear.Config(
-            in_features=ffn.w2.in_features,
-            out_features=ffn.w2.out_features,
-            bias=ffn.w2.bias,
-            param_init=ffn.w2.param_init,
-        ),
+        w13=ffn.w13.linear,
+        w2=ffn.w2.linear,
         gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
     )
 
