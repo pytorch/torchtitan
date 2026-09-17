@@ -42,7 +42,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     MOE_BLOCK_FQN,
     validate_ep_overlap_config,
 )
-
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cudagraph import (
     cudagraph_pass,
@@ -152,6 +151,56 @@ def construct_mandatory_graph_passes() -> list[Callable]:
     return [remove_parameter_gradient_markers_pass]
 
 
+def tag_must_save(
+    gm: torch.fx.GraphModule,
+    example_inputs=None,
+    *,
+    config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
+) -> torch.fx.GraphModule:
+    """Tagging necessary nodes before regional inductor"""
+    from torch.utils.checkpoint import CheckpointPolicy
+
+    from torchtitan.experiments.graph_trainer.common_utils import _is_backward_node
+
+    logger.info("Tagging `MUST_SAVE` nodes before inductor pass")
+    for node in gm.graph.nodes:
+        if _is_backward_node(node):
+            continue
+        if torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set()):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+    return gm
+
+
+def _memory_policy_passes(
+    config: "GraphTrainer.Config",
+    traced_result: "TracedResult",
+    model_parts: list | None,
+) -> list[Callable]:
+    """Tag activations, then materialize the tags.
+
+    The three run as a unit and in this order: tagging only writes
+    ``meta["recompute"]``, and the two passes after it turn those tags into
+    offload/reload ops and duplicated recompute nodes. Shared by both
+    memory-policy orderings so the triplet cannot drift between them.
+    """
+    return [
+        functools.partial(
+            tag_with_memory_policy_pass,
+            config=config,
+            trace=traced_result,
+            model_parts=model_parts,
+        ),
+        functools.partial(
+            apply_cpu_offload_pass,
+            prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+            defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        ),
+        selective_activation_remat_pass,
+    ]
+
+
 def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -160,6 +209,7 @@ def compile_time_passes(
     parallel_dims=None,
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
+    model_parts: list | None = None,
 ) -> list[Callable]:
     """Cleanup, FlexInnerAttention annotation, and regional_inductor passes.
 
@@ -187,6 +237,11 @@ def compile_time_passes(
     from torchtitan.experiments.graph_trainer.common_utils import (
         get_default_transformer_block_buckets,
     )
+
+    order_changed_for_auto_solver = False
+    memory_policy = config.compile.memory_policy.lower()
+    if memory_policy == "auto_perf_maxing":
+        order_changed_for_auto_solver = True
 
     n_layers = len(config.model_spec.model.layers)
     loss_config = getattr(config, "loss", None)
@@ -267,20 +322,25 @@ def compile_time_passes(
                 ]
             )
 
-    passes.extend(
-        [
-            functools.partial(
-                tag_with_memory_policy_pass,
-                config=config,
-            ),
-            functools.partial(
-                apply_cpu_offload_pass,
-                prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
-                defer_n_layers=config.compile.cpu_offload_defer_n_layers,
-            ),
-            selective_activation_remat_pass,
-        ]
-    )
+    # Memory policy, stage 1. auto_perf_maxing is the exception: its solver
+    # prices tensors against a graph that bucketing and Inductor have already
+    # settled, so only the must-save marking runs here and the real tagging
+    # is appended after Inductor below.
+    if order_changed_for_auto_solver:
+        passes.extend(
+            [
+                functools.partial(
+                    tag_must_save,
+                    config=config,
+                    trace=traced_result,
+                    model_parts=model_parts,
+                ),
+                selective_activation_remat_pass,
+            ]
+        )
+    else:
+        passes.extend(_memory_policy_passes(config, traced_result, model_parts))
+
     if ep_overlap_enabled:
         passes.extend(ep_overlap_chunk_passes)
         passes.append(isolate_ep_process_group_pass)
@@ -288,17 +348,21 @@ def compile_time_passes(
 
     if config.compile.enable_fsdp_ag_rs_overlap:
         passes.append(reassign_collective_pgs_pass)
-    passes.append(
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=module_bucket_plans,
-            # FSDP2 packs buckets in managed parameter order. The traced state
-            # FQNs preserve that registration order, unlike graph execution order.
-            fsdp_param_module_order=get_fsdp_param_module_order(
-                traced_result.state_fqns
-            ),
+
+    # Bucketing runs here for every policy except auto_perf_maxing, which
+    # needs it before its solver rather than after.
+    if not order_changed_for_auto_solver:
+        passes.append(
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=module_bucket_plans,
+                # FSDP2 packs buckets in managed parameter order. The traced state
+                # FQNs preserve that registration order, unlike graph execution order.
+                fsdp_param_module_order=get_fsdp_param_module_order(
+                    traced_result.state_fqns
+                ),
+            )
         )
-    )
 
     if ep_overlap_enabled:
         assert ep_overlap_module_fqn is not None
@@ -361,15 +425,30 @@ def compile_time_passes(
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
-    if not include_inductor:
-        return passes
-
-    passes.extend(
-        final_inductor_compile_passes(
-            config.compile,
-            use_cudagraph=use_cudagraph,
+    if include_inductor:
+        passes.extend(
+            final_inductor_compile_passes(
+                config.compile,
+                use_cudagraph=use_cudagraph,
+            )
         )
-    )
+
+    # auto_perf_maxing tags and buckets last, and does so even when Inductor
+    # is skipped (GraphPP calls this with include_inductor=False).
+    if order_changed_for_auto_solver:
+        passes.extend(_memory_policy_passes(config, traced_result, model_parts))
+        passes.append(
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=module_bucket_plans,
+                # FSDP2 packs buckets in managed parameter order. The traced state
+                # FQNs preserve that registration order, unlike graph execution order.
+                fsdp_param_module_order=get_fsdp_param_module_order(
+                    traced_result.state_fqns
+                ),
+            )
+        )
+
     return passes
 
 
@@ -436,6 +515,7 @@ def construct_default_graph_passes(
     config: "GraphTrainer.Config",
     *,
     parallel_dims=None,
+    model_parts: list | None = None,
 ) -> list[Callable]:
     """Build the pass list for the aot_fx_trace path.
 
@@ -457,6 +537,7 @@ def construct_default_graph_passes(
                 config,
                 use_cudagraph=want_cudagraph,
                 parallel_dims=parallel_dims,
+                model_parts=model_parts,
             )
         )
 

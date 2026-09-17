@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 
 import operator
+import os
 from collections import defaultdict
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -36,6 +37,10 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.experiments.graph_trainer.auto_sac_offload_solver_utils import (
+    HOST_MEMORY_FRACTION,
+    MEM_MULTIPLIER,
+)
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
     _get_module_fqn,
@@ -66,6 +71,109 @@ if TYPE_CHECKING:
 
 
 _INF_DISTANCE = int(1e9)
+
+
+def resolve_host_offload_cap_gib(
+    config: "GraphTrainer.Config",
+) -> float:
+    """Per-rank pinned-memory budget for offload, equal on every rank.
+
+    Offloaded activations are pinned on the host and every local rank pins its
+    own set, so the binding limit is the node's free memory shared across the
+    ranks on it, not the per-rank number alone. The returned value v satisfies
+    local_ranks * v <= fraction * MemFree by construction.
+
+    MemFree: only free memory on CPU. MemAvailable: PageCache+Free Mem, might take
+    longer to reclaim memory/pages.
+    """
+    cpu_offload_budget_gb: float = float(config.compile.cpu_offload_budget_gb)
+    local_ranks = max(1, int(os.environ.get("LOCAL_WORLD_SIZE", "1")))
+    avail_gib = 0.0
+    try:
+        with open("/proc/meminfo") as mi:
+            for line in mi:
+                if line.startswith("MemFree:"):
+                    avail_gib = float(line.split()[1]) * 1024 / MEM_MULTIPLIER
+                    break
+    except OSError:
+        pass
+
+    frac = HOST_MEMORY_FRACTION
+    usable_host_mem_fraction = float(
+        config.compile.host_memory_fraction
+    )  # iff user specified
+    if usable_host_mem_fraction and 0.0 < usable_host_mem_fraction < 1.0:
+        frac = usable_host_mem_fraction
+
+    host_limit = frac * avail_gib / local_ranks if avail_gib > 0 else float("inf")
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        _dev = "cuda" if torch.cuda.is_available() else "cpu"
+        t = torch.tensor([host_limit], dtype=torch.float64, device=_dev)
+        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MIN)
+        host_limit = float(t.item())
+
+    requested = float(cpu_offload_budget_gb)
+    if requested < 0:
+        # Negative asks for whatever the host allows
+        cap = host_limit
+    elif requested > host_limit:
+        raise ValueError(
+            f"--compile.cpu_offload_budget_gb {requested:.1f} GiB/rank exceeds "
+            f"what this node can pin: {host_limit:.1f} GiB/rank "
+            f"({host_limit * local_ranks:.0f} GiB across {local_ranks} local "
+            f"ranks, {frac:.0%} of {avail_gib:.0f} GiB MemFree). Pinned "
+            f"pages cannot be swapped, so overcommitting them fails in the "
+            f"driver rather than degrading. Lower it to {host_limit:.1f} or "
+            f"less, set 0 to disable offload, or -1 to use the host limit."
+        )
+    else:
+        cap = requested
+    logger.info(
+        "Host (CPU) offload limit: %.2f GiB/rank x %d local ranks = %.0f GiB of "
+        "%.0f GiB MemFree (fraction %.2f, config cap %.1f)",
+        cap,
+        local_ranks,
+        cap * local_ranks,
+        avail_gib,
+        frac,
+        cpu_offload_budget_gb,
+    )
+    return cap
+
+
+def resolve_memory_budget_gib(auto_sac_config) -> float:
+    """Per-rank peak-memory budget in GiB, inferred from the device if unset.
+
+    A budget is a property of the hardware, not of the model, so the usual
+    answer is "as much as this GPU has". -1 asks for exactly that:
+    ``budget_fraction`` of the local device's total memory. Selecting the
+    policy is then enough to use it -- no separate step to look up the card's
+    capacity and pass it back in.
+
+    Returns 0.0 when there is no CUDA device to measure and no explicit budget,
+    which the caller reports as "cannot plan".
+    """
+    requested = float(auto_sac_config.memory_budget_gb)
+    if requested > 0:
+        return requested
+
+    if not torch.cuda.is_available():
+        return 0.0
+    frac = float(auto_sac_config.budget_fraction)
+    total_gib = (
+        torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+        / MEM_MULTIPLIER
+    )
+    budget = frac * total_gib
+    logger.info(
+        "auto_perf_maxing: memory_budget_gb is unset, using %.2f GiB/rank "
+        "(%.0f%% of the device's %.2f GiB). Pass "
+        "--compile.auto_sac.memory_budget_gb to target a specific peak.",
+        budget,
+        frac * 100,
+        total_gib,
+    )
+    return budget
 
 
 def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
@@ -367,6 +475,8 @@ def _default_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC policy that saves compute-intensive ops and required FSDP unshards."""
     fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
@@ -389,6 +499,8 @@ def _full_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """Full recompute except for user-selected module operations."""
     tag_sac_policy(
@@ -403,6 +515,8 @@ def _eager_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC policy that alternates mm ops between save/recompute."""
     tag_sac_policy(gm, policy_fn=_make_eager_memory_policy())
@@ -532,6 +646,8 @@ def _min_cut_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """Choose saved activations with the min-cut partitioner."""
     backward_side = _backward_side_nodes(gm)
@@ -552,14 +668,76 @@ def _sac_and_offload_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC + CPU offload: apply default SAC, then offload within budget."""
     _default_memory_policy_pass(gm, config=config)
     tag_all_offloadable_activations(
         gm,
-        cpu_budget_gb=config.compile.cpu_offload_budget_gb,
+        cpu_budget_gb=resolve_host_offload_cap_gib(config),
     )
     return gm
+
+
+@register_memory_policy("auto_perf_maxing")
+def two_level_solver_pass(  # auto sac and offload
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
+) -> torch.fx.GraphModule:
+    """Graph tagging with two-level solver: the outer solves per-layer keep/recompute/
+    offload budgets under the GPU memory budget, the inner tags individual nodes
+    to realize them. Only tags the graph nodes; later apply_cpu_offload_pass
+    and selective_activation_remat_pass passes materialize the plan afterwards,
+    so do not disable them for this policy.
+
+    Budget: ``config.compile.auto_sac.memory_budget_gb``, or a fraction of the
+    local device's memory when that is unset.
+    """
+
+    # Importing the solver pulls in pulp, and this module is imported on every
+    # aot_fx_trace run. Keep it local so users on the other policies, and CI
+    # jobs without pulp installed, are unaffected.
+    from torchtitan.experiments.graph_trainer.auto_sac_offload_solver import (
+        two_level_solver,
+    )
+
+    budget_gb = resolve_memory_budget_gib(config.compile.auto_sac)
+    if budget_gb <= 0.0:
+        logger.warning(
+            "auto_perf_maxing: no memory budget could be resolved, so the graph "
+            "is left untagged. Set --compile.auto_sac.memory_budget_gb to a "
+            "positive per-rank budget in GiB."
+        )
+        return gm
+
+    inner_solver_type = config.compile.auto_sac.solver_type.lower()
+    if inner_solver_type not in ("greedy", "ilp"):
+        raise ValueError(
+            f"Unknown inner solver type: {inner_solver_type}, use "
+            "'greedy' or 'ilp' for --compile.auto_sac.solver_type"
+        )
+
+    cpu_offload_bw = int(config.compile.auto_sac.cpu_offload_bw)
+
+    new_gm, metrics = two_level_solver(
+        trace,
+        int(budget_gb * (1 << 30)),  # GiB to match units
+        config.optimizer,
+        model_parts,
+        cpu_offload_budget_gb=resolve_host_offload_cap_gib(config),
+        prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+        defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        debug_logging=config.compile.auto_sac.debug_solver,
+        cpu_offload_bw=cpu_offload_bw,
+        solver_type=inner_solver_type,
+    )
+    #  metrics can be printed or saved here
+
+    return new_gm if new_gm is not None else gm
 
 
 def tag_with_memory_policy_pass(
@@ -567,6 +745,8 @@ def tag_with_memory_policy_pass(
     example_inputs: tuple | None = None,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
@@ -588,6 +768,8 @@ def tag_with_memory_policy_pass(
             f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
         )
 
-    gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
+    gm = MEMORY_POLICY_REGISTRY[memory_policy](
+        gm, config=config, trace=trace, model_parts=model_parts
+    )
     log_activation_memory_policy(gm)
     return gm

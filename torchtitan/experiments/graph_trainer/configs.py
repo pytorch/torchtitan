@@ -26,6 +26,56 @@ SUPPORTED_EP_OVERLAP_MODULE_FQNS = frozenset({TRANSFORMER_BLOCK_FQN, MOE_BLOCK_F
 
 
 @dataclass(kw_only=True, slots=True)
+class AutoSacConfig:
+    """Knobs for the ``auto_perf_maxing`` memory policy.
+
+    Grouped so the policy's surface is one namespace rather than nine loose
+    fields on Compile. ``cpu_offload_budget_gb`` and ``host_memory_fraction``
+    stay on Compile: they size the shared pinned-host pool and
+    ``sac_and_offload`` reads them too.
+    """
+
+    memory_budget_gb: float = -1.0
+    """Peak GPU memory budget (GiB per rank). The solver minimizes runtime
+    subject to peak <= this budget.
+
+    -1 (the default) infers the budget from the local device:
+    ``budget_fraction`` of its total memory. Selecting the policy is therefore
+    enough to use it; set a positive value only to target a specific peak, for
+    example to leave room for another process on the same GPU.
+
+    The sentinel is negative rather than a large positive so that a genuinely
+    large budget is honoured instead of being mistaken for "unset"."""
+
+    budget_fraction: float = 0.90
+    """Share of total device memory to use when ``memory_budget_gb`` is -1.
+
+    Below 1.0 because the budget covers the graph and optimizer state only:
+    the CUDA context, allocator fragmentation, and NCCL buffers are outside the
+    model and still have to fit."""
+
+    solver_type: Literal["greedy", "ilp"] = "greedy"
+    """Inner solver, which splits each layer's activations into
+    keep/recompute/offload under the outer LP's fractions.
+        greedy: exact per-layer knapsack over the recompute cost of each
+            candidate. Fast, and the default.
+        ilp: solve the same split with CBC. Slower, but it expresses the
+            offload/recompute conflict constraint the greedy pass cannot.
+    """
+
+    cpu_offload_bw: int = 10000
+    """Assumed D2H/H2D bandwidth in GB/s, used to size the transfer window.
+
+    The default is a sentinel: at 10000 the solver measures the link instead.
+    Set it to override the measurement, which also skips the benchmark."""
+
+    debug_solver: bool = False
+    """Log the solver's inputs and per-iteration decisions: transfer
+    bandwidth, per-layer byte pools, outer fractions, inner tag counts.
+    Warnings and solver errors are logged regardless."""
+
+
+@dataclass(kw_only=True, slots=True)
 class EpOverlapConfig:
     enabled: bool = False
     """Enable EP-overlap support for the selected chunking and scheduling mode."""
@@ -108,7 +158,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
     memory_policy: Literal[
-        "default", "full", "eager", "min_cut", "sac_and_offload"
+        "default", "full", "eager", "min_cut", "sac_and_offload", "auto_perf_maxing"
     ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
@@ -123,6 +173,22 @@ class GraphTrainerCompileConfig(CompileConfig):
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
     """
+
+    cpu_offload_budget_gb: float = -1.0
+    """Maximum pinned CPU memory (GiB per rank) for offloaded activations.
+    Tensors are selected largest-first until the budget is exhausted.
+    -1 uses whatever the host allows, which is the usual choice: the safe value
+    depends on node memory and local rank count, not on the model. 0 disables
+    offload. A positive value above the host limit is an error, not a silent
+    clamp -- pinned pages are unswappable, so overcommitting fails in the
+    driver rather than degrading."""
+
+    host_memory_fraction: float = 0.80  # between 0.0 and 1.0
+    """Fraction of free host memory that may be pinned for offloaded
+    activations. Shared by ``sac_and_offload`` and ``auto_perf_maxing``."""
+
+    auto_sac: AutoSacConfig = field(default_factory=AutoSacConfig)
+    """Settings for the ``auto_perf_maxing`` memory policy."""
 
     full_recompute_save_ops: str = ""
     """Operations to save instead of recomputing under the ``full`` policy.
@@ -157,10 +223,6 @@ class GraphTrainerCompileConfig(CompileConfig):
     cpu_offload_defer_n_layers: int = 1
     """Defer forward wait_tensor ops this many layers past the last consumer
     to overlap D2H transfers with compute."""
-
-    cpu_offload_budget_gb: float = 100.0
-    """Maximum CPU memory budget (in GB per rank) for offloaded activations.
-    Tensors are selected largest-first until the budget is exhausted."""
 
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
