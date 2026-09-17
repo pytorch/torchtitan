@@ -289,6 +289,7 @@ def _latent_moe_config(
                     num_experts=num_experts,
                     top_k=top_k,
                     hidden_dim=latent_dim,
+                    expert_hidden_dim=expert_hidden_dim,
                 )
                 if moe_comm_backend == "moonep"
                 else make_token_dispatcher_config(

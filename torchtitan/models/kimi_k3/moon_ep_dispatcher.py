@@ -6,9 +6,7 @@
 
 """MoonEP token dispatch for the Kimi K3 latent MoE.
 
-``MoonEPTokenDispatcher`` routes tokens through MoonEP's persistent ``Buffer``
-(https://github.com/MoonshotAI/MoonEP); the expert side that consumes its
-plan is ``moon_ep_experts.MoonEPGroupedExperts``.
+The expert side that consumes the plan is ``moon_ep_experts``.
 """
 
 from __future__ import annotations
@@ -39,6 +37,16 @@ def _import_moonep():
             "comm_backend on hardware without that topology."
         ) from err
     return moonep
+
+
+def padded_slot_count(base_slots: int, in_dim: int, out_dim: int) -> int:
+    """``B`` raised to the VMM granularity MoonEP's reduce buffers are cut on."""
+    moonep = _import_moonep()
+    return int(
+        moonep.buffer.pad_dim0_for_alignment(
+            [base_slots, in_dim, out_dim], torch.float32
+        )
+    )
 
 
 # Routing weights ride along as a second output so their gradient reaches the router.
@@ -121,7 +129,10 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         ``update_ep_token_dispatcher_config``."""
 
         num_prefetch_slots: int | None = None
-        """MoonEP's ``B``; None is ``E // num_ep_ranks``, which training requires."""
+        """MoonEP's ``B``; None derives it, a value set here is taken as it stands."""
+
+        expert_hidden_dim: int | None = None
+        """Expert hidden width, which sizes a row of the reduce buffers."""
 
         num_sms: int = 32
         """SMs MoonEP's kernels may occupy (its default)."""
@@ -134,6 +145,7 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         self.hidden_dim = config.hidden_dim
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.num_prefetch_slots = config.num_prefetch_slots
+        self.expert_hidden_dim = config.expert_hidden_dim
         self.num_sms = config.num_sms
         self.token_padding = config.token_padding
         self._buffer = None
@@ -160,6 +172,17 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
                 "buffer can be allocated."
             )
         ep_size = self.ep_mesh.size()
+        if self.num_prefetch_slots is None:
+            if self.expert_hidden_dim is None:
+                raise ValueError(
+                    "MoonEPTokenDispatcher.Config needs expert_hidden_dim to "
+                    "derive the prefetch slot count: the slots are cut on the "
+                    "VMM granularity of a reduce-buffer row, which is the "
+                    "expert shape."
+                )
+            self.num_prefetch_slots = padded_slot_count(
+                self.num_experts // ep_size, self.hidden_dim, self.expert_hidden_dim
+            )
         self._buffer = self._buffer_factory(
             S=self.num_max_tokens_per_rank,
             H=self.hidden_dim,
@@ -179,6 +202,16 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
             self.num_experts,
             ep_size,
         )
+
+    def grad_reduce_handles(self) -> dict:
+        """MoonEP's barrier handles, which only its ``Buffer`` context holds."""
+        ctx = self._buffer._require_ctx()
+        return {
+            "meta_buf": ctx["meta_buf"],
+            "meta_stride": int(ctx["meta_chunk_padded"]),
+            "barrier_off": int(ctx["BARRIER_OFF"]),
+            "grid_sync_bar": ctx["grid_sync_bar"],
+        }
 
     # pyrefly: ignore [bad-override]
     def dispatch(

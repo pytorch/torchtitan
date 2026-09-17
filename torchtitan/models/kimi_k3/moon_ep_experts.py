@@ -4,13 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""MoonEP's expert side for the Kimi K3 latent MoE.
-
-``MoonEPGroupedExperts`` computes the routed experts over tables of ``E + B``
-rows per projection (every expert, then ``B`` prefetch slots), and
-``MoonEPTableBackendNVLink`` moves slot weights in and slot gradients home
-over MoonEP's NVLink primitives.
-"""
+"""MoonEP's expert side for the Kimi K3 latent MoE."""
 
 from __future__ import annotations
 
@@ -25,96 +19,78 @@ from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.kimi_k3.moon_ep_dispatcher import _import_moonep
 
 # Shape suffixes: R = received (VM-group-ordered) tokens, D = latent width,
-# F = expert hidden, E = experts, B = prefetch slots.
+# F = expert hidden, P = this rank's experts (E / ep size), B = prefetch slots.
 
 _PROJECTIONS = ("gate", "up", "down")
 
 
 class MoonEPTableBackend(Protocol):
-    """Allocates the tables MoonEP addresses across ranks."""
+    """Allocates this rank's bf16 ``[P + B]`` rows and fp32 grad rows, and moves
+    slot weights in and slot gradients home."""
 
-    def configure(self, *, num_experts: int, num_slots: int) -> None:
-        """``E`` and ``B``: how the ``rows`` of every table split."""
-        ...
+    def configure(self, *, num_experts: int, num_slots: int, num_sms: int) -> None: ...
 
-    def alloc_weight_table(
-        self, name: str, rows: int, in_dim: int, out_dim: int
-    ) -> torch.Tensor:
-        """bf16 ``[E + B, in, out]``: the experts, then the prefetch slots."""
-        ...
+    def alloc_expert_rows(
+        self, name: str, in_dim: int, out_dim: int
+    ) -> torch.Tensor: ...
 
-    def alloc_grad_table(
-        self, name: str, rows: int, in_dim: int, out_dim: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """fp32 ``[E + B, in, out]`` and this rank's ``[B, in, out]`` slot grads."""
-        ...
+    def alloc_grad_rows(
+        self, name: str, in_dim: int, out_dim: int
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
-    def prefetch(self, plan, tables: dict[str, torch.Tensor]) -> None:
-        """Fill the slot rows with the experts the plan copied onto this rank."""
-        ...
+    def prefetch(self, plan, tables: dict[str, torch.Tensor]) -> None: ...
 
-    def reduce_grad(
-        self, plan, grads: dict[str, tuple[torch.Tensor, torch.Tensor]]
-    ) -> None:
-        """Add every rank's slot grads for this rank's experts into its rows."""
-        ...
+    def reduce_grad(self, plan, grads: dict[str, torch.Tensor]) -> None: ...
 
 
 class _MoonEPExpertFunction(torch.autograd.Function):
     @staticmethod
     def forward(  # pyrefly: ignore[bad-override]
-        ctx, experts, x_RD, w1_l, w2_l, w3_l, cu_seqlens, plan
+        ctx, experts, x_RD, w1_l, w2_l, w3_l, offsets, plan
     ):
-        experts._refresh_local_rows(w1_l, w2_l, w3_l)
+        experts._refresh_own_rows(w1_l, w2_l, w3_l)
         experts._backend.prefetch(plan, experts._tables)
         with torch.no_grad():
-            out_RD = experts._compute(x_RD, experts._tables, cu_seqlens)
+            out_RD = experts._compute(x_RD, experts._tables, offsets)
         ctx.experts = experts
         ctx.plan = plan
-        ctx.save_for_backward(x_RD, cu_seqlens)
+        ctx.save_for_backward(x_RD, offsets)
         return out_RD
 
     @staticmethod
     def backward(ctx, grad_out_RD):  # pyrefly: ignore[bad-override]
         experts = ctx.experts
-        x_RD, cu_seqlens = ctx.saved_tensors
-        # Recompute with the tables as leaves to get the [E + B] table grads.
+        x_RD, offsets = ctx.saved_tensors
+        # Recompute with the tables as leaves to get the [P + B] row grads.
         x_leaf = x_RD.detach().requires_grad_(True)
         leaves = {
             n: experts._tables[n].detach().requires_grad_(True) for n in _PROJECTIONS
         }
         with torch.enable_grad():
-            out_RD = experts._compute(x_leaf, leaves, cu_seqlens)
-        grad_x, g_gate, g_up, g_down = torch.autograd.grad(
-            out_RD, [x_leaf, leaves["gate"], leaves["up"], leaves["down"]], grad_out_RD
+            out_RD = experts._compute(x_leaf, leaves, offsets)
+        grads = torch.autograd.grad(
+            out_RD,
+            [x_leaf, *(leaves[n] for n in _PROJECTIONS)],
+            grad_out_RD,
         )
-        table_grads = {"gate": g_gate, "up": g_up, "down": g_down}
-        # Route: local rows are ours, slot rows belong to other ranks' experts.
-        E, B = experts.num_experts, experts.num_prefetch_slots
-        lo, hi = experts._local_rows
-        for name in _PROJECTIONS:
-            full_grad, _ = experts._grad_tables[name]
-            full_grad.zero_()
-            full_grad[lo:hi].copy_(table_grads[name][lo:hi])
-            full_grad[E : E + B].copy_(table_grads[name][E : E + B])
-        experts._backend.reduce_grad(ctx.plan, experts._grad_tables)
-        # Tables are [row, in, out]; w1_EFD / w3_EFD are [E, F, D], w2_EDF [E, D, F].
-        grad_w1 = experts._grad_tables["gate"][0][lo:hi].transpose(-2, -1)
-        grad_w3 = experts._grad_tables["up"][0][lo:hi].transpose(-2, -1)
-        grad_w2 = experts._grad_tables["down"][0][lo:hi].transpose(-2, -1)
-        return (
-            None,
-            grad_x,
-            grad_w1.contiguous(),
-            grad_w2.contiguous(),
-            grad_w3.contiguous(),
-            None,
-            None,
+        grad_x = grads[0]
+        rows = experts.num_own_experts
+        for name, row_grad in zip(_PROJECTIONS, grads[1:]):
+            own_grad, slot_grad = experts._grads[name]
+            own_grad.copy_(row_grad[:rows])
+            slot_grad.copy_(row_grad[rows:])
+        experts._backend.reduce_grad(
+            ctx.plan, {n: experts._grads[n][0] for n in _PROJECTIONS}
         )
+        # Rows are [in, out]; w1_EFD / w3_EFD are [P, F, D] and w2_EDF [P, D, F].
+        grad_w1 = experts._grads["gate"][0].transpose(-2, -1).contiguous()
+        grad_w3 = experts._grads["up"][0].transpose(-2, -1).contiguous()
+        grad_w2 = experts._grads["down"][0].transpose(-2, -1).contiguous()
+        return None, grad_x, grad_w1, grad_w2, grad_w3, None, None
 
 
 class MoonEPGroupedExperts(GroupedExperts):
-    """``GroupedExperts`` over MoonEP's ``[E + B]`` tables; the parent without EP."""
+    """``GroupedExperts`` over this rank's experts and MoonEP's prefetch slots."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedExperts.Config):
@@ -125,59 +101,79 @@ class MoonEPGroupedExperts(GroupedExperts):
         self._dispatcher = None
         self._backend: MoonEPTableBackend | None = None
         self._tables: dict[str, torch.Tensor] = {}
-        self._grad_tables: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._local_rows: tuple[int, int] = (0, 0)
+        self._grads: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._row_span: tuple[int, int] = (0, 0)
+        self.num_own_experts = 0
         self.num_prefetch_slots = 0
 
     def attach(self, dispatcher, backend: MoonEPTableBackend, ep_mesh) -> None:
-        """Bind the dispatcher and the table backend and allocate the tables."""
+        """Bind the dispatcher and the table backend and allocate this rank's rows."""
         rank, size = ep_mesh.get_local_rank(), ep_mesh.size()
         if self.num_experts % size != 0:
             raise ValueError(
                 f"MoonEP needs num_experts ({self.num_experts}) divisible by "
                 f"the EP size ({size})."
             )
-        local = self.num_experts // size
-        self._local_rows = (rank * local, (rank + 1) * local)
-        slots = dispatcher.num_prefetch_slots
-        self.num_prefetch_slots = local if slots is None else slots
+        own = self.num_experts // size
+        D, F = self.w1_EFD.shape[-1], self.w1_EFD.shape[-2]
+        # init_buffer set the plan's slot count on MoonEP's VMM granularity.
+        slots = dispatcher.num_prefetch_slots or own
+        if slots < own:
+            raise ValueError(
+                f"MoonEP needs at least E / R = {own} prefetch slots to place "
+                f"every duplicated expert, got B={slots}."
+            )
+        self.num_own_experts = own
+        self.num_prefetch_slots = slots
+        self._row_span = (rank * own, (rank + 1) * own)
         self._dispatcher = dispatcher
         self._backend = backend
         backend.configure(
-            num_experts=self.num_experts, num_slots=self.num_prefetch_slots
+            num_experts=self.num_experts,
+            num_slots=slots,
+            num_sms=dispatcher.num_sms,
         )
-        rows = self.num_experts + self.num_prefetch_slots
-        D, F = self.w1_EFD.shape[-1], self.w1_EFD.shape[-2]
         self._tables = {
-            "gate": backend.alloc_weight_table("gate", rows, D, F),
-            "up": backend.alloc_weight_table("up", rows, D, F),
-            "down": backend.alloc_weight_table("down", rows, F, D),
+            "gate": backend.alloc_expert_rows("gate", D, F),
+            "up": backend.alloc_expert_rows("up", D, F),
+            "down": backend.alloc_expert_rows("down", F, D),
         }
-        self._grad_tables = {
-            "gate": backend.alloc_grad_table("gate", rows, D, F),
-            "up": backend.alloc_grad_table("up", rows, D, F),
-            "down": backend.alloc_grad_table("down", rows, F, D),
+        self._grads = {
+            "gate": backend.alloc_grad_rows("gate", D, F),
+            "up": backend.alloc_grad_rows("up", D, F),
+            "down": backend.alloc_grad_rows("down", F, D),
         }
 
-    def _refresh_local_rows(self, w1_l, w2_l, w3_l) -> None:
-        lo, hi = self._local_rows
+    def _refresh_own_rows(self, w1_l, w2_l, w3_l) -> None:
+        rows = self.num_own_experts
         with torch.no_grad():
-            self._tables["gate"][lo:hi].copy_(w1_l.transpose(-2, -1).to(torch.bfloat16))
-            self._tables["up"][lo:hi].copy_(w3_l.transpose(-2, -1).to(torch.bfloat16))
-            self._tables["down"][lo:hi].copy_(w2_l.transpose(-2, -1).to(torch.bfloat16))
+            self._tables["gate"][:rows].copy_(
+                w1_l.transpose(-2, -1).to(torch.bfloat16)
+            )
+            self._tables["up"][:rows].copy_(w3_l.transpose(-2, -1).to(torch.bfloat16))
+            self._tables["down"][:rows].copy_(w2_l.transpose(-2, -1).to(torch.bfloat16))
 
-    def _compute(self, x_RD, tables, cu_seqlens) -> torch.Tensor:
-        # Tables are [row, in, out]; the grouped-mm seam takes [row, out, in].
+    def _offsets(self, cu_seqlens_R: torch.Tensor) -> torch.Tensor:
+        """Token ends of this rank's expert rows followed by its slot rows."""
+        lo, hi = self._row_span
+        # A token reaches its expert's home rank or a rank holding a slot copy.
+        if lo:
+            torch._assert_async(cu_seqlens_R[lo - 1] == 0)
+        torch._assert_async(cu_seqlens_R[self.num_experts - 1] == cu_seqlens_R[hi - 1])
+        return torch.cat((cu_seqlens_R[lo:hi], cu_seqlens_R[self.num_experts :]))
+
+    def _compute(self, x_RD, tables, offsets) -> torch.Tensor:
+        # Rows are [in, out]; the grouped-mm seam takes [row, out, in].
         x_b = x_RD.to(torch.bfloat16)
         gate_RF = self._grouped_mm(
-            A=x_b, weight_EOI=tables["gate"].transpose(-2, -1), offs=cu_seqlens
+            A=x_b, weight_EOI=tables["gate"].transpose(-2, -1), offs=offsets
         )
         up_RF = self._grouped_mm(
-            A=x_b, weight_EOI=tables["up"].transpose(-2, -1), offs=cu_seqlens
+            A=x_b, weight_EOI=tables["up"].transpose(-2, -1), offs=offsets
         )
         h_RF = self.activation_fn(gate_RF, up_RF)
         return self._grouped_mm(
-            A=h_RF, weight_EOI=tables["down"].transpose(-2, -1), offs=cu_seqlens
+            A=h_RF, weight_EOI=tables["down"].transpose(-2, -1), offs=offsets
         )
 
     def forward(
@@ -185,14 +181,16 @@ class MoonEPGroupedExperts(GroupedExperts):
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        # With MoonEP the counts are per table row ([E + B]), not per local expert.
+        # With MoonEP the token counts come from the plan's cu_seqlens instead.
         if self._dispatcher is None:
             return super().forward(x_RD, num_tokens_per_expert_E)
-        plan, cu_seqlens = self._dispatcher.current_plan()
+        plan, cu_seqlens_R = self._dispatcher.current_plan()
         w1 = self.w1_EFD.to_local() if isinstance(self.w1_EFD, DTensor) else self.w1_EFD
         w2 = self.w2_EDF.to_local() if isinstance(self.w2_EDF, DTensor) else self.w2_EDF
         w3 = self.w3_EFD.to_local() if isinstance(self.w3_EFD, DTensor) else self.w3_EFD
-        out_RD = _MoonEPExpertFunction.apply(self, x_RD, w1, w2, w3, cu_seqlens, plan)
+        out_RD = _MoonEPExpertFunction.apply(
+            self, x_RD, w1, w2, w3, self._offsets(cu_seqlens_R), plan
+        )
         return out_RD.type_as(x_RD)
 
 
@@ -204,51 +202,43 @@ def check_moonep_mesh(parallel_dims) -> None:
             "duplicated-expert grads are reduced by MoonEP, not by the "
             "framework, and the replicate reduction is not wired around that."
         )
-    dp_shard, cp, tp, ep = (
-        parallel_dims.dp_shard,
-        parallel_dims.cp,
-        parallel_dims.tp,
-        parallel_dims.ep,
+    efsdp = parallel_dims.get_optional_mesh("efsdp")
+    degree = (
+        efsdp.size()
+        if efsdp is not None
+        else parallel_dims.dp_shard
+        * parallel_dims.cp
+        * parallel_dims.tp
+        // parallel_dims.ep
     )
-    if dp_shard * cp * tp != ep:
+    if degree != 1:
         raise NotImplementedError(
             "moe_comm_backend='moonep' needs efsdp == 1, i.e. "
             "data_parallel_shard_degree * context_parallel_degree * "
-            f"tensor_parallel_degree == expert_parallel_degree (got {dp_shard} * "
-            f"{cp} * {tp} vs {ep}): MoonEP maps each rank's whole expert chunk "
-            "over NVLink, which an FSDP-sharded expert cannot offer."
+            f"tensor_parallel_degree == expert_parallel_degree (got efsdp "
+            f"{degree}): MoonEP maps each rank's whole expert chunk over "
+            "NVLink, which an FSDP-sharded expert cannot offer."
         )
 
 
-class MoonEPTableBackendNVLink:
-    """Table backend over ``moonep.buffer.create_nvl_single_owner_tensor`` mappings.
+class _MappedRows:
+    """Per-owner NVLink mappings of one projection's ``[P + B, in, out]`` rows."""
 
-    ``plan.experts_to_copy`` is ``[R, B]`` int32: the global expert id in rank r's
-    slot b, negative when empty.
-    """
-
-    def __init__(self, ep_mesh):
-        self.ep_mesh = ep_mesh
-        self.rank, self.size = ep_mesh.get_local_rank(), ep_mesh.size()
+    def __init__(self, ep_mesh, rank: int, size: int):
+        self.ep_mesh, self.rank, self.size = ep_mesh, rank, size
         self.group = ep_mesh.get_group()
-        self.num_experts = 0
-        self.num_slots = 0
-        self._owned: dict[str, torch.Tensor] = {}
-        self._mapped: dict[str, list[torch.Tensor]] = {}
-        self._reduce_owned: dict[str, torch.Tensor] = {}
-        self._reduce_mapped: dict[str, list[torch.Tensor]] = {}
+        self.owners: dict[str, list[torch.Tensor]] = {}
 
-    def configure(self, *, num_experts: int, num_slots: int) -> None:
-        self.num_experts, self.num_slots = num_experts, num_slots
-
-    def _map_all_owners(self, rows: int, in_dim: int, out_dim: int, dtype):
+    def alloc(self, name: str, rows: int, in_dim: int, out_dim: int) -> torch.Tensor:
         moonep = _import_moonep()
-        padded = moonep.buffer.pad_dim0_for_alignment([rows, in_dim, out_dim], dtype)
+        padded = moonep.buffer.pad_dim0_for_alignment(
+            [rows, in_dim, out_dim], torch.bfloat16
+        )
         mapped = []
         for owner in range(self.size):
             t = moonep.buffer.create_nvl_single_owner_tensor(
                 [padded, in_dim, out_dim],
-                dtype,
+                torch.bfloat16,
                 owner_rank=owner,
                 local_rank=self.rank,
                 group=self.group,
@@ -258,64 +248,92 @@ class MoonEPTableBackendNVLink:
             torch.cuda.synchronize()
             dist.barrier(group=self.group)
             mapped.append(t[:rows])
-        return mapped
+        self.owners[name] = mapped
+        return mapped[self.rank]
 
-    def _local_rows(self, rows: int) -> int:
-        assert rows == self.num_experts + self.num_slots, (
-            rows,
-            self.num_experts,
-            self.num_slots,
-        )
-        return self.num_experts // self.size
 
-    def alloc_weight_table(self, name, rows, in_dim, out_dim):
-        local = self._local_rows(rows)
-        self._mapped[name] = self._map_all_owners(
-            local, in_dim, out_dim, torch.bfloat16
-        )
-        self._owned[name] = self._mapped[name][self.rank]
-        return torch.zeros(
-            rows, in_dim, out_dim, dtype=torch.bfloat16, device=self._owned[name].device
-        )
+class MoonEPTableBackendNVLink:
+    """Table backend on MoonEP's ``launch_prefetch`` and ``launch_grad_reduce``.
 
-    def alloc_grad_table(self, name, rows, in_dim, out_dim):
-        self._local_rows(rows)
-        self._reduce_mapped[name] = self._map_all_owners(
-            self.num_slots, in_dim, out_dim, torch.float32
+    ``plan.experts_to_copy`` is ``[R, B]`` int32: the global expert id in rank
+    r's slot b, negative when unused.
+    """
+
+    def __init__(self, ep_mesh, dispatcher):
+        self.ep_mesh = ep_mesh
+        self.rank, self.size = ep_mesh.get_local_rank(), ep_mesh.size()
+        self.group = ep_mesh.get_group()
+        self.dispatcher = dispatcher
+        self.num_experts = 0
+        self.num_slots = 0
+        self.num_sms = 32
+        self.own_rows = 0
+        self._rows = _MappedRows(ep_mesh, self.rank, self.size)
+        self._full_grads: dict[str, torch.Tensor] = {}
+        self._reduce: dict[str, torch.Tensor] = {}
+
+    def configure(self, *, num_experts: int, num_slots: int, num_sms: int) -> None:
+        self.num_experts, self.num_slots, self.num_sms = (
+            num_experts,
+            num_slots,
+            num_sms,
         )
-        self._reduce_owned[name] = self._reduce_mapped[name][self.rank]
+        self.own_rows = num_experts // self.size
+
+    def alloc_expert_rows(self, name, in_dim, out_dim):
+        return self._rows.alloc(name, self.own_rows + self.num_slots, in_dim, out_dim)
+
+    def alloc_grad_rows(self, name, in_dim, out_dim):
+        moonep = _import_moonep()
+        device = self._rows.owners[name][self.rank].device
+        # launch_grad_reduce addresses grad rows by global expert id.
         full = torch.zeros(
-            rows,
-            in_dim,
-            out_dim,
-            dtype=torch.float32,
-            device=self._reduce_owned[name].device,
+            self.num_experts, in_dim, out_dim, dtype=torch.float32, device=device
         )
-        return full, self._reduce_owned[name]
+        reduce_full = moonep.buffer.create_nvl_dist_tensor(
+            [self.num_slots, in_dim, out_dim],
+            torch.float32,
+            self.rank,
+            self.size,
+            group=self.group,
+        )
+        self._full_grads[name] = full
+        self._reduce[name] = reduce_full.view(
+            self.size, self.num_slots, in_dim, out_dim
+        )
+        lo = self.rank * self.own_rows
+        return full[lo : lo + self.own_rows], self._reduce[name][self.rank]
 
     def prefetch(self, plan, tables):
-        local = self.num_experts // self.size
-        for name, table in tables.items():
-            self._owned[name].copy_(table[self.rank * local : (self.rank + 1) * local])
+        moonep = _import_moonep()
+        ids = plan.experts_to_copy[self.rank]
+        # Peers read this rank's rows, which its forward has just refreshed.
         dist.barrier(group=self.group)
-        for b, e in enumerate(plan.experts_to_copy[self.rank].tolist()):
-            if e < 0:
-                continue
-            home, row = divmod(int(e), local)
+        for owner in range(self.size):
+            lo = owner * self.own_rows
+            owned = (ids >= lo) & (ids < lo + self.own_rows)
+            local_ids = torch.where(owned, ids - lo, torch.full_like(ids, -1))
             for name, table in tables.items():
-                table[self.num_experts + b].copy_(self._mapped[name][home][row])
+                moonep.prefetch.launch_prefetch(
+                    self._rows.owners[name][owner][: self.own_rows],
+                    table[self.own_rows :],
+                    local_ids.contiguous(),
+                    num_sms=self.num_sms,
+                )
 
     def reduce_grad(self, plan, grads):
-        local = self.num_experts // self.size
-        E, B = self.num_experts, self.num_slots
-        for name, (full_grad, _) in grads.items():
-            self._reduce_owned[name].copy_(full_grad[E : E + B])
+        moonep = _import_moonep()
+        handles = self.dispatcher.grad_reduce_handles()
+        # The kernel fences peers after its reads; the writes need this one.
         dist.barrier(group=self.group)
-        experts_to_copy = plan.experts_to_copy.tolist()
-        for r in range(self.size):
-            for b, e in enumerate(experts_to_copy[r]):
-                if e >= 0 and int(e) // local == self.rank:
-                    for name, (full_grad, _) in grads.items():
-                        full_grad[int(e)].add_(self._reduce_mapped[name][r][b])
-        # No rank overwrites a reduce buffer another rank is still reading.
-        dist.barrier(group=self.group)
+        for name in grads:
+            moonep.grad_reduce.launch_grad_reduce(
+                self._full_grads[name],
+                self._reduce[name],
+                plan.experts_to_copy,
+                rank=self.rank,
+                num_sms=self.num_sms,
+                **handles,
+            )
+
+

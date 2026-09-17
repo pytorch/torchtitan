@@ -121,7 +121,12 @@ def _run_rank(rank, world, params, inputs, results):
     experts.w3_EFD = nn.Parameter(params["w3"][lo:hi].clone())
     dispatcher = MoonEPTokenDispatcher(
         MoonEPTokenDispatcher.Config(
-            num_experts=E, top_k=K, hidden_dim=D, num_max_tokens_per_rank=S
+            num_experts=E,
+            top_k=K,
+            hidden_dim=D,
+            expert_hidden_dim=F,
+            num_max_tokens_per_rank=S,
+            num_prefetch_slots=E // R,
         )
     )
     dispatcher._buffer_factory = lambda **kw: world.buffer_for(rank)
@@ -207,7 +212,12 @@ def test_moonep_unit_matches_dense_reference_with_duplicated_experts(monkeypatch
 
 def _dims(*, dp_shard, cp=1, tp=1, ep, dp_replicate=False):
     return SimpleNamespace(
-        dp_replicate_enabled=dp_replicate, dp_shard=dp_shard, cp=cp, tp=tp, ep=ep
+        dp_replicate_enabled=dp_replicate,
+        dp_shard=dp_shard,
+        cp=cp,
+        tp=tp,
+        ep=ep,
+        get_optional_mesh=lambda _name: None,
     )
 
 

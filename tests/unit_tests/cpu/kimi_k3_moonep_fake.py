@@ -10,8 +10,9 @@
 hardware is a barrier here: each thread deposits its operand, one thread
 computes the exchange, everyone reads back. What it reproduces faithfully is
 the CONTRACT -- ``cu_seqlens`` over ``E+B`` rows, received tokens in row
-order with per-row padding, duplicated experts landing in prefetch slots,
-slot grads reduced to the home rank -- not MoonEP's planner: which experts get
+order with per-row padding, duplicated experts landing in the prefetch slots
+that follow a rank's own expert rows, slot grads reduced to the home rank's
+own rows -- not MoonEP's planner: which experts get
 duplicated is handed in by the test (``dup_map``), and a duplicated expert's
 tokens alternate between its home and its copies.
 """
@@ -91,8 +92,8 @@ class FakeMoonEPWorld:
             for name in ("dispatch", "redispatch", "combine", "prefetch", "reduce")
         }
         self._tables: dict[tuple[int, str], torch.Tensor] = {}
-        self._grads: dict[tuple[int, str], torch.Tensor] = {}
-        self._reduce: dict[tuple[int, str], torch.Tensor] = {}
+        self._own_grads: dict[tuple[int, str], torch.Tensor] = {}
+        self._slot_grads: dict[tuple[int, str], torch.Tensor] = {}
 
     def home(self, expert: int) -> int:
         return expert // self.local
@@ -195,9 +196,10 @@ class FakeMoonEPWorld:
     def prefetch(self, rank, plan):
         def compute(_inputs):
             for (r, b), e in plan.dup_map.items():
+                home = self.home(e)
                 for name in ("gate", "up", "down"):
-                    self._tables[(r, name)][self.E + b].copy_(
-                        self._tables[(self.home(e), name)][e]
+                    self._tables[(r, name)][self.local + b].copy_(
+                        self._tables[(home, name)][e - home * self.local]
                     )
             return {r: None for r in range(self.R)}
 
@@ -206,9 +208,12 @@ class FakeMoonEPWorld:
     def reduce_grad(self, rank, plan):
         def compute(_inputs):
             for (r, b), e in plan.dup_map.items():
+                home = self.home(e)
                 for name in ("gate", "up", "down"):
-                    self._grads[(self.home(e), name)][e] += self._reduce[(r, name)][b]
-                    self._reduce[(r, name)][b].zero_()
+                    self._own_grads[(home, name)][e - home * self.local] += (
+                        self._slot_grads[(r, name)][b]
+                    )
+                    self._slot_grads[(r, name)][b].zero_()
             return {r: None for r in range(self.R)}
 
         return self._coll["reduce"].run(rank, None, compute)
@@ -261,34 +266,39 @@ class FakeBuffer:
 
 
 class FakeTableBackend:
+    """``MoonEPTableBackend``'s call surface, backed by the world above."""
+
     def __init__(self, world: FakeMoonEPWorld, rank: int):
         self.world, self.rank = world, rank
 
-    def configure(self, *, num_experts: int, num_slots: int) -> None:
+    def configure(self, *, num_experts: int, num_slots: int, num_sms: int) -> None:
+        del num_sms
         assert (num_experts, num_slots) == (self.world.E, self.world.B)
 
-    def alloc_weight_table(self, name, rows, in_dim, out_dim):
-        t = torch.zeros(rows, in_dim, out_dim, dtype=torch.bfloat16)
+    def alloc_expert_rows(self, name, in_dim, out_dim):
+        t = torch.zeros(
+            self.world.local + self.world.B, in_dim, out_dim, dtype=torch.bfloat16
+        )
         self.world._tables[(self.rank, name)] = t
         return t
 
-    def alloc_grad_table(self, name, rows, in_dim, out_dim):
-        full = torch.zeros(rows, in_dim, out_dim, dtype=torch.float32)
-        self.world._grads[(self.rank, name)] = full
-        # The slot rows ARE this rank's reduce buffer.
-        self.world._reduce[(self.rank, name)] = full[self.world.E :]
-        return full, full[self.world.E :]
+    def alloc_grad_rows(self, name, in_dim, out_dim):
+        own = torch.zeros(self.world.local, in_dim, out_dim, dtype=torch.float32)
+        slots = torch.zeros(self.world.B, in_dim, out_dim, dtype=torch.float32)
+        self.world._own_grads[(self.rank, name)] = own
+        self.world._slot_grads[(self.rank, name)] = slots
+        return own, slots
 
     def prefetch(self, plan, tables):
         for name, t in tables.items():
             assert (
                 t is self.world._tables[(self.rank, name)]
-            ), "prefetch must see the allocated table"
+            ), "prefetch must see the allocated rows"
         return self.world.prefetch(self.rank, plan)
 
     def reduce_grad(self, plan, grads):
-        for name, (full, _) in grads.items():
-            assert full is self.world._grads[(self.rank, name)]
+        for name, own in grads.items():
+            assert own is self.world._own_grads[(self.rank, name)]
         return self.world.reduce_grad(self.rank, plan)
 
 

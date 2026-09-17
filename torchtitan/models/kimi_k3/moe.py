@@ -13,6 +13,11 @@ import torch
 from torchtitan.models.common import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.kimi_k3.moon_ep_dispatcher import MoonEPTokenDispatcher
+from torchtitan.models.kimi_k3.moon_ep_experts import (
+    check_moonep_mesh,
+    MoonEPTableBackendNVLink,
+)
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, E = experts,
@@ -55,15 +60,8 @@ class KimiLatentMoE(MoE):
             )
 
     def parallelize(self, parallel_dims) -> None:
+        # core's MoE.parallelize wires the EP mesh and allocates MoonEP's buffer.
         super().parallelize(parallel_dims)
-        # The dispatcher's plan and EP mesh exist only after the children parallelize;
-        # imported here because moon_ep_experts imports this module.
-        from torchtitan.models.kimi_k3.moon_ep_dispatcher import MoonEPTokenDispatcher
-        from torchtitan.models.kimi_k3.moon_ep_experts import (
-            check_moonep_mesh,
-            MoonEPTableBackendNVLink,
-        )
-
         dispatcher = self.routed_experts.token_dispatcher
         if (
             isinstance(dispatcher, MoonEPTokenDispatcher)
@@ -72,7 +70,7 @@ class KimiLatentMoE(MoE):
             check_moonep_mesh(parallel_dims)
             self.routed_experts.inner_experts.attach(
                 dispatcher,
-                MoonEPTableBackendNVLink(dispatcher.ep_mesh),
+                MoonEPTableBackendNVLink(dispatcher.ep_mesh, dispatcher),
                 dispatcher.ep_mesh,
             )
 
