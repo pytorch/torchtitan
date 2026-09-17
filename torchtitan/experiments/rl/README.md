@@ -31,6 +31,21 @@ The distributed layer builds on two core components:
 - **[Monarch](https://github.com/meta-pytorch/monarch) as the controller:** orchestrates trainers and generators on separate GPU meshes with asynchronous communication.
 - **[TorchStore](https://github.com/meta-pytorch/torchstore) for weight synchronization:** efficiently publishes weights from the trainer to generators, including direct GPU-to-GPU RDMA transfers.
 
+### KV reuse across policy updates
+
+Each rollout group pins the generator policy version that was installed when
+the group entered the active window. TitanRL passes that version to vLLM as the
+KV-cache salt for every sibling and turn in the group. Existing groups can
+therefore keep reusing their prefixes across a policy update, while groups
+started after the update cannot match KV produced by the previous policy.
+
+The default, `generator.reprefill_on_weight_sync=false`, preserves this cached
+KV and avoids reset-and-reprefill work. Set it to `true` to reset cached KV and
+preempt running requests at every weight sync. The latter mode recomputes all
+prefixes under the new policy and can provide enough prefill computation to
+hide FSDP parameter all-gathers. Batch-invariant configurations enable it to
+keep exact trainer/generator comparisons.
+
 ## Write an experiment
 
 Most experiments define four pieces:
