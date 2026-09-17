@@ -5,11 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from dataclasses import dataclass, replace
-from typing import ClassVar, Protocol
+from dataclasses import dataclass, fields
+from typing import Any, cast, ClassVar, Protocol
 
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.lora import LinearLoRADecorator
+from torchtitan.models.common.lora import specialize_lora_linear
 from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform
@@ -17,6 +17,35 @@ from .context_parallel import ContextParallelTransform
 
 
 logger = logging.getLogger(__name__)
+
+
+_frozen_config_class_cache: dict[type, type] = {}
+
+
+def _get_frozen_config_cls(
+    config_cls: type[Module.Config],
+) -> type[Module.Config]:
+    """Get or create a config subclass that freezes direct build parameters."""
+    if config_cls in _frozen_config_class_cache:
+        return _frozen_config_class_cache[config_cls]
+
+    class FrozenConfig(config_cls):  # type: ignore[valid-type, misc]
+        def build(self, **kwargs):
+            instance = config_cls.build(self, **kwargs)
+            for param in instance.parameters(recurse=False):
+                param.requires_grad_(False)
+            return instance
+
+    FrozenConfig.__name__ = f"Frozen{config_cls.__name__}"
+    FrozenConfig.__qualname__ = f"Frozen{config_cls.__qualname__}"
+    _frozen_config_class_cache[config_cls] = FrozenConfig
+    return FrozenConfig
+
+
+def _make_frozen_config(cfg: Module.Config) -> Module.Config:
+    """Create a frozen config that still passes checks for the original type."""
+    frozen_cls = _get_frozen_config_cls(type(cfg))
+    return frozen_cls(**{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init})
 
 
 class _LoRAHandler(Protocol):
@@ -46,14 +75,13 @@ class LinearLoRAHandler:
         rank: int,
         alpha: float,
     ) -> Module.Config:
-        assert isinstance(cfg, Linear.Config)
-        return replace(
-            cfg,
-            _module_decorators=(
-                *cfg._module_decorators,
-                LinearLoRADecorator(rank=rank, alpha=alpha),
-            ),
-            _freeze_direct_parameters=True,
+        assert cfg._owner is not None
+        lora_cls = specialize_lora_linear(cast(type[Module], cfg._owner))
+        lora_config_cls = cast(Any, lora_cls.Config)
+        return lora_config_cls(
+            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
+            rank=rank,
+            alpha=alpha,
         )
 
 
@@ -62,9 +90,9 @@ class LoRATransform(ModelConfigTransform):
     """Apply LoRA adapters to supported projection layers in a model.
 
     ``handlers`` defines the projection config types supported by this
-    transform. Include ``LinearLoRAHandler`` to decorate ``Linear.Config``
-    instances at build time. Direct parameters on all existing modules are
-    frozen so only adapter parameters remain trainable.
+    transform. Include ``LinearLoRAHandler`` to adapt ``Linear.Config``
+    instances. Non-target modules are replaced with dynamic frozen config
+    subclasses that freeze direct parameters at build time.
 
     When ``target_modules`` is None (default), every supported projection is
     converted. When specified, only configs whose FQN's last segment matches
@@ -121,9 +149,9 @@ class LoRATransform(ModelConfigTransform):
     def transform(self, model: Module.Config) -> Module.Config:
         """Walk the module config tree from leaves to root.
 
-        Target projection modules record a build-time adapter decoration. All
-        existing module configs freeze their direct parameters so LoRA training
-        updates only adapter parameters.
+        Target projection modules get their config replaced with an adapter
+        config. All other module configs become frozen config subclasses so
+        LoRA training updates only adapter parameters.
         """
         transformed_root = model
         matched = set()
@@ -156,8 +184,7 @@ class LoRATransform(ModelConfigTransform):
                 )
                 matched.add(last_segment)
             else:
-                new_cfg = cfg
-                new_cfg._freeze_direct_parameters = True
+                new_cfg = _make_frozen_config(cfg)
 
             if parent is None:
                 transformed_root = new_cfg

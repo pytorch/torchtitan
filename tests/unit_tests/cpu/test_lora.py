@@ -191,8 +191,8 @@ def test_float8_lora_targets_fused_feed_forward_projection():
     assert feed_forward(torch.randn(2, 16)).shape == (2, 16)
 
 
-def test_lora_preserves_the_compute_config_type():
-    """LoRA decorates the existing compute config instead of subclassing it."""
+def test_lora_class_is_reused_for_the_same_parent():
+    """Dynamic LoRA class creation is cached per parent class."""
     first = LoRATransform(handlers=LINEAR_LORA_HANDLERS, rank=2, alpha=4.0).transform(
         Linear.Config(in_features=4, out_features=3)
     )
@@ -200,12 +200,11 @@ def test_lora_preserves_the_compute_config_type():
         Linear.Config(in_features=4, out_features=3)
     )
 
-    assert type(first) is Linear.Config
-    assert type(second) is Linear.Config
+    assert type(first) is type(second)
     assert first._owner is second._owner
-    assert first._owner is Linear
-    assert len(first._module_decorators) == 1
-    assert first._module_decorators == second._module_decorators
+    assert first._owner is not None
+    assert first._owner.__name__ == "LoRALinear"
+    assert issubclass(first._owner, Linear)
 
 
 def test_lora_handler_matches_linear_config_subclass():
