@@ -9,9 +9,9 @@ from __future__ import annotations
 import contextlib
 import inspect
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatch
-from typing import Any
+from typing import Any, Protocol
 
 import spmd_types as spmd
 import torch
@@ -31,6 +31,13 @@ from torchtitan.distributed.spmd_types import (
     spmd_validate_redistributions,
 )
 from torchtitan.protocols.sharding import ShardingConfig
+
+
+class ModuleDecorator(Protocol):
+    """Build-time behavior attached to a module config."""
+
+    def apply(self, module: Module, config: Module.Config) -> None:
+        """Attach state and wrap behavior on a newly built module."""
 
 
 class Module(nn.Module, Configurable):
@@ -87,6 +94,8 @@ class Module(nn.Module, Configurable):
     class Config(Configurable.Config):
         param_init: dict | None = None
         sharding_config: ShardingConfig | None = None
+        _module_decorators: tuple[ModuleDecorator, ...] = field(default=(), repr=False)
+        _freeze_direct_parameters: bool = field(default=False, repr=False)
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -97,6 +106,11 @@ class Module(nn.Module, Configurable):
                 instance._param_init = self.param_init
             if self.sharding_config is not None:
                 instance._sharding_config = self.sharding_config
+            if self._freeze_direct_parameters:
+                for param in instance.parameters(recurse=False):
+                    param.requires_grad_(False)
+            for decorator in self._module_decorators:
+                decorator.apply(instance, self)
             return instance
 
     def init_states(

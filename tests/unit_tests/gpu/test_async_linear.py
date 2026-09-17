@@ -38,6 +38,7 @@ from torchtitan.config.transform import (
     transform_model_config_,
 )
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
@@ -289,6 +290,39 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             feed_forward.w2.weight.shape,
             (1, DIM, hidden_dim // self.world_size),
         )
+
+    @with_comms
+    def test_sync_tp_collectives_enclose_lora_compute(self):
+        """The input gather and output reduction also cover LoRA adapters."""
+        from torchtitan.models.common.config_utils import make_ffn_config
+
+        init = {"weight": torch.nn.init.zeros_}
+        ffn_config = make_ffn_config(
+            dim=16,
+            hidden_dim=32,
+            w1_param_init=init,
+            w2w3_param_init=init,
+        )
+        ffn_config = LoRATransform(
+            handlers=(LinearLoRAHandler(),),
+            rank=4,
+            alpha=8,
+        ).transform(ffn_config)
+        assert isinstance(ffn_config, FeedForward.Config)
+        set_dense_ffn_sharding(
+            ffn_config,
+            attn_x_layout=dense_sequence_parallel_placement(),
+            enable_sp=True,
+        )
+
+        parallel_dims = self._parallel_dims()
+        feed_forward = ffn_config.build().to(self.device_type)
+        feed_forward.parallelize(parallel_dims)
+        input_TD = torch.randn(4, 16, device=self.device_type)
+        with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+            output_TD = feed_forward(input_TD)
+
+        self.assertEqual(output_TD.shape, input_TD.shape)
 
 
 @unittest.skipUnless(
