@@ -11,6 +11,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from spmd_types import SpmdType
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -19,8 +20,13 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.linear import Linear, PartialBiasRowwiseLinear
+from torchtitan.models.common.linear import (
+    Linear,
+    PartialBiasRowwiseLinear,
+    RowParallelLinear,
+)
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 class TestLinear(unittest.TestCase):
@@ -139,6 +145,9 @@ class TestLinear(unittest.TestCase):
 
 
 class TestPartialBiasRowwiseLinear(unittest.TestCase):
+    def test_is_row_parallel(self):
+        self.assertTrue(issubclass(PartialBiasRowwiseLinear, RowParallelLinear))
+
     def test_requires_bias(self):
         with self.assertRaisesRegex(ValueError, "requires bias=True"):
             PartialBiasRowwiseLinear.Config(
@@ -190,6 +199,9 @@ class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):
                 in_features=4,
                 out_features=2,
                 bias=True,
+                sharding_config=ShardingConfig(
+                    out_src_shardings=SpmdType({"tp": spmd.I}),
+                ),
             )
             .build()
             .to(self.device_type)
@@ -201,13 +213,7 @@ class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):
             linear._parameters["bias"] = spmd.assert_type(
                 linear.bias, {tp_group: spmd.I}
             )
-            local_partial = linear(local_input)
-            actual = spmd.redistribute(
-                local_partial,
-                tp_group,
-                src=spmd.P,
-                dst=spmd.I,
-            )
+            actual = linear(local_input)
             actual.sum().backward()
 
         torch.testing.assert_close(actual, expected)

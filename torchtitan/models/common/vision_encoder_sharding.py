@@ -150,14 +150,8 @@ def vision_partial_bias_rowwise_config(
         in_src_shardings={
             "input": input_layout,
         },
-        in_dst_shardings={
-            "input": input_layout,
-        },
-        out_src_shardings=_vision_activation_placement(
-            tp=spmd.P, include_cp_axis=include_cp_axis
-        ),
-        out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
-        local_spmd=True,
+        # PartialBiasRowwiseLinear performs the Partial -> Invariant reduction.
+        out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
     )
 
 

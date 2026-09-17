@@ -9,11 +9,12 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
+    implicit_colwise_config,
     norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_gqa_inner_attention_local_spmd,
 )
@@ -39,23 +40,12 @@ _GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 
 
 def partial_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
-    input_layout = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
-    out_dst = (
+    output_layout = (
         dense_sequence_parallel_placement()
         if output_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.I),
-        },
-        in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=out_dst,
-        local_spmd=True,
-    )
+    return rowwise_config(output_layout=output_layout)
 
 
 def set_gpt_oss_sharding_config(
@@ -115,7 +105,7 @@ def _set_gpt_oss_layer_sharding(
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
-    attention.qkv_linear.wqkv.sharding_config = colwise_config()
+    attention.qkv_linear.wqkv.sharding_config = implicit_colwise_config()
     attention.wo.sharding_config = partial_bias_rowwise_config(output_sp=enable_sp)
 
     set_gqa_inner_attention_local_spmd(attention.inner_attention)

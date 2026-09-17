@@ -155,19 +155,6 @@ class RowParallelLinear(Linear):
         )
 
 
-LinearConfig = Linear.Config
-
-
-def is_column_parallel_linear_config(config: Module.Config) -> bool:
-    """Return whether a config builds an explicit column-parallel boundary."""
-    return isinstance(config, ColumnParallelLinear.Config)
-
-
-def is_row_parallel_linear_config(config: Module.Config) -> bool:
-    """Return whether a config builds an explicit row-parallel boundary."""
-    return isinstance(config, RowParallelLinear.Config)
-
-
 @spmd.register_local_autograd_function
 class _RouterGateLinearFunction(torch.autograd.Function):
     """Router projection with FP32 output and backward GEMMs."""
@@ -239,11 +226,11 @@ class RouterGateLinear(Linear):
         return output_TE
 
 
-class PartialBiasRowwiseLinear(Linear):
-    """Rowwise linear whose invariant bias becomes TP-partial in forward."""
+class PartialBiasRowwiseLinear(RowParallelLinear):
+    """Row-parallel Linear whose invariant bias joins the partial output."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
+    class Config(RowParallelLinear.Config):
         pass
 
     def __init__(self, config: Config):
@@ -270,10 +257,7 @@ __all__ = [
     "CastLinear",
     "ColumnParallelLinear",
     "Linear",
-    "LinearConfig",
     "RowParallelLinear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
-    "is_column_parallel_linear_config",
-    "is_row_parallel_linear_config",
 ]

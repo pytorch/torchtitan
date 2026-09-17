@@ -27,7 +27,10 @@ from torchtitan.config.transform import (
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
-from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
+from torchtitan.models.common.decoder_sharding import (
+    implicit_colwise_config,
+    implicit_rowwise_config,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -321,9 +324,9 @@ def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
 @pytest.mark.parametrize(
     "sharding_config_factory, input_tp",
     [
-        pytest.param(lambda: colwise_config(), spmd.R, id="colwise"),
+        pytest.param(lambda: implicit_colwise_config(), spmd.R, id="colwise"),
         pytest.param(
-            lambda: rowwise_config(output_sp=True),
+            lambda: implicit_rowwise_config(output_sp=True),
             spmd.S(-1),
             id="rowwise",
         ),
@@ -364,16 +367,16 @@ def test_nvfp4_parallel_build_preserves_collective_boundary(linear_cls):
     if linear_cls is None:
         pytest.skip("torchao NVFP4 training prototype not available")
     from torchtitan.models.common.decoder_sharding import (
-        column_parallel_config,
+        colwise_config,
         dense_sequence_parallel_placement,
-        row_parallel_config,
+        rowwise_config,
     )
 
     boundary_layout = dense_sequence_parallel_placement()
     sharding_config = (
-        column_parallel_config(input_layout=boundary_layout)
+        colwise_config(input_layout=boundary_layout)
         if issubclass(linear_cls.Config, ColumnParallelLinear.Config)
-        else row_parallel_config(output_layout=boundary_layout)
+        else rowwise_config(output_layout=boundary_layout)
     )
     module = linear_cls.Config(
         in_features=512,
@@ -612,7 +615,10 @@ def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
             input_activation_format_for_backward="missing",
         )
 
-    for sharding_config in (colwise_config(), rowwise_config()):
+    for sharding_config in (
+        implicit_colwise_config(),
+        implicit_rowwise_config(),
+    ):
         linear = MXFP8Linear.Config(
             in_features=128,
             out_features=128,

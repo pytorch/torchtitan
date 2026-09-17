@@ -25,12 +25,12 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
-    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
+    implicit_colwise_config,
+    implicit_rowwise_config,
     norm_config,
-    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_spmd,
@@ -240,7 +240,7 @@ def _set_shared_experts_sharding(
         # The gate and w13 both consume x, so gather once at their parent.
         in_dst_shardings={"x": replicated_input_layout},
     )
-    shared_experts.w13.sharding_config = colwise_config()
+    shared_experts.w13.sharding_config = implicit_colwise_config()
     shared_experts.w2.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
@@ -312,12 +312,12 @@ def _set_full_attention_sharding(
     attention_cfg.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
-    attention_cfg.wq.sharding_config = colwise_config()
-    attention_cfg.wk.sharding_config = colwise_config()
-    attention_cfg.wv.sharding_config = colwise_config()
+    attention_cfg.wq.sharding_config = implicit_colwise_config()
+    attention_cfg.wk.sharding_config = implicit_colwise_config()
+    attention_cfg.wv.sharding_config = implicit_colwise_config()
     # RowwiseParallel out_proj: reduce-scatter to Shard(1) under SP, else all-reduce
     # to Replicate.
-    attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+    attention_cfg.wo.sharding_config = implicit_rowwise_config(output_sp=enable_sp)
 
     attention_cfg.q_norm.sharding_config = _qk_norm_sharding()
     attention_cfg.k_norm.sharding_config = _qk_norm_sharding()
@@ -345,7 +345,7 @@ def _set_deltanet_sharding(
         "in_proj_a",
         "in_proj_b",
     ):
-        getattr(deltanet_cfg, name).sharding_config = colwise_config()
+        getattr(deltanet_cfg, name).sharding_config = implicit_colwise_config()
 
     # Depthwise conv weights: Shard(0) on out-channels (head-sharded).
     deltanet_cfg.conv_q.sharding_config = _conv_weight_sharding()
@@ -354,7 +354,7 @@ def _set_deltanet_sharding(
 
     # RowwiseParallel out_proj: reduce-scatter to Shard(1) under SP, else all-reduce
     # to Replicate.
-    deltanet_cfg.out_proj.sharding_config = rowwise_config(output_sp=enable_sp)
+    deltanet_cfg.out_proj.sharding_config = implicit_rowwise_config(output_sp=enable_sp)
 
     # The projections are 2D [T, C], while the norm and recurrence output are
     # 3D [T, H, V]. Both shard the feature/head axis on TP.

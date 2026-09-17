@@ -54,11 +54,16 @@ try:
         class Config(Float8Linear.Config, ColumnParallelLinear.Config):
             pass
 
+        # ColumnParallelLinear appears before Float8Linear in the MRO so its
+        # forward owns communication. Delegate construction and local compute
+        # explicitly to Float8Linear instead of falling back to BF16 Linear.
         def __init__(self, config: Config):
-            Float8Linear.__init__(self, config)
+            Float8Linear.__init__(self, config)  # pyrefly: ignore[bad-argument-count]
 
         def _linear(self, input: torch.Tensor) -> torch.Tensor:
-            return Float8Linear._linear(self, input)
+            return Float8Linear._linear(  # pyrefly: ignore[missing-attribute]
+                self, input
+            )
 
     class Float8RowParallelLinear(RowParallelLinear, Float8Linear):
         """Float8 projection with a synchronous row-parallel boundary."""
@@ -67,11 +72,16 @@ try:
         class Config(Float8Linear.Config, RowParallelLinear.Config):
             pass
 
+        # RowParallelLinear appears before Float8Linear in the MRO so its
+        # forward owns communication. Keep Float8 initialization and compute
+        # explicit for the same reason as the column-parallel variant above.
         def __init__(self, config: Config):
-            Float8Linear.__init__(self, config)
+            Float8Linear.__init__(self, config)  # pyrefly: ignore[bad-argument-count]
 
         def _linear(self, input: torch.Tensor) -> torch.Tensor:
-            return Float8Linear._linear(self, input)
+            return Float8Linear._linear(  # pyrefly: ignore[missing-attribute]
+                self, input
+            )
 
 except ImportError:
     Float8Linear = None

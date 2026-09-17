@@ -123,7 +123,7 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
     }
 
 
-def colwise_config() -> ShardingConfig:
+def implicit_colwise_config() -> ShardingConfig:
     """ColwiseParallel: weight S(0), output S(-1)."""
     return ShardingConfig(
         state_shardings={
@@ -134,7 +134,7 @@ def colwise_config() -> ShardingConfig:
     )
 
 
-def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
+def implicit_rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     """
     RowwiseParallel: weight S(1), bias I (no-op if bias absent).
     Output redistributes to S(1) (reduce-scatter) if SP on, else I (all-reduce).
@@ -154,7 +154,7 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     )
 
 
-def column_parallel_config(*, input_layout: SpmdType) -> ShardingConfig:
+def colwise_config(*, input_layout: SpmdType) -> ShardingConfig:
     """Sharding contract for a column-parallel projection boundary."""
     return ShardingConfig(
         state_shardings={
@@ -166,7 +166,7 @@ def column_parallel_config(*, input_layout: SpmdType) -> ShardingConfig:
     )
 
 
-def row_parallel_config(
+def rowwise_config(
     *,
     output_layout: SpmdType,
 ) -> ShardingConfig:
@@ -253,8 +253,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         in_src_shardings={"x_TD": attn_x_layout},
         out_src_shardings=attn_x_layout,
     )
-    qkv.sharding_config = column_parallel_config(input_layout=attn_x_layout)
-    attention_cfg.wo.sharding_config = row_parallel_config(output_layout=attn_x_layout)
+    qkv.sharding_config = colwise_config(input_layout=attn_x_layout)
+    attention_cfg.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
     if attention_cfg.rope is not None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
@@ -311,10 +311,8 @@ def set_dense_ffn_sharding(
         in_src_shardings={"x": attn_x_layout},
         out_src_shardings=attn_x_layout,
     )
-    w13.sharding_config = column_parallel_config(input_layout=attn_x_layout)
-    feed_forward_cfg.w2.sharding_config = row_parallel_config(
-        output_layout=attn_x_layout
-    )
+    w13.sharding_config = colwise_config(input_layout=attn_x_layout)
+    feed_forward_cfg.w2.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
 
 def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:

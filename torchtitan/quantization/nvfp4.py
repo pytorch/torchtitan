@@ -262,11 +262,15 @@ try:
         class Config(NVFP4Linear.Config, ColumnParallelLinear.Config):
             pass
 
+        # ColumnParallelLinear appears first so its forward owns communication;
+        # explicitly retain NVFP4 parameter construction and local compute.
         def __init__(self, config: Config):
-            NVFP4Linear.__init__(self, config)
+            NVFP4Linear.__init__(self, config)  # pyrefly: ignore[bad-argument-count]
 
         def _linear(self, input: torch.Tensor) -> torch.Tensor:
-            return NVFP4Linear._linear(self, input)
+            return NVFP4Linear._linear(  # pyrefly: ignore[missing-attribute]
+                self, input
+            )
 
     class NVFP4RowParallelLinear(RowParallelLinear, NVFP4Linear):
         """NVFP4 projection with a synchronous row-parallel boundary."""
@@ -275,11 +279,15 @@ try:
         class Config(NVFP4Linear.Config, RowParallelLinear.Config):
             pass
 
+        # RowParallelLinear appears first so its forward owns communication;
+        # explicitly retain NVFP4 parameter construction and local compute.
         def __init__(self, config: Config):
-            NVFP4Linear.__init__(self, config)
+            NVFP4Linear.__init__(self, config)  # pyrefly: ignore[bad-argument-count]
 
         def _linear(self, input: torch.Tensor) -> torch.Tensor:
-            return NVFP4Linear._linear(self, input)
+            return NVFP4Linear._linear(  # pyrefly: ignore[missing-attribute]
+                self, input
+            )
 
 except ImportError:
     NVFP4Linear = None

@@ -134,6 +134,11 @@ def specialize_lora_linear(parent_cls: type[Module]) -> type[Module]:
     if parent_cls is RowParallelLinear:
         return LoRARowParallelLinear
 
+    # This fallback composes LoRA with another Linear backend, such as
+    # Float8Linear or its column-/row-parallel variants, when quantization is
+    # applied before LoRA. The common BF16 TP cases above use explicit classes.
+    # TODO: Remove dynamic specialization once every supported quantized Linear
+    # backend has explicit LoRA classes or exposes a non-inheritance extension.
     parent_config_cls = parent_cls.Config
 
     class SpecializedLoRALinear(  # type: ignore[misc, valid-type]

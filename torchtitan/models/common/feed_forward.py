@@ -10,7 +10,7 @@ import torch
 import torch_remat as remat
 
 from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
-from torchtitan.models.common.linear import LinearConfig
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend:
@@ -45,8 +45,8 @@ class FeedForward(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        w13: LinearConfig
-        w2: LinearConfig
+        w13: Linear.Config
+        w2: Linear.Config
         activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
 
     def __init__(self, config: Config):
@@ -106,7 +106,7 @@ class SigmoidGatedFeedForward(FeedForward):
 
     @dataclass(kw_only=True, slots=True)
     class Config(FeedForward.Config):
-        gate: LinearConfig
+        gate: Linear.Config
 
     def __init__(self, config: Config):
         super().__init__(config)

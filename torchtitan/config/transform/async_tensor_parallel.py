@@ -18,7 +18,7 @@ from torchtitan.models.common.attention import GQAttention, QKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    LinearConfig,
+    Linear,
     RowParallelLinear,
 )
 from torchtitan.protocols.module import Module
@@ -30,7 +30,7 @@ __all__ = ["AsyncTensorParallelTransform"]
 
 
 def _convert_linear(
-    config: LinearConfig,
+    config: Linear.Config,
     replacement: type[ColumnParallelLinear] | type[RowParallelLinear],
     *,
     projection_name: str,
