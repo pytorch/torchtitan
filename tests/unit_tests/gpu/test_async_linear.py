@@ -103,15 +103,15 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         )
         fused = async_model.layers[0].attention
         self.assertEqual(
-            fused.qkv_linear.wqkv.linear.in_features,
-            stock.qkv_linear.wqkv.linear.in_features,
+            fused.qkv_linear.wqkv.in_features,
+            stock.qkv_linear.wqkv.in_features,
         )
         self.assertEqual(
-            fused.qkv_linear.wqkv.linear.out_features,
-            stock.qkv_linear.wqkv.linear.out_features,
+            fused.qkv_linear.wqkv.out_features,
+            stock.qkv_linear.wqkv.out_features,
         )
-        self.assertEqual(fused.wo.linear.in_features, stock.wo.linear.in_features)
-        self.assertEqual(fused.wo.linear.out_features, stock.wo.linear.out_features)
+        self.assertEqual(fused.wo.in_features, stock.wo.in_features)
+        self.assertEqual(fused.wo.out_features, stock.wo.out_features)
 
     def test_sequence_parallel_disabled_is_rejected(self):
         """The fused GEMMs *are* the SP collectives, so SP off has nothing to fuse
@@ -158,7 +158,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         self.assertIsNotNone(async_layer.attention.wo.sharding_config.out_src_shardings)
         self.assertIsNone(async_layer.attention.wo.sharding_config.out_dst_shardings)
         self.assertIn(
-            "weight", async_layer.attention.wo.linear.sharding_config.state_shardings
+            "weight", async_layer.attention.wo.sharding_config.state_shardings
         )
 
         self.assertIsNone(async_layer.feed_forward.sharding_config.in_dst_shardings)
@@ -255,7 +255,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         self.assertIsNone(attn.qkv_linear.wqkv._sharding_config.in_dst_shardings)
         self.assertIsNotNone(attn.wo._sharding_config.out_src_shardings)
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
-        self.assertIn("weight", attn.wo.linear._sharding_config.state_shardings)
+        self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
 
 @unittest.skipUnless(
@@ -289,10 +289,8 @@ class TestAsyncQKVNumerics(DTensorTestBase):
             n_heads=num_heads,
             n_kv_heads=num_kv_heads,
             wqkv=AsyncColumnParallelLinear.Config(
-                linear=Linear.Config(
-                    in_features=dim,
-                    out_features=out_features,
-                ),
+                in_features=dim,
+                out_features=out_features,
             ),
         )
         stock = stock_config.build().to(device=device, dtype=torch.bfloat16)
@@ -301,7 +299,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
         torch.manual_seed(0)
         with torch.no_grad():
             stock.wqkv.weight.copy_(torch.randn_like(stock.wqkv.weight))
-            async_qkv.wqkv.linear.weight = torch.nn.Parameter(
+            async_qkv.wqkv.weight = torch.nn.Parameter(
                 stock.wqkv.weight.chunk(R, 0)[self.rank].contiguous()
             )
 
@@ -335,7 +333,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
             rtol=2e-2,
         )
         torch.testing.assert_close(
-            async_qkv.wqkv.linear.weight.grad,
+            async_qkv.wqkv.weight.grad,
             stock.wqkv.weight.grad.chunk(R, 0)[self.rank],
             atol=2e-2,
             rtol=2e-2,
@@ -387,7 +385,7 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
 
         with torch.no_grad():
             for m in (standard, dist_gemm):
-                for w in (m.w13.linear.weight, m.w2.linear.weight):
+                for w in (m.w13.weight, m.w2.weight):
                     torch.manual_seed(hash(tuple(w.shape)) % 2**31)
                     w.copy_(torch.randn_like(w) * 0.1)
 
@@ -396,11 +394,11 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
 
         # Shard the dist-GEMM module's weights: w13 colwise, w2 rowwise.
         with torch.no_grad():
-            dist_gemm.w13.linear.weight = torch.nn.Parameter(
-                standard.w13.linear.weight.chunk(R, 0)[self.rank].contiguous()
+            dist_gemm.w13.weight = torch.nn.Parameter(
+                standard.w13.weight.chunk(R, 0)[self.rank].contiguous()
             )
-            dist_gemm.w2.linear.weight = torch.nn.Parameter(
-                standard.w2.linear.weight.chunk(R, 1)[self.rank].contiguous()
+            dist_gemm.w2.weight = torch.nn.Parameter(
+                standard.w2.weight.chunk(R, 1)[self.rank].contiguous()
             )
 
         # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
@@ -459,7 +457,7 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
         self.assertIsInstance(fused.w2, AsyncRowParallelLinear)
 
         with torch.no_grad():
-            for w in (native.w13.linear.weight, native.w2.linear.weight):
+            for w in (native.w13.weight, native.w2.weight):
                 torch.manual_seed(hash(tuple(w.shape)) % 2**31)
                 w.copy_(torch.randn_like(w) * 0.1)
 
@@ -469,11 +467,11 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
         # w13.weight is (2 * hidden/R, dim), with this rank's interleaved
         # colwise slice of both halves.
         with torch.no_grad():
-            fused.w13.linear.weight = torch.nn.Parameter(
-                native.w13.linear.weight.chunk(R, 0)[self.rank].contiguous()
+            fused.w13.weight = torch.nn.Parameter(
+                native.w13.weight.chunk(R, 0)[self.rank].contiguous()
             )
-            fused.w2.linear.weight = torch.nn.Parameter(
-                native.w2.linear.weight.chunk(R, 1)[self.rank].contiguous()
+            fused.w2.weight = torch.nn.Parameter(
+                native.w2.weight.chunk(R, 1)[self.rank].contiguous()
             )
 
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))

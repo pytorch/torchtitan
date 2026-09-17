@@ -13,10 +13,7 @@ from torchtitan.models.common.async_linear import (
     validate_async_tp_preconditions,
 )
 from torchtitan.models.common.attention import GQAttention
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
+from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
@@ -158,29 +155,14 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
 
 
 def column_parallel_config(*, input_layout: SpmdType) -> ShardingConfig:
-    """Activation contract for an explicit column-parallel boundary.
-
-    The owned Linear carries its parameter and output-feature sharding.
-    """
-    return ShardingConfig(
-        in_src_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
-    )
-
-
-def rowwise_compute_config(
-    *, bias_tp: spmd.PerMeshAxisSpmdType = spmd.I
-) -> ShardingConfig:
-    """Shard a row-parallel Linear while leaving reduction to its owner."""
+    """Sharding contract for a column-parallel projection boundary."""
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=bias_tp),
+            "weight": dense_param_placement(tp=spmd.S(0)),
+            "bias": dense_param_placement(tp=spmd.S(0)),
         },
-        in_src_shardings={
-            "input": dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
-        },
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
+        in_src_shardings={"input": input_layout},
+        out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
     )
 
 
@@ -188,8 +170,12 @@ def row_parallel_config(
     *,
     output_layout: SpmdType,
 ) -> ShardingConfig:
-    """Activation contract for an explicit row-parallel boundary."""
+    """Sharding contract for a row-parallel projection boundary."""
     return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.I),
+        },
         in_src_shardings={
             "input": dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
         },
@@ -268,11 +254,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         out_src_shardings=attn_x_layout,
     )
     qkv.sharding_config = column_parallel_config(input_layout=attn_x_layout)
-    qkv.linear.sharding_config = colwise_config()
-    attention_cfg.wo.sharding_config = row_parallel_config(
-        output_layout=attn_x_layout
-    )
-    attention_cfg.wo.linear.sharding_config = rowwise_compute_config()
+    attention_cfg.wo.sharding_config = row_parallel_config(output_layout=attn_x_layout)
     if attention_cfg.rope is not None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},
@@ -330,11 +312,9 @@ def set_dense_ffn_sharding(
         out_src_shardings=attn_x_layout,
     )
     w13.sharding_config = column_parallel_config(input_layout=attn_x_layout)
-    w13.linear.sharding_config = colwise_config()
     feed_forward_cfg.w2.sharding_config = row_parallel_config(
         output_layout=attn_x_layout
     )
-    feed_forward_cfg.w2.linear.sharding_config = rowwise_compute_config()
 
 
 def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
