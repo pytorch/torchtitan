@@ -17,7 +17,7 @@ _data_input_loop                                      _rollout_loop[N] (group wo
 +--------------------------------------------------+  +--------------------------------------------------+
 | group_buffer.wait_for_slot()                     |  | work = group_buffer.claim_next()                  |
 | sample = rollouter.get_training_sample()         |  | group = rollouter.run_group_rollouts(work.sample) |
-| work = RolloutGroupWork(group_id, sample)        |  | group_buffer.finalize_work(group)                 |
+| work = RolloutGroupWork(group_id, version, sample)| | group_buffer.finalize_work(group)                 |
 | group_buffer.add_work(work)                      |  +-----------------------+--------------------------+
 +-----------------------+--------------------------+                          ^ |
                         |                                                     | |
@@ -411,16 +411,6 @@ class Controller(Configurable):
                         "and has not been validated for determinism."
                     )
 
-            if (
-                not self.generator_router.hot_swap
-                and not self.generator.reset_prefix_cache_on_weight_sync
-            ):
-                raise ValueError(
-                    "generator_router.hot_swap=False requires "
-                    "generator.reset_prefix_cache_on_weight_sync=True, else requests admitted after a "
-                    "pull reuse KV cached under the old weights."
-                )
-
     def __init__(self, config: Config):
         self.config = config
         self.trainer: PolicyTrainer | None = None
@@ -502,10 +492,10 @@ class Controller(Configurable):
         """
         return result.get(0)
 
-    def _make_generate_fn(self, metrics_prefix: str) -> GenerateFn:
+    def _make_generate_fn(self, metrics_prefix: str, *, cache_salt: str) -> GenerateFn:
         """Build the rollouter's `GenerateFn`: route a completion via the generator router, namespacing
-        generation metrics with `metrics_prefix` and pinning sticky routing on `routing_session_id` (a sample's
-        turns reuse one generator's prefix KV)."""
+        generation metrics with `metrics_prefix`, pinning sticky routing on
+        `routing_session_id`, and pinning prefix KV to `cache_salt`."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
         # Bind the router handle to a local so the closure captures it instead of
         # `self`. A GenerateFn may be shipped to another process, where an actor
@@ -524,6 +514,7 @@ class Controller(Configurable):
                 prompt_token_ids,
                 request_id=request_id,
                 routing_session_id=routing_session_id,
+                cache_salt=cache_salt,
                 sampling_config=sampling_config,
                 metrics_prefix=metrics_prefix,
             )
@@ -686,7 +677,9 @@ class Controller(Configurable):
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
-        generate = self._make_generate_fn(metrics_prefix="validation_generator")
+        generate = self._make_generate_fn(
+            metrics_prefix="validation_generator", cache_salt=str(step)
+        )
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         samples = [self._rollouter.get_validation_sample() for _ in range(num_groups)]
         group_results = await asyncio.gather(
@@ -803,6 +796,7 @@ class Controller(Configurable):
             generator_router=self.generator_router,
             group_buffer=self._group_buffer,
             num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
+            initial_policy_version=self.start_step,
         )
 
         # training_sample_builder
@@ -824,9 +818,6 @@ class Controller(Configurable):
             maxsize=1
         )
 
-        # rollout_loop
-        generate_fn = self._make_generate_fn(metrics_prefix="generator")
-
         # One rollout worker per active buffer slot: lets generation fill the whole windowed FIFO range,
         # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
         # TODO: support warm start
@@ -834,7 +825,6 @@ class Controller(Configurable):
             asyncio.create_task(
                 self._rollout_loop(
                     group_buffer=self._group_buffer,
-                    generate_fn=generate_fn,
                 ),
                 name=f"rollout_worker_{group_worker_id}",
             )
@@ -843,7 +833,11 @@ class Controller(Configurable):
 
         # data_input_loop
         data_input_task = asyncio.create_task(
-            self._data_input_loop(self._group_buffer), name="data_input"
+            self._data_input_loop(
+                self._group_buffer,
+                weight_sync=self._weight_sync,
+            ),
+            name="data_input",
         )
 
         # training_sample_batcher_loop
@@ -918,7 +912,12 @@ class Controller(Configurable):
             )
         logger.info("=" * 60)
 
-    async def _data_input_loop(self, group_buffer: RolloutGroupWorkBuffer) -> None:
+    async def _data_input_loop(
+        self,
+        group_buffer: RolloutGroupWorkBuffer,
+        *,
+        weight_sync: WeightSyncManager,
+    ) -> None:
         """produces a RolloutGroupWork into group_buffer.
         waits for:    a free active slot (group_buffer.wait_for_slot)
         unblocked by: _trainer_loop release_active_groups(num_prompts_per_train_step, "trained")
@@ -941,6 +940,7 @@ class Controller(Configurable):
             await group_buffer.add_work(
                 RolloutGroupWork(
                     group_id=group_index,
+                    policy_version_at_start=weight_sync.generator_policy_version,
                     sample=sample,
                 )
             )
@@ -951,7 +951,6 @@ class Controller(Configurable):
         self,
         *,
         group_buffer: RolloutGroupWorkBuffer,
-        generate_fn: GenerateFn,
     ) -> None:
         """Generate + score one group at a time; a failed group becomes an empty group + a failure metric.
 
@@ -972,6 +971,10 @@ class Controller(Configurable):
                 return
             try:
                 with sl.log_trace_span("rollout_group"):
+                    generate_fn = self._make_generate_fn(
+                        metrics_prefix="generator",
+                        cache_salt=str(work.policy_version_at_start),
+                    )
                     group = await self._rollouter.run_group_rollouts(
                         generate_fn=generate_fn,
                         sample=work.sample,

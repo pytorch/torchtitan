@@ -250,7 +250,9 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
         ),
     )
     config.generator = dataclasses.replace(
-        config.generator, debug=_BATCH_INVARIANT_DEBUG
+        config.generator,
+        debug=_BATCH_INVARIANT_DEBUG,
+        reset_kv_cache_on_weight_sync=True,
     )
     return config
 
@@ -468,6 +470,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 max_tokens=50,
             ),
             debug=batch_invariant_config,
+            reset_kv_cache_on_weight_sync=True,
         ),
     )
 
@@ -823,6 +826,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
                 max_tokens=50,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
+            reset_kv_cache_on_weight_sync=True,
         ),
     )
 
@@ -1009,6 +1013,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 max_tokens=700,
             ),
             debug=batch_invariant_config,
+            reset_kv_cache_on_weight_sync=True,
         ),
     )
 
@@ -1117,7 +1122,9 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
         ),
     )
     config.generator = dataclasses.replace(
-        config.generator, debug=_BATCH_INVARIANT_DEBUG
+        config.generator,
+        debug=_BATCH_INVARIANT_DEBUG,
+        reset_kv_cache_on_weight_sync=True,
     )
     return config
 
@@ -1202,7 +1209,9 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant() -> Controller.Config:
         ),
     )
     config.generator = dataclasses.replace(
-        config.generator, debug=_BATCH_INVARIANT_DEBUG
+        config.generator,
+        debug=_BATCH_INVARIANT_DEBUG,
+        reset_kv_cache_on_weight_sync=True,
     )
     return config
 

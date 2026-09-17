@@ -752,15 +752,13 @@ class VLLMGenerator(Actor, Configurable):
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
 
-        # TODO: check if we should put these under WeightSyncConfig
-        reset_prefix_cache_on_weight_sync: bool = True
-        """Drop the prefix cache when weights change so new requests don't reuse KV computed under the old
-        weights. vLLM only clears it while the engine is idle (true under sync training)."""
+        reset_kv_cache_on_weight_sync: bool = False
+        """Reset cached and running-request KV after each weight sync.
 
-        reset_running_requests_on_weight_sync: bool = True
-        """Affects requests ALREADY running at the pull: preempts them and recomputes their KV under
-        the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
-        Default True to avoid reusing stale-weight KV."""
+        The default preserves in-flight requests and their KV. New rollout groups
+        use the new policy-version cache salt, so they cannot reuse old-policy KV.
+        Enable this to clear prefix-cache entries and preempt running requests;
+        vLLM then recomputes their KV under the new weights when they resume."""
 
         vllm_stat_logger: Annotated[
             VllmOtelStatLogger.Config | None, tyro.conf.Suppress
@@ -780,21 +778,10 @@ class VLLMGenerator(Actor, Configurable):
                     f"tensor_parallel_degree ({full_ep}) in the generator."
                 )
 
-            if (
-                self.debug.batch_invariant
-                and not self.reset_prefix_cache_on_weight_sync
-            ):
+            if self.debug.batch_invariant and not self.reset_kv_cache_on_weight_sync:
                 raise ValueError(
-                    "batch_invariant requires reset_prefix_cache_on_weight_sync=True so a stale prefix "
-                    "cache from old weights can't break determinism"
-                )
-            if (
-                self.reset_running_requests_on_weight_sync
-                and not self.reset_prefix_cache_on_weight_sync
-            ):
-                raise ValueError(
-                    "reset_running_requests_on_weight_sync requires "
-                    "reset_prefix_cache_on_weight_sync=True (it only matters as part of resetting the cache)"
+                    "batch_invariant requires reset_kv_cache_on_weight_sync=True so "
+                    "cached KV cannot cross a policy update"
                 )
 
     def __init__(
@@ -1069,6 +1056,7 @@ class VLLMGenerator(Actor, Configurable):
         *,
         request_id: str,
         routing_session_id: str,
+        cache_salt: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
     ) -> Completion:
@@ -1083,6 +1071,7 @@ class VLLMGenerator(Actor, Configurable):
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
             routing_session_id: Stable session key for in-mesh DP routing.
+            cache_salt: Policy-version salt pinned for the request's rollout group.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
             metrics_prefix: Namespace prepended to every metric key on the returned
@@ -1115,6 +1104,7 @@ class VLLMGenerator(Actor, Configurable):
                     prompt_token_ids=prompt_token_ids,
                     sampling=sampling,
                     routing_session_id=routing_session_id,
+                    cache_salt=cache_salt,
                 )
             )
             # Wakes the engine loop only if it is idle in `_decide_next_action`.
@@ -1188,22 +1178,7 @@ class VLLMGenerator(Actor, Configurable):
                         self._request_dispatcher._dp_rank
                     ]
                     if local_requests:
-                        # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized prompts);
-                        # the high-level entry stays resilient to vLLM internals vs vllm.inputs.tokens_input.
-                        engine_inputs = self._engine.renderer.render_cmpl(
-                            [
-                                {"prompt_token_ids": request.prompt_token_ids}
-                                for request in local_requests
-                            ]
-                        )
-                        for request, engine_input in zip(
-                            local_requests, engine_inputs, strict=True
-                        ):
-                            self._engine.add_request(
-                                request_id=request.request_id,
-                                prompt=engine_input,
-                                params=self._build_sampling_params(request.sampling),
-                            )
+                        self._admit_requests(local_requests)
 
                 # Barrier (NCCL): engine.step() runs SPMD in lockstep.
                 # The step burst `max_engine_steps_between_decisions` gives the generator time to buffer
@@ -1293,6 +1268,26 @@ class VLLMGenerator(Actor, Configurable):
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
+    def _admit_requests(self, requests: list[GenerationRequest]) -> None:
+        """Render queued requests and add them to the local vLLM engine."""
+        # render_cmpl is vLLM's input pipeline. Tokenization is a no-op for
+        # tokenized prompts, and the typed input carries cache_salt to vLLM.
+        engine_inputs = self._engine.renderer.render_cmpl(
+            [
+                {
+                    "prompt_token_ids": request.prompt_token_ids,
+                    "cache_salt": request.cache_salt,
+                }
+                for request in requests
+            ]
+        )
+        for request, engine_input in zip(requests, engine_inputs, strict=True):
+            self._engine.add_request(
+                request_id=request.request_id,
+                prompt=engine_input,
+                params=self._build_sampling_params(request.sampling),
+            )
+
     @concurrent_endpoint
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
@@ -1328,7 +1323,7 @@ class VLLMGenerator(Actor, Configurable):
     @sl.log_trace_span("pull_model_state_dict_copy")
     async def _pull_model_state_dict(self, version: int) -> None:
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
-        prefix cache (so no new request reuses an old-weight prefix), and bump the policy version.
+        prefix cache when configured, and bump the policy version.
         """
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
@@ -1343,13 +1338,9 @@ class VLLMGenerator(Actor, Configurable):
         # TODO: investigate can we avoid the copy and properly load fused qkv weights
         model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
-        if self.config.reset_prefix_cache_on_weight_sync:
-            # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
-            #   (helps long generations that span many steps).
-            # TODO(async-rl): salt the prefix cache per NEW rollout so a new rollout can't reuse stale-weight
-            #   KV, while an in-flight rollout keeps reusing its own KV (avoids the full drop).
+        if self.config.reset_kv_cache_on_weight_sync:
             self._engine.reset_prefix_cache(
-                reset_running_requests=self.config.reset_running_requests_on_weight_sync,
+                reset_running_requests=True,
             )
         gc.collect()
 
@@ -1442,6 +1433,7 @@ class GenerationRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     routing_session_id: str
+    cache_salt: str
 
 
 @dataclass(kw_only=True, slots=True)

@@ -254,6 +254,7 @@ class InterGeneratorRouter(Actor, Configurable):
         *,
         request_id: str,
         routing_session_id: str | None,
+        cache_salt: str,
         sampling_config: Any | None,
         metrics_prefix: str,
     ) -> Any:
@@ -265,6 +266,7 @@ class InterGeneratorRouter(Actor, Configurable):
             # VLLMGenerator.generate also requires this field for its
             # intra-mesh DP routing.
             routing_session_id=routing_session_id,
+            cache_salt=cache_salt,
             sampling_config=sampling_config,
             metrics_prefix=metrics_prefix,
             # Load is measured as in-flight request count (one unit per call).
