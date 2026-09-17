@@ -36,6 +36,14 @@ from torchtitan.models.common.cp_attention import (
     UlyssesCPInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.models.kimi_k3.attention import (
+    MLAFlexInnerAttention,
+    MLAVarlenInnerAttention,
+)
+from torchtitan.models.kimi_k3.cp_attention import (
+    KVAllGatherCPMLAFlexInnerAttention,
+    UlyssesCPMLAFlexInnerAttention,
+)
 from torchtitan.protocols.module import Module
 
 
@@ -57,6 +65,14 @@ class TestKernelSelection(unittest.TestCase):
         config = KVAllGatherCPFlexInnerAttention.Config()
         self.assertIsInstance(config, CPInnerAttention.Config)
         self.assertIsInstance(config, FlexInnerAttention.Config)
+
+    def test_mla_cp_kernel_combines_cp_and_mla_flex(self):
+        kernel = KVAllGatherCPMLAFlexInnerAttention(
+            KVAllGatherCPMLAFlexInnerAttention.Config()
+        )
+        self.assertIsInstance(kernel, CPInnerAttention)
+        self.assertIsInstance(kernel, MLAFlexInnerAttention)
+        self.assertNotIsInstance(kernel, KVAllGatherCPFlexInnerAttention)
 
     def test_cp_kernel_inherits_flex_fields(self):
         config = KVAllGatherCPFlexInnerAttention.Config(block_size=256)
@@ -567,6 +583,165 @@ class TestUlysses(unittest.TestCase):
         self.assertEqual(2, group.size())
         self.assertEqual(spmd.S(1), src)
         self.assertEqual(spmd.S(0), dst)
+
+
+class TestMLAContextParallelAttention(unittest.TestCase):
+    def test_mla_flex_materializes_per_head_kv_at_kernel_boundary(self):
+        q_THK = torch.randn(8, 4, 6)
+        kv_THP = torch.randn(8, 4, 7)
+        k_shared_TR = torch.randn(8, 2)
+        expected_k_THK = torch.cat(
+            (kv_THP[..., :4], k_shared_TR.unsqueeze(1).expand(-1, 4, -1)), dim=-1
+        )
+        expected_v_THV = kv_THP[..., 4:]
+        out_THV = torch.randn(8, 4, 3)
+        attention_mask = object()
+        kernel = MLAFlexInnerAttention(MLAFlexInnerAttention.Config())
+
+        with mock.patch.object(
+            FlexInnerAttention,
+            "forward",
+            autospec=True,
+            return_value=out_THV,
+        ) as flex_forward:
+            result = kernel.forward(
+                q_THK,
+                kv_THP,
+                k_shared_TR,
+                attention_masks=attention_mask,
+            )
+
+        self.assertIs(result, out_THV)
+        args = flex_forward.call_args.args
+        self.assertIs(args[0], kernel)
+        self.assertIs(args[1], q_THK)
+        torch.testing.assert_close(args[2], expected_k_THK)
+        torch.testing.assert_close(args[3], expected_v_THV)
+        self.assertIs(flex_forward.call_args.kwargs["attention_masks"], attention_mask)
+
+    def test_mla_varlen_materializes_per_head_kv_at_kernel_boundary(self):
+        q_THK = torch.randn(8, 4, 6)
+        kv_THP = torch.randn(8, 4, 7)
+        k_shared_TR = torch.randn(8, 2)
+        expected_k_THK = torch.cat(
+            (kv_THP[..., :4], k_shared_TR.unsqueeze(1).expand(-1, 4, -1)), dim=-1
+        )
+        expected_v_THV = kv_THP[..., 4:]
+        out_THV = torch.randn(8, 4, 3)
+        attention_mask = object()
+        kernel = MLAVarlenInnerAttention(MLAVarlenInnerAttention.Config())
+
+        with mock.patch.object(
+            VarlenInnerAttention,
+            "forward",
+            autospec=True,
+            return_value=out_THV,
+        ) as varlen_forward:
+            result = kernel.forward(
+                q_THK,
+                kv_THP,
+                k_shared_TR,
+                attention_masks=attention_mask,
+            )
+
+        self.assertIs(result, out_THV)
+        args = varlen_forward.call_args.args
+        self.assertIs(args[0], kernel)
+        self.assertIs(args[1], q_THK)
+        torch.testing.assert_close(args[2], expected_k_THK)
+        torch.testing.assert_close(args[3], expected_v_THV)
+        self.assertIs(
+            varlen_forward.call_args.kwargs["attention_masks"], attention_mask
+        )
+
+    def test_all_gather_keeps_shared_key_headless_during_communication(self):
+        q_THK = torch.randn(8, 4, 6)
+        kv_THP = torch.randn(8, 4, 7)
+        k_shared_TR = torch.randn(8, 2)
+        expected_k_THK = torch.cat(
+            (kv_THP[..., :4], k_shared_TR.unsqueeze(1).expand(-1, 4, -1)), dim=-1
+        )
+        expected_v_THV = kv_THP[..., 4:]
+        out_THV = torch.randn(8, 4, 3)
+        attention_mask = object()
+
+        kernel = KVAllGatherCPMLAFlexInnerAttention(
+            KVAllGatherCPMLAFlexInnerAttention.Config()
+        )
+        calls = []
+
+        def record(x, group, *, src, dst, backward_options=None):
+            calls.append((x, group, src, dst, backward_options))
+            return x
+
+        with _in_mesh(2), mock.patch.object(
+            spmd, "redistribute", record
+        ), mock.patch.object(
+            FlexInnerAttention,
+            "forward",
+            autospec=True,
+            return_value=out_THV,
+        ) as flex_forward:
+            result = kernel.forward(
+                q_THK,
+                kv_THP,
+                k_shared_TR,
+                attention_masks=attention_mask,
+            )
+
+        self.assertIs(result, out_THV)
+        self.assertEqual(2, len(calls))
+        self.assertIs(calls[0][0], kv_THP)
+        self.assertIs(calls[1][0], k_shared_TR)
+        for _, group, src, dst, backward_options in calls:
+            self.assertEqual(2, group.size())
+            self.assertEqual(spmd.S(0), src)
+            self.assertEqual(spmd.R, dst)
+            self.assertEqual({"op_dtype": torch.float32}, backward_options)
+        flex_forward.assert_called_once()
+        args = flex_forward.call_args.args
+        self.assertIs(args[0], kernel)
+        self.assertIs(args[1], q_THK)
+        torch.testing.assert_close(args[2], expected_k_THK)
+        torch.testing.assert_close(args[3], expected_v_THV)
+        self.assertIs(flex_forward.call_args.kwargs["attention_masks"], attention_mask)
+
+    def test_ulysses_keeps_shared_key_headless_during_communication(self):
+        q_THK = torch.randn(8, 4, 6)
+        kv_THP = torch.randn(8, 4, 7)
+        k_shared_TR = torch.randn(8, 2)
+        out_THV = torch.randn(8, 4, 3)
+        calls = []
+
+        def record(x, group, *, src, dst, backward_options=None):
+            calls.append((x, group, src, dst, backward_options))
+            return x
+
+        kernel = UlyssesCPMLAFlexInnerAttention(UlyssesCPMLAFlexInnerAttention.Config())
+        with _in_mesh(2), mock.patch.object(
+            spmd, "redistribute", record
+        ), mock.patch.object(
+            MLAFlexInnerAttention,
+            "forward",
+            autospec=True,
+            return_value=out_THV,
+        ) as inner_forward:
+            result = kernel.forward(q_THK, kv_THP, k_shared_TR)
+
+        self.assertIs(result, out_THV)
+        self.assertEqual(3, len(calls))
+        self.assertEqual((8, 4, 13), calls[0][0].shape)
+        self.assertEqual((spmd.S(0), spmd.S(1)), calls[0][2:4])
+        self.assertIs(calls[1][0], k_shared_TR)
+        self.assertEqual((spmd.S(0), spmd.R), calls[1][2:4])
+        self.assertEqual({"op_dtype": k_shared_TR.dtype}, calls[1][4])
+        self.assertEqual((spmd.S(1), spmd.S(0)), calls[2][2:4])
+        inner_forward.assert_called_once()
+        args = inner_forward.call_args.args
+        self.assertIs(args[0], kernel)
+        torch.testing.assert_close(args[1], q_THK)
+        torch.testing.assert_close(args[2], kv_THP)
+        self.assertIs(args[3], k_shared_TR)
 
 
 class TestUlyssesVarlen(unittest.TestCase):

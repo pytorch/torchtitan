@@ -31,9 +31,11 @@ def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
 def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
     from torchtitan.config.transform import apply_transforms, ContextParallelTransform
     from torchtitan.distributed.context_parallel import HeadTailLoadBalancer
-    from torchtitan.models.common.attention import FlexInnerAttention
-    from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+    from torchtitan.models.kimi_k3.attention import MLAFlexInnerAttention
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+    from torchtitan.models.kimi_k3.cp_attention import (
+        KVAllGatherCPMLAFlexInnerAttention,
+    )
     from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
     from torchtitan.models.kimi_k3.kda import InnerKDA
 
@@ -47,7 +49,7 @@ def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention={
-                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention,
+                    MLAFlexInnerAttention.Config: KVAllGatherCPMLAFlexInnerAttention,
                     InnerKDA.Config: ContextParallelInnerKDA,
                 }
             ),
@@ -57,9 +59,9 @@ def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
 
 def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
     from torchtitan.config.transform import apply_transforms, ContextParallelTransform
-    from torchtitan.models.common.attention import FlexInnerAttention
-    from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+    from torchtitan.models.kimi_k3.attention import MLAFlexInnerAttention
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+    from torchtitan.models.kimi_k3.cp_attention import UlyssesCPMLAFlexInnerAttention
     from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
     from torchtitan.models.kimi_k3.kda import InnerKDA
 
@@ -73,7 +75,7 @@ def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention={
-                    FlexInnerAttention.Config: UlyssesCPFlexInnerAttention,
+                    MLAFlexInnerAttention.Config: UlyssesCPMLAFlexInnerAttention,
                     InnerKDA.Config: ContextParallelInnerKDA,
                 }
             ),

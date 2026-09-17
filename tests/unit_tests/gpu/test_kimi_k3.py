@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
@@ -19,12 +20,15 @@ from torchtitan.distributed.context_parallel import (
     PTRRLoadBalancer,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    UlyssesCPFlexInnerAttention,
-)
-
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
+from torchtitan.models.kimi_k3.attention import (
+    MLAFlexInnerAttention,
+    MLAVarlenInnerAttention,
+)
+from torchtitan.models.kimi_k3.cp_attention import (
+    KVAllGatherCPMLAFlexInnerAttention,
+    UlyssesCPMLAFlexInnerAttention,
+)
 from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
 from torchtitan.models.kimi_k3.kda import InnerKDA, KDAAttentionMetadata, KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
@@ -122,6 +126,20 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_mla_attention_rejects_standard_backend_config(self):
+        model_config = _small_model_config()
+        attention_config = next(
+            layer.attention
+            for layer in model_config.layers
+            if layer.attention is not None
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires an MLAInnerAttention"):
+            replace(
+                attention_config,
+                inner_attention=FlexInnerAttention.Config(),
+            )
+
     def test_preprocess_builds_token_aligned_vision_bank_indices(self):
         model_config = _small_model_config()
         ContextParallelTransform(
@@ -212,7 +230,7 @@ class TestKimiK3(unittest.TestCase):
         assert config.model_spec is not None
         ContextParallelTransform(
             inner_attention={
-                FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention,
+                MLAFlexInnerAttention.Config: KVAllGatherCPMLAFlexInnerAttention,
                 InnerKDA.Config: ContextParallelInnerKDA,
             }
         ).transform(config.model_spec.model)
@@ -224,7 +242,7 @@ class TestKimiK3(unittest.TestCase):
             if layer.attention is not None:
                 self.assertIsInstance(
                     layer.attention.inner_attention,
-                    KVAllGatherCPFlexInnerAttention.Config,
+                    KVAllGatherCPMLAFlexInnerAttention.Config,
                 )
                 self.assertIsNotNone(layer.attention.inner_attention.sharding_config)
             if layer.delta_attention is not None:
@@ -247,7 +265,7 @@ class TestKimiK3(unittest.TestCase):
         assert config.model_spec is not None
         ContextParallelTransform(
             inner_attention={
-                FlexInnerAttention.Config: UlyssesCPFlexInnerAttention,
+                MLAFlexInnerAttention.Config: UlyssesCPMLAFlexInnerAttention,
                 InnerKDA.Config: ContextParallelInnerKDA,
             }
         ).transform(config.model_spec.model)
@@ -259,7 +277,7 @@ class TestKimiK3(unittest.TestCase):
             if layer.attention is not None:
                 self.assertIsInstance(
                     layer.attention.inner_attention,
-                    UlyssesCPFlexInnerAttention.Config,
+                    UlyssesCPMLAFlexInnerAttention.Config,
                 )
                 self.assertIsNotNone(layer.attention.inner_attention.sharding_config)
             if layer.delta_attention is not None:
@@ -272,6 +290,20 @@ class TestKimiK3(unittest.TestCase):
                     layer.delta_attention.conv_kernel_size,
                 )
                 self.assertIsNotNone(layer.delta_attention.inner_kda.sharding_config)
+
+    def test_varlen_config_uses_mla_backend(self):
+        from torchtitan.models.kimi_k3 import model_registry
+
+        model_config = cast(
+            KimiK3Model.Config,
+            model_registry("debugmodel", attn_backend="varlen").model,
+        )
+        for layer in model_config.layers:
+            if layer.attention is not None:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    MLAVarlenInnerAttention.Config,
+                )
 
     def test_context_parallel_rejects_ptrr_partition(self):
         from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel

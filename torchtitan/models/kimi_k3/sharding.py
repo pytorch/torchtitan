@@ -17,7 +17,10 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.decoder_sharding import set_gqa_inner_attention_local_spmd
+from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
+    dense_activation_placement,
+)
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
     set_moe_sharding_config,
@@ -89,6 +92,26 @@ def _set_inner_kda_sharding(inner_kda: Module.Config) -> None:
     )
 
 
+def _set_mla_inner_attention_local_spmd(inner_attention: Module.Config) -> None:
+    """Localize MLA inputs while preserving their CP and TP placements."""
+    token_head_vectors = attention_activation_placement()
+    shared_key = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    inner_attention.sharding_config = ShardingConfig(
+        in_src_shardings={
+            "q_THK": token_head_vectors,
+            "kv_THP": token_head_vectors,
+            "k_shared_TR": shared_key,
+        },
+        in_dst_shardings={
+            "q_THK": token_head_vectors,
+            "kv_THP": token_head_vectors,
+            "k_shared_TR": shared_key,
+        },
+        out_src_shardings=token_head_vectors,
+        local_spmd=True,
+    )
+
+
 def set_kimi_k3_sharding_config(
     config: "KimiK3Model.Config", *, enable_ep: bool, enable_sp: bool = False
 ) -> None:
@@ -104,7 +127,7 @@ def set_kimi_k3_sharding_config(
 
     for layer in config.layers:
         if layer.attention is not None:
-            set_gqa_inner_attention_local_spmd(layer.attention.inner_attention)
+            _set_mla_inner_attention_local_spmd(layer.attention.inner_attention)
         if layer.delta_attention is not None:
             _set_inner_kda_sharding(layer.delta_attention.inner_kda)
         if layer.moe is not None:
