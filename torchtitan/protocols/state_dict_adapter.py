@@ -132,13 +132,14 @@ class StateDictAdapter(BaseStateDictAdapter):
 
     def _linear_state_dict_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Remove the physical singleton axis from ordinary Linear parameters."""
-        from torchtitan.models.common.linear import Linear
+        from torchtitan.models.common.linear import canonical_linear_fqn, Linear
 
         result = dict(state_dict)
-        for fqn, config, _, _ in self.model_config.traverse(Linear.Config):
+        for fqn, config, parent, _ in self.model_config.traverse(Linear.Config):
             assert isinstance(config, Linear.Config)
             if config.num_linears != 1:
                 continue
+            fqn = canonical_linear_fqn(fqn, parent)
             for name, physical_ndim in (("weight", 3), ("bias", 2)):
                 key = f"{fqn}.{name}"
                 value = result.get(key)
@@ -152,13 +153,14 @@ class StateDictAdapter(BaseStateDictAdapter):
 
     def _linear_state_dict_from_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Restore the physical singleton axis on ordinary Linear parameters."""
-        from torchtitan.models.common.linear import Linear
+        from torchtitan.models.common.linear import canonical_linear_fqn, Linear
 
         result = dict(state_dict)
-        for fqn, config, _, _ in self.model_config.traverse(Linear.Config):
+        for fqn, config, parent, _ in self.model_config.traverse(Linear.Config):
             assert isinstance(config, Linear.Config)
             if config.num_linears != 1:
                 continue
+            fqn = canonical_linear_fqn(fqn, parent)
             for name, hf_ndim in (("weight", 2), ("bias", 1)):
                 key = f"{fqn}.{name}"
                 value = result.get(key)
