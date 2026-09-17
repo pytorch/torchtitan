@@ -5,11 +5,6 @@ on:
     branches: [ main ]
     tags:
       - ciflow/rl/*
-    paths:
-      - 'torchtitan/experiments/rl/**'
-      - 'torchtitan/models/qwen3_5/**'
-      - 'torchtitan/models/qwen3_8/**'
-      - '.github/workflows/integration_test_8gpu_rl.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -67,7 +62,7 @@ jobs:
         pip install uv
 
         # 1. Install Monarch, TorchStore, and Renderers
-        uv pip install -r torchtitan/experiments/rl/requirements.txt
+        uv pip install -r torchtitan/rl/requirements.txt
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 
         # 2. Install batch-invariant ops
@@ -100,10 +95,10 @@ jobs:
         # (--hf-assets-path=$MODEL_PATH): real weights -> varied rewards -> non-zero
         # advantage -> meaningful, full-precision losses (random init gives all
         # zeros). The golden is arch-specific; regenerate on A10G if it changes.
-        LOSS_FILE="torchtitan/experiments/rl/tests/assets/losses/rl_grpo_cuda.txt"
+        LOSS_FILE="tests/assets/losses/rl_grpo_cuda.txt"
         # Override to trainer TP=4 + 1 generator TP=4: the config's TP=2 OOMs with
         # batch-invariant on A10G; the golden is from TP=4.
-        python torchtitan/experiments/rl/scripts/loss_compare.py \
+        python scripts/rl/loss_compare.py \
           --hf-assets-path "$MODEL_PATH" \
           --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
           --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
@@ -116,16 +111,16 @@ jobs:
         # and vLLM engine.
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
+          tests/unit_tests/rl/test_bitwise_parity.py::TestBitwiseParityVarlen -v
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
+          tests/unit_tests/rl/test_bitwise_parity.py::TestBitwiseParityFlex -v
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           torchrun --nproc-per-node=2 -m pytest \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
+          tests/unit_tests/rl/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
 
         # Run E2E RL integration tests (up to 8 GPUs): includes the MoE TP=4 EP=4
         # random-init test and the batch-invariant debug tests (both need 8 GPUs).
-        python -m torchtitan.experiments.rl.tests.integration_tests \
+        python -m tests.integration_tests.rl \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 \
           --hf_assets_path "$MODEL_PATH"

@@ -44,27 +44,18 @@ class TinyModel(Module):
 
 class TestApplyCompile(unittest.TestCase):
     def test_async_tp_requires_model_compile(self):
-        invalid_configs = (
-            {"enable_async_tensor_parallel": True},
-            {
-                "enable": True,
-                "enable_async_tensor_parallel": True,
-                "components": ["loss"],
-            },
-        )
-        for kwargs in invalid_configs:
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "Async TP requires 'model' in --compile.components and "
-                    "--compile.enable",
-                ):
-                    CompileConfig(**kwargs)
+        with self.assertRaisesRegex(
+            ValueError,
+            "Async TP requires 'model' in --compile.components",
+        ):
+            CompileConfig(
+                enable_async_tensor_parallel=True,
+                components=["loss"],
+            )
 
     def test_apply_compile_configures_async_tp(self):
         model = TinyModel(num_layers=2, dim=128)
         compile_config = CompileConfig(
-            enable=True,
             enable_async_tensor_parallel=True,
         )
         parallel_dims = MagicMock(tp_enabled=True)

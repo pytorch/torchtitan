@@ -39,7 +39,9 @@ def inference(config: FluxTrainer.Config):
     # Distribute prompts across processes using round-robin assignment
     prompts = original_prompts[global_rank::world_size]
 
-    trainer.checkpointer.load(step=config.checkpoint.load_step)
+    if config.checkpointer is None:
+        raise ValueError("Flux inference requires a checkpointer configuration.")
+    trainer.engine.load_checkpoint()
 
     # Build tokenizers from the config
     tokenizer = config.tokenizer.build()
@@ -60,22 +62,23 @@ def inference(config: FluxTrainer.Config):
         global_ids = list(range(global_rank, total_prompts, world_size))
 
         for i in range(0, len(prompts), bs):
-            images = generate_image(
-                device=trainer.device,
-                dtype=trainer._dtype,
-                img_height=16 * (img_size // 16),
-                img_width=16 * (img_size // 16),
-                enable_classifier_free_guidance=config.inference.sampling.enable_classifier_free_guidance,
-                denoising_steps=config.inference.sampling.denoising_steps,
-                classifier_free_guidance_scale=config.inference.sampling.classifier_free_guidance_scale,
-                # pyrefly: ignore [bad-argument-type]
-                model=trainer.model_parts[0],
-                prompt=prompts[i : i + bs],
-                autoencoder=trainer.autoencoder,
-                tokenizer=tokenizer,
-                t5_encoder=trainer.t5_encoder,
-                clip_encoder=trainer.clip_encoder,
-            )
+            with trainer.engine.train_context():
+                images = generate_image(
+                    device=trainer.engine.device,
+                    dtype=trainer._dtype,
+                    img_height=16 * (img_size // 16),
+                    img_width=16 * (img_size // 16),
+                    enable_classifier_free_guidance=config.inference.sampling.enable_classifier_free_guidance,
+                    denoising_steps=config.inference.sampling.denoising_steps,
+                    classifier_free_guidance_scale=config.inference.sampling.classifier_free_guidance_scale,
+                    # pyrefly: ignore [bad-argument-type]
+                    model=trainer.engine.model_parts[0],
+                    prompt=prompts[i : i + bs],
+                    autoencoder=trainer.autoencoder,
+                    tokenizer=tokenizer,
+                    t5_encoder=trainer.t5_encoder,
+                    clip_encoder=trainer.clip_encoder,
+                )
             for j in range(images.shape[0]):
                 # Extract single image while preserving batch dimension [1, C, H, W]
                 img = images[j : j + 1]

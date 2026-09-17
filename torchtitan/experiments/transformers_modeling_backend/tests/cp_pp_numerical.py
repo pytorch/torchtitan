@@ -35,6 +35,8 @@ import tempfile
 
 import torch
 
+from scripts._checkpoint_test_config import configure_checkpoint
+
 _MODULE = "transformers_modeling_backend"
 # cp=2; seq_len 256 -> 2 flex Q-blocks so ptrr (blocks % cp == 0) holds; 1 step;
 # fp32 so CP/PP reduction-order noise isn't masked by bf16. Small on purpose.
@@ -66,10 +68,10 @@ def _run(cmd: str, env: dict | None = None) -> None:
         raise RuntimeError(f"Command failed (rc={result.returncode}): {cmd}")
 
 
-def _torchrun(ngpu: int, config: str, extra: str) -> str:
+def _torchrun(ngpu: int, module: str, config: str, extra: str) -> str:
     return (
         f"torchrun --nproc_per_node={ngpu} --role rank -m torchtitan.train "
-        f"--module {_MODULE} --config {config} {extra}"
+        f"--module {module} --config {config} {extra}"
     )
 
 
@@ -125,11 +127,18 @@ def _run_case(work: str) -> None:
     os.makedirs(pp, exist_ok=True)
 
     print("  [1/4] seed checkpoint")
+    seed_env: dict[str, str] = {}
+    seed_module, seed_config = configure_checkpoint(
+        seed_env,
+        module=_MODULE,
+        config=config,
+        mode="seed",
+    )
     _run(
         _torchrun(
             1,
-            config,
-            "--checkpoint.enable --checkpoint.create_seed_checkpoint "
+            seed_module,
+            seed_config,
             "--parallelism.data_parallel_shard_degree 1 "
             "--parallelism.tensor_parallel_degree 1 "
             "--parallelism.pipeline_parallel_degree 1 "
@@ -137,9 +146,15 @@ def _run_case(work: str) -> None:
             "--parallelism.expert_parallel_degree 1 "
             f"--dump_folder {seed}",
         ),
+        env=seed_env,
     )
-    load = (
-        f"--checkpoint.enable --checkpoint.initial_load_path {seed}/checkpoint/step-0"
+    load_env: dict[str, str] = {}
+    load_module, load_config = configure_checkpoint(
+        load_env,
+        module=_MODULE,
+        config=config,
+        mode="load",
+        initial_load_path=f"{seed}/checkpoint/step-0",
     )
     bal = f"--parallelism.context_parallel_load_balancer {balancer}"
 
@@ -147,25 +162,27 @@ def _run_case(work: str) -> None:
     _run(
         _torchrun(
             2,
-            config,
-            f"{_COMMON} {load} {bal} --parallelism.data_parallel_shard_degree 1 "
+            load_module,
+            load_config,
+            f"{_COMMON} {bal} --parallelism.data_parallel_shard_degree 1 "
             f"--dump_folder {os.path.join(work, 'out_co')}",
         ),
-        env={"HF_BACKEND_LOGIT_DUMP": co},
+        env={**load_env, "HF_BACKEND_LOGIT_DUMP": co},
     )
 
     print("  [3/4] CP+PP run (cp=2, pp=2)")
     _run(
         _torchrun(
             4,
-            config,
-            f"{_COMMON} {load} {bal} --parallelism.pipeline_parallel_degree 2 "
+            load_module,
+            load_config,
+            f"{_COMMON} {bal} --parallelism.pipeline_parallel_degree 2 "
             f"--parallelism.num_pp_microbatches 4 "
             f"--training.num_tokens_per_microbatch_per_dp_rank 256 "
             f"--parallelism.pipeline_parallel_schedule 1F1B "
             f"--dump_folder {os.path.join(work, 'out_pp')}",
         ),
-        env={"HF_BACKEND_LOGIT_DUMP": pp},
+        env={**load_env, "HF_BACKEND_LOGIT_DUMP": pp},
     )
 
     print("  [4/4] compare logits")

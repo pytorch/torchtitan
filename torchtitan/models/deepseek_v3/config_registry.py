@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -83,10 +82,7 @@ def deepseek_v3_debugmodel(
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -115,7 +111,7 @@ def deepseek_v3_debugmodel_mxfp8(
     # pad_multiple=128 is required by the CuTeDSL quantization kernel
     # on sm_100 (e.g. B200)
     model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
+        config.compile is not None and "model" in config.compile.components
     )
     config.model_spec = model_registry(
         "debugmodel",
@@ -175,9 +171,9 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
             pipeline_parallel_schedule="Interleaved1F1B",
             expert_parallel_degree=8,
         ),
-        checkpoint=CheckpointManager.Config(interval=10),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        compile=CompileConfig(enable=True, components=["loss"]),
+        compile=CompileConfig(components=["loss"]),
     )
 
 
@@ -228,9 +224,9 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             pipeline_parallel_schedule="Interleaved1F1B",
             expert_parallel_degree=2,
         ),
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        compile=CompileConfig(enable=True, components=["loss"]),
+        compile=CompileConfig(components=["loss"]),
     )
 
 
@@ -241,7 +237,7 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
     # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
     # build time, so use the plain deepseek_v3_671b config there.
     model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
+        config.compile is not None and "model" in config.compile.components
     )
     config.model_spec = model_registry(
         "671B",

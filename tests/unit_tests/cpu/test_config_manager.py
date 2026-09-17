@@ -13,7 +13,14 @@ from unittest import mock
 
 import pytest
 import tyro
-from torchtitan.config import ConfigManager, ParallelismConfig, TrainingConfig
+from torchtitan.components.validate import Validator
+from torchtitan.config import (
+    CompileConfig,
+    ConfigManager,
+    DebugConfig,
+    ParallelismConfig,
+    TrainingConfig,
+)
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )
@@ -21,6 +28,7 @@ from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 
 class TestConfigManager(unittest.TestCase):
@@ -225,10 +233,10 @@ class TestConfigManager(unittest.TestCase):
             ]
         )
         config.training.disable_cuda_graphs = False
-        config.validator.enable = True
-
+        config.parallelism.pipeline_parallel_schedule = "1F1B"
+        config.validator = Validator.Config()
         with pytest.raises(ValueError, match="do not support validation"):
-            config._validate_cuda_graphs()
+            config.__post_init__()
 
     def test_cuda_graphs_enabled_by_default(self):
         config = ConfigManager().parse_args(
@@ -300,12 +308,34 @@ class TestConfigManager(unittest.TestCase):
         config.sdc_replayer = SDCReplayer.Config()
 
         with pytest.raises(ValueError, match="debug.deterministic=True"):
-            config._validate_sdc_replay()
+            TrainingEngine.Config.__post_init__(config)
 
         config.debug.deterministic = True
         config.debug.deterministic_warn_only = True
         with pytest.raises(ValueError, match="deterministic_warn_only=False"):
-            config._validate_sdc_replay()
+            TrainingEngine.Config.__post_init__(config)
+
+    def test_microbatch_tokens_must_match_activation_sharding(self):
+        config = TrainingEngine.Config()
+        config.training = TrainingConfig(num_tokens_per_microbatch_per_dp_rank=10)
+        config.parallelism = ParallelismConfig(
+            tensor_parallel_degree=4,
+            enable_sequence_parallel=True,
+        )
+
+        with pytest.raises(ValueError, match="pipeline microbatch"):
+            config.__post_init__()
+
+        config.training.num_tokens_per_microbatch_per_dp_rank = 16
+        config.__post_init__()
+
+    def test_engine_rejects_spmd_typechecking_with_pipeline_parallelism(self):
+        with pytest.raises(ValueError, match="SPMD typechecking"):
+            TrainingEngine.Config(
+                debug=DebugConfig(spmd_typechecking=True),
+                training=TrainingConfig(disable_cuda_graphs=True),
+                parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+            )
 
     def test_sdc_replay_is_off_the_cli(self):
         hints = typing.get_type_hints(Trainer.Config, include_extras=True)
@@ -322,7 +352,7 @@ class TestConfigManager(unittest.TestCase):
             ]
         )
         config.sdc_replayer = SDCReplayer.Config(num_steps=3, num_replays=2)
-        config._validate_sdc_replay()
+        TrainingEngine.Config.__post_init__(config)
 
     def test_sdc_replay_rejects_multiple_replays_with_cuda_graphs(self):
         config = ConfigManager().parse_args(
@@ -337,7 +367,7 @@ class TestConfigManager(unittest.TestCase):
         config.sdc_replayer = SDCReplayer.Config(num_replays=2)
 
         with pytest.raises(ValueError, match="at most one replay"):
-            config._validate_sdc_replay()
+            TrainingEngine.Config.__post_init__(config)
 
     def test_sdc_replay_allows_multiple_replays_without_cuda_graphs(self):
         config = ConfigManager().parse_args(
@@ -352,7 +382,7 @@ class TestConfigManager(unittest.TestCase):
         )
         config.sdc_replayer = SDCReplayer.Config(num_replays=2)
 
-        config._validate_sdc_replay()
+        TrainingEngine.Config.__post_init__(config)
 
     def test_sdc_replay_accepts_execution_modes(self):
         config = ConfigManager().parse_args(
@@ -366,7 +396,7 @@ class TestConfigManager(unittest.TestCase):
         )
         config.sdc_replayer = SDCReplayer.Config()
         config.parallelism.fsdp_symm_mem_scope = "all"
-        config.compile.enable_async_tensor_parallel = True
+        config.compile = CompileConfig(enable_async_tensor_parallel=True)
         configs = {
             "symm_mem_async_tp": config,
             "distributed_gemm": llama3_debugmodel_dist_gemm(seq_len=2048),
@@ -378,7 +408,7 @@ class TestConfigManager(unittest.TestCase):
             with self.subTest(config=name):
                 config.debug.deterministic = True
                 config.sdc_replayer = SDCReplayer.Config()
-                config._validate_sdc_replay()
+                TrainingEngine.Config.__post_init__(config)
 
     def test_cuda_graphs_reject_blocking_hybridep(self):
         from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
@@ -421,46 +451,19 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.parallelism.module_fqns_per_model_part is None
 
-    def test_parse_exclude_from_loading(self):
-        """exclude_from_loading defaults to [] and can be overridden."""
+    def test_optional_component_configs_do_not_add_cli_subcommands(self):
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
-        assert config.checkpoint.exclude_from_loading == []
+        assert config.checkpointer is None
+        assert config.compile is None
+        assert config.validator is None
 
-        config_manager = ConfigManager()
-        config = config_manager.parse_args(
-            [
-                "--module",
-                "llama3",
-                "--config",
-                "llama3_debugmodel",
-                "--checkpoint.exclude_from_loading",
-                "optimizer,lr_scheduler",
-            ]
-        )
-        assert config.checkpoint.exclude_from_loading == [
-            "optimizer",
-            "lr_scheduler",
-        ]
-
-    def test_concrete_checkpoint_fields_remain_overridable(self):
-        from torchtitan.components.checkpointer import CheckpointManager
-
-        config = ConfigManager().parse_args(
-            [
-                "--module",
-                "llama3",
-                "--config",
-                "llama3_debugmodel",
-                "--checkpoint.async_mode",
-                "async",
-            ]
-        )
-
-        assert isinstance(config.checkpoint, CheckpointManager.Config)
-        assert config.checkpoint.async_mode == "async"
+        hints = typing.get_type_hints(Trainer.Config, include_extras=True)
+        for field_name in ("checkpointer", "compile", "validator"):
+            assert tyro.conf.AvoidSubcommands in hints[field_name].__metadata__
+        assert tyro.conf.Suppress in hints["create_seed_checkpoint"].__metadata__
 
     def test_trainer_config_quantization_default(self):
         from torchtitan.quantization.utils import has_quantization
@@ -474,7 +477,7 @@ class TestConfigManager(unittest.TestCase):
     # TODO: remove this test when we remove the merge functionality
     def test_extend_trainer_config_directly(self):
         """Test that _merge_configs works to extend config types."""
-        from dataclasses import dataclass
+        from dataclasses import dataclass, field
 
         from torchtitan.trainer import Trainer
 
@@ -485,7 +488,7 @@ class TestConfigManager(unittest.TestCase):
 
         @dataclass
         class CustomTrainerConfig:
-            checkpoint: CustomCheckpoint
+            checkpointer: CustomCheckpoint = field(default_factory=CustomCheckpoint)
 
         MergedTrainerConfig = ConfigManager._merge_configs(
             Trainer.Config, CustomTrainerConfig
@@ -498,10 +501,10 @@ class TestConfigManager(unittest.TestCase):
             .model_spec
         )
         merged = MergedTrainerConfig(model_spec=model_spec)
-        assert hasattr(merged, "checkpoint")
-        assert hasattr(merged.checkpoint, "convert_path")
-        assert merged.checkpoint.convert_path == "/custom/path"
-        assert merged.checkpoint.fake_model is True
+        assert hasattr(merged, "checkpointer")
+        assert hasattr(merged.checkpointer, "convert_path")
+        assert merged.checkpointer.convert_path == "/custom/path"
+        assert merged.checkpointer.fake_model is True
         assert hasattr(merged, "model_spec")
 
     def test_flux_config_via_cli(self):

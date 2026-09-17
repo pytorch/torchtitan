@@ -32,28 +32,63 @@ class TestFluxDataLoader(unittest.TestCase):
                 "t5": torch.tensor([1, 2]),
                 "clip": torch.tensor([3]),
                 "prompt": "first",
-                "image": torch.full((3, 2, 2), 1.0),
+                "image": torch.full((3, 16, 16), 1.0),
             },
             {
                 "t5": torch.tensor([4, 5]),
                 "clip": torch.tensor([6]),
                 "prompt": "second",
-                "image": torch.full((3, 2, 2), 2.0),
+                "image": torch.full((3, 16, 16), 2.0),
             },
         ]
 
         context = SimpleNamespace(
-            num_tokens_per_batch=2,
+            num_tokens_per_microbatch=2,
             max_context_length=1,
         )
-        model_inputs = self._collator.build(context=context)(rows)
-        labels = model_inputs["labels"]
+        microbatch = self._collator.build(context=context)(rows)
+        model_inputs = microbatch.as_input_dict()
+        labels = microbatch.labels
 
         self.assertNotIn("image", model_inputs)
+        self.assertEqual(microbatch.num_valid_tokens, 128)
         self.assertEqual(model_inputs["prompt"], ["first", "second"])
         self.assertTrue(
             torch.equal(labels, torch.stack([row["image"] for row in rows]))
         )
+
+    def test_model_preprocess_inputs_accepts_external_encoders(self):
+        from torchtitan.models.flux.model.model import FluxModel
+
+        class Autoencoder:
+            def encode(self, images):
+                return torch.ones(images.shape[0], 16, 2, 2)
+
+        class Encoder:
+            def __init__(self, output_shape):
+                self.output_shape = output_shape
+
+            def __call__(self, tokens):
+                return torch.ones(tokens.shape[0], *self.output_shape)
+
+        model = object.__new__(FluxModel)
+        inputs, target, model_kwargs = model.preprocess_inputs(
+            {
+                "labels": torch.ones(2, 3, 16, 16),
+                "clip": torch.ones(2, 1, 4, dtype=torch.int64),
+                "t5": torch.ones(2, 1, 5, dtype=torch.int64),
+            },
+            parallel_dims=SimpleNamespace(cp_enabled=False),
+            parallelism=SimpleNamespace(),
+            autoencoder=Autoencoder(),
+            clip_encoder=Encoder((4,)),
+            t5_encoder=Encoder((5, 8)),
+            dtype=torch.float32,
+        )
+
+        self.assertEqual(inputs.shape, (2, 1, 64))
+        self.assertEqual(target.shape, (2, 1, 64))
+        self.assertIs(model_kwargs["loss_target"], target)
 
     def test_recipe_context_length_matches_dataset_geometry(self):
         for recipe, expected_max_context_length in (
@@ -133,7 +168,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    num_tokens_per_batch=(
+                    num_tokens_per_microbatch=(
                         batch_size * config.training.max_context_length
                     ),
                     tokenizer=tokenizer,
@@ -143,12 +178,12 @@ class TestFluxDataLoader(unittest.TestCase):
                 it = iter(dl)
 
                 for i in range(0, num_steps):
-                    input_data = next(it)
-                    labels = input_data["labels"]
+                    microbatch = next(it)
+                    input_data = microbatch.as_input_dict()
+                    labels = microbatch.labels
 
-                    assert (
-                        len(input_data) == 4
-                    )  # (clip_encodings, t5_encodings, prompt, labels)
+                    assert len(input_data) == 4
+                    assert microbatch.num_valid_tokens == 16384
                     assert labels.shape == (batch_size, 3, 256, 256)
                     assert input_data["clip"].shape == (
                         batch_size,
@@ -165,7 +200,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 dl_resumed = config.dataloader.build(
                     dp_world_size=world_size,
                     dp_rank=rank,
-                    num_tokens_per_batch=(
+                    num_tokens_per_microbatch=(
                         batch_size * config.training.max_context_length
                     ),
                     tokenizer=tokenizer,
@@ -175,8 +210,10 @@ class TestFluxDataLoader(unittest.TestCase):
                 it_resumed = iter(dl_resumed)
 
                 for i in range(num_steps):
-                    expected_input_ids = next(it)
-                    input_ids = next(it_resumed)
+                    expected_microbatch = next(it)
+                    resumed_microbatch = next(it_resumed)
+                    expected_input_ids = expected_microbatch.as_input_dict()
+                    input_ids = resumed_microbatch.as_input_dict()
 
                     assert torch.equal(input_ids["clip"], expected_input_ids["clip"])
                     assert torch.equal(input_ids["t5"], expected_input_ids["t5"])

@@ -1,7 +1,7 @@
 # Manifesto
 
 As accelerators get faster, CPU-side kernel launch overhead dominates —
-you can't launch kernels fast enough to keep the GPU fed. CUDAGraph is
+you can't launch kernels fast enough to keep the GPU fed. CUDA graph is
 already a must on GB200, and this is the direction all hardware is heading.
 
 GraphTrainer exists because distributed training at scale will require a
@@ -15,16 +15,16 @@ toolkit.
 ## Eager Challenges
 
 **Composability is fragile.** Getting FSDP2, activation checkpointing,
-torch.compile, and CUDAGraph to all work together is a minefield.
+torch.compile, and CUDA graph to all work together is a minefield.
 Each feature is its own system with its own interception points, and they
 interfere with each other in non-obvious ways: compile graph-breaks on
 FSDP2, AC recomputes FSDP2 all-gathers in backward, AC with compile
 graph-breaks invalidates AC and causes OOM, and so on. Each combination
 needs its own workaround, and workarounds for one pair can break another.
 
-**CUDAGraph is hard.** Making CUDAGraph work in eager requires deep
+**CUDA graph is hard.** Making CUDA graph work in eager requires deep
 understanding of PyTorch autograd engine internals and careful memory
-management. Wrapping a full training step is tractable; regional CUDAGraph
+management. Wrapping a full training step is tractable; regional CUDA graph
 is much harder.
 
 **Scheduling is coarse.** `autograd.Function` and hooks are the only
@@ -39,7 +39,7 @@ backward (and optionally optimizer.step) — as one flat FX graph. No separate g
 opaque boundaries. Full visibility into every operation — in particular, all backward
 computations are explicit.
 
-**Every optimization is a graph pass.** Activation checkpointing, CUDAGraph,
+**Every optimization is a graph pass.** Activation checkpointing, CUDA graph,
 CPU offload, communication overlap, kernel fusion — all expressed as
 transformations on the same graph. Passes compose naturally because they share a common
 representation. Adding a new optimization means writing a new pass, not
@@ -50,9 +50,9 @@ all-gather and reduce-scatter as traceable DTensor operations. The
 collectives show up as nodes in the graph, so they can be reordered,
 fused, and overlapped by passes — not hidden behind opaque module hooks.
 
-**CUDAGraph becomes manageable.** With a graph, all computation is explicit
+**CUDA graph becomes manageable.** With a graph, all computation is explicit
 — no hidden autograd state, no opaque memory management. Piecewise
-CUDAGraph wrapping is straightforward because you can see exactly what
+CUDA graph wrapping is straightforward because you can see exactly what
 needs to be captured.
 
 **Hardware heterogeneity.** Most non-GPU accelerators — TPUs, Trainium, and
