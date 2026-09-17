@@ -6,6 +6,7 @@
 
 """Configurations for the ``models`` integration test suite."""
 
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import CompileConfig
@@ -227,6 +228,12 @@ def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
         config,
         [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
     )
+
+
+def qwen3_debugmodel_moe_param_groups_seed() -> Trainer.Config:
+    config = qwen3_debugmodel_moe_param_groups()
+    config.checkpointer = CheckpointManager.Config(export_dtype="float16")
+    return config
 
 
 def qwen3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
