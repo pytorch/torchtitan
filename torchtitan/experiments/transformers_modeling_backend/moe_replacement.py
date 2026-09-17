@@ -46,7 +46,6 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import (
     set_moe_sharding_config,
-    set_shared_experts_sharding_config,
 )
 from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
 from torchtitan.protocols.sharding import ShardingConfig
@@ -129,12 +128,6 @@ def build_and_swap_native_moe(
             enable_sp=enable_sp,
             expert_param_layout=expert_layout,
         )
-        if moe_config.shared_experts is not None:
-            set_shared_experts_sharding_config(
-                moe_config.shared_experts,
-                enable_ep=enable_ep,
-                enable_sp=enable_sp,
-            )
         root_sharding = moe_config.sharding_config
         assert root_sharding is not None
         # Only the MoE root sees HF's singleton batch. Its children retain the
