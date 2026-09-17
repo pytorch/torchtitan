@@ -24,6 +24,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
     set_moe_sharding_config,
+    set_shared_experts_sharding_config,
 )
 from torchtitan.models.deepseek_v3.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
@@ -152,6 +153,12 @@ def _set_deepseek_v3_layer_sharding(
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
+        if layer_cfg.moe.shared_experts is not None:
+            set_shared_experts_sharding_config(
+                layer_cfg.moe.shared_experts,
+                enable_ep=enable_ep,
+                enable_sp=enable_sp,
+            )
 
 
 def _set_deepseek_v3_mtp_sharding(

@@ -61,8 +61,8 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
 
                 with torch.no_grad():
                     for reference_weight, parallel_weight in (
-                        (reference.w13.weight, parallel.w13.weight),
-                        (reference.w2.weight, parallel.w2.weight),
+                        (reference.w13.linear.weight, parallel.w13.linear.weight),
+                        (reference.w2.linear.weight, parallel.w2.linear.weight),
                     ):
                         torch.manual_seed(hash(tuple(reference_weight.shape)) % 2**31)
                         reference_weight.copy_(torch.randn_like(reference_weight) * 0.1)
@@ -109,12 +109,16 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                 torch.testing.assert_close(parallel_out, expected_out)
                 torch.testing.assert_close(x_local.grad, expected_grad)
                 torch.testing.assert_close(
-                    parallel.w13.weight.grad,
-                    reference.w13.weight.grad.chunk(self.world_size, 1)[self.rank],
+                    parallel.w13.linear.weight.grad,
+                    reference.w13.linear.weight.grad.chunk(self.world_size, 1)[
+                        self.rank
+                    ],
                 )
                 torch.testing.assert_close(
-                    parallel.w2.weight.grad,
-                    reference.w2.weight.grad.chunk(self.world_size, 2)[self.rank],
+                    parallel.w2.linear.weight.grad,
+                    reference.w2.linear.weight.grad.chunk(self.world_size, 2)[
+                        self.rank
+                    ],
                 )
 
 

@@ -53,12 +53,14 @@ _ADAMW_STATE_NAMES = ("step", "exp_avg", "exp_avg_sq")
 _TOP_LEVEL_ANCHORS = ("tok_embeddings.weight", "norm.weight", "lm_head.weight")
 _LAYER0_ANCHORS = (
     # debugmodel uses fused QKV by default, so named_parameters() exposes the
-    # single fused ``wqkv`` (state_dict() splits it back to wq/wk/wv via a hook).
-    "layers.0.attention.qkv_linear.wqkv.weight",
-    "layers.0.attention.wo.weight",
-    # FeedForward stores gate/up in one physical w13 parameter.
-    "layers.0.feed_forward.w13.weight",
-    "layers.0.feed_forward.w2.weight",
+    # single fused ``wqkv`` inside its TP boundary. state_dict() removes the
+    # ``linear`` implementation segment and splits it back to wq/wk/wv.
+    "layers.0.attention.qkv_linear.wqkv.linear.weight",
+    "layers.0.attention.wo.linear.weight",
+    # FeedForward stores gate/up in one physical w13 parameter inside the TP
+    # boundary. Its state-dict hook retains the existing logical keys.
+    "layers.0.feed_forward.w13.linear.weight",
+    "layers.0.feed_forward.w2.linear.weight",
     "layers.0.attention_norm.weight",
     "layers.0.ffn_norm.weight",
 )

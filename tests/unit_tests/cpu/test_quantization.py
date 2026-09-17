@@ -29,7 +29,11 @@ from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    canonical_linear_fqn,
+    ColumnParallelLinear,
+    Linear,
+)
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
 from torchtitan.protocols.module import Module
@@ -108,10 +112,8 @@ def test_float8_applied_by_model_registry():
     ]
     assert len(converted) > 0
     lora_converted = {
-        fqn
-        for fqn, lc, _parent, _attr in model_config.traverse(
-            Module.Config, recurse=True
-        )
+        canonical_linear_fqn(fqn, parent)
+        for fqn, lc, parent, _attr in model_config.traverse(Module.Config, recurse=True)
         if hasattr(lc, "rank") and hasattr(lc, "alpha")
     }
     assert lora_converted == {
@@ -376,7 +378,9 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     model_config = config.model_spec.model
     model = model_config.build()
     model.init_states()
-    assert isinstance(model.get_submodule("layers.0.feed_forward.w13"), NVFP4Linear)
+    assert isinstance(
+        model.get_submodule("layers.0.feed_forward.w13.linear"), NVFP4Linear
+    )
 
     sd = model.state_dict()
     # Both NVFP4 runtime buffers are non-persistent, so neither the RHT vector
@@ -552,7 +556,8 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
     assert converted.input_activation_format_for_backward == "bf16"
 
 
-def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch, wrapped):
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
@@ -562,14 +567,15 @@ def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
     head_dim = 48
     n_heads = 4
     n_kv_heads = 2
+    wqkv = Linear.Config(
+        in_features=128,
+        out_features=(n_heads + 2 * n_kv_heads) * head_dim,
+    )
     qkv_config = QKVLinear.Config(
         head_dim=head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
-        wqkv=Linear.Config(
-            in_features=128,
-            out_features=(n_heads + 2 * n_kv_heads) * head_dim,
-        ),
+        wqkv=ColumnParallelLinear.Config(linear=wqkv) if wrapped else wqkv,
     )
 
     with pytest.raises(ValueError, match="head_dim divisible by 32"):

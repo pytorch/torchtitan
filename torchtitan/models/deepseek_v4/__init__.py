@@ -18,6 +18,7 @@ from torchtitan.config.transform import (
 )
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     ComplexRoPE,
     Embedding,
     FeedForward,
@@ -26,6 +27,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    RowParallelLinear,
     SqrtSoftplus,
 )
 from torchtitan.models.common.config_utils import (
@@ -562,8 +564,11 @@ def _build_mtp_layers(
             )
             if block_cfg.moe.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
-                block_cfg.moe.shared_experts.w2.param_init = depth_init
-                block_cfg.moe.shared_experts.w13.param_init = fused_gate_up_param_init(
+                shared_experts = block_cfg.moe.shared_experts
+                assert isinstance(shared_experts.w13, ColumnParallelLinear.Config)
+                assert isinstance(shared_experts.w2, RowParallelLinear.Config)
+                shared_experts.w2.linear.param_init = depth_init
+                shared_experts.w13.linear.param_init = fused_gate_up_param_init(
                     _LINEAR_INIT, depth_init
                 )
         mtp_layers.append(
