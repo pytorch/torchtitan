@@ -188,6 +188,7 @@ class PolicyTrainer(Actor, Configurable):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=None,
             states={"train_state": self},
             sd_adapter=self.sd_adapter,
             base_folder=config.dump_folder,

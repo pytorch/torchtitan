@@ -14,7 +14,7 @@ from .base import (
     OPTIMIZER,
     TRAIN_STATE,
 )
-from .dcp import AsyncMode, CheckpointManager
+from .dcp import AsyncMode, CheckpointManager, EMA
 
 __all__ = [
     "AsyncMode",
@@ -22,6 +22,7 @@ __all__ = [
     "CheckpointManager",
     "CheckpointStorage",
     "DATALOADER",
+    "EMA",
     "LR_SCHEDULER",
     "MODEL",
     "ModelWrapper",

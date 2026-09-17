@@ -295,6 +295,12 @@ class FaultTolerantTrainer(Trainer):
         self.metrics_processor.optimizers = self.optimizers
         self.metrics_processor.model_parts = self.model_parts
 
+        self.ema = (
+            config.ema.build(model_parts=self.model_parts)
+            if config.ema is not None
+            else None
+        )
+
         # Initialize trainer states that will be saved in checkpoint.
         # These attributes must be initialized before checkpoint loading.
         self.step = 0
@@ -324,6 +330,7 @@ class FaultTolerantTrainer(Trainer):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states={"train_state": self},
             sd_adapter=(
                 model_spec.state_dict_adapter(model_config, config.hf_assets_path)
@@ -532,6 +539,8 @@ class FaultTolerantTrainer(Trainer):
         self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
+        if self.ema is not None:
+            self.ema.step(self.step)
 
         # log metrics
         if not should_log:
