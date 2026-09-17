@@ -56,11 +56,13 @@ class WeightSyncManager:
         generator_router: InterGeneratorRouter,
         group_buffer: RolloutGroupWorkBuffer,
         num_prompts_per_train_step: int,
+        initial_policy_version: int,
     ) -> None:
         self._trainer = trainer
         self._generator_router = generator_router
         self._group_buffer = group_buffer
         self._num_prompts_per_train_step = num_prompts_per_train_step
+        self._generator_policy_version = initial_policy_version
 
         # Step 0 has no `wait_prev_push/pull`, so we start with a noop task.
         self._trainer_push_task: asyncio.Task = asyncio.create_task(_noop())
@@ -69,6 +71,11 @@ class WeightSyncManager:
         # Wall time of the push and pull of the last completed sync.
         self._last_push_s: float = 0.0
         self._last_pull_s: float = 0.0
+
+    @property
+    def generator_policy_version(self) -> int:
+        """Policy version currently installed on every generator."""
+        return self._generator_policy_version
 
     def start_async_push_pull(self, *, version: int) -> None:
         """Fire push -> pull -> buffer-slot release in the background; returns immediately.
@@ -119,13 +126,14 @@ class WeightSyncManager:
             start = time.perf_counter()
             await self._generator_router.pull_model_state_dict.call_one(version)
             self._last_pull_s = time.perf_counter() - start
+        self._generator_policy_version = version
         # TODO(perf): pull_model_state_dict awaits ALL generators before we release any buffer slots,
         #   so a generator that finishes its pull early idles until the slowest one. Investigate
         #   per-generator release (router surfaces each pull's completion -> release that generator's
         #   share / resume it early); needs the born-fresh invariant to hold per-generator, not globally.
 
-        # Born-fresh: admit the next groups only now that the generators are on `version`, so a new
-        # rollout starts at the current version (keeps policy_age within the derived freshness bound).
+        # Born-fresh: publish the installed version before releasing slots so
+        # each newly admitted group pins that version as its KV-cache salt.
         await self._group_buffer.release_active_groups(
             self._num_prompts_per_train_step, reason="trained"
         )

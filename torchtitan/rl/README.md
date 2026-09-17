@@ -82,6 +82,21 @@ distributed adapters and the controller. Rollout domain components must not
 depend on Monarch or TorchStore, standalone services must not depend on
 Monarch, and core TorchTitan must not acquire RL-only optional dependencies.
 
+### KV reuse across policy updates
+
+Each rollout group pins the generator policy version that was installed when
+the group entered the active window. TitanRL passes that version to vLLM as the
+KV-cache salt for every sibling and turn in the group. Existing groups can
+therefore keep reusing their prefixes across a policy update, while groups
+started after the update cannot match KV produced by the previous policy.
+
+The default, `generator.reprefill_on_weight_sync=false`, preserves this cached
+KV and avoids reset-and-reprefill work. Set it to `true` to reset cached KV and
+preempt running requests at every weight sync. The latter mode recomputes all
+prefixes under the new policy and can provide enough prefill computation to
+hide FSDP parameter all-gathers. Batch-invariant configurations enable it to
+keep exact trainer/generator comparisons.
+
 ## Write an experiment
 
 Most experiments configure four pieces:

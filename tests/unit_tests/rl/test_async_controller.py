@@ -17,6 +17,7 @@ from torchtitan.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.controller import Controller
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.controller import (
     compute_perf_ratio_metrics,
@@ -24,7 +25,59 @@ from torchtitan.rl.observability.controller import (
     MetricsTimer,
 )
 from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.types import RolloutTurnID, TrainingSample, TrainingSampleGroup
+from torchtitan.rl.types import (
+    Completion,
+    RolloutTurnID,
+    TrainingSample,
+    TrainingSampleGroup,
+)
+
+
+def test_generate_fn_pins_group_cache_salt() -> None:
+    class _GenerateEndpoint:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call_one(self, prompt_token_ids, **kwargs):
+            self.calls.append((prompt_token_ids, kwargs))
+            return Completion(
+                min_policy_version=7,
+                max_policy_version=7,
+                request_id=kwargs["request_id"],
+                token_ids=[3],
+                token_logprobs=[-0.1],
+            )
+
+    async def run() -> None:
+        controller = Controller.__new__(Controller)
+        endpoint = _GenerateEndpoint()
+        controller.generator_router = type("Router", (), {"generate": endpoint})()
+        generate_v7 = controller._make_generate_fn("generator", cache_salt="7")
+        generate_v8 = controller._make_generate_fn("generator", cache_salt="8")
+
+        await generate_v7(
+            [1, 2],
+            request_id="group=3/rollout=0/turn=1",
+            routing_session_id="group=3/rollout=0",
+        )
+        await generate_v7(
+            [1, 2, 3],
+            request_id="group=3/rollout=0/turn=2",
+            routing_session_id="group=3/rollout=0",
+        )
+        await generate_v8(
+            [4, 5],
+            request_id="group=4/rollout=0/turn=0",
+            routing_session_id="group=4/rollout=0",
+        )
+
+        assert [kwargs["cache_salt"] for _, kwargs in endpoint.calls] == [
+            "7",
+            "7",
+            "8",
+        ]
+
+    asyncio.run(run())
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
@@ -324,7 +377,9 @@ def test_take_finalized_does_not_release_active_slot() -> None:
         )
         if not await buffer.wait_for_slot():
             raise RuntimeError("buffer closed unexpectedly")
-        await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
+        await buffer.add_work(
+            RolloutGroupWork(group_id=0, policy_version_at_start=0, sample=object())
+        )
         await buffer.finalize_work(RolloutGroup(group_id=0, rollouts=[]))
         await buffer.take_finalized()
 
@@ -353,7 +408,9 @@ def test_untrainable_group_releases_before_training() -> None:
 
         if not await buffer.wait_for_slot():
             raise RuntimeError("buffer closed unexpectedly")
-        await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
+        await buffer.add_work(
+            RolloutGroupWork(group_id=0, policy_version_at_start=0, sample=object())
+        )
 
         training_sample_group = TrainingSampleGroup(
             group_id=0, training_samples=[], metrics=[]
@@ -437,7 +494,9 @@ def _buffer(*, capacity: int, window_size: int | None) -> RolloutGroupWorkBuffer
 async def _admit(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
     if not await buffer.wait_for_slot():
         raise RuntimeError("buffer closed unexpectedly")
-    await buffer.add_work(RolloutGroupWork(group_id=group_id, sample=object()))
+    await buffer.add_work(
+        RolloutGroupWork(group_id=group_id, policy_version_at_start=0, sample=object())
+    )
 
 
 async def _finalize(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
