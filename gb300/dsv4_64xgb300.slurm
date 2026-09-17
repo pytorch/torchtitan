@@ -47,6 +47,10 @@ if not got.startswith(want.rstrip("/") + "/"):
     sys.exit(1)
 PY
 
+# Node count follows the allocation, so `sbatch --nodes=N` alone rescales the
+# run (the #SBATCH --nodes=16 header is the default, not a constraint).
+NNODES=${NNODES:-$SLURM_JOB_NUM_NODES}
+echo "###### nodes=$NNODES ($SLURM_JOB_NODELIST) ######"
 nodes=( $(scontrol show hostnames "$SLURM_JOB_NODELIST") )
 head_ip=$(getent ahostsv4 "${nodes[0]}" | awk '{print $1; exit}')
 export NCCL_IB_HCA=ibP16p3s0,ibP18p3s0,ibP2p3s0,ibp3s0
@@ -57,7 +61,7 @@ export PYTHONFAULTHANDLER=1
 
 LOG="/mnt/dgxc/runs/dsv4_${TAG}.log"
 srun --kill-on-bad-exit=1 torchrun \
-  --nnodes 16 --nproc_per_node 4 --rdzv_id "$SLURM_JOB_ID" \
+  --nnodes "$NNODES" --nproc_per_node 4 --rdzv_id "$SLURM_JOB_ID" \
   --rdzv_backend c10d --rdzv_endpoint "$head_ip:29500" \
   --role rank --tee 3 --local-ranks-filter 0 \
   -m torchtitan.train --module deepseek_v4 --config "$CONFIG" \

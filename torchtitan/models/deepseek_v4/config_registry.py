@@ -1176,3 +1176,19 @@ def deepseek_v4_flash_pr18_best_ep64(seq_len: int | None = 8192) -> Trainer.Conf
     """E4. EP=64 -- the stock degree, every expert on its own rank. 18.29 with
     sink-token flex and a blocking all-to-all; the question is what it is now."""
     return _pr18_best(64, seq_len)
+
+
+def deepseek_v4_flash_pr18_best_profile(seq_len: int | None = 8192) -> Trainer.Config:
+    """P3. The 100.09 TFLOP/s config (PR #18 + MinimalAsyncEP + bf16 reduce) with
+    the profiler on. Same profiler settings as every other profile in
+    /mnt/dgxc/profiles so the tables line up. Node count is a launch-time
+    property (sbatch --nodes); nothing here depends on it: dp_shard=-1 resolves
+    to the world size, EP=4 divides 32 as it divides 64, and the async-EP
+    capacity is derived from the per-rank microbatch.
+    """
+    config = deepseek_v4_flash_pr18_asyncep_bf16reduce(seq_len)
+    config.profiler.enable_profiling = True
+    config.profiler.profile_freq = 10
+    config.profiler.profiler_warmup = 3
+    config.profiler.profiler_active = 2
+    return config
