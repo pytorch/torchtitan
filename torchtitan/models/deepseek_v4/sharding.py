@@ -24,7 +24,6 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
     set_moe_sharding_config,
-    set_shared_experts_sharding_config,
 )
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -266,12 +265,6 @@ def set_deepseek_v4_layer_sharding(
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
-        if layer_cfg.moe.shared_experts is not None:
-            set_shared_experts_sharding_config(
-                layer_cfg.moe.shared_experts,
-                enable_ep=enable_ep,
-                enable_sp=enable_sp,
-            )
         router_cfg = layer_cfg.moe.router
         if getattr(router_cfg, "layer_id", 0) < getattr(router_cfg, "n_hash_layers", 0):
             input_ids_src_placement = token_id_placement()
