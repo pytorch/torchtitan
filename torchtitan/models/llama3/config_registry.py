@@ -34,7 +34,6 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.observability.profiler import Profiler
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
-from torchtitan.tools.utils import device_type
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -67,13 +66,6 @@ def llama3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
-    # On Ascend NPU the eager flex_attention fallback materializes the full
-    # scores matrix, so shrink the per-rank microbatch to fit device memory.
-    tokens_per_microbatch = (
-        model_spec.max_context_length
-        if device_type == "npu"
-        else 8 * model_spec.max_context_length
-    )
     packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -91,7 +83,7 @@ def llama3_debugmodel(
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=tokens_per_microbatch,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
             max_context_length=model_spec.max_context_length,
             steps=10,
         ),

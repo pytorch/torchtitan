@@ -24,7 +24,6 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.tools.utils import device_type
 from torchtitan.trainer import Trainer
 
 from . import KIMI_K3_SPECIAL_TOKENS, model_registry
@@ -64,11 +63,6 @@ def kimi_k3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     model_spec = model_registry("debugmodel", seq_len=seq_len)
-    # eager flex_attention backward materializes the full scores matrix, so on
-    # Ascend NPU shrink the per-rank microbatch to fit device memory.
-    tokens_per_microbatch = (
-        2048 if device_type == "npu" else model_spec.max_context_length
-    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -88,7 +82,7 @@ def kimi_k3_debugmodel(
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=tokens_per_microbatch,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
             max_context_length=model_spec.max_context_length,
             steps=10,
             dtype="bfloat16",

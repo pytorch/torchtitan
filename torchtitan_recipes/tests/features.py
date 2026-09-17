@@ -42,7 +42,6 @@ from torchtitan.models.llama3.config_registry import (
 )
 from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
-from torchtitan.tools.utils import device_type
 from torchtitan.trainer import Trainer
 
 from . import _set_spmd_typechecking
@@ -504,14 +503,8 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     """Two gradient accumulation steps on 2 GPUs."""
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    if device_type == "npu":
-        # eager flex_attention backward materializes the full scores matrix, so
-        # shrink the microbatch (and keep 2 accumulation steps) to fit NPU RAM.
-        config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-        config.training.num_tokens_per_train_step = 8192
-    else:
-        config.training.num_tokens_per_microbatch_per_dp_rank = 16384
-        config.training.num_tokens_per_train_step = 65536
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    config.training.num_tokens_per_train_step = 65536
     return config
 
 
