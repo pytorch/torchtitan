@@ -15,7 +15,6 @@ from torchtitan.models.common.async_linear import (
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    is_column_parallel_linear_config,
     RowParallelLinear,
 )
 from torchtitan.protocols.sharding import ShardingConfig
@@ -358,33 +357,21 @@ def set_dense_ffn_sharding(
     a no-op redistribute when placements already agree.
     """
     w13 = feed_forward_cfg.w13
-    projection_owned = is_column_parallel_linear_config(w13)
+    assert isinstance(w13, ColumnParallelLinear.Config)
+    assert isinstance(feed_forward_cfg.w2, RowParallelLinear.Config)
     if isinstance(w13, AsyncColumnParallelLinear.Config):
         validate_async_tp_preconditions(enable_sp=enable_sp)
 
-    if projection_owned:
-        assert isinstance(w13, ColumnParallelLinear.Config)
-        assert isinstance(feed_forward_cfg.w2, RowParallelLinear.Config)
-        feed_forward_cfg.sharding_config = ShardingConfig(
-            in_src_shardings={"x": attn_x_layout},
-            out_src_shardings=attn_x_layout,
-        )
-        w13.sharding_config = stacked_column_parallel_config(input_layout=attn_x_layout)
-        w13.linear.sharding_config = stacked_colwise_config()
-        feed_forward_cfg.w2.sharding_config = row_parallel_config(
-            output_layout=attn_x_layout
-        )
-        feed_forward_cfg.w2.linear.sharding_config = rowwise_compute_config()
-        return
-
-    # A model-specific FFN may share x across projections, so its parent keeps
-    # the single input redistribution.
     feed_forward_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x": attn_x_layout},
-        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+        out_src_shardings=attn_x_layout,
     )
-    w13.sharding_config = stacked_colwise_config()
-    feed_forward_cfg.w2.sharding_config = rowwise_config(output_sp=enable_sp)
+    w13.sharding_config = stacked_column_parallel_config(input_layout=attn_x_layout)
+    w13.linear.sharding_config = stacked_colwise_config()
+    feed_forward_cfg.w2.sharding_config = row_parallel_config(
+        output_layout=attn_x_layout
+    )
+    feed_forward_cfg.w2.linear.sharding_config = rowwise_compute_config()
 
 
 def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
