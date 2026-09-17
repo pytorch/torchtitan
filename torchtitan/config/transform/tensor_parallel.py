@@ -18,7 +18,6 @@ from torchtitan.models.common.attention import GQAttention, QKVLinear
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    Linear,
     LinearConfig,
     RowParallelLinear,
 )
@@ -41,7 +40,7 @@ def _convert_linear(
         if replacement is AsyncColumnParallelLinear
         else RowParallelLinear.Config
     )
-    if type(config) is expected and type(config.linear) is Linear.Config:
+    if type(config) is expected:
         return cast(
             ColumnParallelLinear.Config | RowParallelLinear.Config,
             convert_config_type(config, replacement),
@@ -118,5 +117,5 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
 
 
 # Async kernels call their fused autograd functions directly instead of the
-# wrapped projection's forward, so they would silently omit LoRA computation.
+# projection's ``_linear`` method, so they would silently omit LoRA computation.
 AsyncTensorParallelTransform.conflicts_with = (LoRATransform,)

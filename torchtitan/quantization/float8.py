@@ -8,7 +8,11 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RowParallelLinear,
+)
 from torchtitan.protocols.module import Module
 
 
@@ -55,7 +59,7 @@ try:
                     requires_grad=self.bias.requires_grad,
                 )
 
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
+        def _linear(self, input: torch.Tensor) -> torch.Tensor:
             if torch.is_autocast_enabled():
                 input = input.to(torch.get_autocast_gpu_dtype())
             weight = self.weight.flatten(0, -2)
@@ -72,6 +76,9 @@ try:
                 return output
             return output.unflatten(-1, self.weight.shape[:-1])
 
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            return self._linear(input)
+
         def reset_parameters(self) -> None:
             Linear.reset_parameters(self)
 
@@ -80,8 +87,36 @@ try:
                 param = param.flatten(0, -2) if name == "weight" else param.flatten()
             Module._init_param(self, name, param)
 
+    class Float8ColumnParallelLinear(ColumnParallelLinear, Float8Linear):
+        """Float8 projection with a synchronous column-parallel boundary."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(Float8Linear.Config, ColumnParallelLinear.Config):
+            pass
+
+        def __init__(self, config: Config):
+            Float8Linear.__init__(self, config)
+
+        def _linear(self, input: torch.Tensor) -> torch.Tensor:
+            return Float8Linear._linear(self, input)
+
+    class Float8RowParallelLinear(RowParallelLinear, Float8Linear):
+        """Float8 projection with a synchronous row-parallel boundary."""
+
+        @dataclass(kw_only=True, slots=True)
+        class Config(Float8Linear.Config, RowParallelLinear.Config):
+            pass
+
+        def __init__(self, config: Config):
+            Float8Linear.__init__(self, config)
+
+        def _linear(self, input: torch.Tensor) -> torch.Tensor:
+            return Float8Linear._linear(self, input)
+
 except ImportError:
     Float8Linear = None
+    Float8ColumnParallelLinear = None
+    Float8RowParallelLinear = None
 
 
 _float8_experts_cache: dict[type, type] = {}
