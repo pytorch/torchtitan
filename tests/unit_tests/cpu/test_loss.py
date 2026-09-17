@@ -42,7 +42,12 @@ class TestLoss(unittest.TestCase):
         logits = torch.randn(8, 16)
         labels = torch.randint(0, 16, (8,))
 
-        logprobs, entropy = compute_logprobs(logits, labels, return_entropy=True)
+        logprobs, entropy = compute_logprobs(
+            logits,
+            labels,
+            return_entropy=True,
+            global_vocab_size=logits.shape[-1],
+        )
         expected_logprobs = -F.cross_entropy(logits, labels, reduction="none")
         expected_entropy = torch.logsumexp(logits, dim=-1) - (
             torch.softmax(logits, dim=-1) * logits
@@ -70,13 +75,21 @@ class TestLoss(unittest.TestCase):
         tokens = torch.tensor([10, 11, 12, 20, 21, 22, 23, 24])
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4])
         labels = torch.arange(8)
+        padding_mask = torch.tensor(
+            [False, False, False, False, False, False, True, True]
+        )
         model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
         with patch(
             "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallel_dims, batch, _input_sharding: batch,
         ):
             input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
-                {"input": tokens, "labels": labels, "positions": positions},
+                {
+                    "input": tokens,
+                    "labels": labels,
+                    "positions": positions,
+                    "padding_mask": padding_mask,
+                },
                 parallel_dims=SimpleNamespace(cp_enabled=False),
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
@@ -87,23 +100,43 @@ class TestLoss(unittest.TestCase):
         assert isinstance(loss_labels, tuple)
         torch.testing.assert_close(input_tokens[0], tokens)
         torch.testing.assert_close(
-            input_tokens[1], torch.tensor([11, 12, 0, 21, 22, 23, 24, 0])
+            input_tokens[1], torch.tensor([11, 12, 0, 21, 22, 0, 0, 0])
         )
         torch.testing.assert_close(
-            input_tokens[2], torch.tensor([12, 0, 0, 22, 23, 24, 0, 0])
+            input_tokens[2], torch.tensor([12, 0, 0, 22, 0, 0, 0, 0])
         )
         torch.testing.assert_close(loss_labels[0], labels)
         torch.testing.assert_close(
             loss_labels[1],
-            torch.tensor([1, 2, IGNORE_INDEX, 4, 5, 6, 7, IGNORE_INDEX]),
+            torch.tensor(
+                [1, 2, IGNORE_INDEX, 4, 5, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX]
+            ),
         )
         torch.testing.assert_close(
             loss_labels[2],
             torch.tensor(
-                [2, IGNORE_INDEX, IGNORE_INDEX, 5, 6, 7, IGNORE_INDEX, IGNORE_INDEX]
+                [
+                    2,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    5,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                ]
             ),
         )
         self.assertEqual(len(extra_kwargs["mtp_input_valid_masks"]), 2)
+        torch.testing.assert_close(
+            extra_kwargs["mtp_input_valid_masks"][0],
+            torch.tensor([True, True, False, True, True, False, False, False]),
+        )
+        torch.testing.assert_close(
+            extra_kwargs["mtp_input_valid_masks"][1],
+            torch.tensor([True, False, False, True, False, False, False, False]),
+        )
+        torch.testing.assert_close(extra_kwargs["padding_mask"], padding_mask)
 
     def test_mtp_loss_rejects_plain_tensor(self):
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
@@ -416,6 +449,127 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         )
                     )
 
+    @with_comms
+    def test_vocab_parallel_policy_stats_parity(self):
+        """Check no-gather logprobs, entropy, gradients, and SPMD types."""
+        torch.use_deterministic_algorithms(True)
+        torch.set_num_threads(1)
+
+        T = 32
+        mesh_configs = (
+            ((4,), ("tp",), (Shard(1),), (Replicate(),)),
+            ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
+        )
+        cases = (
+            (128, torch.float32, False),
+            (131, torch.bfloat16, True),
+        )
+
+        for mesh_shape, axis_names, logits_placements, label_placements in mesh_configs:
+            mesh = init_device_mesh(
+                self.device_type, mesh_shape, mesh_dim_names=axis_names
+            )
+            tp_group = mesh.get_group("tp")
+            for vocab_size, dtype, ignore in cases:
+                with self.subTest(
+                    mesh_shape=mesh_shape,
+                    vocab_size=vocab_size,
+                    dtype=dtype,
+                    ignore=ignore,
+                ):
+                    generator = torch.Generator(device=self.device_type).manual_seed(
+                        1729 + vocab_size
+                    )
+                    global_logits = torch.randn(
+                        T,
+                        vocab_size,
+                        device=self.device_type,
+                        dtype=dtype,
+                        generator=generator,
+                    )
+                    global_labels = torch.randint(
+                        0,
+                        vocab_size,
+                        (T,),
+                        device=self.device_type,
+                        generator=generator,
+                    )
+                    if ignore:
+                        global_labels[[1, 17]] = IGNORE_INDEX
+                    # Exercise masked logits without allowing 0 * -inf to
+                    # contaminate otherwise finite entropy values.
+                    global_logits[3, vocab_size // 2 :] = -torch.inf
+                    global_labels[3] = 0
+                    global_weights = torch.linspace(
+                        -1.25, 1.75, T, device=self.device_type
+                    )
+
+                    reference_logits = (
+                        global_logits.detach().clone().requires_grad_(True)
+                    )
+                    reference_logits_fp32 = reference_logits.float()
+                    reference_logprobs = -F.cross_entropy(
+                        reference_logits_fp32,
+                        global_labels,
+                        reduction="none",
+                        ignore_index=IGNORE_INDEX,
+                    )
+                    with torch.no_grad():
+                        reference_probs = torch.softmax(reference_logits_fp32, dim=-1)
+                        reference_entropy = -torch.special.xlogy(
+                            reference_probs, reference_probs
+                        ).sum(dim=-1)
+                    (reference_logprobs * global_weights).sum().backward()
+
+                    local_logits = (
+                        distribute_tensor(global_logits, mesh, logits_placements)
+                        .to_local()
+                        .detach()
+                        .requires_grad_(True)
+                    )
+                    local_labels = distribute_tensor(
+                        global_labels, mesh, label_placements
+                    ).to_local()
+                    local_weights = distribute_tensor(
+                        global_weights, mesh, label_placements
+                    ).to_local()
+                    expected_logprobs = distribute_tensor(
+                        reference_logprobs.detach(), mesh, label_placements
+                    ).to_local()
+                    expected_entropy = distribute_tensor(
+                        reference_entropy, mesh, label_placements
+                    ).to_local()
+                    expected_grad = distribute_tensor(
+                        reference_logits.grad, mesh, logits_placements
+                    ).to_local()
+
+                    logits_type = {tp_group: spmd.S(1)}
+                    labels_type = {tp_group: spmd.I}
+                    if "dp" in axis_names:
+                        dp_group = mesh.get_group("dp")
+                        logits_type[dp_group] = spmd.S(0)
+                        labels_type[dp_group] = spmd.S(0)
+                    spmd.assert_type(local_logits, logits_type)
+                    spmd.assert_type(local_labels, labels_type)
+
+                    with set_current_spmd_mesh(mesh):
+                        with typecheck(strict_mode="strict"):
+                            logprobs, entropy = compute_logprobs(
+                                local_logits,
+                                local_labels,
+                                return_entropy=True,
+                                global_vocab_size=vocab_size,
+                            )
+
+                    self.assertIs(spmd.get_axis_local_type(logprobs, tp_group), spmd.I)
+                    self.assertIs(spmd.get_axis_local_type(entropy, tp_group), spmd.I)
+                    self.assertFalse(entropy.requires_grad)
+                    torch.testing.assert_close(logprobs, expected_logprobs)
+                    torch.testing.assert_close(entropy, expected_entropy)
+
+                    (logprobs * local_weights).sum().backward()
+                    torch.testing.assert_close(local_logits.grad, expected_grad)
+
 
 class _FakeDecoder(nn.Module):
     """Minimal Decoder-like model for testing ChunkedLossWrapper."""
@@ -435,8 +589,8 @@ class _FakeDecoder(nn.Module):
 
 
 class _IdentityDecoderBlock(nn.Module):
-    def forward(self, hidden, attention_masks, positions):
-        del attention_masks, positions
+    def forward(self, hidden, attention_masks, positions, *, padding_mask=None):
+        del attention_masks, positions, padding_mask
         return hidden
 
 
@@ -448,8 +602,10 @@ class _AddMTPBlock(nn.Module):
         mtp_input_valid_mask,
         attention_masks,
         positions,
+        *,
+        padding_mask=None,
     ):
-        del attention_masks, positions
+        del attention_masks, positions, padding_mask
         return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
 
 

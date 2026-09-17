@@ -10,6 +10,10 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.components.optimizer import register_moe_load_balancing_hook
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
@@ -18,6 +22,7 @@ from torchtitan.models.common import (  # noqa: F401
     Linear,
     PartialBiasRowwiseLinear,
     SigmoidGatedFeedForward,
+    Softmax,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -33,8 +38,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 
 from torchtitan.protocols.model_spec import ModelSpec
 
@@ -440,7 +443,7 @@ def _build_qwen35_moe_layers(
                         num_experts=num_experts,
                         gate_param_init=_depth_init(layer_id),
                         top_k=top_k,
-                        score_func="softmax",
+                        score_func=Softmax.Config(),
                         route_norm=True,
                     ),
                     routed_experts=make_routed_experts_config(
@@ -1117,7 +1120,7 @@ def model_registry(
         ),
     )
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
 

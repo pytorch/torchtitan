@@ -29,6 +29,7 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
     _hf_activation_placement,
     _hf_sequence_parallel_placement,
 )
+from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_moe_config,
@@ -555,7 +556,9 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_experts=params["num_experts"],
         gate_param_init=_LINEAR_INIT,
         top_k=params["top_k"],
-        score_func=params["score_func"],
+        score_func=(
+            Sigmoid.Config() if params["score_func"] == "sigmoid" else Softmax.Config()
+        ),
         route_norm=params["route_norm"],
         route_scale=params["route_scale"],
         **router_kwargs,

@@ -15,24 +15,32 @@ from renderers import (
     Qwen3RendererConfig,
     Tokenizer,
 )
+from torchtitan.components.renderer import (
+    from_renderers,
+    RendererConfig,
+    RenderersConfigAdapter,
+    RendererTokenizerWrapper,
+)
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
-from torchtitan.experiments.rl.renderer import (
-    RendererConfig,
-    RenderersLibraryConfig,
-    RendererTokenizerWrapper,
-)
 
 _TOKENIZER_PATH = "tests/assets/tokenizer"
 
 
-# --- RenderersLibraryConfig ---
+# --- RenderersConfigAdapter ---
+
+
+def test_from_renderers_returns_adapter() -> None:
+    renderers_config = Qwen3RendererConfig(enable_thinking=False)
+    config = from_renderers(renderers_config)
+    assert isinstance(config, RenderersConfigAdapter)
+    assert config.renderers_config is renderers_config
 
 
 def test_build_renders_with_titan_tokenizer() -> None:
     tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
-    renderer = RenderersLibraryConfig(
+    renderer = RenderersConfigAdapter(
         renderers_config=Qwen3RendererConfig(enable_thinking=False)
     ).build(tokenizer=tokenizer)
     rendered = renderer.render(
@@ -56,7 +64,7 @@ def test_build_renders_with_titan_tokenizer() -> None:
 def test_auto_and_default_are_refused(renderers_config, reason: str) -> None:
     tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
     with pytest.raises(ValueError) as error:
-        RenderersLibraryConfig(renderers_config=renderers_config).build(
+        RenderersConfigAdapter(renderers_config=renderers_config).build(
             tokenizer=tokenizer
         )
     assert reason in str(error.value)
@@ -70,7 +78,7 @@ def test_config_to_dict_is_json() -> None:
         renderer: RendererConfig
 
     holder = _Holder(
-        renderer=RenderersLibraryConfig(
+        renderer=RenderersConfigAdapter(
             renderers_config=Qwen3RendererConfig(enable_thinking=False)
         )
     )

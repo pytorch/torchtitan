@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from typing import Annotated, Any, cast, ClassVar
+from typing import Annotated, Any, cast, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -25,6 +25,7 @@ from torch.distributed.pipelining.schedules import (
     get_schedule_class,
     PipelineScheduleMulti,
 )
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
@@ -72,6 +73,12 @@ from torchtitan.tools import utils
 
 logger = logging.getLogger(__name__)
 
+_PreprocessedMicrobatch: TypeAlias = tuple[
+    torch.Tensor | tuple[torch.Tensor, ...],
+    torch.Tensor | tuple[torch.Tensor, ...],
+    dict[str, Any],
+]
+
 
 class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
     """Run model training.
@@ -95,8 +102,6 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
                 |
                 +-- _forward_backward_body
     """
-
-    _use_accumulation_cuda_graph: ClassVar[bool] = True
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -746,10 +751,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     def _init_gradient_accumulation(self) -> None:
         config = self.config
-        if (
-            self._use_accumulation_cuda_graph
-            and not config.training.disable_cuda_graphs
-        ):
+        if not config.training.disable_cuda_graphs:
             sdc_config = config.sdc_replayer
             gradient_state = CUDAGraphGradientState(
                 parameter
@@ -825,10 +827,10 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         if parallel_dims.pp_enabled:
             arg_mbs, kwarg_mbs, target_mbs = prepared_inputs
             return self._pp_forward_backward_body(
-                arg_mbs,
-                kwarg_mbs,
-                target_mbs,
-                global_valid_tokens,
+                arg_mbs=arg_mbs,
+                kwarg_mbs=kwarg_mbs,
+                target_mbs=target_mbs,
+                global_valid_tokens=global_valid_tokens,
                 finalize_gradients=finalize_gradients,
             )
 
@@ -844,7 +846,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         microbatches: list[TrainerBatch],
     ) -> tuple[Any, ...]:
         """Move and preprocess one accumulation step's inputs outside capture."""
-        prepared_microbatches: list[tuple[Any, Any, dict[str, Any]]] = []
+        prepared_microbatches: list[_PreprocessedMicrobatch] = []
         for input_dict in microbatches:
             for key, value in input_dict.items():
                 if isinstance(value, torch.Tensor):
@@ -912,11 +914,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
     def _pp_forward_backward_body(
         self,
+        *,
         arg_mbs: list[tuple[torch.Tensor, ...]] | None,
         kwarg_mbs: list[dict[str, Any]],
         target_mbs: list[torch.Tensor] | None,
         global_valid_tokens: torch.Tensor,
-        *,
         finalize_gradients: bool = True,
     ) -> torch.Tensor:
         """Run one PP schedule and optionally finalize its FSDP gradients."""
@@ -1025,6 +1027,8 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         # Auxiliary losses normalize by the same per-step token count as the
         # main loss, so their scale is independent of parallelism degrees.
+        # TODO(sdmyzlp): Each MTP depth can have a different valid-token count
+        # after shifting and should use its own auxiliary-loss denominator.
         AuxLoss.set_step_denominator(global_valid_tokens)
 
         accumulation_step_inputs = [

@@ -40,7 +40,6 @@ def parallelize_kimi_k3(
     unsupported_parallelisms = [
         name
         for name, enabled in (
-            ("tensor parallel", parallel_dims.tp_enabled),
             ("pipeline parallel", parallel_dims.pp_enabled),
             ("context parallel", parallel_dims.cp_enabled),
         )
@@ -107,7 +106,7 @@ def parallelize_kimi_k3(
         edp_mesh=edp_mesh,
         dp_mesh_dims=dp_mesh_dims,
         edp_mesh_dims=edp_mesh_dims,
-        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
+        symm_mem_scope=parallelism.fsdp_symm_mem_scope,
     )
 
     return model
