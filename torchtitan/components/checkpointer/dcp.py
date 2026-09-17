@@ -45,7 +45,7 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
-# "EMA" is also the class name (torchtitan.components.ema.EMA), aliased on
+# "EMA" is also the class name (torchtitan.components.optimizer.ema.EMA), aliased on
 # import below to avoid shadowing this state-dict key constant, which follows
 # the same NAME = "name" convention as MODEL/OPTIMIZER/etc. above.
 EMA = "ema"
@@ -54,8 +54,8 @@ if TYPE_CHECKING:
     import torch.nn as nn
 
     from torchtitan.components.data.loader import BaseDataLoader
-    from torchtitan.components.ema import EMA as EMAContainer  # noqa: N811
-    from torchtitan.components.optimizer import (
+    from torchtitan.components.optimizer import (  # noqa: N811
+        EMA as EMAContainer,
         LRSchedulersContainer,
         OptimizersContainer,
     )
@@ -131,7 +131,7 @@ class CheckpointManager(BaseCheckpointManager):
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize
             the model.
         ema (Optional[EMA]): Online EMA of model weights, or None when the
-            user hasn't configured one (see torchtitan.components.ema.EMA).
+            user hasn't configured one (see torchtitan.components.optimizer.ema.EMA).
         states (Dict[str, Any]): The states that need to be saved, other than the
             previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
@@ -414,17 +414,6 @@ class CheckpointManager(BaseCheckpointManager):
             if MODEL in states:
                 states[MODEL].load_state_dict(state_dict)
 
-    def _load_checkpoint(
-        self,
-        states: dict[str, Any],
-        checkpoint_id: str,
-        *,
-        from_hf: bool,
-        from_quantized: bool,
-    ) -> None:
-        super()._load_checkpoint(
-            states, checkpoint_id, from_hf=from_hf, from_quantized=from_quantized
-        )
         # Reseed EMA from the just-loaded weights if it wasn't itself restored
         # (excluded, or a model_only load). MODEL is never excludable, so its
         # presence rules out torchft's per-replica dataloader-only load, which

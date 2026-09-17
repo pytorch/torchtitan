@@ -14,7 +14,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.components.ema import EMA
+from torchtitan.components.optimizer import EMA
 
 
 class TestEMADynamicDecay(unittest.TestCase):
@@ -86,6 +86,47 @@ class TestEMADynamicDecay(unittest.TestCase):
             actual = ema.optimizers[0].state[model.weight]["ema_params"]
             torch.testing.assert_close(actual, expected, atol=1e-6, rtol=0)
 
+    def test_start_step_does_not_double_count_first_firing(self):
+        """Regression test: with start_step > 0, the first firing lands
+        exactly at current_step == start_step (elapsed=0), unlike the default
+        start_step=0 where Trainer never calls step(0). The firing count must
+        still advance 1, 2, 3, ... rather than getting stuck at 1 for the
+        first two firings."""
+        model = nn.Linear(4, 4)
+        ema = EMA.Config(start_step=10).build(model_parts=[model])
+        expected = ema.optimizers[0].state[model.weight]["ema_params"].clone()
+        for i, step in enumerate((10, 11, 12), start=1):
+            with torch.no_grad():
+                model.weight.fill_(float(step))
+            ema.step(step)
+            beta = 2.0 ** (-1.0 / (0.05 * i))
+            expected = expected * beta + model.weight.detach() * (1 - beta)
+            actual = ema.optimizers[0].state[model.weight]["ema_params"]
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=0)
+
+    def test_step_bias_with_update_every_n_steps_not_a_multiple(self):
+        """Regression test: step_bias must shift the firing count even when
+        it isn't an exact multiple of update_every_n_steps -- previously the
+        two were combined via floor division in step-space, silently
+        discarding step_bias's remainder."""
+        model_a = nn.Linear(4, 4)
+        model_b = nn.Linear(4, 4)
+        ema_a = EMA.Config(update_every_n_steps=2, step_bias=0).build(
+            model_parts=[model_a]
+        )
+        ema_b = EMA.Config(update_every_n_steps=2, step_bias=1).build(
+            model_parts=[model_b]
+        )
+        for step in range(1, 9):
+            with torch.no_grad():
+                model_a.weight.fill_(float(step))
+                model_b.weight.fill_(float(step))
+            ema_a.step(step)
+            ema_b.step(step)
+        val_a = ema_a.optimizers[0].state[model_a.weight]["ema_params"]
+        val_b = ema_b.optimizers[0].state[model_b.weight]["ema_params"]
+        self.assertFalse(torch.equal(val_a, val_b))
+
 
 class _ModelWithExpertBias(nn.Module):
     """Toy stand-in for a module with a non-gradient-updated buffer (e.g.
@@ -97,6 +138,25 @@ class _ModelWithExpertBias(nn.Module):
         self.register_buffer("expert_bias_E", torch.zeros(4))
 
 
+class _ModelWithoutExpertBias(nn.Module):
+    """PP-stage stand-in with no buffer matching buffer_patterns."""
+
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(4, 4)
+
+
+class _ModelWithMixedDtypeBuffers(nn.Module):
+    """Two buffers matched by one pattern, with different dtypes -- exercises
+    _update_group's per-dtype-class batching."""
+
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(4, 4)
+        self.register_buffer("bias_buf", torch.zeros(4, dtype=torch.float32))
+        self.register_buffer("count_buf", torch.zeros(4, dtype=torch.int64))
+
+
 class TestEMABufferSupport(unittest.TestCase):
     """CPU-only: verifies buffer_patterns tracks matching buffers alongside
     parameters, folded into the same "ema" checkpoint key."""
@@ -105,7 +165,7 @@ class TestEMABufferSupport(unittest.TestCase):
         model = _ModelWithExpertBias()
         ema = EMA.Config(buffer_patterns=["expert_bias_E"]).build(model_parts=[model])
         expected = (
-            ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"].clone()
+            ema._buffer_optimizers[0].state[model.expert_bias_E]["ema_params"].clone()
         )
         for step in range(1, 6):
             with torch.no_grad():
@@ -113,7 +173,7 @@ class TestEMABufferSupport(unittest.TestCase):
             ema.step(step)
             beta = 2.0 ** (-1.0 / (0.05 * step))
             expected = expected * beta + model.expert_bias_E.detach() * (1 - beta)
-            actual = ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
+            actual = ema._buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
             torch.testing.assert_close(actual, expected, atol=1e-5, rtol=0)
 
     def test_default_empty_patterns_leaves_buffers_untracked(self):
@@ -121,7 +181,7 @@ class TestEMABufferSupport(unittest.TestCase):
         configs see zero behavior change -- no buffer_optimizers built."""
         model = _ModelWithExpertBias()
         ema = EMA.Config().build(model_parts=[model])
-        self.assertEqual(ema.buffer_optimizers, [])
+        self.assertEqual(ema._buffer_optimizers, [])
         ema.step(1)  # must not error despite the untracked buffer existing
 
     def test_checkpoint_round_trip_folds_buffer_into_ema_key(self):
@@ -133,7 +193,7 @@ class TestEMABufferSupport(unittest.TestCase):
             model.expert_bias_E.fill_(3.0)
         ema.step(1)
         saved_buffer_ema = (
-            ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"].clone()
+            ema._buffer_optimizers[0].state[model.expert_bias_E]["ema_params"].clone()
         )
 
         ckpt_dir = tempfile.mkdtemp()
@@ -150,17 +210,65 @@ class TestEMABufferSupport(unittest.TestCase):
             )
             dcp.load({"ema": ema2}, checkpoint_id=ckpt_dir)
 
-            actual = ema2.buffer_optimizers[0].state[model2.expert_bias_E]["ema_params"]
+            actual = ema2._buffer_optimizers[0].state[model2.expert_bias_E][
+                "ema_params"
+            ]
             torch.testing.assert_close(actual, saved_buffer_ema, atol=1e-6, rtol=0)
         finally:
             shutil.rmtree(ckpt_dir, ignore_errors=True)
+
+    def test_multi_part_with_one_buffer_free_part_is_safe(self):
+        model_a = _ModelWithExpertBias()
+        model_b = _ModelWithoutExpertBias()
+        ema = EMA.Config(buffer_patterns=["expert_bias_E"]).build(
+            model_parts=[model_a, model_b]
+        )
+        self.assertEqual(len(ema._buffer_optimizers), 2)
+        self.assertEqual(len(ema._buffer_optimizers[1].state), 0)  # model_b: empty
+
+        expected = (
+            ema._buffer_optimizers[0].state[model_a.expert_bias_E]["ema_params"].clone()
+        )
+        for step in range(1, 6):
+            with torch.no_grad():
+                model_a.expert_bias_E.fill_(float(step))
+            ema.step(step)  # must not raise for either part
+            beta = 2.0 ** (-1.0 / (0.05 * step))
+            expected = expected * beta + model_a.expert_bias_E.detach() * (1 - beta)
+            actual = ema._buffer_optimizers[0].state[model_a.expert_bias_E][
+                "ema_params"
+            ]
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=0)
+
+    def test_mixed_dtype_buffers_in_one_group_do_not_crash(self):
+        """Regression test: buffer_patterns matching buffers of different
+        dtypes within one model part must not route the non-float tensor
+        into torch._foreach_lerp_ (which previously happened because the
+        foreach-vs-loop decision checked only the first tensor's dtype)."""
+        model = _ModelWithMixedDtypeBuffers()
+        ema = EMA.Config(buffer_patterns=["_buf$"]).build(model_parts=[model])
+        with torch.no_grad():
+            model.bias_buf.fill_(1.0)
+            model.count_buf.fill_(3)
+        ema.step(1)  # must not raise
+
+        bias_ema = ema._buffer_optimizers[0].state[model.bias_buf]["ema_params"]
+        count_ema = ema._buffer_optimizers[0].state[model.count_buf]["ema_params"]
+        beta = 2.0 ** (-1.0 / (0.05 * 1))
+        expected_bias = 0.0 * beta + 1.0 * (1 - beta)
+        expected_count = int(0 * beta + 3 * (1 - beta))
+        torch.testing.assert_close(
+            bias_ema, torch.full((4,), expected_bias), atol=1e-5, rtol=0
+        )
+        self.assertEqual(count_ema.dtype, torch.int64)
+        torch.testing.assert_close(count_ema, torch.full((4,), expected_count))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
 class TestEMACpuOffload(unittest.TestCase):
     """GPU-only: exercises offload_to_cpu under real FSDP2 DTensor params --
     the DTensor pin_memory workaround (_pin_local/_materialize_dtensor in
-    torchtitan/components/ema.py) can't be tested without real DTensors.
+    torchtitan/components/optimizer/ema.py) can't be tested without real DTensors.
     """
 
     @classmethod
@@ -287,7 +395,7 @@ class TestEMACpuOffload(unittest.TestCase):
         ema = EMA.Config(
             offload_to_cpu=True, buffer_patterns=[r"expert_bias_E$"]
         ).build(model_parts=[model])
-        bias_state = ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
+        bias_state = ema._buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
         self.assertFalse(bias_state.is_cuda)
         self.assertTrue(bias_state.is_pinned())
 
@@ -295,7 +403,7 @@ class TestEMACpuOffload(unittest.TestCase):
             model.expert_bias_E.fill_(2.0)
         ema.step(1)
         torch.cuda.synchronize()
-        bias_state = ema.buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
+        bias_state = ema._buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
 
         ckpt_dir = tempfile.mkdtemp()
         try:
@@ -307,7 +415,7 @@ class TestEMACpuOffload(unittest.TestCase):
             ).build(model_parts=[model2])
             dcp.load({"ema": ema2}, checkpoint_id=ckpt_dir)
 
-            v2 = ema2.buffer_optimizers[0].state[model2.expert_bias_E]["ema_params"]
+            v2 = ema2._buffer_optimizers[0].state[model2.expert_bias_E]["ema_params"]
             self.assertFalse(v2.is_cuda)
             self.assertTrue(v2.is_pinned())
             torch.testing.assert_close(bias_state, v2, atol=1e-6, rtol=0)

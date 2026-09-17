@@ -28,9 +28,12 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.ema import EMA
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.components.optimizer import (
+    EMA,
+    LRSchedulersContainer,
+    OptimizersContainer,
+)
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP

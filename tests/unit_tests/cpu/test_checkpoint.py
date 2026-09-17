@@ -39,7 +39,7 @@ from torchtitan.components.checkpointer.dcp import (
     AsyncMode,
     CheckpointManager,
 )
-from torchtitan.components.ema import EMA
+from torchtitan.components.optimizer import EMA
 from torchtitan.config import Function
 from torchtitan.observability import structured_logger as sl
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -1812,7 +1812,16 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.base_temp_dir, ignore_errors=True)
 
-    def _build_manager(self, folder, model, *, with_ema, exclude_from_loading=()):
+    def _build_manager(
+        self,
+        folder,
+        model,
+        *,
+        with_ema,
+        exclude_from_loading=(),
+        initial_load_path=None,
+        initial_load_model_only=True,
+    ):
         ckpt_cfg = CheckpointManager.Config(
             enable=True,
             async_mode="disabled",
@@ -1821,6 +1830,8 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
             keep_latest_k=0,
             last_save_model_only=False,
             exclude_from_loading=list(exclude_from_loading),
+            initial_load_path=initial_load_path,
+            initial_load_model_only=initial_load_model_only,
         )
         ema = EMA.Config().build(model_parts=[model]) if with_ema else None
         manager = CheckpointManager(
@@ -1928,6 +1939,32 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         manager2.load(step=1)  # must not crash; EMA state is simply never requested
 
         self.assertIsNone(ema2)
+        manager2.close()
+
+    def test_model_only_load_reseeds_ema_from_loaded_weights(self):
+        save_folder = os.path.join(self.base_temp_dir, "src_ckpt")
+        model = nn.Linear(2, 2)
+        with torch.no_grad():
+            model.weight.fill_(7.0)
+            model.bias.fill_(7.0)
+        manager, _ = self._build_manager(save_folder, model, with_ema=False)
+        manager.save(curr_step=1)
+        manager.close()
+
+        dest_folder = os.path.join(self.base_temp_dir, "dest_ckpt")  # never created
+        model2 = nn.Linear(2, 2)  # random init != 7.0
+        manager2, ema2 = self._build_manager(
+            dest_folder,
+            model2,
+            with_ema=True,
+            initial_load_path=os.path.join(save_folder, "step-1"),
+            initial_load_model_only=True,
+        )
+        manager2.load()  # step=-1 default -> initial_load_path, model_only=True
+
+        self.assertTrue(torch.equal(model2.weight, model.weight))
+        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"]
+        self.assertTrue(torch.equal(ema_weight, model2.weight.detach()))
         manager2.close()
 
 

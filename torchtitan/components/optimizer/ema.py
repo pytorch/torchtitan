@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -14,10 +15,13 @@ from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import Configurable
 
+from .optimizer import OptimizersContainer
+
 __all__ = ["EMA"]
+
+logger = logging.getLogger(__name__)
 
 
 class _EMAParamOptimizer(Optimizer):
@@ -74,10 +78,13 @@ class EMA(OptimizersContainer):
         the LR scheduler's WSD phases."""
 
         step_bias: int = 0
-        """Manual offset added when computing num_updates, for deliberately
-        renumbering Trainer.step (e.g. a new training phase) without
-        resetting EMA aging. A normal resume needs no bias -- current_step
-        already continues correctly on its own."""
+        """Manual offset added to the firing count when computing num_updates,
+        for deliberately renumbering a new training phase (e.g. a restart that
+        resets Trainer.step) without resetting EMA aging. A normal resume
+        needs no bias -- the firing count already continues correctly on its
+        own. Measured in EMA firings, not raw steps: with
+        update_every_n_steps=4, step_bias=2 means "pretend 2 firings already
+        happened", not "pretend 2 steps already happened"."""
 
         update_every_n_steps: int = 1
         """Only fire the EMA update every N real optimizer steps."""
@@ -116,22 +123,31 @@ class EMA(OptimizersContainer):
         self._validate_params(all_params)
 
         self._buffer_patterns = [re.compile(p) for p in config.buffer_patterns]
-        self.buffer_optimizers: list[_EMAParamOptimizer] = []
+        self._buffer_optimizers: list[_EMAParamOptimizer] = []
         if self._buffer_patterns:
+            total_matched = 0
             for model in model_parts:
                 named_buffers = [
                     (name, b)
                     for name, b in model.named_buffers()
                     if any(p.search(name) for p in self._buffer_patterns)
                 ]
-                self.buffer_optimizers.append(_EMAParamOptimizer(named_buffers))
+                total_matched += len(named_buffers)
+                self._buffer_optimizers.append(_EMAParamOptimizer(named_buffers))
+            if total_matched == 0:
+                logger.warning(
+                    "EMA.Config.buffer_patterns=%s matched no buffers across any "
+                    "model part -- buffer EMA is configured but silently tracking "
+                    "nothing. Check the patterns for typos.",
+                    config.buffer_patterns,
+                )
 
         # OptimizersContainer.state_dict()/load_state_dict() (reused as-is --
         # see state_dict() below) iterate self.optimizers and merge each
-        # one's FQN-keyed flat dict, so folding buffer_optimizers in here is
+        # one's FQN-keyed flat dict, so folding _buffer_optimizers in here is
         # what gives buffer EMA the same "ema" checkpoint key as parameters.
         self.optimizers: list[_EMAParamOptimizer] = (
-            self._param_optimizers + self.buffer_optimizers
+            self._param_optimizers + self._buffer_optimizers
         )
         self._post_init(all_params)
 
@@ -140,6 +156,8 @@ class EMA(OptimizersContainer):
         self._pending_event: torch.cuda.Event | None = None
         if self.offload_to_cpu:
             self._init_cpu_offload()
+
+        self._num_firings = 0
 
     def zero_grad(self, *args, **kwargs) -> None:
         pass  # never called by the training loop; no-op for safety
@@ -152,10 +170,14 @@ class EMA(OptimizersContainer):
         elapsed = current_step - self.start_step
         if elapsed % self.update_every_n_steps != 0:
             return
-        # num_updates counts firings, not raw steps (equal only when
-        # update_every_n_steps == 1) -- still stateless, a pure function of
-        # current_step. Clamped to >= 1 for the first firing.
-        num_updates = max((elapsed + self.step_bias) // self.update_every_n_steps, 1)
+        # num_updates is an explicit firing count (1, 2, 3, ...), not derived
+        # from elapsed/update_every_n_steps -- deriving it that way previously
+        # under- or over-counted whenever start_step > 0 (elapsed=0 is a real
+        # firing there, unlike the default start_step=0) or step_bias wasn't a
+        # multiple of update_every_n_steps (floor division silently dropped
+        # the remainder).
+        self._num_firings += 1
+        num_updates = self._num_firings + self.step_bias
         self._update(num_updates)
 
     def _decay_at(self, num_updates: int) -> float:
@@ -163,6 +185,14 @@ class EMA(OptimizersContainer):
             return self.decay
         return 2.0 ** (-1.0 / (self.half_life_fraction * num_updates))
 
+    # TODO: params/buffers are re-derived from the model on every firing
+    # (model.parameters()/model.named_buffers() + regex matching for
+    # buffers), even though the identical lists are already sitting in
+    # ema_opt.param_groups[0]["params"] from construction -- EMA state is
+    # already looked up by tensor identity, so identity (and thus this list)
+    # is already assumed stable across the run. Reusing param_groups[0]
+    # instead of recomputing would remove this per-step traversal/regex cost
+    # with no behavior change.
     def _update(self, num_updates: int) -> None:
         decay = self._decay_at(num_updates)
         for part_idx, (ema_opt, model) in enumerate(
@@ -171,7 +201,7 @@ class EMA(OptimizersContainer):
             params = [p for p in model.parameters() if p.requires_grad]
             self._update_group(("param", part_idx), ema_opt, params, decay)
         for part_idx, (ema_opt, model) in enumerate(
-            zip(self.buffer_optimizers, self.model_parts)
+            zip(self._buffer_optimizers, self.model_parts)
         ):
             buffers = [
                 b
@@ -197,11 +227,26 @@ class EMA(OptimizersContainer):
             # Tensor.
             local_tensors = [self._local_view(t) for t in tensors]
             self._update_offloaded(scratch_key, local_tensors, ema_params, decay)
-        elif torch.is_floating_point(ema_params[0]) or torch.is_complex(ema_params[0]):
-            torch._foreach_lerp_(ema_params, tensors, 1.0 - decay)
-        else:
-            for e, t in zip(ema_params, tensors):
-                e.copy_(e * decay + t * (1.0 - decay))
+            return
+        # buffer_patterns can match tensors of different dtypes within one
+        # group (e.g. a float bias alongside an int counter); foreach ops
+        # require a homogeneous dtype, so split by dtype-class before batching.
+        floating = [
+            (e, t)
+            for e, t in zip(ema_params, tensors)
+            if torch.is_floating_point(e) or torch.is_complex(e)
+        ]
+        other = [
+            (e, t)
+            for e, t in zip(ema_params, tensors)
+            if not (torch.is_floating_point(e) or torch.is_complex(e))
+        ]
+        if floating:
+            torch._foreach_lerp_(
+                [e for e, _ in floating], [t for _, t in floating], 1.0 - decay
+            )
+        for e, t in other:
+            e.copy_(e * decay + t * (1.0 - decay))
 
     # --- CPU offload path (GH200-optimized: async side-stream, pinned memory) ---
 
@@ -233,9 +278,12 @@ class EMA(OptimizersContainer):
         sharding, only for the duration of a checkpoint save/load -- this is
         what DCP needs to (re)shard EMA state correctly across world sizes.
         ``p`` is still the live DTensor param, so its spec is read directly
-        rather than cached. No collective communication:
-        ``from_local(run_check=False)`` only communicates to reconcile a
-        ``Replicate()`` placement, which FSDP2 params never use.
+        rather than cached. ``run_check=False`` skips the collective that
+        would otherwise verify a ``Replicate()`` placement is consistent
+        across ranks (FSDP2 params do carry ``Replicate()`` under HSDP, on
+        the dp_replicate axis) -- safe here because EMA's update is a pure,
+        per-rank-local function of already-consistent local data, so every
+        replica computes the same result without needing a cross-rank check.
         """
         if not isinstance(p, DTensor):
             return local
@@ -254,6 +302,15 @@ class EMA(OptimizersContainer):
             self._offload_scratch[key] = scratch
         return scratch
 
+    # TODO: this only makes the offload stream wait for the compute stream
+    # (via wait_stream below) before reading live params -- nothing makes
+    # the compute stream wait for the offload stream's read before the next
+    # iteration's optimizer.step() overwrites those same param tensors.
+    # _maybe_wait_pending()'s event.synchronize() is a host-side block that
+    # runs too late to help: by the time it executes, the next iteration's
+    # write kernels may already be enqueued on the compute stream. A correct
+    # fix needs the compute stream to wait on this stream's completion event
+    # (e.g. current_stream().wait_event(...)) rather than a host-side sync.
     def _maybe_wait_pending(self) -> None:
         if self._pending_event is not None:
             self._pending_event.synchronize()
@@ -294,11 +351,12 @@ class EMA(OptimizersContainer):
                 param_state["ema_params"] = self._materialize_dtensor(
                     p, param_state["ema_params"]
                 )
-        result = super().state_dict()
-        for ema_opt in self.optimizers:
-            for p, param_state in ema_opt.state.items():
-                param_state["ema_params"] = originals[id(p)]
-        return result
+        try:
+            return super().state_dict()
+        finally:
+            for ema_opt in self.optimizers:
+                for p, param_state in ema_opt.state.items():
+                    param_state["ema_params"] = originals[id(p)]
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         if not state_dict:
@@ -311,7 +369,7 @@ class EMA(OptimizersContainer):
                     if self.offload_to_cpu:
                         source = self._local_view(source)
                     ema_opt.state[p]["ema_params"].copy_(source)
-            for ema_opt, model in zip(self.buffer_optimizers, self.model_parts):
+            for ema_opt, model in zip(self._buffer_optimizers, self.model_parts):
                 for name, b in model.named_buffers():
                     if not any(p.search(name) for p in self._buffer_patterns):
                         continue
@@ -322,10 +380,12 @@ class EMA(OptimizersContainer):
             return
         # DCP calls our state_dict() above to build its load template, so it
         # already receives real DTensors here too -- re-pin them afterward.
-        super().load_state_dict(state_dict)
-        if self.offload_to_cpu:
-            for ema_opt in self.optimizers:
-                for param_state in ema_opt.state.values():
-                    param_state["ema_params"] = self._pin_local(
-                        param_state["ema_params"]
-                    )
+        try:
+            super().load_state_dict(state_dict)
+        finally:
+            if self.offload_to_cpu:
+                for ema_opt in self.optimizers:
+                    for param_state in ema_opt.state.values():
+                        param_state["ema_params"] = self._pin_local(
+                            param_state["ema_params"]
+                        )
