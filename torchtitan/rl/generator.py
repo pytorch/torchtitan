@@ -753,12 +753,13 @@ class VLLMGenerator(Configurable):
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
 
-        reprefill_on_weight_sync: bool = False
+        reset_kv_cache_on_weight_sync: bool = False
         """Reset cached and running-request KV after each weight sync.
 
-        The default preserves in-flight groups' policy-version-salted KV, matching
-        Prime-RL. Enable this to recompute all KV under the new weights, which can
-        provide useful prefill work for hiding FSDP parameter all-gathers."""
+        The default preserves in-flight requests and their KV. New rollout groups
+        use the new policy-version cache salt, so they cannot reuse old-policy KV.
+        Enable this to clear prefix-cache entries and preempt running requests;
+        vLLM then recomputes their KV under the new weights when they resume."""
 
         vllm_stat_logger: Annotated[
             VllmOtelStatLogger.Config | None, tyro.conf.Suppress
@@ -785,9 +786,9 @@ class VLLMGenerator(Configurable):
                     f"tensor_parallel_degree ({full_ep}) in the generator."
                 )
 
-            if self.debug.batch_invariant and not self.reprefill_on_weight_sync:
+            if self.debug.batch_invariant and not self.reset_kv_cache_on_weight_sync:
                 raise ValueError(
-                    "batch_invariant requires reprefill_on_weight_sync=True so "
+                    "batch_invariant requires reset_kv_cache_on_weight_sync=True so "
                     "cached KV cannot cross a policy update"
                 )
 
@@ -1337,7 +1338,7 @@ class VLLMGenerator(Configurable):
         # including native QKVLinear.wqkv, share storage with model_sd.
         model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
-        if self.config.reprefill_on_weight_sync:
+        if self.config.reset_kv_cache_on_weight_sync:
             self._engine.reset_prefix_cache(
                 reset_running_requests=True,
             )

@@ -117,7 +117,7 @@ def _generator():
     generator.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
-        reprefill_on_weight_sync=False,
+        reset_kv_cache_on_weight_sync=False,
     )
     return generator
 
@@ -265,12 +265,14 @@ def test_admit_requests_threads_cache_salt_to_vllm():
     assert kwargs["prompt"]["cache_salt"] == "7"
 
 
-@pytest.mark.parametrize("reprefill", [False, True])
-def test_weight_sync_reprefill_flag_controls_cache_reset(monkeypatch, reprefill: bool):
+@pytest.mark.parametrize("reset_kv_cache", [False, True])
+def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
+    monkeypatch, reset_kv_cache: bool
+):
     async def run() -> None:
         generator = _generator()
         engine = cast(_FakeEngine, generator._engine)
-        generator.config.reprefill_on_weight_sync = reprefill
+        generator.config.reset_kv_cache_on_weight_sync = reset_kv_cache
         generator._pull_model_state_dict_future = None
         generator._model_state_dict_pull_request = None
         model = SimpleNamespace(
@@ -289,7 +291,7 @@ def test_weight_sync_reprefill_flag_controls_cache_reset(monkeypatch, reprefill:
         await generator._pull_model_state_dict(version=8)
 
         assert generator.policy_version == 8
-        expected = [((), {"reset_running_requests": True})] if reprefill else []
+        expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
         assert engine.reset_prefix_cache_calls == expected
 
     asyncio.run(run())
@@ -355,11 +357,11 @@ def test_generator_dp_can_supply_expert_parallelism():
 def test_generator_defaults_to_preserving_salted_kv_on_weight_sync():
     config = VLLMGenerator.Config(parallelism=_PARALLELISM)
 
-    assert not config.reprefill_on_weight_sync
+    assert not config.reset_kv_cache_on_weight_sync
 
 
-def test_batch_invariant_requires_reprefill():
-    with pytest.raises(ValueError, match="reprefill_on_weight_sync"):
+def test_batch_invariant_requires_kv_cache_reset():
+    with pytest.raises(ValueError, match="reset_kv_cache_on_weight_sync"):
         VLLMGenerator.Config(
             parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
