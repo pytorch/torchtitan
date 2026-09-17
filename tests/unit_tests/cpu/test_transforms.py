@@ -10,6 +10,7 @@ import copy
 import unittest
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torchtitan.config.transform as transform_api
 from torchtitan.config.transform import (
     apply_transforms,
@@ -21,6 +22,8 @@ from torchtitan.config.transform import (
     ModelConfigTransform,
     transform_model_config_,
 )
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import _per_axis_types
 
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
@@ -328,7 +331,10 @@ class TestTensorParallelModules(unittest.TestCase):
         self.assertIsInstance(transformed.shared_experts.w2, RowParallelLinear.Config)
 
     def test_shared_expert_sharding_uses_projection_boundaries(self):
-        from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+        from torchtitan.models.common.moe_sharding import (
+            set_moe_sharding_config,
+            set_shared_experts_sharding_config,
+        )
         from torchtitan.models.deepseek_v3 import model_registry
 
         model = model_registry("debugmodel", seq_len=128).model
@@ -340,6 +346,11 @@ class TestTensorParallelModules(unittest.TestCase):
             enable_ep=True,
             enable_sp=True,
             expert_param_layout={},
+        )
+        set_shared_experts_sharding_config(
+            moe.shared_experts,
+            enable_ep=True,
+            enable_sp=True,
         )
 
         self.assertIsNone(moe.shared_experts.sharding_config.in_dst_shardings)
@@ -356,9 +367,9 @@ class TestTensorParallelModules(unittest.TestCase):
     def test_async_transform_rejects_converted_projection(self):
         config = copy.deepcopy(self._config().model_spec.model.layers[0].feed_forward)
         config.w13 = _ConvertedLinear.Config(
-            in_features=config.w13.in_features,
-            out_features=config.w13.out_features,
-            param_init=config.w13.param_init,
+            in_features=config.w13.linear.in_features,
+            out_features=config.w13.linear.out_features,
+            param_init=config.w13.linear.param_init,
         )
 
         with self.assertRaisesRegex(ValueError, "converted w13 projections"):
@@ -392,6 +403,18 @@ class TestTensorParallelModules(unittest.TestCase):
         self.assertIsNone(feed_forward.w13.sharding_config.in_dst_shardings)
         self.assertIsNotNone(feed_forward.w2.sharding_config.out_src_shardings)
         self.assertIsNone(feed_forward.w2.sharding_config.out_dst_shardings)
+        self.assertEqual(
+            _per_axis_types(feed_forward.w13.sharding_config.in_src_shardings["input"])[
+                MeshAxisName.TP
+            ],
+            spmd.S(0),
+        )
+        self.assertEqual(
+            _per_axis_types(feed_forward.w2.sharding_config.out_src_shardings)[
+                MeshAxisName.TP
+            ],
+            spmd.S(0),
+        )
 
     def test_sharding_sets_no_sequence_parallel_contract(self):
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
@@ -405,6 +428,18 @@ class TestTensorParallelModules(unittest.TestCase):
         assert feed_forward.w2.sharding_config is not None
         self.assertIsNone(feed_forward.w13.sharding_config.in_dst_shardings)
         self.assertIsNone(feed_forward.w2.sharding_config.out_dst_shardings)
+        self.assertEqual(
+            _per_axis_types(feed_forward.w13.sharding_config.in_src_shardings["input"])[
+                MeshAxisName.TP
+            ],
+            spmd.I,
+        )
+        self.assertEqual(
+            _per_axis_types(feed_forward.w2.sharding_config.out_src_shardings)[
+                MeshAxisName.TP
+            ],
+            spmd.I,
+        )
 
 
 if __name__ == "__main__":

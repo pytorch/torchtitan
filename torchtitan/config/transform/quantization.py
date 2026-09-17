@@ -17,8 +17,8 @@ import torch._inductor.config
 
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
+    canonical_linear_fqn,
     Linear,
-    preserve_parallel_linear_role,
     RouterGateLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
@@ -152,16 +152,14 @@ class Float8LinearConverter(QuantizationConverter):
 
         assert Float8Linear is not None
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
+            fqn = canonical_linear_fqn(fqn, parent)
             if self.filter_fn(linear_config, fqn):
                 if isinstance(linear_config, RouterGateLinear.Config):
                     raise ValueError(
                         f"Float8 quantization does not support router gate {fqn!r}; "
                         "exclude it with filter_fqns."
                     )
-                quantized_cls = preserve_parallel_linear_role(
-                    Float8Linear, linear_config
-                )
-                config_cls = cast(Any, quantized_cls.Config)
+                config_cls = cast(Any, Float8Linear.Config)
                 new_config = config_cls(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,
@@ -321,19 +319,30 @@ class MXFP8LinearConverter(QuantizationConverter):
     def convert(self, model_config):
         assert MXFP8Linear is not None
         fqns = self.config.fqns
-        targets = [
-            entry
-            for entry in model_config.traverse(Linear.Config)
-            if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
-        ]
+        targets = []
+        for fqn, config, parent, attr in model_config.traverse(Linear.Config):
+            fqn = canonical_linear_fqn(fqn, parent)
+            if not fqns or any(target_fqn in fqn for target_fqn in fqns):
+                targets.append((fqn, config, parent, attr))
 
         block_size = MXFP8Linear.WEIGHT_BLOCK_SIZE
+        qkv_head_dims = {
+            f"{qkv_fqn}.wqkv" if qkv_fqn else "wqkv": qkv_config.head_dim
+            for qkv_fqn, qkv_config, _parent, _attr in model_config.traverse(
+                QKVLinear.Config
+            )
+        }
         for fqn, _config, parent, _attr in targets:
-            if isinstance(parent, QKVLinear.Config) and parent.head_dim % block_size:
+            head_dim = (
+                parent.head_dim
+                if isinstance(parent, QKVLinear.Config)
+                else qkv_head_dims.get(fqn)
+            )
+            if head_dim is not None and head_dim % block_size:
                 raise ValueError(
                     "MXFP8 quantization of fused QKV requires head_dim divisible "
                     f"by {block_size} so weight scale blocks do not span Q, K, "
-                    f"or V; got {fqn!r} with head_dim={parent.head_dim}."
+                    f"or V; got {fqn!r} with head_dim={head_dim}."
                 )
 
         quantized_router_fqns = [
@@ -365,8 +374,7 @@ class MXFP8LinearConverter(QuantizationConverter):
             fqn for fqn in target_fqns if any(selector in fqn for selector in selectors)
         }
         for fqn, config, parent, attr in targets:
-            quantized_cls = preserve_parallel_linear_role(MXFP8Linear, config)
-            config_cls = cast(Any, quantized_cls.Config)
+            config_cls = cast(Any, MXFP8Linear.Config)
             new_config = config_cls(
                 in_features=config.in_features,
                 out_features=config.out_features,
@@ -490,14 +498,14 @@ class NVFP4LinearConverter(QuantizationConverter):
         assert NVFP4Linear is not None
         fqns = self.config.fqns
         for fqn, config, parent, attr in model_config.traverse(Linear.Config):
+            fqn = canonical_linear_fqn(fqn, parent)
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
                 if isinstance(config, RouterGateLinear.Config):
                     raise ValueError(
                         f"NVFP4 quantization does not support router gate {fqn!r}; "
                         "exclude it with fqns."
                     )
-                quantized_cls = preserve_parallel_linear_role(NVFP4Linear, config)
-                config_cls = cast(Any, quantized_cls.Config)
+                config_cls = cast(Any, NVFP4Linear.Config)
                 new_config = config_cls(
                     in_features=config.in_features,
                     out_features=config.out_features,

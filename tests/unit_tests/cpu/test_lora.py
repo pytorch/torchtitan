@@ -59,7 +59,7 @@ def test_lora_model_builds():
     assert len(frozen_linears) > 0, "No frozen parameters found"
     lora_modules = {name.rsplit(".", 2)[0] for name in lora_params}
     assert lora_modules == {
-        f"layers.{layer}.attention.{projection}"
+        f"layers.{layer}.attention.{projection}.linear"
         for layer in range(6)
         for projection in ("qkv_linear.wqkv", "wo")
     }
@@ -187,7 +187,7 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
     assert feed_forward.w13._sharding_config.in_src_shardings is not None
     assert feed_forward.w13._sharding_config.in_dst_shardings is None
 
-    lora_b_sharding = feed_forward.w13.lora_b._sharding_config
+    lora_b_sharding = feed_forward.w13.linear.lora_b._sharding_config
     assert lora_b_sharding is not None
     assert lora_b_sharding.state_shardings["weight"] == dense_param_placement(
         tp=spmd.S(1)
