@@ -20,11 +20,20 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RowParallelLinear,
+)
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 
-__all__ = ["specialize_lora_linear"]
+__all__ = [
+    "LoRAColumnParallelLinear",
+    "LoRALinear",
+    "LoRARowParallelLinear",
+    "specialize_lora_linear",
+]
 
 
 class _LoRALinearMixin:
@@ -55,9 +64,10 @@ class _LoRALinearMixin:
             param_init={"weight": nn.init.zeros_},
         ).build()
 
-    def forward(self, input_XI: torch.Tensor) -> torch.Tensor:
-        base_out_XO = super().forward(input_XI)  # type: ignore[misc]
-        lora_out_XO = self.lora_b(self.lora_a(input_XI))
+    def _linear(self, input: torch.Tensor) -> torch.Tensor:
+        """Apply the base projection and add the LoRA adapter output."""
+        base_out_XO = super()._linear(input)  # type: ignore[misc]
+        lora_out_XO = self.lora_b(self.lora_a(input))
         return base_out_XO + self._lora_scaling * lora_out_XO
 
     @staticmethod
@@ -87,17 +97,53 @@ class _LoRALinearMixin:
         return lora_a_sharding, replicated_weight
 
 
+class LoRALinear(_LoRALinearMixin, Linear):
+    """Linear with a LoRA update on its local computation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        rank: int
+        alpha: float
+
+
+class LoRAColumnParallelLinear(_LoRALinearMixin, ColumnParallelLinear):
+    """Column-parallel Linear with a LoRA update inside its TP boundary."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ColumnParallelLinear.Config):
+        rank: int
+        alpha: float
+
+
+class LoRARowParallelLinear(_LoRALinearMixin, RowParallelLinear):
+    """Row-parallel Linear with a LoRA update inside its TP boundary."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RowParallelLinear.Config):
+        rank: int
+        alpha: float
+
+
 @functools.cache
 def specialize_lora_linear(parent_cls: type[Module]) -> type[Module]:
-    """Create a cached LoRA specialization of a linear module class."""
+    """Return the explicit LoRA class or specialize another Linear backend."""
+    if parent_cls is Linear:
+        return LoRALinear
+    if parent_cls is ColumnParallelLinear:
+        return LoRAColumnParallelLinear
+    if parent_cls is RowParallelLinear:
+        return LoRARowParallelLinear
+
     parent_config_cls = parent_cls.Config
 
-    class LoRALinear(_LoRALinearMixin, parent_cls):  # type: ignore[misc, valid-type]
+    class SpecializedLoRALinear(  # type: ignore[misc, valid-type]
+        _LoRALinearMixin, parent_cls
+    ):
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             rank: int
             alpha: float
 
-    LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
-    LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
-    return LoRALinear
+    SpecializedLoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
+    SpecializedLoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
+    return SpecializedLoRALinear

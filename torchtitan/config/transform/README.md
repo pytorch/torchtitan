@@ -20,6 +20,18 @@ config = apply_transforms(
 )
 ```
 
+Common attention and feed-forward configs contain synchronous tensor-parallel
+projection roles by default. To overlap those collectives with their adjacent
+GEMMs, select the asynchronous implementations with a transform:
+
+```python
+config.parallelism.tensor_parallel_degree = 8
+config = apply_transforms(config, [AsyncTensorParallelTransform()])
+```
+
+Without a TP mesh, the synchronous projection classes behave as ordinary
+linear modules.
+
 `apply_transforms` deep-copies the trainer config. It orders and applies the
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.
@@ -28,6 +40,12 @@ Legacy `ModelConfigConverter` instances passed to `model_registry` run before
 all model config transforms. In particular, apply quantization in
 `model_registry` before applying `LoRATransform`; running a converter over a
 LoRA-transformed tree can replace an adapter config.
+
+Synchronous tensor-parallel boundaries compose with quantization and LoRA.
+Their converters replace the projection computation while preserving its
+column- or row-parallel role. Async tensor parallelism does not yet support
+converted projections; it conflicts with `LoRATransform` and rejects
+quantized projection configs.
 
 Use `transform_model_config_` when there is no trainer config, such as with a bare
 `ModelSpec`. It rewrites the model config in place and returns the root. It does

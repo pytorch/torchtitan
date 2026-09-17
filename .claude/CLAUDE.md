@@ -78,6 +78,15 @@ You should NEVER use `--debug.deterministic_warn_only`.
    conversions "just in case." Only validate explicit contracts, user-facing
    configuration, or invariants whose failure would otherwise be silent or unclear.
 
+8. **Revisit abstractions when premises change.** When a prototype's core premise
+   changes, redesign from first principles instead of preserving machinery from the
+   old design. Separate orthogonal concerns: computation-changing features such as
+   LoRA and quantization should compose independently from communication-owning
+   features such as TP. Prefer composition when it preserves parameter ownership;
+   when wrapping would change stable parameter FQNs, prefer a narrow overridable
+   computation method over runtime-generated inheritance. Reconsider inheritance
+   and transform ordering before continuing.
+
 ## Code Style
 
 ### Unicode

@@ -25,6 +25,7 @@ from torchtitan.models.common import (  # noqa: F401
     Softmax,
 )
 from torchtitan.models.common.config_utils import (
+    fused_gate_up_param_init,
     get_attention_config,
     make_ffn_config,
     make_moe_config,
@@ -134,15 +135,21 @@ def _shared_experts_config(
     *, dim: int, hidden_dim: int, layer_id: int
 ) -> SigmoidGatedFeedForward.Config:
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
-    ffn = make_ffn_config(
-        dim=dim,
-        hidden_dim=hidden_dim,
-        w1_param_init=_LINEAR_INIT,
-        w2w3_param_init=_depth_init(layer_id),
-    )
+    depth_init = _depth_init(layer_id)
     return SigmoidGatedFeedForward.Config(
-        w13=ffn.w13,
-        w2=ffn.w2,
+        # The gate and w13 share x, so the enclosing shared-expert boundary
+        # retains their single input all-gather until this module has an
+        # explicit shared-input TP implementation.
+        w13=Linear.Config(
+            in_features=dim,
+            out_features=2 * hidden_dim,
+            param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
+        ),
+        w2=Linear.Config(
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init=depth_init,
+        ),
         gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
     )
 

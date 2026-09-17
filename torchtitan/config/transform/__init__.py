@@ -21,10 +21,12 @@ from .quantization import (
     NVFP4LinearConverter,
     QuantizationConverter,
 )
+from .tensor_parallel import AsyncTensorParallelTransform
 
 __all__ = [
     "ModelConfigTransform",
     "ModelConfigConverter",
+    "AsyncTensorParallelTransform",
     "apply_transforms",
     "transform_model_config_",
     "convert_config_type",
