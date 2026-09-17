@@ -159,56 +159,28 @@ def _tp_type(layout) -> spmd.PerMeshAxisSpmdType:
 class _ColumnParallelLinearMixin(Module):
     """All-gather a TP-sharded input before the composed projection."""
 
-    _register_sync_tp_collective_hooks = True
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        if self._register_sync_tp_collective_hooks:
-            # A module pre-hook encloses the complete projection, including
-            # build-time decorations such as LoRA.
-            self.register_forward_pre_hook(
-                self._all_gather_input,
-                with_kwargs=True,
-            )
-
-    def _all_gather_input(self, _module, args, kwargs):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is None:
-            return args, kwargs
-
-        input = args[0] if args else kwargs["input"]
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        assert sharding_config.in_src_shardings is not None
-        input_layout = sharding_config.in_src_shardings["input"]
-        input = spmd.redistribute(
-            input,
-            tp_group,
-            src=_tp_type(input_layout),
-            dst=spmd.R,
-            backward_options={"op_dtype": input.dtype},
-        )
-        if args:
-            return (input, *args[1:]), kwargs
-        return args, {**kwargs, "input": input}
+        if tp_group is not None:
+            sharding_config = self._sharding_config
+            assert sharding_config is not None
+            assert sharding_config.in_src_shardings is not None
+            input_layout = sharding_config.in_src_shardings["input"]
+            input = spmd.redistribute(
+                input,
+                tp_group,
+                src=_tp_type(input_layout),
+                dst=spmd.R,
+                backward_options={"op_dtype": input.dtype},
+            )
+        return super().forward(input)
 
 
 class _RowParallelLinearMixin(Module):
     """Reduce a TP-partial output after the composed projection."""
 
-    _register_sync_tp_collective_hooks = True
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        if self._register_sync_tp_collective_hooks:
-            # A module post-hook encloses the complete projection, including
-            # build-time decorations such as LoRA.
-            self.register_forward_hook(
-                self._reduce_output,
-                with_kwargs=True,
-            )
-
-    def _reduce_output(self, _module, args, kwargs, output):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = super().forward(input)
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return output
