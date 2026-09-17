@@ -53,7 +53,6 @@ def flux_debugmodel() -> FluxTrainer.Config:
     img_size = 256
     max_t5_encoding_len = 256
     training_dataset = _flux_dataset("cc12m-test", img_size=img_size)
-    validation_dataset = _flux_dataset("cc12m-test-validation", img_size=img_size)
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
         loss=MSELoss.Config(),

@@ -6,9 +6,19 @@
 
 """Configurations for the ``flux`` integration test suite."""
 
+from dataclasses import replace
+
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.components.validate import Validator
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.config import CompileConfig
+from torchtitan.models.flux.configs import SamplingConfig
+from torchtitan.models.flux.flux_datasets import (
+    DATASETS,
+    FluxCollator,
+    FluxSampleProcessor,
+    FluxValidationDatasetConfig,
+)
+from torchtitan.models.flux.validate import FluxValidator
 from torchtitan.trainer import Trainer
 
 
@@ -34,7 +44,29 @@ def flux_debugmodel_hsdp2x2_cp2_validation() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.validator = Validator.Config(steps=5)
+    validation_dataset = DATASETS["cc12m-test-validation"]
+    validation_processor = validation_dataset.processor
+    assert isinstance(validation_processor, FluxSampleProcessor.Config)
+    validation_dataset = replace(
+        validation_dataset,
+        processor=replace(validation_processor, img_size=256),
+    )
+    config.validator = FluxValidator.Config(
+        freq=5,
+        steps=5,
+        sampling=SamplingConfig(
+            enable_classifier_free_guidance=True,
+            classifier_free_guidance_scale=5.0,
+            denoising_steps=4,
+        ),
+        dataloader=GrainDataLoader.Config(
+            dataset=FluxValidationDatasetConfig(dataset=validation_dataset),
+            collator=FluxCollator.Config(),
+            streaming_shuffle_buffer_size=128,
+        ),
+        save_img_count=1,
+        save_img_folder="img",
+    )
     config.checkpointer = CheckpointManager.Config()
     config.training.disable_cuda_graphs = True
     return config
