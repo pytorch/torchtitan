@@ -35,7 +35,7 @@ import tempfile
 
 import torch
 
-from scripts.checkpoint_config import configure_checkpoint
+from scripts._checkpoint_test_config import configure_checkpoint
 
 _MODULE = "transformers_modeling_backend"
 # cp=2; seq_len 256 -> 2 flex Q-blocks so ptrr (blocks % cp == 0) holds; 1 step;

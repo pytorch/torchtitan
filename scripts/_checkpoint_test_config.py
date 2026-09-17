@@ -4,7 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Create process-local config wrappers for checkpoint test scripts."""
+"""Private checkpoint config helper for cross-commit test scripts.
+
+This helper is used by ``scripts/loss_compare.py``,
+``scripts/checkpoint_compat_test.py``, and the Transformers modeling backend
+``cp_pp_numerical.py`` test. These callers need to enable and configure
+checkpointing for arbitrary registry configs without exposing the optional
+checkpointer config through the training CLI. The comparison scripts also
+check out other revisions while running, so this helper creates a temporary
+importable config module that remains available across those worktree changes.
+"""
 
 import os
 import tempfile

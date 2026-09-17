@@ -76,9 +76,9 @@ from collections.abc import Sequence
 from typing import Any
 
 if __package__:
-    from scripts.checkpoint_config import configure_checkpoint
+    from scripts._checkpoint_test_config import configure_checkpoint
 else:
-    from checkpoint_config import (  # pyrefly: ignore [missing-import]
+    from _checkpoint_test_config import (  # pyrefly: ignore [missing-import]
         configure_checkpoint,
     )
 
