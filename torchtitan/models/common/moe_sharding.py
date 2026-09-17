@@ -296,18 +296,14 @@ def _moe_sharding_config(
     )
 
 
-def set_moe_sharding_config(
+def set_moe_core_sharding_config(
     moe_cfg,
     *,
     enable_ep: bool,
     enable_sp: bool,
     expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
 ) -> None:
-    """Configure the MoE wrapper, router, and routed experts.
-
-    Shared experts are configured separately because their input-sharing
-    contract is model-specific. Standard ``FeedForward`` shared experts use
-    :func:`set_shared_experts_sharding_config`.
+    """Configure the MoE wrapper, router, and routed experts only.
 
     Branches dense vs sparse family per Module:
 
@@ -357,6 +353,28 @@ def set_moe_sharding_config(
     )
     moe_cfg.routed_experts.sharding_config = routed_experts_config
     moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_config
+
+
+def set_moe_sharding_config(
+    moe_cfg,
+    *,
+    enable_ep: bool,
+    enable_sp: bool,
+    expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
+) -> None:
+    """Configure an MoE whose shared experts use the standard FeedForward."""
+    set_moe_core_sharding_config(
+        moe_cfg,
+        enable_ep=enable_ep,
+        enable_sp=enable_sp,
+        expert_param_layout=expert_param_layout,
+    )
+    if moe_cfg.shared_experts is not None:
+        set_shared_experts_sharding_config(
+            moe_cfg.shared_experts,
+            enable_ep=enable_ep,
+            enable_sp=enable_sp,
+        )
 
 
 def set_moe_block_padding_mask_sharding(block_cfg, *, enable_sp: bool) -> None:

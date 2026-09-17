@@ -296,34 +296,21 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     qkv = attention_cfg.qkv_linear.wqkv
-    projection_owned = is_column_parallel_linear_config(qkv)
+    assert isinstance(qkv, ColumnParallelLinear.Config)
+    assert isinstance(attention_cfg.wo, RowParallelLinear.Config)
     if isinstance(qkv, AsyncColumnParallelLinear.Config):
         validate_async_tp_preconditions(enable_sp=enable_sp)
 
-    if projection_owned:
-        assert isinstance(qkv, ColumnParallelLinear.Config)
-        assert isinstance(attention_cfg.wo, RowParallelLinear.Config)
-        attention_cfg.sharding_config = ShardingConfig(
-            in_src_shardings={"x_TD": attn_x_layout},
-            out_src_shardings=attn_x_layout,
-        )
-        qkv.sharding_config = column_parallel_config(input_layout=attn_x_layout)
-        qkv.linear.sharding_config = colwise_config()
-        attention_cfg.wo.sharding_config = row_parallel_config(
-            output_layout=attn_x_layout
-        )
-        attention_cfg.wo.linear.sharding_config = rowwise_compute_config()
-    else:
-        # Muse Glimmer gathers once at the attention boundary because qkv and
-        # its output gate consume the same input.
-        attention_cfg.sharding_config = ShardingConfig(
-            in_src_shardings={"x_TD": attn_x_layout},
-            in_dst_shardings={
-                "x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-            },
-        )
-        qkv.sharding_config = colwise_config()
-        attention_cfg.wo.sharding_config = rowwise_config(output_sp=enable_sp)
+    attention_cfg.sharding_config = ShardingConfig(
+        in_src_shardings={"x_TD": attn_x_layout},
+        out_src_shardings=attn_x_layout,
+    )
+    qkv.sharding_config = column_parallel_config(input_layout=attn_x_layout)
+    qkv.linear.sharding_config = colwise_config()
+    attention_cfg.wo.sharding_config = row_parallel_config(
+        output_layout=attn_x_layout
+    )
+    attention_cfg.wo.linear.sharding_config = rowwise_compute_config()
     if attention_cfg.rope is not None:
         attention_cfg.rope.sharding_config = ShardingConfig(
             state_shardings={"cache": dense_param_placement(tp=spmd.R)},

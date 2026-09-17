@@ -20,7 +20,6 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
     set_moe_sharding_config,
-    set_shared_experts_sharding_config,
 )
 from torchtitan.models.gpt_oss.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
@@ -130,9 +129,3 @@ def _set_gpt_oss_layer_sharding(
             enable_sp=enable_sp,
             expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
         )
-        if layer_cfg.moe.shared_experts is not None:
-            set_shared_experts_sharding_config(
-                layer_cfg.moe.shared_experts,
-                enable_ep=enable_ep,
-                enable_sp=enable_sp,
-            )
