@@ -26,7 +26,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.distributed import ParallelismContext
-from torchtitan.models.deepseek_v3.model import Attention
+from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.deepseek_v3.attention import DeepSeekV3MLAAttention
 
 from torchtitan.models.kimi_k2_7.qk_clip import (
     qk_clip,
@@ -56,7 +57,8 @@ class QKClipTest(unittest.TestCase):
             "torchtitan.models.common.attention.FlexInnerAttention.compiled_flex_attn",
             return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
         ):
-            attention(
+            FlexInnerAttention.forward(
+                attention,
                 q_THK,
                 q_THK,
                 q_THK,
@@ -75,7 +77,8 @@ class QKClipTest(unittest.TestCase):
             "torchtitan.models.common.attention.FlexInnerAttention.compiled_flex_attn",
             return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
         ):
-            attention(
+            FlexInnerAttention.forward(
+                attention,
                 q_THK,
                 q_THK,
                 q_THK,
@@ -101,7 +104,8 @@ class QKClipTest(unittest.TestCase):
         aux = SimpleNamespace(lse=None, max_scores=max_scores_1HT)
 
         def forward(q_THK: torch.Tensor) -> torch.Tensor:
-            return attention(
+            return FlexInnerAttention.forward(
+                attention,
                 q_THK,
                 q_THK,
                 q_THK,
@@ -195,7 +199,7 @@ class QKClipDistributedTest(DTensorTestBase):
             )
             return module
 
-        attention = Attention.__new__(Attention)
+        attention = DeepSeekV3MLAAttention.__new__(DeepSeekV3MLAAttention)
         nn.Module.__init__(attention)
         attention.q_lora_rank = 1
         attention.qk_nope_head_dim = qk_nope_head_dim
@@ -294,7 +298,7 @@ class QKClipDistributedTest(DTensorTestBase):
 
         model = nn.Module()
         for layer_id in range(num_layers):
-            attention = Attention.__new__(Attention)
+            attention = DeepSeekV3MLAAttention.__new__(DeepSeekV3MLAAttention)
             nn.Module.__init__(attention)
             attention.q_lora_rank = 1
             attention.qk_nope_head_dim = qk_nope_head_dim

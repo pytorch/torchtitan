@@ -18,11 +18,11 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_spmd,
+    set_mla_inner_attention_local_spmd,
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
-from torchtitan.models.deepseek_v3.model import Attention
+from torchtitan.models.deepseek_v3.attention import DeepSeekV3MLAAttention
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
@@ -75,7 +75,7 @@ def _set_deepseek_v3_layer_sharding(
     MoE FFN is routed through ``set_moe_sharding_config``.
     """
     attention = layer_cfg.attention
-    assert isinstance(attention, Attention.Config)
+    assert isinstance(attention, DeepSeekV3MLAAttention.Config)
 
     norm = norm_config(enable_sp=enable_sp)
     layer_cfg.attention_norm.sharding_config = norm
@@ -87,7 +87,7 @@ def _set_deepseek_v3_layer_sharding(
     )
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
-    # Attention.forward explicitly gathers x once for all MLA branches. This
+    # DeepSeekV3MLAAttention.forward gathers x once for all MLA branches. This
     # config only declares its external input and output layout contracts.
     attention.sharding_config = ShardingConfig(
         in_src_shardings={
@@ -111,7 +111,7 @@ def _set_deepseek_v3_layer_sharding(
     )
     attention.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
-    set_gqa_inner_attention_local_spmd(attention.inner_attention)
+    set_mla_inner_attention_local_spmd(attention.inner_attention)
 
     # Query projection: depends on q_lora_rank
     if attention.q_lora_rank == 0:

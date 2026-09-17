@@ -147,15 +147,20 @@ def supports_cp_inner_attention(
         KVAllGatherCPFlexInnerAttention,
         KVAllGatherCPSlidingWindowFlexInnerAttention,
     )
+    from torchtitan.models.common.attention.cp_mla import (
+        KVAllGatherCPMLAFlexInnerAttention,
+    )
 
     supported_cp_inner_attentions: dict[type, tuple[type, ...]] = {
         HeadTailCPLoadBalancer: (
             KVAllGatherCPFlexInnerAttention,
             KVAllGatherCPSlidingWindowFlexInnerAttention,
+            KVAllGatherCPMLAFlexInnerAttention,
         ),
         PTRRFlexAttentionCPLoadBalancer: (
             KVAllGatherCPFlexInnerAttention,
             KVAllGatherCPSlidingWindowFlexInnerAttention,
+            KVAllGatherCPMLAFlexInnerAttention,
         ),
     }
     load_balancer_type = load_balancer_config._owner

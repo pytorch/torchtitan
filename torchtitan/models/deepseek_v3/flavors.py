@@ -30,6 +30,10 @@ from torchtitan.models.common import (
     TransformerBlock,
     UnaryActivationFn,
 )
+from torchtitan.models.common.attention import (
+    MLAFlexInnerAttention,
+    MLAVarlenInnerAttention,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -42,7 +46,8 @@ from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.module import Module
 
-from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
+from .attention import DeepSeekV3MLAAttention
+from .model import DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
 
@@ -119,6 +124,14 @@ def make_deepseek_v3_router_config(
     )
 
 
+def _get_mla_attention_config(attn_backend: str) -> Module.Config:
+    return get_attention_config(
+        attn_backend,
+        flex_attention=MLAFlexInnerAttention,
+        varlen_attention=MLAVarlenInnerAttention,
+    )
+
+
 def make_mla_attention_config(
     *,
     layer_id: int,
@@ -135,9 +148,11 @@ def make_mla_attention_config(
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
-    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
-) -> Attention.Config:
-    """Build a fully-specified DeepSeek V3 MLA ``Attention.Config``.
+    attention_config_factory: Callable[
+        [str], Module.Config
+    ] = _get_mla_attention_config,
+) -> DeepSeekV3MLAAttention.Config:
+    """Build a fully-specified ``DeepSeekV3MLAAttention.Config``.
 
     All Linear and RMSNorm sub-configs have their dimensional fields set. When
     ``q_lora_rank == 0``, sets ``wq`` (not ``wq_a``/``wq_b``); when
@@ -155,7 +170,7 @@ def make_mla_attention_config(
         wq_a = None
         wq_b = None
         # q_norm is unused when q_lora_rank == 0 (never built), but the field is
-        # required on Attention.Config so we supply a placeholder.
+        # required on DeepSeekV3MLAAttention.Config so we supply a placeholder.
         q_norm = RMSNorm.Config(normalized_shape=1, eps=1e-6, param_init=norm_init)
     else:
         wq = None
@@ -173,7 +188,7 @@ def make_mla_attention_config(
             normalized_shape=q_lora_rank, eps=1e-6, param_init=norm_init
         )
 
-    return Attention.Config(
+    return DeepSeekV3MLAAttention.Config(
         dim=dim,
         n_heads=n_heads,
         q_lora_rank=q_lora_rank,
@@ -236,7 +251,9 @@ def build_mla_moe_layers(
     depth_init: Callable[[int], dict[str, Callable]],
     depth_experts_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
-    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
+    attention_config_factory: Callable[
+        [str], Module.Config
+    ] = _get_mla_attention_config,
     router_config_factory: Callable[
         ..., TokenChoiceTopKRouter.Config
     ] = make_router_config,

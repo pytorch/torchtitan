@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from .kda import KDAAttentionMetadata
 
 __all__ = [
+    "BaseAttention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",

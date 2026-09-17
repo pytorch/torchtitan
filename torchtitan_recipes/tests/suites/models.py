@@ -16,12 +16,14 @@ from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
+    MLAFlexInnerAttention,
     SlidingWindowFlexInnerAttention,
 )
 from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     KVAllGatherCPSlidingWindowFlexInnerAttention,
 )
+from torchtitan.models.common.attention.cp_mla import KVAllGatherCPMLAFlexInnerAttention
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -129,7 +131,7 @@ def deepseek_v3_debugmodel_mtp_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    MLAFlexInnerAttention: KVAllGatherCPMLAFlexInnerAttention
                 }
             )
         ],
@@ -165,7 +167,7 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    MLAFlexInnerAttention: KVAllGatherCPMLAFlexInnerAttention
                 }
             )
         ],
@@ -188,7 +190,7 @@ def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    MLAFlexInnerAttention: KVAllGatherCPMLAFlexInnerAttention
                 }
             )
         ],

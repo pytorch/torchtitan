@@ -17,19 +17,19 @@ from torch.nn.attention.flex_attention import AuxRequest
 
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
-from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.deepseek_v3.model import Attention
+from torchtitan.models.common.attention import MLAFlexInnerAttention
+from torchtitan.models.deepseek_v3.attention import DeepSeekV3MLAAttention
 
 # Shape suffixes:
 # T = packed tokens, H = attention heads, D = projection rows per head,
 # I = input features.
 
 
-class QKClipFlexInnerAttention(FlexInnerAttention):
+class QKClipFlexInnerAttention(MLAFlexInnerAttention):
     """FlexInnerAttention that records the maximum score for each query head."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexInnerAttention.Config):
+    class Config(MLAFlexInnerAttention.Config):
         pass
 
     def __init__(self, config: Config) -> None:
@@ -108,7 +108,7 @@ def _scale_mla_heads(
 
 @torch.no_grad()
 def _clip_mla_weights(
-    attention: Attention,
+    attention: DeepSeekV3MLAAttention,
     scales_H: torch.Tensor,
     *,
     alpha: float,
@@ -148,7 +148,7 @@ def qk_clip(
         module
         for model_part in model_parts
         for module in model_part.modules()
-        if isinstance(module, Attention)
+        if isinstance(module, DeepSeekV3MLAAttention)
         and isinstance(module.inner_attention, QKClipFlexInnerAttention)
     ]
     if not attention_layers:
