@@ -521,6 +521,10 @@ class FaultTolerantTrainer(Trainer):
                     ft_pg,
                 ),
             )
+            # ft_pg is None in semi-sync training.
+            if ft_pg is not None:
+                # Avoid artificial jumps in logged loss when replicas leave or rejoin.
+                global_avg_loss /= ft_pg.size()
         else:
             global_avg_loss = global_max_loss = accumulated_loss.item()
             global_ntokens_seen = self.ntokens_seen

@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Annotated
 
 import torch
+import tyro
 
 from torchtitan.components.loss import BaseLoss, compute_logprobs
 from torchtitan.config import CompileConfig
@@ -44,6 +46,10 @@ class DAPOLoss(BaseLoss):
         """Upper clip: the ratio is clamped to ``<= 1 + ratio_clip_high``. Set larger
         than ``ratio_clip_low`` for DAPO "clip-higher" (e.g. 0.28)."""
 
+        global_vocab_size: Annotated[int | None, tyro.conf.Suppress] = None
+        """Full vocabulary size from the model spec, set when building RL configs.
+        Leave unset for batch-invariant mode to retain the full-gather path."""
+
     def __init__(
         self,
         config: Config,
@@ -53,6 +59,7 @@ class DAPOLoss(BaseLoss):
         del compile_config
         self.ratio_clip_low = config.ratio_clip_low
         self.ratio_clip_high = config.ratio_clip_high
+        self.global_vocab_size = config.global_vocab_size
 
     def __call__(
         self,
@@ -80,7 +87,10 @@ class DAPOLoss(BaseLoss):
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
         trainer_logprobs, token_entropy = compute_logprobs(
-            logits, labels, return_entropy=True
+            logits,
+            labels,
+            return_entropy=True,
+            global_vocab_size=self.global_vocab_size,
         )
         # A non-finite generator logprob (notably under cudagraph) has no valid
         # old-policy reference, so DROP that token from the loss + denominator (cleaner

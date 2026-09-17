@@ -4,7 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from .activation import ActivationFn, SiTUGLU, SwiGLU
+from .activation import (
+    BinaryActivationFn,
+    Sigmoid,
+    SiTUGLU,
+    Softmax,
+    SqrtSoftplus,
+    SwiGLU,
+    UnaryActivationFn,
+)
 from .attention import (
     create_attention_mask,
     create_varlen_metadata_for_document,
@@ -24,7 +32,7 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
-from .linear import Linear, PartialBiasRowwiseLinear, RouterGateLinear
+from .linear import CastLinear, Linear, PartialBiasRowwiseLinear, RouterGateLinear
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .nn_modules import (
     Conv1d,
@@ -42,6 +50,7 @@ __all__ = [
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
+    "CastLinear",
     "CosSinRoPE",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
@@ -70,11 +79,15 @@ __all__ = [
     "RoPE",
     "RouterGateLinear",
     "ScaledDotProductInnerAttention",
+    "Sigmoid",
     "SiLU",
-    "ActivationFn",
+    "BinaryActivationFn",
     "SiTUGLU",
+    "Softmax",
+    "SqrtSoftplus",
     "SwiGLU",
     "TransformerBlock",
+    "UnaryActivationFn",
     "VarlenInnerAttention",
     "VarlenMetadata",
     "compute_ffn_hidden_dim",

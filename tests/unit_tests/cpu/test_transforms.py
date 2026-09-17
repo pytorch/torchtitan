@@ -8,6 +8,7 @@
 
 import unittest
 
+import torchtitan.config.transform as transform_api
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
@@ -53,6 +54,13 @@ class _Third(_Record):
 
 class _Rival(_Record):
     conflicts_with = (_First,)
+
+
+class _SelfConflicting(_Record):
+    pass
+
+
+_SelfConflicting.conflicts_with = (_SelfConflicting,)
 
 
 class _Loose(_Record):
@@ -105,6 +113,16 @@ class TestOrdering(unittest.TestCase):
         config.parallelism.context_parallel_degree = 1
         with self.assertRaisesRegex(ValueError, "cannot be combined"):
             apply_transforms(config, [_First(), _Rival()])
+
+    def test_rejects_the_same_self_conflicting_instance_twice(self):
+        config = _llama3_cp_ready()
+        config.parallelism.context_parallel_degree = 1
+        transform = _SelfConflicting()
+
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            apply_transforms(config, [transform, transform])
+
+        self.assertEqual(_Record.order, [])
 
 
 class TestAtomicApplication(unittest.TestCase):
@@ -170,6 +188,10 @@ class TestTransformModel(unittest.TestCase):
 
 
 class TestContextParallelTransform(unittest.TestCase):
+    def test_linear_lora_handler_is_exported(self):
+        handler_cls = getattr(transform_api, "LinearLoRAHandler", None)
+        self.assertIsNotNone(handler_cls, "LinearLoRAHandler is not exported")
+
     def test_swap_keeps_the_tuning_of_the_kernel_it_replaces(self):
         config = _llama3_cp_ready()
         tuned = config.model_spec.model.layers[0].attention.inner_attention
@@ -189,6 +211,38 @@ class TestContextParallelTransform(unittest.TestCase):
     def test_rejects_a_kernel_that_is_not_context_parallel(self):
         with self.assertRaisesRegex(ValueError, "must inherit CPInnerAttention"):
             ContextParallelTransform(inner_attention=FlexInnerAttention)
+
+    def test_lora_runs_after_context_parallelism(self):
+        transform_cls = getattr(transform_api, "LoRATransform", None)
+        self.assertIsNotNone(transform_cls, "LoRATransform is not exported")
+        handler_cls = getattr(transform_api, "LinearLoRAHandler", None)
+        self.assertIsNotNone(handler_cls, "LinearLoRAHandler is not exported")
+        config = _llama3_cp_ready()
+
+        result = apply_transforms(
+            config,
+            [
+                transform_cls(
+                    handlers=(handler_cls(),),
+                    rank=2,
+                    alpha=4.0,
+                    target_modules=["wqkv", "wo"],
+                ),
+                ContextParallelTransform(
+                    inner_attention=KVAllGatherCPFlexInnerAttention
+                ),
+            ],
+        )
+
+        inner = result.model_spec.model.layers[0].attention.inner_attention
+        self.assertIsInstance(inner, KVAllGatherCPFlexInnerAttention.Config)
+
+        model = result.model_spec.model.build()
+        trainable = {
+            name for name, param in model.named_parameters() if param.requires_grad
+        }
+        self.assertTrue(trainable)
+        self.assertTrue(all("lora_a" in name or "lora_b" in name for name in trainable))
 
 
 if __name__ == "__main__":

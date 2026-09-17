@@ -9,9 +9,9 @@ This is the reference for how the mechanism works and how to write overrides.
 
 Torchtitan has a config-driven build system: every component defines a nested
 `Config` dataclass and `config.build()` constructs the owning object. Swapping a
-component (e.g. Float8 quantization, LoRA) currently works via
-`ModelConfigConverter`, which traverses the model config tree and replaces
-`Config` nodes during config construction, inside `config_registry.py` functions.
+component currently works through model config converters and transforms,
+which traverse the model config tree and replace `Config` nodes before model
+construction.
 
 That works well for in-repo, first-class features, but it requires editing the
 repo for *every* alternative implementation. The override mechanism removes that
@@ -77,7 +77,7 @@ tree and replaces matching nodes with the factory's output.
   model.
 - **Minimal surface.** The whole mechanism lives in
   `torchtitan/config/override.py`, reusing the `Configurable.Config.traverse()` +
-  replace pattern that the Float8/LoRA converters already use.
+  replace pattern that the Float8 converter and LoRA transform already use.
 
 ## How It Works
 
@@ -366,13 +366,13 @@ config itself is a valid target (whole-model swap), while `ModelSpec` is not —
 `target` must be a `Configurable.Config` subclass, so a plain class like
 `ModelSpec` is rejected at registration.
 
-## Interaction with Converters
+## Interaction with Converters and Transforms
 
-In-repo converters (Float8, LoRA via `ModelConfigConverter`) run *first*, inside
-`model_registry()` during config construction; overrides run later in
-`Trainer.__init__` and see the post-converter tree. The order is deliberate: an
-in-repo converter cannot be expected to understand arbitrary external overrides,
-so it runs against the known core configs, and overrides layer on top.
+In-repo converters such as Float8 run first inside `model_registry()` during
+config construction. Model config transforms such as LoRA run afterward when
+the recipe calls `apply_transforms`. Overrides run later in `Trainer.__init__`
+and see the post-converter, post-transform tree. The order is deliberate:
+in-repo conversions run against known core configs, and overrides layer on top.
 
 Conversely, converter-style transforms *can* be expressed as overrides (a
 factory that rewrites a `Config`), so external code does not need the converter
@@ -382,7 +382,7 @@ machinery.
 |-----------------|------------------------------|-------|
 | RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
 | GroupedExperts.Config | Possibly | `Float8GroupedExpertsConverter` rewrites this |
-| Linear.Config | Yes | Float8/LoRA replace these |
+| Linear.Config | Yes | Float8 and LoRA can replace these |
 
 Where a converter already rewrote a node, target that node by location with
 `fqns` so the override only claims the instances you intend (e.g. specific

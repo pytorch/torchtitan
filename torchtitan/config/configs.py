@@ -27,10 +27,14 @@ The command-line surface is frozen either way, so annotate a new field with
 """
 
 from dataclasses import dataclass, field
-from typing import Annotated, Literal
+from typing import Annotated, get_args, Literal, TypeAlias
 
 import torch
 import tyro
+
+
+FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
+_FSDP_SYMM_MEM_SCOPES = get_args(FSDPSymmMemScope)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -166,10 +170,12 @@ class ParallelismConfig:
     reduce gradients only after the final backward.
     """
 
-    enable_fsdp_symm_mem: bool = False
+    fsdp_symm_mem_scope: Annotated[FSDPSymmMemScope, tyro.conf.Suppress] = None
     """
-    Whether to enable FSDP2 symmetric-memory communication optimizations for
-    all FSDP modules after `fully_shard` has been applied.
+    Which FSDP modules use symmetric-memory communication. None disables it.
+    "dense" skips any module with routed experts. An MoE transformer block is
+    one FSDP module, so its attention parameters are skipped along with its
+    experts.
     """
 
     tensor_parallel_degree: int = 1
@@ -270,7 +276,13 @@ class ParallelismConfig:
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
             )
-        if self.enable_fsdp_symm_mem and (
+        if self.fsdp_symm_mem_scope not in _FSDP_SYMM_MEM_SCOPES:
+            raise ValueError(
+                "parallelism.fsdp_symm_mem_scope must be one of: "
+                f"{list(_FSDP_SYMM_MEM_SCOPES)} "
+                f"(got {self.fsdp_symm_mem_scope!r})"
+            )
+        if self.fsdp_symm_mem_scope is not None and (
             not torch.cuda.is_available()
             or (
                 torch.version.hip is None
@@ -278,7 +290,7 @@ class ParallelismConfig:
             )
         ):
             raise ValueError(
-                "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
+                "For NVIDIA GPUs, parallelism.fsdp_symm_mem_scope is only supported "
                 "for compute capability 9.0 or newer."
             )
         # Import lazily so loading configs.py does not pull in pipelining.

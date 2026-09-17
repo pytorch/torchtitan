@@ -34,11 +34,10 @@ this class directly.
 
 TODO: upstream this to PrimeIntellect-ai/renderers (renderer -> renderers/muse_glimmer.py,
 atem.py -> a tool parser in renderers/parsers.py), then delete both files and select it
-through ``RenderersLibraryConfig`` like the other renderers.
+through ``from_renderers`` like the other renderers.
 
 It lives under ``experiments/rl`` rather than ``torchtitan/models/muse_glimmer`` because
-RL is its only consumer and ``renderers`` is an RL-only optional dependency; keeping it
-here leaves the core model package importable without it.
+RL is its only consumer.
 """
 
 from __future__ import annotations
@@ -61,9 +60,9 @@ from renderers.base import (
     trim_to_turn_close,
 )
 from renderers.configs import ThinkingRetention
+from torchtitan.components.renderer import RendererConfig, RendererTokenizerWrapper
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.experiments.rl.renderer import RendererConfig, RendererTokenizerWrapper
 
 from .atem import parse_atem_tool_calls, render_atem_tool_call
 

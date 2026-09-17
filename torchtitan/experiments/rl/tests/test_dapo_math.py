@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from datasets import Dataset
@@ -18,11 +20,10 @@ from torchtitan.experiments.rl.examples.dapo_math import (
     DapoMathDataset,
     DapoMathEnv,
     DapoMathSample,
-    RewardMathVerify,
-    score_math_response,
-)
-from torchtitan.experiments.rl.examples.dapo_math import (
     data as math_data,
+    RewardMathVerify,
+    rubric as math_rubric,
+    score_math_response,
 )
 from torchtitan.experiments.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.experiments.rl.types import RolloutTurnID
@@ -137,6 +138,31 @@ def test_math_verifier_works_in_rollout_worker_thread() -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         result = executor.submit(score_math_response, r"work\nAnswer: \boxed{34}", "34")
         assert result.result() == 1.0
+
+
+def test_math_verifier_times_out_in_rollout_worker_thread(monkeypatch, caplog) -> None:
+    verify_called = False
+    caplog.set_level(logging.WARNING, logger=math_rubric.__name__)
+
+    def busy_verify(*args, **kwargs) -> bool:
+        nonlocal verify_called
+        del args, kwargs
+        verify_called = True
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            pass
+        return True
+
+    monkeypatch.setattr(math_rubric, "parse", lambda *args, **kwargs: [34])
+    monkeypatch.setattr(math_rubric, "verify", busy_verify)
+    monkeypatch.setattr(math_rubric, "_MATH_VERIFY_TIMEOUT_SECONDS", 0.01)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(score_math_response, r"work\nAnswer: \boxed{34}", "34")
+        assert result.result(timeout=1) == 0.0
+
+    assert verify_called
+    assert "Math-Verify timed out after 0.01 seconds" in caplog.text
 
 
 def test_reward_handles_equivalent_latex_and_units() -> None:

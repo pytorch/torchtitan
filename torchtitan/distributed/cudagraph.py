@@ -455,8 +455,8 @@ def wrap_with_cuda_graph(
         )
         return fn
 
-    # Warmup is measured in optimizer steps, but this wrapper counts calls.
-    # Include the extra forward-backward calls made by SDC replay.
+    # The wrapper sees one call per optimizer step and one extra call per SDC
+    # replay.
     num_checked_warmup_steps = (
         num_warmup_steps
         if sdc_num_steps == -1

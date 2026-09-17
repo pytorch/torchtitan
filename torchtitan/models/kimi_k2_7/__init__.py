@@ -13,6 +13,10 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
     register_moe_load_balancing_hook,
 )
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
@@ -21,6 +25,8 @@ from torchtitan.models.common import (
     Linear,
     PartialBiasRowwiseLinear,
     RMSNorm,
+    Sigmoid,
+    Softmax,
     TransformerBlock,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -31,8 +37,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.deepseek_v3 import build_mla_moe_layers
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import KimiK25Model
@@ -250,7 +254,7 @@ def _debugmodel(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=3,
-        router_score_func="softmax",
+        router_score_func=Softmax.Config(),
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -325,7 +329,7 @@ def _moonlight_16b_a3b_config(
         num_experts=64,
         num_shared_experts=2,
         router_top_k=6,
-        router_score_func="sigmoid",
+        router_score_func=Sigmoid.Config(),
         router_route_scale=2.446,
         router_route_norm=True,
         attn_backend=attn_backend,
@@ -448,7 +452,7 @@ def _kimi_k2_5(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=8,
-        router_score_func="sigmoid",
+        router_score_func=Sigmoid.Config(),
         router_route_scale=2.827,
         router_route_norm=True,
         attn_backend=attn_backend,
@@ -522,7 +526,7 @@ def model_registry(
         seq_len=context_len,
     )
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for c in converters:
             c.build().convert(config)
     return ModelSpec(
