@@ -148,6 +148,9 @@ class AuxLoss(Module):
         )
         AuxLoss._group_counts[(self.reduce_mesh, self.metric_name)] += 1
 
+    def _reset_accumulators(self) -> None:
+        self.instance_acc.zero_()
+
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
             buffer_device = self.instance_acc.device
@@ -234,7 +237,7 @@ def _zero_aux_losses(model_parts) -> None:
                 if key not in AuxLoss.group_acc:
                     AuxLoss.group_acc[key] = torch.zeros_like(module.instance_acc)
                 AuxLoss.group_acc[key] += module.instance_acc
-                module.instance_acc.zero_()
+                module._reset_accumulators()
 
 
 def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:

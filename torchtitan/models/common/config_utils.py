@@ -33,6 +33,7 @@ from torchtitan.models.common.dist_gemm import (
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
+    GlobalBatchWiseLoadBalanceLoss,
     GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
     MoE,
@@ -315,13 +316,21 @@ def make_moe_config(
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
     aux_loss_coeff: float | None = None,
+    aux_loss_type: Literal["microbatch_wise", "global_batch_wise"] = "microbatch_wise",
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
+    aux_loss = None
     if aux_loss_coeff is not None:
-        router = dataclasses.replace(
-            router,
-            aux_loss=MicrobatchWiseLoadBalanceLoss.Config(coeff=aux_loss_coeff),
-        )
+        if aux_loss_type == "microbatch_wise":
+            aux_loss = MicrobatchWiseLoadBalanceLoss.Config(coeff=aux_loss_coeff)
+        elif aux_loss_type == "global_batch_wise":
+            aux_loss = GlobalBatchWiseLoadBalanceLoss.Config(coeff=aux_loss_coeff)
+        else:
+            raise ValueError(
+                f"Unknown aux_loss_type {aux_loss_type!r}; expected "
+                "'microbatch_wise' or 'global_batch_wise'."
+            )
+    router = dataclasses.replace(router, aux_loss=aux_loss)
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,

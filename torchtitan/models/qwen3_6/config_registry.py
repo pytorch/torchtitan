@@ -131,7 +131,7 @@ def qwen36_debugmodel_moe(
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=None,
     )
 
 

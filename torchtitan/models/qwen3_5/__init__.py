@@ -24,6 +24,7 @@ from torchtitan.models.common import (  # noqa: F401
     SigmoidGatedFeedForward,
     Softmax,
 )
+from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -460,6 +461,9 @@ def _build_qwen35_moe_layers(
                         hidden_dim=shared_expert_hidden_dim,
                         layer_id=layer_id,
                     ),
+                    aux_loss_coeff=1e-3,
+                    aux_loss_type="global_batch_wise",
+                    load_balance_coeff=None,
                 ),
                 attention_norm=_offset_norm(dim),
                 ffn_norm=_offset_norm(dim),
@@ -1095,6 +1099,12 @@ qwen3_5_configs = {
 }
 
 
+def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
+    """Register step pre-hooks for load balancing and aux-loss accumulators."""
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
+
+
 def model_registry(
     flavor: str,
     *,
@@ -1134,6 +1144,6 @@ def model_registry(
             pipeline_with_first_stage_modules,
             first_stage_module_fqns=("vision_encoder",),
         ),
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_post_optimizer_build_fn,
         state_dict_adapter=Qwen35StateDictAdapter,
     )

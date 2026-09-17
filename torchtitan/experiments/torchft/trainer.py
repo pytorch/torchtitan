@@ -19,6 +19,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.data.loader import DataloaderExhaustedError
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import apply_overrides, TORCH_DTYPE_MAP
+from torchtitan.config.validation import validate_global_batch_wise_aux_loss
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.cudagraph import wrap_with_cuda_graph
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
@@ -193,6 +194,13 @@ class FaultTolerantTrainer(Trainer):
             )
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
             num_tokens_per_dp_rank * batch_degree
+        )
+        validate_global_batch_wise_aux_loss(
+            model_config,
+            num_microbatches_per_step=(
+                self.num_pp_microbatches * self.gradient_accumulation_steps
+            ),
+            activation_checkpoint_enabled=config.activation_checkpoint is not None,
         )
 
         # apply parallelisms and initialization
