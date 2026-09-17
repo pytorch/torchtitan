@@ -7,15 +7,14 @@
 """
 Context Parallel APIs
 
-``cp_shard`` is only used by Flux, which has a different input pattern from LLMs.
-
-``prepare_context_parallel_input`` is the main API.
-TODO: we should generalize this API to cover even Flux's use case.
+``ContextParallelLoadBalancer`` builds one batch's CP partition and applies it
+consistently to model inputs and attention metadata.
 """
 
-from .api import cp_shard, prepare_context_parallel_input
+from .api import ContextParallelLoadBalancer, HeadTailLoadBalancer, PTRRLoadBalancer
 
 __all__ = [
-    "cp_shard",
-    "prepare_context_parallel_input",
+    "ContextParallelLoadBalancer",
+    "HeadTailLoadBalancer",
+    "PTRRLoadBalancer",
 ]

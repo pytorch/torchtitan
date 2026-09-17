@@ -10,7 +10,7 @@ import unittest
 from dataclasses import dataclass
 from unittest import mock
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import ContextParallelLoadBalancerConfig, ParallelismConfig
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.protocols.module import Module
 
@@ -82,7 +82,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         *,
         cp: int = 2,
         tp: int = 1,
-        load_balancer: str | None = None,
+        load_balancer: ContextParallelLoadBalancerConfig | None = None,
         n_heads: int | None = None,
         n_kv_heads: int | None = None,
     ):
@@ -104,16 +104,18 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         config.training.max_context_length = 512
         return config
 
-    def test_rejects_the_default_load_balancer(self):
+    def test_allows_the_default_load_balancer(self):
         default = ParallelismConfig().context_parallel_load_balancer
-        self.assertIsNotNone(default, "the default must stay a reordering balancer")
+        self.assertIsNone(default)
         config = self._config(load_balancer=default)
-        with self.assertRaisesRegex(ValueError, "load_balancer must be"):
-            config.__post_init__()
-
-    def test_allows_load_balancing_disabled(self):
-        config = self._config(load_balancer=None)
         config.__post_init__()
+
+    def test_rejects_reordering_load_balancer(self):
+        from torchtitan.distributed.context_parallel import HeadTailLoadBalancer
+
+        config = self._config(load_balancer=HeadTailLoadBalancer.Config())
+        with self.assertRaisesRegex(ValueError, "must use contiguous sharding"):
+            config.__post_init__()
 
     def test_rejects_kv_heads_indivisible_by_cp(self):
         config = self._config(cp=4, tp=1, n_heads=8, n_kv_heads=2)
