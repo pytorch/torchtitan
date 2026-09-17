@@ -174,7 +174,7 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
         with torch.no_grad():
-            fused.w13.linear.weight.copy_(torch.randn(2, _HIDDEN, _DIM))
+            fused.w13.weight.copy_(torch.randn(2, _HIDDEN, _DIM))
         state_dict = fused.state_dict()
         self.assertEqual(set(state_dict), {"w1.weight", "w2.weight", "w3.weight"})
 
@@ -184,7 +184,7 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         reload_config.activation_fn = fused_swiglu(reload_config.activation_fn)
         reloaded = reload_config.build()
         reloaded.load_state_dict(state_dict)
-        torch.testing.assert_close(reloaded.w13.linear.weight, fused.w13.linear.weight)
+        torch.testing.assert_close(reloaded.w13.weight, fused.w13.weight)
 
 
 class TestFusedSwiGLUHFAdapter(unittest.TestCase):
@@ -216,12 +216,12 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         self.assertIn("model.layers.0.mlp.gate_proj.weight", hf_sd)
         self.assertIn("model.layers.0.mlp.up_proj.weight", hf_sd)
 
-        orig_w13 = ffn.w13.linear.weight.detach().clone()
+        orig_w13 = ffn.w13.weight.detach().clone()
         restored = adapter.from_hf(hf_sd)
         self.assertIn("layers.0.feed_forward.w1.weight", restored)
         self.assertIn("layers.0.feed_forward.w3.weight", restored)
         model.load_state_dict(restored, strict=False)
-        self.assertTrue(torch.equal(ffn.w13.linear.weight, orig_w13))
+        self.assertTrue(torch.equal(ffn.w13.weight, orig_w13))
 
 
 if __name__ == "__main__":
