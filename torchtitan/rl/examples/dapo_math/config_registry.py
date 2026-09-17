@@ -89,7 +89,7 @@ def _qwen3_4b_dapo_math_config(
                 num_samples=num_validation_samples,
             ),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_dapo_math_rollouter_config(
             validation_dataset=validation_dataset,
             token_env=TokenEnv.Config(
@@ -132,8 +132,7 @@ def _qwen3_4b_dapo_math_config(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=100,
                 last_save_model_only=False,
@@ -154,8 +153,8 @@ def _qwen3_4b_dapo_math_config(
                 data_parallel_degree=1,
                 tensor_parallel_degree=1,
             ),
-            cuda_graph=VLLMCudaGraphConfig(enable=True),
-            checkpoint=CheckpointManager.Config(enable=False),
+            cuda_graph=VLLMCudaGraphConfig(),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=1.0,

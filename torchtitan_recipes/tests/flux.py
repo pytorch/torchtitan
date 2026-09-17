@@ -6,6 +6,9 @@
 
 """Configurations for the ``flux`` integration test suite."""
 
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.validate import Validator
+from torchtitan.config import CompileConfig
 from torchtitan.trainer import Trainer
 
 
@@ -31,15 +34,14 @@ def flux_debugmodel_hsdp2x2_cp2_validation() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.validator.enable = True
-    config.validator.steps = 5
-    config.checkpoint.enable = True
+    config.validator = Validator.Config(steps=5)
+    config.checkpointer = CheckpointManager.Config()
     config.training.disable_cuda_graphs = True
     return config
 
 
 def flux_debugmodel_compile() -> Trainer.Config:
     config = flux_debugmodel_test()
-    config.compile.enable = True
+    config.compile = CompileConfig()
     config.training.disable_cuda_graphs = True
     return config

@@ -8,7 +8,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
 
 import torch
 import torchstore as ts
@@ -25,10 +24,7 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.observability.metrics import (
-    build_device_memory_monitor,
-    compute_training_performance_metrics,
-)
+from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
 from torchtitan.rl.types import OptimizerStepOutput, TrainingMicrobatch
@@ -72,7 +68,7 @@ class Trainer(Configurable):
         config: Config,
         *,
         model_spec: ModelSpec,
-        compile_config: CompileConfig,
+        compile_config: CompileConfig | None,
         max_num_documents: int | None,
         hf_assets_path: str = "",
         generator_dtype: str = "",
@@ -121,51 +117,36 @@ class Trainer(Configurable):
         gen_dtype = TORCH_DTYPE_MAP[generator_dtype] if generator_dtype else None
         self._transfer_dtype = gen_dtype if gen_dtype != training_dtype else None
 
-        engine.initialize_distributed_runtime()
-
-        # TODO: Unify RL and dataset-driven trainer metrics so device-memory
-        # monitoring and performance metrics share one lifecycle and implementation.
-        self.device_memory_monitor = build_device_memory_monitor()
         self.gpu_peak_flops = utils.get_peak_flops(
-            self.device_memory_monitor.device_name
+            engine.device_memory_monitor.device_name
         )
-        engine.initialize_model(
+        engine.initialize(
             model_spec,
             compile_config=compile_config,
-        )
-        logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
-        device_mem_stats = self.device_memory_monitor.get_peak_stats()
-        logger.info(
-            f"{engine.device.type.upper()} memory usage for model: "
-            f"{device_mem_stats.max_reserved_gib:.2f}GiB"
-            f"({device_mem_stats.max_reserved_pct:.2f}%)"
-        )
-        self.model = engine.model_parts[0]
-        engine.initialize_optimizer(model_spec)
-
-        # Always build CheckpointManager; enable is a field on the config.
-        # When enable=False (CI/debug), load() is a no-op and random init stands.
-        engine.initialize_checkpointer(
-            dataloader=None,
             sd_adapter=(
                 model_spec.state_dict_adapter(model_config, hf_assets_path)
                 if model_spec.state_dict_adapter
                 else None
             ),
         )
+
+        logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
+        logger.info(
+            f"{engine.device.type.upper()} memory usage for model: "
+            f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
+            f"({engine.model_device_mem_stats.max_reserved_pct:.2f}%)"
+        )
+        self.model = engine.model_parts[0]
+
         engine.load_checkpoint()
-        if not engine.checkpointer.enable:
+        if config.checkpointer is None:
             logger.warning(
                 "Checkpoint disabled, skip weight loading and use random-initialized weights. "
-                "Set checkpoint.enable=True to load from a checkpoint."
+                "Configure checkpointer to load from a checkpoint."
             )
 
-        engine.initialize_forward_backward()
-
         engine.start_profiler()
-        self.device_memory_monitor.reset_peak_stats()
-
-        self.generator: Any | None = None
+        engine.device_memory_monitor.reset_peak_stats()
 
         # Data parallelism: mesh is available after model construction builds it.
         self.dp_enabled = engine.parallel_dims.dp_enabled
@@ -180,7 +161,7 @@ class Trainer(Configurable):
     @property
     def policy_version(self) -> int:
         """Number of completed optimizer steps, restored with engine state."""
-        return self.engine.step
+        return self.engine.num_completed_steps
 
     async def get_policy_version(self) -> int:
         """Current policy version: after load(), the step a resume restored from
@@ -259,38 +240,34 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._step_compute_start = time.perf_counter()
-        self._step_start_ntokens = engine.ntokens_seen
-        prepared_global_valid_tokens = engine.prepare_step(
-            num_global_valid_tokens, step=engine.step + 1
+        self._step_num_tokens_per_dp_rank = sum(
+            rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
         )
-        assert prepared_global_valid_tokens is not None
         microbatch_metrics: list[dict[str, float]] = []
         num_accumulation_steps = len(training_data)
+        prepared_global_valid_tokens = engine.prepare_step(
+            num_global_valid_tokens,
+            num_accumulation_steps=num_accumulation_steps,
+        )
 
         for microbatch_index, rank_batches in enumerate(training_data):
             local_batch = rank_batches[self.dp_rank]
-            loss_kwargs = {
-                key: value.to(engine.device, non_blocking=True)
-                for key, value in local_batch.loss_kwargs().items()
-            }
 
             engine.forward_backward_microbatch(
                 microbatch_group=[local_batch],
                 global_valid_tokens=prepared_global_valid_tokens,
-                loss_kwargs=loss_kwargs,
                 accumulation_index=microbatch_index,
-                num_accumulation_steps=num_accumulation_steps,
             )
             microbatch_metrics.append(
                 self._reduce_forward_backward_metrics(
                     sum_reduced_metrics={
                         key: value
-                        for key, value in engine._last_loss_metrics.items()
+                        for key, value in engine.loss_metrics.items()
                         if not key.endswith("/max")
                     },
                     max_reduced_metrics={
                         key: value
-                        for key, value in engine._last_loss_metrics.items()
+                        for key, value in engine.loss_metrics.items()
                         if key.endswith("/max")
                     },
                 )
@@ -309,13 +286,12 @@ class Trainer(Configurable):
         # scheduler advances in engine.optimizer_step().
         lr_metrics = engine.lr_schedulers.get_metrics()
 
-        with sl.log_trace_span("optim"):
-            grad_norm = engine.optimizer_step()
+        grad_norm = engine.optimizer_step()
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
         performance = compute_training_performance_metrics(
-            num_tokens=engine.ntokens_seen - self._step_start_ntokens,
+            num_tokens=self._step_num_tokens_per_dp_rank,
             elapsed_time=time.perf_counter() - self._step_compute_start,
             non_data_parallel_size=engine.parallel_dims.non_data_parallel_size,
             num_flops_per_token=engine.num_flops_per_token,
@@ -323,10 +299,10 @@ class Trainer(Configurable):
             has_quantization=engine.has_quantization,
         )
 
-        engine.step += 1
-        engine.complete_step(last_step=last_step)
-        device_mem_stats = self.device_memory_monitor.get_peak_stats()
-        self.device_memory_monitor.reset_peak_stats()
+        engine.save_checkpoint(last_step=last_step)
+        engine.step_profiler()
+        device_mem_stats = engine.device_memory_monitor.get_peak_stats()
+        engine.device_memory_monitor.reset_peak_stats()
 
         logger.debug(
             f"{os.getpid()=} Trainer optimizer_step done, "

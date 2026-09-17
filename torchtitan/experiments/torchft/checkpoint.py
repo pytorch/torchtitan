@@ -113,9 +113,6 @@ class TorchFTCheckpointManager(CheckpointManager):
                 "multiple times, which can result in overfitting."
             )
 
-        if not self.enable:
-            return
-
         if self.ft_manager:
             optimizers.init_cache_state_dict()
 
@@ -173,7 +170,7 @@ class TorchFTCheckpointManager(CheckpointManager):
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
-        if self.enable and self.enable_ft_dataloader_checkpoints:
+        if self.enable_ft_dataloader_checkpoints:
             self._ft_load()
         return super().load(step)
 

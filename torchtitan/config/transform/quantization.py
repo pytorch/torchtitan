@@ -199,7 +199,7 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
         if not self.config.model_compile_enabled:
             logger.warning(
                 "Compile is required for high performance float8 MoE training; "
-                "enable it with --compile.enable"
+                "enable it with compile:compile-config"
             )
 
     def convert(self, model_config):

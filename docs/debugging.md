@@ -158,7 +158,7 @@ For multiple experimental runs with different parallelism configs, we need to us
 #### Creating a Seed Checkpoint
 
 ```bash
-NGPU=1 MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --checkpoint.enable --create-seed-checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
+NGPU=1 MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --create-seed-checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
 ```
 
 #### Loading Seed Checkpoints for Debugging
@@ -166,10 +166,10 @@ NGPU=1 MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --checkpoint.enable
 When using seed checkpoints for debugging or validation purposes, you can enable the `load_only` configuration to load checkpoints without saving any new ones during training. This is particularly useful when you only want to verify model correctness or compare different configurations without cluttering your disk:
 
 ```bash
-MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --checkpoint.enable --checkpoint.load_only
+MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh checkpointer:config --checkpointer.load_only
 ```
 
-The `--checkpoint.load_only` flag prevents the training process from saving any checkpoints, allowing you to:
+The `--checkpointer.load_only` flag prevents the training process from saving any checkpoints, allowing you to:
 - Run debugging sessions without generating unwanted checkpoint files
 - Compare model behaviors using the same initial weights without checkpoint overhead
 

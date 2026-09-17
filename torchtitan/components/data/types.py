@@ -42,6 +42,23 @@ class TrainingMicrobatch(ABC):
             for key, value in self.as_input_dict().items()
         }
 
+    def loss_kwargs(self) -> dict[str, Any]:
+        """Return additional keyword arguments for the loss function."""
+        return {}
+
+    def to_loss_kwargs(
+        self, device: torch.device | str, *, non_blocking: bool = False
+    ) -> dict[str, Any]:
+        """Return loss arguments with top-level tensors moved to ``device``."""
+        return {
+            key: (
+                value.to(device, non_blocking=non_blocking)
+                if isinstance(value, torch.Tensor)
+                else value
+            )
+            for key, value in self.loss_kwargs().items()
+        }
+
 
 @dataclass(kw_only=True, slots=True)
 class TokenizedTrainingMicrobatch(TrainingMicrobatch):

@@ -38,11 +38,17 @@ def _batch() -> TokenizedTrainingMicrobatch:
 
 
 class _DictTrainingMicrobatch(TrainingMicrobatch):
-    def __init__(self, input_dict: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        input_dict: dict[str, Any],
+        loss_kwargs: dict[str, Any] | None = None,
+    ) -> None:
         self._input_dict = input_dict
+        self._loss_kwargs = loss_kwargs or {}
         self.labels = input_dict["labels"]
         self.num_valid_tokens = self.labels.numel()
         self.to_input_dict_calls: list[tuple[torch.device | str, bool]] = []
+        self.to_loss_kwargs_calls: list[tuple[torch.device | str, bool]] = []
 
     def as_input_dict(self) -> dict[str, Any]:
         return dict(self._input_dict)
@@ -53,9 +59,21 @@ class _DictTrainingMicrobatch(TrainingMicrobatch):
         self.to_input_dict_calls.append((device, non_blocking))
         return super().to_input_dict(device, non_blocking=non_blocking)
 
+    def loss_kwargs(self) -> dict[str, Any]:
+        return dict(self._loss_kwargs)
 
-def _dict_microbatch(input_dict: dict[str, Any]) -> TrainingMicrobatch:
-    return _DictTrainingMicrobatch(input_dict)
+    def to_loss_kwargs(
+        self, device: torch.device | str, *, non_blocking: bool = False
+    ) -> dict[str, Any]:
+        self.to_loss_kwargs_calls.append((device, non_blocking))
+        return super().to_loss_kwargs(device, non_blocking=non_blocking)
+
+
+def _dict_microbatch(
+    input_dict: dict[str, Any],
+    loss_kwargs: dict[str, Any] | None = None,
+) -> TrainingMicrobatch:
+    return _DictTrainingMicrobatch(input_dict, loss_kwargs)
 
 
 def _bind_pp_forward_backward_body(trainer: TrainingEngine) -> None:
@@ -70,8 +88,8 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
     if not hasattr(trainer, "loss_is_finite"):
         trainer.loss_is_finite = torch.ones((), dtype=torch.int32)
     if not hasattr(trainer, "prepare_step"):
-        trainer.prepare_step = lambda global_valid_tokens, *, step: (
-            TrainingEngine.prepare_step(trainer, global_valid_tokens, step=step)
+        trainer.prepare_step = lambda global_valid_tokens, **kwargs: (
+            TrainingEngine.prepare_step(trainer, global_valid_tokens, **kwargs)
         )
     if not hasattr(trainer, "optimizer_step"):
         trainer.optimizer_step = lambda: TrainingEngine.optimizer_step(trainer)
@@ -151,7 +169,8 @@ def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage():
             ntokens_seen=0,
             device=torch.device("cpu"),
             sdc_replayer=None,
-            step=0,
+            num_accumulation_steps=1,
+            num_completed_steps=0,
             _pp_loss_sentinel_on_non_last_stage=sentinel,
         ),
     )
@@ -218,7 +237,8 @@ def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs() -> None:
             ntokens_seen=0,
             device=torch.device("cpu"),
             sdc_replayer=None,
-            step=0,
+            num_accumulation_steps=1,
+            num_completed_steps=0,
         ),
     )
     _bind_pp_forward_backward_body(trainer)
@@ -275,7 +295,8 @@ def test_pp_forward_backward_microbatch_prepares_structured_inputs() -> None:
             device=torch.device("cpu"),
             forward_backward_body_fn=forward_backward_body_fn,
             sdc_replayer=None,
-            step=0,
+            num_accumulation_steps=1,
+            num_completed_steps=0,
         ),
     )
     global_valid_tokens = torch.tensor(2)
@@ -299,7 +320,6 @@ def test_pp_forward_backward_microbatch_prepares_structured_inputs() -> None:
             ),
         ],
         global_valid_tokens=global_valid_tokens,
-        loss_kwargs={"advantages": torch.tensor([0.1])},
     )
 
     torch.testing.assert_close(result, torch.tensor(0.0))
@@ -314,9 +334,33 @@ def test_pp_forward_backward_microbatch_prepares_structured_inputs() -> None:
     torch.testing.assert_close(kwarg_mbs[1]["positions"], torch.tensor(23))
     torch.testing.assert_close(target_mbs[0], torch.tensor([5]))
     torch.testing.assert_close(target_mbs[1], torch.tensor([6]))
-    torch.testing.assert_close(passed_loss_kwargs["advantages"], torch.tensor([0.1]))
+    assert set(passed_loss_kwargs) == {"global_valid_tokens"}
     assert passed_loss_kwargs["global_valid_tokens"] is global_valid_tokens
     assert trainer.ntokens_seen == 2
+
+
+def test_pp_forward_backward_microbatch_rejects_batch_loss_kwargs() -> None:
+    trainer = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            parallel_dims=SimpleNamespace(pp_enabled=True, dp_replicate_enabled=False),
+            device=torch.device("cpu"),
+            sdc_replayer=None,
+            num_accumulation_steps=1,
+            num_completed_steps=0,
+        ),
+    )
+    microbatch = _dict_microbatch(
+        {"labels": torch.tensor([1])},
+        {"advantages": torch.tensor([0.1])},
+    )
+
+    with pytest.raises(ValueError, match="pipeline parallelism"):
+        TrainingEngine.forward_backward_microbatch(
+            trainer,
+            microbatch_group=[microbatch],
+            global_valid_tokens=torch.tensor(1),
+        )
 
 
 def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple():
@@ -330,6 +374,8 @@ def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple():
     def forward_backward_body_fn(*, inputs, labels, model_kwargs, loss_kwargs):
         captured["fwd_bwd_args"] = (inputs, labels, model_kwargs)
         torch.testing.assert_close(loss_kwargs["global_valid_tokens"], torch.tensor(1))
+        torch.testing.assert_close(loss_kwargs["advantages"], torch.tensor([0.1]))
+        assert loss_kwargs["reduction"] == "sum"
         return torch.tensor(0.0, requires_grad=True)
 
     fake = SimpleNamespace(
@@ -352,10 +398,14 @@ def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple():
         device=torch.device("cpu"),
         forward_backward_body_fn=forward_backward_body_fn,
         sdc_replayer=None,
-        step=0,
+        num_accumulation_steps=1,
+        num_completed_steps=0,
     )
 
-    microbatch = _dict_microbatch({"input": 0, "labels": torch.zeros(1)})
+    microbatch = _dict_microbatch(
+        {"input": 0, "labels": torch.zeros(1)},
+        {"advantages": torch.tensor([0.1]), "reduction": "sum"},
+    )
     detached_loss = TrainingEngine.forward_backward_microbatch(
         fake,  # pyrefly: ignore[bad-argument-type]
         microbatch_group=[microbatch],
@@ -370,6 +420,7 @@ def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple():
     assert not detached_loss.requires_grad
     assert fake.loss_is_finite.item() == 1
     assert microbatch.to_input_dict_calls == [(fake.device, True)]
+    assert microbatch.to_loss_kwargs_calls == [(fake.device, True)]
     assert captured["preprocess_kwargs"] == {
         "parallel_dims": fake.parallel_dims,
         "parallelism": "PARA",
@@ -495,7 +546,7 @@ def test_training_engine_owns_cuda_graph_warmup() -> None:
             side_effect=lambda fn, **kwargs: fn(**kwargs),
         ) as run_eager,
     ):
-        TrainingEngine.initialize_forward_backward(engine)
+        TrainingEngine._initialize_forward_backward(engine)
         assert engine._num_optimizer_steps_since_cuda_graph_init == 0
 
         # Any number of forward/backward calls remains eager until two complete
@@ -549,7 +600,7 @@ def test_training_engine_skips_cuda_graph_warmup_when_unsupported() -> None:
         ),
         patch("torchtitan.training_engine.run_eager_on_cuda_graph_stream") as run_eager,
     ):
-        TrainingEngine.initialize_forward_backward(engine)
+        TrainingEngine._initialize_forward_backward(engine)
         torch.testing.assert_close(
             engine.forward_backward_body_fn(value=torch.tensor(0)), torch.tensor(1.0)
         )
@@ -600,7 +651,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             model_parts=[],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
-            step=1,
+            num_completed_steps=0,
             ntokens_seen=3,
             gc_handler=SimpleNamespace(run=MagicMock()),
             _deferred_cuda_graph_options=None,
@@ -621,6 +672,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         4.0,
         extra_metrics={"n_tokens_seen": 3},
     )
+    assert trainer.num_completed_steps == 1
 
     metrics_processor.should_log.return_value = False
     metrics_processor.log.reset_mock()
@@ -634,6 +686,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         )
 
     metrics_processor.log.assert_not_called()
+    assert trainer.num_completed_steps == 2
 
 
 def test_engine_replay_checks_only_first_forward_backward():
@@ -671,7 +724,8 @@ def test_engine_replay_checks_only_first_forward_backward():
             preprocess_inputs_kwargs={},
             forward_backward_body_fn=forward_backward_body_fn,
             sdc_replayer=replayer,
-            step=1,
+            num_accumulation_steps=2,
+            num_completed_steps=0,
             ntokens_seen=0,
         ),
     )
@@ -682,7 +736,6 @@ def test_engine_replay_checks_only_first_forward_backward():
             microbatch_group=[_batch()],
             global_valid_tokens=torch.tensor(2),
             accumulation_index=accumulation_index,
-            num_accumulation_steps=2,
         )
 
     replayer.run_fwd_bwd.assert_called_once()
@@ -714,7 +767,8 @@ def test_replay_failure_propagates_from_engine():
             device=torch.device("cpu"),
             model_parts=[],
             sdc_replayer=SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch)),
-            step=1,
+            num_accumulation_steps=1,
+            num_completed_steps=0,
         ),
     )
 
@@ -732,13 +786,71 @@ def test_loading_checkpoint_rearms_replay_schedule():
 
     TrainingEngine.load_state_dict(trainer, {"step": 12, "ntokens_seen": 34})
 
-    assert trainer.step == 12
+    assert trainer.num_completed_steps == 12
     assert trainer.ntokens_seen == 34
     replayer.reset_schedule.assert_called_once_with()
 
     disabled = cast(TrainingEngine, SimpleNamespace(sdc_replayer=None))
     TrainingEngine.load_state_dict(disabled, {"step": 1, "ntokens_seen": 2})
-    assert disabled.step == 1
+    assert disabled.num_completed_steps == 1
+
+
+def test_initialize_preserves_phase_order():
+    events = []
+    model_mem_stats = object()
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            device_memory_monitor=SimpleNamespace(
+                get_peak_stats=lambda: (
+                    events.append("model_memory"),
+                    model_mem_stats,
+                )[1]
+            ),
+            _initialize_model=MagicMock(
+                side_effect=lambda *args, **kwargs: events.append("model")
+            ),
+            _initialize_optimizer=MagicMock(
+                side_effect=lambda *args, **kwargs: events.append("optimizer")
+            ),
+            _initialize_checkpointer=MagicMock(
+                side_effect=lambda *args, **kwargs: events.append("checkpointer")
+            ),
+            _initialize_forward_backward=MagicMock(
+                side_effect=lambda: events.append("forward_backward")
+            ),
+        ),
+    )
+    model_spec = MagicMock()
+    sd_adapter = MagicMock()
+
+    TrainingEngine.initialize(
+        engine,
+        model_spec,
+        compile_config=None,
+        sd_adapter=sd_adapter,
+        create_seed_checkpoint=True,
+    )
+
+    assert events == [
+        "model",
+        "model_memory",
+        "optimizer",
+        "checkpointer",
+        "forward_backward",
+    ]
+    assert engine.model_device_mem_stats is model_mem_stats
+    engine._initialize_model.assert_called_once_with(
+        model_spec,
+        compile_config=None,
+        create_seed_checkpoint=True,
+    )
+    engine._initialize_optimizer.assert_called_once_with(model_spec)
+    engine._initialize_checkpointer.assert_called_once_with(
+        dataloader=None,
+        sd_adapter=sd_adapter,
+    )
+    engine._initialize_forward_backward.assert_called_once_with()
 
 
 def test_compute_training_performance_metrics():
@@ -830,7 +942,8 @@ def _run_forward_backward_recording_all_reduce(
             model_parts=[part],
             max_num_documents=None,
             preprocess_inputs_kwargs={},
-            step=1,
+            num_accumulation_steps=gradient_accumulation_steps,
+            num_completed_steps=1,
             ntokens_seen=0,
         ),
     )
@@ -840,7 +953,6 @@ def _run_forward_backward_recording_all_reduce(
             microbatch_group=[_batch()],
             global_valid_tokens=torch.tensor(gradient_accumulation_steps),
             accumulation_index=accumulation_index,
-            num_accumulation_steps=gradient_accumulation_steps,
         )
     return part.requires_all_reduce_calls
 

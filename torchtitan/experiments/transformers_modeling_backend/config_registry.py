@@ -63,10 +63,7 @@ def transformers_modeling_backend_debugmodel(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -100,10 +97,7 @@ def transformers_modeling_backend_debugmodel_moe(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -135,10 +129,7 @@ def transformers_modeling_backend_full_moe(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -172,10 +163,7 @@ def transformers_modeling_backend_full(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -228,8 +216,7 @@ def transformers_modeling_backend_sft_full(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            enable=True,
+        checkpointer=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_model_only=True,
             interval=10,
@@ -291,9 +278,6 @@ def transformers_modeling_backend_sft_debugmodel(
         parallelism=ParallelismConfig(
             pipeline_parallel_schedule="1F1B",
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )

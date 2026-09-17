@@ -19,11 +19,15 @@ from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhauste
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, CompileConfig, Configurable
 from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
-from torchtitan.observability.metrics import ensure_pp_loss_visible
+from torchtitan.observability.metrics import (
+    build_device_memory_monitor,
+    ensure_pp_loss_visible,
+)
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
@@ -46,15 +50,16 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         output_dir: str,
         fault_tolerance: FaultTolerance,
     ) -> None:
+        # The base constructor invokes the distributed-runtime hook.
+        self.fault_tolerance = fault_tolerance
         super().__init__(
             config,
             model_config=model_config,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
-        self.fault_tolerance = fault_tolerance
 
-    def initialize_distributed_runtime(self) -> None:
+    def _initialize_distributed_runtime(self) -> None:
         device_module = utils.device_module
         # pyrefly: ignore [read-only]
         self.device = utils.get_local_device()
@@ -89,22 +94,23 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
+        self.device_memory_monitor = build_device_memory_monitor()
 
-    def initialize_model(
+    def _initialize_model(
         self,
         model_spec: ModelSpec,
         *,
-        compile_config: CompileConfig,
+        compile_config: CompileConfig | None,
         create_seed_checkpoint: bool = False,
     ) -> None:
-        super().initialize_model(
+        super()._initialize_model(
             model_spec,
             compile_config=compile_config,
             create_seed_checkpoint=create_seed_checkpoint,
         )
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
-    def initialize_optimizer(self, model_spec: ModelSpec) -> None:
+    def _initialize_optimizer(self, model_spec: ModelSpec) -> None:
         if isinstance(self.config.optimizer, TorchFTOptimizersContainer.Config):
             self.optimizers = self.config.optimizer.build(
                 model_parts=self.model_parts,
@@ -123,13 +129,16 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             training_steps=self.config.training.steps,
         )
 
-    def initialize_checkpointer(
+    def _initialize_checkpointer(
         self,
         *,
         dataloader: BaseDataLoader | None,
         sd_adapter: Any | None,
     ) -> None:
-        self.checkpointer = self.config.checkpoint.build(
+        checkpointer_config = self.config.checkpointer
+        if checkpointer_config is None:
+            return
+        self.checkpointer = checkpointer_config.build(
             dataloader=dataloader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
@@ -144,6 +153,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
 class FaultTolerantTrainer(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
+        checkpointer: TorchFTCheckpointManager.Config | None = None
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
     engine: FaultTolerantTrainingEngine
@@ -166,7 +176,6 @@ class FaultTolerantTrainer(Configurable):
             fault_tolerance=config.fault_tolerance,
         )
         engine = self.engine
-        engine.initialize_distributed_runtime()
         parallel_dims = engine.parallel_dims
 
         # Logging needs to happen after distributed initialization.
@@ -204,6 +213,7 @@ class FaultTolerantTrainer(Configurable):
         # metrics logging (FT addition: ft_enable, ft_replica_id)
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
+            device_memory_monitor=engine.device_memory_monitor,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             ft_enable=config.fault_tolerance.enable,
@@ -231,11 +241,18 @@ class FaultTolerantTrainer(Configurable):
             num_tokens_per_dp_rank * dp_degree
         )
 
-        engine.initialize_model(
+        engine.initialize(
             model_spec,
             compile_config=config.compile,
+            dataloader=self.dataloader,
+            sd_adapter=(
+                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
+                if model_spec.state_dict_adapter
+                else None
+            ),
             create_seed_checkpoint=config.create_seed_checkpoint,
         )
+
         if parallel_dims.pp_enabled:
             ensure_pp_loss_visible(
                 parallel_dims=parallel_dims,
@@ -245,32 +262,20 @@ class FaultTolerantTrainer(Configurable):
         self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
 
         # initialize device memory monitor and get peak flops for MFU calculation
-        device_memory_monitor = self.metrics_processor.device_memory_monitor
+        device_memory_monitor = engine.device_memory_monitor
         gpu_peak_flops = utils.get_peak_flops(device_memory_monitor.device_name)
         logger.info(f"Peak FLOPS used for computing MFU: {gpu_peak_flops:.3e}")
-        device_mem_stats = device_memory_monitor.get_peak_stats()
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
-            f"{device_mem_stats.max_reserved_gib:.2f}GiB"
-            f"({device_mem_stats.max_reserved_pct:.2f}%)"
+            f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
+            f"({engine.model_device_mem_stats.max_reserved_pct:.2f}%)"
         )
 
-        engine.initialize_optimizer(model_spec)
         self.metrics_processor.optimizers = engine.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
-        engine.initialize_checkpointer(
-            dataloader=self.dataloader,
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
-        )
-        engine.initialize_forward_backward()
-
         # Build validator if validation is configured
-        if config.validator.enable:
+        if config.validator is not None:
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
                 (
                     engine.pp_schedule,
@@ -329,9 +334,10 @@ class FaultTolerantTrainer(Configurable):
 
     def train_step(self, data_iterator: Iterator[TrainingMicrobatch]):
         engine = self.engine
+        current_step = engine.num_completed_steps + 1
         # Save the current step learning rate for logging
         lr = engine.lr_schedulers.schedulers[0].get_last_lr()[0]
-        should_log = self.metrics_processor.should_log(engine.step)
+        should_log = self.metrics_processor.should_log(current_step)
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -361,12 +367,10 @@ class FaultTolerantTrainer(Configurable):
                 global_valid_tokens, dp_mesh
             )
 
-        prepared_valid_tokens = engine.prepare_step(
+        global_valid_tokens = engine.prepare_step(
             global_valid_tokens,
-            step=engine.step,
+            num_accumulation_steps=self.gradient_accumulation_steps,
         )
-        assert prepared_valid_tokens is not None
-        global_valid_tokens = prepared_valid_tokens
 
         accumulated_loss: torch.Tensor | None = None
         for fwd_bwd_index, microbatch_group in enumerate(microbatch_groups):
@@ -374,7 +378,6 @@ class FaultTolerantTrainer(Configurable):
                 microbatch_group=microbatch_group,
                 global_valid_tokens=global_valid_tokens,
                 accumulation_index=fwd_bwd_index,
-                num_accumulation_steps=self.gradient_accumulation_steps,
             )
             if should_log:
                 if accumulated_loss is None:
@@ -434,7 +437,7 @@ class FaultTolerantTrainer(Configurable):
             **collect_aux_loss_metrics(engine.parallel_dims),
         }
         self.metrics_processor.log(
-            engine.step,
+            engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
             grad_norm.item(),
@@ -446,8 +449,8 @@ class FaultTolerantTrainer(Configurable):
         config = self.config
         engine = self.engine
 
-        engine.checkpointer.load(step=config.checkpoint.load_step)
-        logger.info(f"Training starts at step {engine.step + 1}")
+        engine.load_checkpoint()
+        logger.info(f"Training starts at step {engine.num_completed_steps + 1}")
 
         # FT addition: per-replica profiling leaf folder
         leaf_folder = (
@@ -457,7 +460,7 @@ class FaultTolerantTrainer(Configurable):
         )
         with (
             config.profiler.build(
-                global_step=engine.step,
+                global_step=engine.num_completed_steps,
                 base_folder=config.dump_folder,
                 leaf_folder=leaf_folder,
             ) as profiler,
@@ -481,30 +484,31 @@ class FaultTolerantTrainer(Configurable):
         ):
             data_iterator = self.microbatch_generator(self.dataloader)
             while self.should_continue_training():
-                engine.step += 1
                 try:
                     self.train_step(data_iterator)
                 except DataloaderExhaustedError:
                     logger.warning("Ran out of data; last step was canceled.")
                     break
 
-                engine.checkpointer.save(
-                    engine.step,
-                    last_step=(engine.step == config.training.steps),
+                engine.save_checkpoint(
+                    last_step=(engine.num_completed_steps == config.training.steps),
                 )
 
                 # Run validation if validator is available
-                if self.config.validator.enable and self.validator.should_validate(
-                    engine.step
+                if (
+                    self.config.validator is not None
+                    and self.validator.should_validate(engine.num_completed_steps)
                 ):
-                    self.validator.validate(engine.model_parts, engine.step)
+                    self.validator.validate(
+                        engine.model_parts, engine.num_completed_steps
+                    )
 
                 # signal the profiler that the next profiling step has started
                 profiler.step()
 
                 # reduce timeout after first train step for faster signal
                 # (assuming lazy init and compilation are finished)
-                if engine.step == 1:
+                if engine.num_completed_steps == 1:
                     dist_utils.set_pg_timeouts(
                         timeout=timedelta(seconds=config.comm.train_timeout_seconds),
                         parallel_dims=engine.parallel_dims,
@@ -517,7 +521,7 @@ class FaultTolerantTrainer(Configurable):
         logger.info("Training completed")
 
     def should_continue_training(self) -> bool:
-        return self.engine.step < self.config.training.steps
+        return self.engine.num_completed_steps < self.config.training.steps
 
     def close(self) -> None:
         if self.dataloader:

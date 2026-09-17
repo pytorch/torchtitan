@@ -95,7 +95,7 @@ jobs:
         # (--hf-assets-path=$MODEL_PATH): real weights -> varied rewards -> non-zero
         # advantage -> meaningful, full-precision losses (random init gives all
         # zeros). The golden is arch-specific; regenerate on A10G if it changes.
-        LOSS_FILE="tests/rl/assets/losses/rl_grpo_cuda.txt"
+        LOSS_FILE="tests/assets/losses/rl_grpo_cuda.txt"
         # Override to trainer TP=4 + 1 generator TP=4: the config's TP=2 OOMs with
         # batch-invariant on A10G; the golden is from TP=4.
         python scripts/rl/loss_compare.py \
@@ -111,16 +111,16 @@ jobs:
         # and vLLM engine.
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/test_bitwise_parity.py::TestBitwiseParityVarlen -v
+          tests/unit_tests/rl/test_bitwise_parity.py::TestBitwiseParityVarlen -v
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/test_bitwise_parity.py::TestBitwiseParityFlex -v
+          tests/unit_tests/rl/test_bitwise_parity.py::TestBitwiseParityFlex -v
         RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
           torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
+          tests/unit_tests/rl/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
 
         # Run E2E RL integration tests (up to 8 GPUs): includes the MoE TP=4 EP=4
         # random-init test and the batch-invariant debug tests (both need 8 GPUs).
-        python -m tests.rl.integration_tests \
+        python -m tests.integration_tests.rl \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 \
           --hf_assets_path "$MODEL_PATH"

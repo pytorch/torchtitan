@@ -74,7 +74,7 @@ def apply_compile(
         parallel_dims: Parallel dimensions
         dump_folder: Folder for dumping debug graphs
     """
-    if not compile_config.enable:
+    if compile_config is None:
         return model
 
     _maybe_enable_async_tp(

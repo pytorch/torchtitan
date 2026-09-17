@@ -43,16 +43,16 @@ The Flux model supports `torch.compile` for accelerating training. Compilation i
 
 To enable compilation, add the following flags:
 ```bash
-MODULE=flux CONFIG=flux_debugmodel ./run_train.sh --compile.enable
+MODULE=flux CONFIG=flux_debugmodel ./run_train.sh compile:compile-config
 ```
 
 By default, both the model and the loss function are compiled. You can control which components are compiled via `--compile.components`:
 ```bash
 # Compile only the model (not the loss)
-MODULE=flux CONFIG=flux_debugmodel ./run_train.sh --compile.enable --compile.components '["model"]'
+MODULE=flux CONFIG=flux_debugmodel ./run_train.sh compile:compile-config --compile.components '["model"]'
 
 # Compile only the loss
-MODULE=flux CONFIG=flux_debugmodel ./run_train.sh --compile.enable --compile.components '["loss"]'
+MODULE=flux CONFIG=flux_debugmodel ./run_train.sh compile:compile-config --compile.components '["loss"]'
 ```
 
 **Notes:**
@@ -90,7 +90,7 @@ from torchtitan.config.transform import MXFP8LinearConverter
 
 def my_custom_mxfp8() -> FluxTrainer.Config:
     config = flux_schnell()  # or flux_dev()
-    config.compile = CompileConfig(enable=True)
+    config.compile = CompileConfig()
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             MXFP8LinearConverter.Config(

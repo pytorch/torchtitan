@@ -2613,7 +2613,7 @@ class TestTraceContextParallel(FSDPTest):
                 config.parallelism.context_parallel_degree = context_parallel_degree
                 config.parallelism.tensor_parallel_degree = 1
                 config.activation_checkpoint = None
-                config.compile.enable = False
+                config.compile.mode = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
                 config.model_spec.model.layers = config.model_spec.model.layers[:1]

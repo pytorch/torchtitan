@@ -13,7 +13,7 @@ test infrastructure but with a custom runner since train.py is
 a Monarch script (run with ``python``, not ``torchrun``).
 
 Usage:
-    python -m tests.rl.integration_tests \
+    python -m tests.integration_tests.rl \
         $OUTPUT_DIR --ngpu 4
 """
 
@@ -57,8 +57,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
-                    "--compile.no-enable",
-                    "--generator.cuda-graph.no-enable",
+                    "compile:none",
+                    "generator.cuda-graph:none",
                     "--metrics.no-enable-wandb",
                 ],
             ],
@@ -109,10 +109,10 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.sampling.max_tokens 256",
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
-                    "--trainer.checkpoint.no-enable",  # use random-init weights
-                    "--generator.checkpoint.no-enable",  # use random-init weights
-                    "--compile.no-enable",
-                    "--generator.cuda-graph.no-enable",
+                    "trainer.checkpointer:none",  # use random-init weights
+                    "generator.checkpointer:none",  # use random-init weights
+                    "compile:none",
+                    "generator.cuda-graph:none",
                     "--metrics.no-enable-wandb",
                 ],
             ],
@@ -148,7 +148,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--metrics.no-enable-wandb",
-                    "--trainer.checkpoint.interval 2",
+                    "--trainer.checkpointer.interval 2",
                     "--trainer.lr_scheduler.total_steps 4",
                 ],
                 [
@@ -166,7 +166,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.debug.no_batch_invariant",
                     "--generator.debug.no_batch_invariant",
                     "--metrics.no-enable-wandb",
-                    "--trainer.checkpoint.interval 2",
+                    "--trainer.checkpointer.interval 2",
                     "--trainer.lr_scheduler.total_steps 4",
                 ],
             ],
@@ -211,8 +211,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--generator.sampling.max_tokens 256",
-                    "--trainer.checkpoint.no-enable",  # use random-init weights
-                    "--generator.checkpoint.no-enable",
+                    "trainer.checkpointer:none",  # use random-init weights
+                    "generator.checkpointer:none",
                     "--metrics.no-enable-wandb",
                 ],
             ],
@@ -237,8 +237,8 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 1024",
                     "--generator.sampling.max_tokens 128",
-                    "--trainer.checkpoint.no-enable",  # random-init weights
-                    "--generator.checkpoint.no-enable",
+                    "trainer.checkpointer:none",  # random-init weights
+                    "generator.checkpointer:none",
                     "--metrics.no-enable-wandb",
                 ],
             ],

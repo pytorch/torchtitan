@@ -6,6 +6,8 @@
 
 """Validation across configuration components."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from torchtitan.models.common.attention import BaseAttention
@@ -26,13 +28,13 @@ __all__ = ["validate_context_parallel", "validate_model_training_config"]
 
 
 def validate_model_training_config(
-    model: "Module.Config",
+    model: Module.Config,
     *,
-    parallelism: "ParallelismConfig",
-    training: "TrainingConfig",
-    debug: "DebugConfig",
-    activation_checkpoint: "ActivationCheckpointingConfig",
-    compile_config: "CompileConfig",
+    parallelism: ParallelismConfig,
+    training: TrainingConfig,
+    debug: DebugConfig,
+    activation_checkpoint: ActivationCheckpointingConfig,
+    compile_config: CompileConfig | None,
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
@@ -88,12 +90,12 @@ def validate_model_training_config(
         )
 
     if isinstance(activation_checkpoint, MemoryBudgetAC.Config) and not (
-        compile_config.enable and "model" in compile_config.components
+        compile_config is not None and "model" in compile_config.components
     ):
         raise ValueError(
             "Memory budget activation checkpointing requires the model to be "
-            "compiled: set --compile.enable and include 'model' in "
-            "--compile.components."
+            "compiled: configure CompileConfig and include 'model' in "
+            "compile.components."
         )
 
     validate_context_parallel(model, parallelism)

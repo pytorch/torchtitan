@@ -45,6 +45,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         )
         engine.ft_manager = config.fault_tolerance.build()
         engine.gc_handler = None
+        engine.device_memory_monitor = SimpleNamespace()
 
     class ModelBuildReachedError(Exception):
         """Stop FT initialization at the model-build boundary."""
@@ -58,7 +59,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     # Bypass hardware/data setup, but keep config updates and FFN building real.
     monkeypatch.setattr(
         ft.FaultTolerantTrainingEngine,
-        "initialize_distributed_runtime",
+        "_initialize_distributed_runtime",
         initialize_distributed_runtime,
     )
     monkeypatch.setattr(
@@ -94,7 +95,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         ),
         ft_manager=Mock(loss_sync_pg=Mock(size=lambda: 2), group_size=4),
         lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])]),
-        step=1,
+        num_completed_steps=1,
         ntokens_seen=4,
         prepare_step=Mock(return_value=torch.tensor(4)),
         forward_backward_microbatch=Mock(return_value=torch.tensor(2.0)),
@@ -126,8 +127,8 @@ def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None
     engine.model_parts = [object()]
     engine.ft_manager = SimpleNamespace(maybe_set_all_reduce_hook=MagicMock())
 
-    with patch.object(TrainingEngine, "initialize_model") as initialize_model:
-        ft.FaultTolerantTrainingEngine.initialize_model(
+    with patch.object(TrainingEngine, "_initialize_model") as initialize_model:
+        ft.FaultTolerantTrainingEngine._initialize_model(
             engine,
             SimpleNamespace(),
             compile_config=SimpleNamespace(),

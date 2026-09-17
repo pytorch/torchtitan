@@ -264,7 +264,7 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
         ctx = _PipelineContext(schedule, arg_mbs, kwarg_mbs, None, [])
         provider = GraphTrainerStageGraphProvider(
             loss_fn=lambda pred, target: pred.sum(),
-            compile_config=GraphTrainerCompileConfig(enable=False),
+            compile_config=GraphTrainerCompileConfig(mode=None),
             model_config=None,
             parallelism=None,
         )
@@ -433,7 +433,7 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
     def test_graph_pp_warns_when_cuda_graph_pass_is_enabled(self) -> None:
         provider = GraphTrainerStageGraphProvider(
             loss_fn=lambda pred, target: (pred.sum(), {}),
-            compile_config=GraphTrainerCompileConfig(enable=True, enable_passes=True),
+            compile_config=GraphTrainerCompileConfig(enable_passes=True),
             model_config=None,
             parallelism=None,
         )
@@ -479,7 +479,7 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
         gm = torch.fx.symbolic_trace(lambda x: x + 1)
         for node in gm.graph.find_nodes(op="placeholder"):
             node.meta["val"] = torch.randn(2)
-        compile_config = GraphTrainerCompileConfig(enable=True)
+        compile_config = GraphTrainerCompileConfig()
 
         def boxed_apply_graph_passes(gm, example_inputs, passes, compile_config):
             return ensure_boxed_graph_module(gm)
@@ -524,7 +524,6 @@ class GraphPipelineRuntimeTraceTest(unittest.TestCase):
 
     def test_full_inductor_overlap_builds_multiplexed_graph(self) -> None:
         full_compile = GraphTrainerCompileConfig(
-            enable=True,
             enable_passes=True,
             inductor_compilation="full",
         )

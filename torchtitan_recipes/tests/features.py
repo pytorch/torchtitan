@@ -16,6 +16,7 @@ import torch
 import torch.distributed as dist
 from renderers import Message, Qwen3RendererConfig
 from torch.distributed.tensor import DTensor
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     FirstFitPackingConfig,
     GrainDataLoader,
@@ -23,6 +24,8 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.renderer import from_renderers
+from torchtitan.components.validate import Validator
+from torchtitan.config import CompileConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -175,7 +178,7 @@ def llama3_debugmodel_default() -> Trainer.Config:
 def llama3_debugmodel_compile() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
-    config.compile.enable = True
+    config.compile = CompileConfig()
     return config
 
 
@@ -221,7 +224,7 @@ def llama3_debugmodel_tp2_asynctp_compile_spmd_types() -> Trainer.Config:
 def llama3_debugmodel_full_checkpoint_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.checkpoint.enable = True
+    config.checkpointer = CheckpointManager.Config()
     return config
 
 
@@ -233,9 +236,9 @@ def llama3_debugmodel_full_checkpoint_load() -> Trainer.Config:
 
 def llama3_debugmodel_hf_checkpoint_save() -> Trainer.Config:
     config = llama3_debugmodel_full_checkpoint_save()
-    config.checkpoint.folder = "hf_checkpoint"
-    config.checkpoint.last_save_model_only = True
-    config.checkpoint.last_save_in_hf = True
+    config.checkpointer.folder = "hf_checkpoint"
+    config.checkpointer.last_save_model_only = True
+    config.checkpointer.last_save_in_hf = True
     return config
 
 
@@ -252,19 +255,19 @@ def llama3_debugmodel_hf_checkpoint_load() -> Trainer.Config:
             "artifacts-to-be-uploaded/model_only_hf_checkpoint",
         ),
     )
-    config.checkpoint.initial_load_path = os.path.join(
+    config.checkpointer.initial_load_path = os.path.join(
         test_output_dir,
         "hf_checkpoint/step-10/",
     )
-    config.checkpoint.initial_load_model_only = True
-    config.checkpoint.initial_load_in_hf = True
+    config.checkpointer.initial_load_model_only = True
+    config.checkpointer.initial_load_in_hf = True
     return config
 
 
 def llama3_debugmodel_last_save_model_only_bf16() -> Trainer.Config:
     config = llama3_debugmodel_full_checkpoint_save()
-    config.checkpoint.last_save_model_only = True
-    config.checkpoint.export_dtype = "bfloat16"
+    config.checkpointer.last_save_model_only = True
+    config.checkpointer.export_dtype = "bfloat16"
     return config
 
 
@@ -316,7 +319,7 @@ def llama3_debugmodel_tp2_pp2_gpipe() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
-    config.checkpoint.enable = True
+    config.checkpointer = CheckpointManager.Config()
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.data_parallel_shard_degree = 2
@@ -340,7 +343,7 @@ def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.compile.enable = True
+    config.compile = CompileConfig()
     config.training.disable_cuda_graphs = True
     return config
 
@@ -509,7 +512,7 @@ def llama3_debugmodel_fsdp_reshard_always() -> Trainer.Config:
 def llama3_debugmodel_optional_checkpoint_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.checkpoint.enable = True
+    config.checkpointer = CheckpointManager.Config()
     return config
 
 
@@ -520,7 +523,11 @@ def llama3_debugmodel_optional_checkpoint_load_tp2() -> Trainer.Config:
     mismatched dp degree.
     """
     config = llama3_debugmodel_optional_checkpoint_save()
-    config.checkpoint.exclude_from_loading = ["lr_scheduler", "dataloader", "optimizer"]
+    config.checkpointer.exclude_from_loading = [
+        "lr_scheduler",
+        "dataloader",
+        "optimizer",
+    ]
     config.parallelism.tensor_parallel_degree = 2
     config.training.steps = 20
     return config
@@ -538,7 +545,7 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
 def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
-    config.validator.enable = True
+    config.validator = Validator.Config()
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
@@ -619,7 +626,7 @@ def llama3_debugmodel_sft_multiturn() -> Trainer.Config:
 def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.checkpoint.enable = True
+    config.checkpointer = CheckpointManager.Config()
     config.create_seed_checkpoint = True
     config.training.disable_cuda_graphs = True
     return config

@@ -34,6 +34,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.examples.alphabet_sort import config_registry
+from torchtitan.rl.generator import get_vllm_compilation_config
 from torchtitan.rl.model.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -90,7 +91,7 @@ def generate() -> None:
     # FULL_AND_PIECEWISE reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time (the
     # @eager_break_during_capture decorator in rl/model/attention.py).
     if (
-        gen_config.cuda_graph.enable
+        gen_config.cuda_graph is not None
         and gen_config.cuda_graph.mode == "FULL_AND_PIECEWISE"
     ):
         os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
@@ -100,8 +101,7 @@ def generate() -> None:
         model_spec,
         parallelism=gen_config.parallelism,
         compile_config=config.compile,
-        checkpoint_config=CheckpointManager.Config(
-            enable=True,
+        checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
@@ -145,7 +145,7 @@ def generate() -> None:
         distributed_executor_backend=("external_launcher"),
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=not gen_config.cuda_graph.enable,
+        enforce_eager=gen_config.cuda_graph is None,
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION
@@ -162,7 +162,8 @@ def generate() -> None:
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
-    vllm_compilation_config = gen_config.cuda_graph.get_vllm_compilation_config(
+    vllm_compilation_config = get_vllm_compilation_config(
+        gen_config.cuda_graph,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,

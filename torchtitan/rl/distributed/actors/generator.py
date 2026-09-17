@@ -23,7 +23,7 @@ class _GeneratorActorEndpoints:
         *,
         model_spec: ModelSpec,
         model_path: str,
-        compile_config: CompileConfig,
+        compile_config: CompileConfig | None,
         max_num_seqs: int,
         output_dir: str,
     ) -> None:

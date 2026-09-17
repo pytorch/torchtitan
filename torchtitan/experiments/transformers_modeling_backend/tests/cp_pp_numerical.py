@@ -129,17 +129,18 @@ def _run_case(work: str) -> None:
         _torchrun(
             1,
             config,
-            "--checkpoint.enable --create-seed-checkpoint "
+            "--create-seed-checkpoint "
             "--parallelism.data_parallel_shard_degree 1 "
             "--parallelism.tensor_parallel_degree 1 "
             "--parallelism.pipeline_parallel_degree 1 "
             "--parallelism.context_parallel_degree 1 "
             "--parallelism.expert_parallel_degree 1 "
-            f"--dump_folder {seed}",
+            f"--dump_folder {seed} "
+            "checkpointer:config --checkpointer.last_save_model_only",
         ),
     )
     load = (
-        f"--checkpoint.enable --checkpoint.initial_load_path {seed}/checkpoint/step-0"
+        f"checkpointer:config --checkpointer.initial_load_path {seed}/checkpoint/step-0"
     )
     bal = f"--parallelism.context_parallel_load_balancer {balancer}"
 
@@ -148,8 +149,8 @@ def _run_case(work: str) -> None:
         _torchrun(
             2,
             config,
-            f"{_COMMON} {load} {bal} --parallelism.data_parallel_shard_degree 1 "
-            f"--dump_folder {os.path.join(work, 'out_co')}",
+            f"{_COMMON} {bal} --parallelism.data_parallel_shard_degree 1 "
+            f"--dump_folder {os.path.join(work, 'out_co')} {load}",
         ),
         env={"HF_BACKEND_LOGIT_DUMP": co},
     )
@@ -159,11 +160,11 @@ def _run_case(work: str) -> None:
         _torchrun(
             4,
             config,
-            f"{_COMMON} {load} {bal} --parallelism.pipeline_parallel_degree 2 "
+            f"{_COMMON} {bal} --parallelism.pipeline_parallel_degree 2 "
             f"--parallelism.num_pp_microbatches 4 "
             f"--training.num_tokens_per_microbatch_per_dp_rank 256 "
             f"--parallelism.pipeline_parallel_schedule 1F1B "
-            f"--dump_folder {os.path.join(work, 'out_pp')}",
+            f"--dump_folder {os.path.join(work, 'out_pp')} {load}",
         ),
         env={"HF_BACKEND_LOGIT_DUMP": pp},
     )

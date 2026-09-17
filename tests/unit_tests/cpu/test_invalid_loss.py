@@ -45,7 +45,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config.training.disable_cuda_graphs = True
         trainer.sdc_replayer = None
         trainer.device = torch.device("cpu")
-        trainer.step = 1
+        trainer.num_completed_steps = 1
         trainer.ntokens_seen = 0
         trainer._num_optimizer_steps_since_cuda_graph_init = 0
         trainer.gc_handler = MagicMock()
@@ -84,7 +84,7 @@ class TestInvalidLoss(unittest.TestCase):
                 num_valid_tokens=2,
             )
 
-    def _run_step(self, loss_value: float, should_log: bool) -> None:
+    def _run_step(self, loss_value: float, should_log: bool) -> Trainer:
         trainer = self._make_trainer(loss_value, should_log)
         # sl.* are logging side effects; clip_grad_norm_ needs real params.
         with patch("torchtitan.training_engine.sl", MagicMock()), patch(
@@ -92,19 +92,23 @@ class TestInvalidLoss(unittest.TestCase):
             return_value=torch.tensor(1.0),
         ):
             trainer.train_step(self._data_iterator())
+        return trainer
 
     def test_nan_loss_raises_on_log_step(self):
         with self.assertRaises(RuntimeError) as ctx:
             self._run_step(float("nan"), should_log=True)
         self.assertIn("not finite", str(ctx.exception))
+        self.assertIn("step 2", str(ctx.exception))
 
     def test_inf_loss_raises_on_log_step(self):
         with self.assertRaises(RuntimeError) as ctx:
             self._run_step(float("inf"), should_log=True)
         self.assertIn("not finite", str(ctx.exception))
+        self.assertIn("step 2", str(ctx.exception))
 
     def test_finite_loss_does_not_raise(self):
-        self._run_step(1.5, should_log=True)
+        trainer = self._run_step(1.5, should_log=True)
+        self.assertEqual(trainer.engine.num_completed_steps, 2)
 
     def test_nan_loss_raises_when_not_logging(self):
         with self.assertRaises(RuntimeError) as ctx:

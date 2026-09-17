@@ -672,7 +672,7 @@ def _compile_graph_pp_module(
     graph_name: str,
 ) -> fx.GraphModule:
     """Compile one extracted GraphPP callable with GraphTrainer Inductor passes."""
-    if not compile_config.enable or not compile_config.enable_passes:
+    if compile_config is None or not compile_config.enable_passes:
         return ensure_boxed_graph_module(gm)
 
     example_inputs = example_inputs_from_placeholders(gm)
@@ -1298,7 +1298,7 @@ class GraphTrainerStageGraphProvider:
     def _warn_if_cuda_graph_pass_requested(self) -> None:
         if self._warned_cuda_graph:
             return
-        if not self.compile_config.enable or not self.compile_config.enable_passes:
+        if self.compile_config.mode is None or not self.compile_config.enable_passes:
             return
         if "cuda_graph_pass" in self.compile_config.disable_passes:
             return

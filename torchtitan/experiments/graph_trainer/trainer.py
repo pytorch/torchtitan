@@ -150,13 +150,13 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
+        validate_memory_policy_config(config.compile)
         super().__init__(
             config,
             model_config=model_config,
             max_num_documents=max_num_documents,
             output_dir=output_dir,
         )
-        validate_memory_policy_config(self.config.compile)
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
         self._graph_runner: GraphRunner | None = None
@@ -164,8 +164,8 @@ class GraphTrainingEngine(TrainingEngine):
         self._graph_gradient_state: GraphGradientState | None = None
         self._pinned_pool_ctx = None
 
-    def initialize_forward_backward(self) -> None:
-        super().initialize_forward_backward()
+    def _initialize_forward_backward(self) -> None:
+        super()._initialize_forward_backward()
         _maybe_apply_numa_binding(self.device.index, self.device.type)
         self._validate_inplace_graph_gradient_accumulation_config()
         if self.config.compile.enable_inplace_graph_gradient_accumulation:
@@ -186,20 +186,16 @@ class GraphTrainingEngine(TrainingEngine):
         *,
         microbatch_group: list[TrainingMicrobatch],
         global_valid_tokens: torch.Tensor,
-        loss_kwargs: dict[str, Any] | None = None,
         accumulation_index: int = 0,
-        num_accumulation_steps: int = 1,
     ) -> torch.Tensor:
         if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
             return super().forward_backward_microbatch(
                 microbatch_group=microbatch_group,
                 global_valid_tokens=global_valid_tokens,
-                loss_kwargs=loss_kwargs,
                 accumulation_index=accumulation_index,
-                num_accumulation_steps=num_accumulation_steps,
             )
 
-        if loss_kwargs:
+        if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
             raise ValueError(
                 "GraphTrainingEngine does not support per-microbatch loss arguments."
             )
@@ -210,9 +206,9 @@ class GraphTrainingEngine(TrainingEngine):
             self.loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
 
         if self.parallel_dims.dp_replicate_enabled and (
-            num_accumulation_steps == 1 or self.config.training.disable_cuda_graphs
+            self.num_accumulation_steps == 1 or self.config.training.disable_cuda_graphs
         ):
-            is_last = accumulation_index == num_accumulation_steps - 1
+            is_last = accumulation_index == self.num_accumulation_steps - 1
             for part in self.model_parts:
                 part.set_requires_all_reduce(is_last)  # pyrefly: ignore[not-callable]
 
@@ -248,7 +244,7 @@ class GraphTrainingEngine(TrainingEngine):
 
         if self.sdc_replayer is not None and accumulation_index == 0:
             loss = self.sdc_replayer.run_fwd_bwd(
-                compute_forward_backward, step=self.step
+                compute_forward_backward, step=self.num_completed_steps + 1
             )
         else:
             loss = compute_forward_backward()

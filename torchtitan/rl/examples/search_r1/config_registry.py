@@ -98,7 +98,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_samples_per_prompt=8,
             validation=ValidationConfig(num_samples=500),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -116,8 +116,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=1,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,  # first run loads HF; restarts resume from DCP
                 # Mid-run checkpoints so a preempted run resumes; full last save
                 # (not model-only) keeps it resumable; keep_latest_k caps disk.
@@ -141,8 +140,8 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            cuda_graph=VLLMCudaGraphConfig(enable=True),
-            checkpoint=CheckpointManager.Config(enable=False),
+            cuda_graph=VLLMCudaGraphConfig(),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=1.0,
@@ -233,7 +232,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_samples_per_prompt=8,  # TODO: TBD
             validation=ValidationConfig(num_samples=500),
         ),
-        compile=CompileConfig(enable=False),
+        compile=None,
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -253,8 +252,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=1,
                 expert_parallel_degree=8,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=50,
                 last_save_model_only=False,
@@ -274,8 +272,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            cuda_graph=VLLMCudaGraphConfig(enable=True, mode="FULL"),
-            checkpoint=CheckpointManager.Config(enable=False),
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
+            checkpointer=None,
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
             # Generator-only: DeepEP CUDA graph EXPAND dispatch on top of the perf overrides.
             override=OverrideConfig(
@@ -331,7 +329,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             num_samples_per_prompt=8,
             validation=ValidationConfig(num_samples=500),
         ),
-        compile=CompileConfig(enable=False),
+        compile=None,
         rollouter=_search_r1_rollouter_config(),
         renderer=MuseGlimmerRendererConfig(),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -350,8 +348,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 data_parallel_shard_degree=3,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,  # first run loads HF; restarts resume from DCP
                 interval=50,
                 last_save_model_only=False,
@@ -372,8 +369,8 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,  # <= 2 KV heads
             ),
-            cuda_graph=VLLMCudaGraphConfig(enable=False),
-            checkpoint=CheckpointManager.Config(enable=False),
+            cuda_graph=None,
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=1.0,

@@ -196,8 +196,8 @@ def register_to_vllm(
     model_spec: ModelSpec,
     *,
     parallelism: InferenceParallelismConfig,
-    compile_config: CompileConfig,
-    checkpoint_config: CheckpointManager.Config,
+    compile_config: CompileConfig | None,
+    checkpointer_config: CheckpointManager.Config | None,
     override: OverrideConfig,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
@@ -208,7 +208,7 @@ def register_to_vllm(
       1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
-         ``model_spec``/``parallelism``/``compile_config``/``checkpoint_config``
+         ``model_spec``/``parallelism``/``compile_config``/``checkpointer_config``
          and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
@@ -228,10 +228,9 @@ def register_to_vllm(
             layout matches.
         compile_config: torch.compile config applied per-layer by the
             wrapper's parallelize step.
-        checkpoint_config: CheckpointManager config controlling initial
-            weight loading. Set ``enable=True`` with ``initial_load_in_hf``
-            and ``initial_load_path`` for standalone inference. Set
-            ``enable=False`` to skip loading (RL loop, weights from TorchStore).
+        checkpointer_config: Optional CheckpointManager configuration for
+            initial weight loading. Pass ``None`` for the RL loop, where
+            weights arrive from TorchStore.
         override: Config overrides applied to the generator's model spec after
             ``update_from_config`` and before build (empty ``OverrideConfig`` for
             no overrides).
@@ -257,7 +256,7 @@ def register_to_vllm(
                 model_spec=model_spec,
                 parallelism=parallelism,
                 compile_config=compile_config,
-                checkpoint_config=checkpoint_config,
+                checkpointer_config=checkpointer_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
                 override=override,

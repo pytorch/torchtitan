@@ -31,7 +31,7 @@ from . import model_registry
 
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -56,7 +56,7 @@ def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
         llama3_debugmodel_dist_gemm(),
         partial(model_registry, tp_gemm_backend="dist_gemm"),
     )
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -70,7 +70,7 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
         ],
     )
     config = to_graph_trainer_config(base, model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -91,7 +91,7 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
         attn_backend="sdpa",
     )
     config = to_graph_trainer_config(base, model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -115,13 +115,13 @@ def graph_trainer_llama3_debugmodel_sdpa_eager() -> GraphTrainer.Config:
     fill this role — flex + AutoParallel is unsupported (BlockMask flattening).
     """
     config = graph_trainer_llama3_debugmodel_sdpa()
-    config.compile = GraphTrainerCompileConfig(enable=False, mode=None)
+    config.compile = GraphTrainerCompileConfig(mode=None)
     return config
 
 
 def graph_trainer_llama3_8b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_8b(seq_len=8192), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -145,17 +145,17 @@ def graph_trainer_llama3_8b_mxfp8() -> GraphTrainer.Config:
         ],
     )
     config = to_graph_trainer_config(base, model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
 def graph_trainer_llama3_70b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_70b(seq_len=8192), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
 def graph_trainer_llama3_405b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_405b(seq_len=8192), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config

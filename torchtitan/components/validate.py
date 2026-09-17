@@ -75,9 +75,6 @@ class Validator(BaseValidator):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseValidator.Config):
-        enable: bool = False
-        """Enable validation to default run validation after each training loop"""
-
         steps: int = -1
         """
         Number of validation steps. -1 consumes the finite dataset and therefore

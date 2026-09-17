@@ -16,8 +16,7 @@ To register TorchTitan models with vLLM:
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
-        checkpoint_config=CheckpointManager.Config(
-            enable=True,
+        checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_path="/path/to/hf/checkpoint",
         ),
@@ -28,7 +27,7 @@ To register TorchTitan models with vLLM:
         model_spec,
         parallelism=parallelism_config,
         compile_config=compile_config,
-        checkpoint_config=CheckpointManager.Config(enable=False),
+        checkpointer_config=None,
     )
 """
 

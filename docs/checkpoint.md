@@ -7,16 +7,16 @@ You may want to enable checkpointing in `torchtitan` for better fault tolerance 
 1. ENABLE CHECKPOINTING
 In your config_registry function, configure the checkpoint settings:
 ```python
-checkpoint=CheckpointManager.Config(
+checkpointer=CheckpointManager.Config(
     interval=500,
 ),
 ```
-Or via CLI: `--checkpoint.interval 500`
+Or via CLI: `checkpointer:config --checkpointer.interval 500`
 
 2. SAVE MODEL ONLY
 By setting `last_save_model_only` to `True`, the checkpoint will only contain the model and exclude the optimizer state and extra train states, resulting in a smaller checkpoint size.
 ```python
-checkpoint=CheckpointManager.Config(
+checkpointer=CheckpointManager.Config(
     interval=500,
     last_save_model_only=True,
 ),
@@ -25,7 +25,7 @@ checkpoint=CheckpointManager.Config(
 3. CHOOSE DESIRED EXPORT PRECISION
 The default model states are in `float32`. You can choose to export the checkpoint in a lower precision format such as `bfloat16`.
 ```python
-checkpoint=CheckpointManager.Config(
+checkpointer=CheckpointManager.Config(
     interval=500,
     last_save_model_only=True,
     export_dtype="bfloat16",
@@ -35,15 +35,15 @@ checkpoint=CheckpointManager.Config(
 4. EXCLUDING SPECIFIC KEYS FROM CHECKPOINT LOADING
 In some cases, you may want to partially load from a previous-trained checkpoint and modify certain settings, such as the number of GPUs or the current step. To achieve this, you can use the `exclude_from_loading` parameter to specify which keys should be excluded from loading.
 ```python
-checkpoint=CheckpointManager.Config(
+checkpointer=CheckpointManager.Config(
     exclude_from_loading=["dataloader", "lr_scheduler"],
 ),
 ```
-When used in command line: `--checkpoint.exclude_from_loading dataloader,lr_scheduler`.
+When used in command line: `checkpointer:config --checkpointer.exclude_from_loading dataloader,lr_scheduler`.
 
 5. EXAMPLE CHECKPOINT CONFIGURATION
 ```python
-checkpoint=CheckpointManager.Config(
+checkpointer=CheckpointManager.Config(
     interval=10,
     load_step=5,
     last_save_model_only=True,
@@ -69,7 +69,7 @@ NGPU=1 ./run_train.sh --module <module_name> --config <config_name> --create-see
 ### HuggingFace
 `torchtitan` offers two ways to work with Hugging Face models: either by directly saving and loading a Hugging Face checkpoint during training, or by using an example conversion script to directly reformat the model weights on cpu.
 
-1. You can directly save huggingface model weights during training by using the `--checkpoint.last_save_in_hf` and `--checkpoint.last_save_model_only` options together. To directly load a `torchtitan` training session from a huggingface safetensors file, enable `--checkpoint.initial_load_in_hf`, and set either `--hf_assets_path` or `--checkpoint.initial_load_path` to the directory containing the huggingface checkpoint. `--checkpoint.initial_load_path` overrides `--hf_assets_path` if both are set. If `checkpoint.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
+1. You can directly save huggingface model weights during training by selecting `checkpointer:config` and using the `--checkpointer.last_save_in_hf` and `--checkpointer.last_save_model_only` options together. To directly load a `torchtitan` training session from a huggingface safetensors file, enable `--checkpointer.initial_load_in_hf`, and set either `--hf_assets_path` or `--checkpointer.initial_load_path` to the directory containing the huggingface checkpointer. `--checkpointer.initial_load_path` overrides `--hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
 
 2. To directly reformat the weights without the need to run a training loop, run the corresponding conversion script. The naming scheme is `torchtitan`-centric, e.g. convert_from_hf means convert hf->tt.
 
@@ -86,7 +86,7 @@ This guide will walk you through the steps required to convert a checkpoint from
 
 1. CHECKPOINT CONFIGURATION
 ```python
-checkpoint=CheckpointManager.Config(
+checkpointer=CheckpointManager.Config(
     interval=10,
     last_save_model_only=True,
     export_dtype="bfloat16",
@@ -100,7 +100,7 @@ Once the above have been set, the final checkpoint at the end of the training st
 Finally, once you have obtained the last checkpoint, you can use the following command to convert the sharded checkpoints to a single .pt file.
 
 ```bash
-python -m torch.distributed.checkpoint.format_utils dcp_to_torch torchtitan/outputs/checkpoint/step-1000 checkpoint.pt
+python -m torch.distributed.checkpointer.format_utils dcp_to_torch torchtitan/outputs/checkpoint/step-1000 checkpointer.pt
 ```
 
 

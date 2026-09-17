@@ -95,13 +95,12 @@ def build_minimal_trainer(
     trainer.dataloader = SimpleNamespace(max_num_documents=None)
     engine.max_num_documents = None
     engine.ntokens_seen = 0
-    engine.step = 0
+    engine.num_completed_steps = 0
     engine.sdc_replayer = None
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
             compile=GraphTrainerCompileConfig(
-                enable=True,
                 mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
                 enable_inplace_graph_gradient_accumulation=(

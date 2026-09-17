@@ -113,7 +113,7 @@ def build_cmd(
     if options:
         cmd += f" {options}"
     if checkpoint_enable:
-        cmd += f" --checkpoint.enable --checkpoint.interval={checkpoint_interval}"
+        cmd += f" checkpointer:config --checkpointer.interval={checkpoint_interval}"
     return cmd
 
 

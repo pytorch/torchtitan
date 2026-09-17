@@ -108,7 +108,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         generator_router=InterGeneratorRouter.Config(
@@ -132,8 +132,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
                 last_save_model_only=False,
@@ -151,7 +150,7 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -175,7 +174,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -195,8 +194,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
                 last_save_model_only=False,
@@ -214,7 +212,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -282,7 +280,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(GptOssRendererConfig(reasoning_effort="low")),
         generator_router=InterGeneratorRouter.Config(
@@ -306,8 +304,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
                 last_save_model_only=False,
@@ -325,7 +322,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -354,7 +351,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
                 drop_zero_std_reward_groups=False,
             ),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_alphabet_sort_rollouter_config(),
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
@@ -376,7 +373,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
@@ -390,7 +387,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -429,7 +426,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 drop_zero_std_reward_groups=False,
             ),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_alphabet_sort_rollouter_config(),
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
@@ -454,7 +451,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             debug=batch_invariant_config,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
@@ -472,7 +469,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 # matmuls and attention, which batch-invariant ops do not undo.
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -499,7 +496,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -518,8 +515,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
                 last_save_model_only=False,
@@ -537,7 +533,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -561,7 +557,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -581,8 +577,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=8,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
                 last_save_model_only=False,
@@ -600,7 +595,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=8,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -636,7 +631,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
-        compile=CompileConfig(enable=False),
+        compile=None,
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -657,11 +652,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
                 data_parallel_replicate_degree=1,
                 expert_parallel_degree=4,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=False,
-                interval=10,
-                last_save_model_only=False,
-            ),
+            checkpointer=None,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
@@ -673,13 +664,13 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             # Disable torch.compile + CUDA graph capture: the EP all-to-all
             # path issues an unpinned D2H copy of split sizes that the
             # piecewise/full graph capture rejects.
-            cuda_graph=VLLMCudaGraphConfig(enable=False),
+            cuda_graph=None,
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
                 expert_parallel_degree=4,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=0.95,
@@ -736,9 +727,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
             ),
         ]
     )
-    config.generator.cuda_graph = VLLMCudaGraphConfig(
-        enable=True, mode="FULL_AND_PIECEWISE"
-    )
+    config.generator.cuda_graph = VLLMCudaGraphConfig(mode="FULL_AND_PIECEWISE")
     # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
     # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
     config.generator.max_num_batched_tokens = 2048
@@ -786,7 +775,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         ),
         # MoE EP all-to-all path issues unpinned D2H copies that block
         # torch.compile and CUDA graph capture; disable both.
-        compile=CompileConfig(enable=False),
+        compile=None,
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -810,11 +799,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
                 expert_parallel_degree=4,
                 enable_sequence_parallel=False,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=False,
-                interval=10,
-                last_save_model_only=False,
-            ),
+            checkpointer=None,
             debug=_BATCH_INVARIANT_DEBUG,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
@@ -825,13 +810,13 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(enable=False),
+            cuda_graph=None,
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
                 expert_parallel_degree=4,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=0.95,
@@ -861,7 +846,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        compile=CompileConfig(enable=False),
+        compile=None,
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -883,8 +868,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
                 tensor_parallel_degree=2,
                 expert_parallel_degree=4,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
                 last_save_model_only=False,
@@ -898,13 +882,13 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(enable=False),
+            cuda_graph=None,
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=2,
                 tensor_parallel_degree=2,
                 expert_parallel_degree=4,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -979,7 +963,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        compile=CompileConfig(enable=True, backend="aot_eager"),
+        compile=CompileConfig(backend="aot_eager"),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -999,8 +983,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 tensor_parallel_degree=2,
                 enable_sequence_parallel=False,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
                 last_save_model_only=False,
@@ -1019,7 +1002,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -1065,7 +1048,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        compile=CompileConfig(enable=False),
+        compile=None,
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -1085,8 +1068,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(
-                enable=True,
+            checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=10,
                 last_save_model_only=False,
@@ -1101,12 +1083,12 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
             # GDN decode supports full capture; prefill breaks into eager pieces.
-            cuda_graph=VLLMCudaGraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL_AND_PIECEWISE"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,
@@ -1159,7 +1141,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
                 drop_zero_std_reward_groups=False,
             ),
         ),
-        compile=CompileConfig(enable=False),
+        compile=None,
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -1179,7 +1161,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),  # random-init weights
+            checkpointer=None,  # random-init weights
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
@@ -1189,12 +1171,12 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(enable=True, mode="FULL_AND_PIECEWISE"),
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL_AND_PIECEWISE"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
             ),
-            checkpoint=CheckpointManager.Config(enable=False),
+            checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
                 top_p=0.95,

@@ -3929,7 +3929,6 @@ class TestChunkPasses(TestCase):
                 maybe_apply_ep_overlap_eager_chunking(
                     model,
                     GraphTrainerCompileConfig(
-                        enable=True,
                         ep_overlap=EpOverlapConfig(
                             enabled=True,
                             strategy="eager",
@@ -4233,7 +4232,6 @@ class TestChunkPasses(TestCase):
                 pipeline_parallel_degree=1,
             ),
             compile=GraphTrainerCompileConfig(
-                enable=True,
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     chunk_dim="batch",
@@ -5534,7 +5532,6 @@ class TestChunkPasses(TestCase):
         maybe_apply_ep_overlap_eager_chunking(
             model,
             GraphTrainerCompileConfig(
-                enable=True,
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     strategy="eager",
@@ -7735,7 +7732,6 @@ class TestEagerChunking(TestCase):
         module_fqn: str = "layers.*",
     ) -> GraphTrainerCompileConfig:
         return GraphTrainerCompileConfig(
-            enable=True,
             ep_overlap=EpOverlapConfig(
                 enabled=True,
                 strategy="eager",
@@ -7781,7 +7777,7 @@ class TestEagerChunking(TestCase):
         model = Model()
         forward = model.layers[0].forward
         config = self._config()
-        config.enable = False
+        config.ep_overlap.enabled = False
 
         maybe_apply_ep_overlap_eager_chunking(model, config)
 

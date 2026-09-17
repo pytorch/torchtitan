@@ -105,7 +105,7 @@ class FluxTrainer(Trainer):
             "dtype": self._dtype,
         }
 
-        if config.validator.enable:
+        if config.validator is not None:
             # pyrefly: ignore [missing-attribute]
             self.validator.flux_init(
                 device=self.engine.device,

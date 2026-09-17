@@ -13,7 +13,9 @@ from unittest import mock
 
 import pytest
 import tyro
+from torchtitan.components.validate import Validator
 from torchtitan.config import (
+    CompileConfig,
     ConfigManager,
     DebugConfig,
     ParallelismConfig,
@@ -232,8 +234,7 @@ class TestConfigManager(unittest.TestCase):
         )
         config.training.disable_cuda_graphs = False
         config.parallelism.pipeline_parallel_schedule = "1F1B"
-        config.validator.enable = True
-
+        config.validator = Validator.Config()
         with pytest.raises(ValueError, match="do not support validation"):
             config.__post_init__()
 
@@ -395,7 +396,7 @@ class TestConfigManager(unittest.TestCase):
         )
         config.sdc_replayer = SDCReplayer.Config()
         config.parallelism.fsdp_symm_mem_scope = "all"
-        config.compile.enable_async_tensor_parallel = True
+        config.compile = CompileConfig(enable_async_tensor_parallel=True)
         configs = {
             "symm_mem_async_tp": config,
             "distributed_gemm": llama3_debugmodel_dist_gemm(seq_len=2048),
@@ -456,7 +457,7 @@ class TestConfigManager(unittest.TestCase):
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
-        assert config.checkpoint.exclude_from_loading == []
+        assert config.checkpointer is None
 
         config_manager = ConfigManager()
         config = config_manager.parse_args(
@@ -465,11 +466,12 @@ class TestConfigManager(unittest.TestCase):
                 "llama3",
                 "--config",
                 "llama3_debugmodel",
-                "--checkpoint.exclude_from_loading",
+                "checkpointer:config",
+                "--checkpointer.exclude_from_loading",
                 "optimizer,lr_scheduler",
             ]
         )
-        assert config.checkpoint.exclude_from_loading == [
+        assert config.checkpointer.exclude_from_loading == [
             "optimizer",
             "lr_scheduler",
         ]
@@ -483,13 +485,14 @@ class TestConfigManager(unittest.TestCase):
                 "llama3",
                 "--config",
                 "llama3_debugmodel",
-                "--checkpoint.async_mode",
+                "checkpointer:config",
+                "--checkpointer.async_mode",
                 "async",
             ]
         )
 
-        assert isinstance(config.checkpoint, CheckpointManager.Config)
-        assert config.checkpoint.async_mode == "async"
+        assert isinstance(config.checkpointer, CheckpointManager.Config)
+        assert config.checkpointer.async_mode == "async"
 
     def test_trainer_config_quantization_default(self):
         from torchtitan.quantization.utils import has_quantization
@@ -503,7 +506,7 @@ class TestConfigManager(unittest.TestCase):
     # TODO: remove this test when we remove the merge functionality
     def test_extend_trainer_config_directly(self):
         """Test that _merge_configs works to extend config types."""
-        from dataclasses import dataclass
+        from dataclasses import dataclass, field
 
         from torchtitan.trainer import Trainer
 
@@ -514,7 +517,7 @@ class TestConfigManager(unittest.TestCase):
 
         @dataclass
         class CustomTrainerConfig:
-            checkpoint: CustomCheckpoint
+            checkpointer: CustomCheckpoint = field(default_factory=CustomCheckpoint)
 
         MergedTrainerConfig = ConfigManager._merge_configs(
             Trainer.Config, CustomTrainerConfig
@@ -527,10 +530,10 @@ class TestConfigManager(unittest.TestCase):
             .model_spec
         )
         merged = MergedTrainerConfig(model_spec=model_spec)
-        assert hasattr(merged, "checkpoint")
-        assert hasattr(merged.checkpoint, "convert_path")
-        assert merged.checkpoint.convert_path == "/custom/path"
-        assert merged.checkpoint.fake_model is True
+        assert hasattr(merged, "checkpointer")
+        assert hasattr(merged.checkpointer, "convert_path")
+        assert merged.checkpointer.convert_path == "/custom/path"
+        assert merged.checkpointer.fake_model is True
         assert hasattr(merged, "model_spec")
 
     def test_flux_config_via_cli(self):

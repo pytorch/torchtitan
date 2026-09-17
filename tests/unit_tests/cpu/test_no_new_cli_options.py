@@ -25,23 +25,22 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "activation_checkpoint.preserve_rng_state",
         "activation_checkpoint.save_regions",
         "activation_checkpoint.visualize_memory_budget_pareto",
-        "checkpoint.async_mode",
+        "checkpointer.async_mode",
         "create_seed_checkpoint",
-        "checkpoint.enable",
-        "checkpoint.enable_first_step_checkpoint",
-        "checkpoint.exclude_from_loading",
-        "checkpoint.export_dtype",
-        "checkpoint.folder",
-        "checkpoint.initial_load_in_hf",
-        "checkpoint.initial_load_in_hf_quantized",
-        "checkpoint.initial_load_model_only",
-        "checkpoint.initial_load_path",
-        "checkpoint.interval",
-        "checkpoint.keep_latest_k",
-        "checkpoint.last_save_in_hf",
-        "checkpoint.last_save_model_only",
-        "checkpoint.load_only",
-        "checkpoint.load_step",
+        "checkpointer.enable_first_step_checkpoint",
+        "checkpointer.exclude_from_loading",
+        "checkpointer.export_dtype",
+        "checkpointer.folder",
+        "checkpointer.initial_load_in_hf",
+        "checkpointer.initial_load_in_hf_quantized",
+        "checkpointer.initial_load_model_only",
+        "checkpointer.initial_load_path",
+        "checkpointer.interval",
+        "checkpointer.keep_latest_k",
+        "checkpointer.last_save_in_hf",
+        "checkpointer.last_save_model_only",
+        "checkpointer.load_only",
+        "checkpointer.load_step",
         "comm.init_timeout_seconds",
         "comm.mode",
         "comm.save_traces_file_prefix",
@@ -50,7 +49,6 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "comm.train_timeout_seconds",
         "compile.backend",
         "compile.components",
-        "compile.enable",
         "compile.enable_async_tensor_parallel",
         "dataloader.build_mrope_positions",
         "dataloader.dataset",
@@ -232,7 +230,6 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "validator.dataloader.video_max_frames",
         "validator.dataloader.video_min_frames",
         "validator.dataloader.weight",
-        "validator.enable",
         "validator.freq",
         "validator.sampling.classifier_free_guidance_scale",
         "validator.sampling.denoising_steps",
@@ -269,7 +266,7 @@ def _cli_options(config, prefix: str = "") -> set[str]:
     options = set()
     # Resolved rather than raw: a module using ``from __future__ import
     # annotations`` stores its field types as strings, which would hide the
-    # Suppress annotation. checkpoint.py is one such module.
+    # Suppress annotation. checkpointer.py is one such module.
     hints = typing.get_type_hints(type(config), include_extras=True)
     for f in dataclasses.fields(config):
         field_type = hints.get(f.name, f.type)

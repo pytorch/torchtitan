@@ -93,7 +93,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
 def test_aux_loss_denominator_uses_global_token_count() -> None:
     trainer = SimpleNamespace(
         device=torch.device("cpu"),
-        step=1,
+        num_completed_steps=0,
         gc_handler=SimpleNamespace(run=MagicMock()),
         optimizers=SimpleNamespace(zero_grad=MagicMock()),
         config=SimpleNamespace(training=SimpleNamespace(disable_cuda_graphs=True)),
@@ -103,9 +103,11 @@ def test_aux_loss_denominator_uses_global_token_count() -> None:
     with patch(
         "torchtitan.training_engine.AuxLoss.set_step_denominator"
     ) as set_denominator:
-        denominator = TrainingEngine.prepare_step(trainer, 17, step=1)
+        denominator = TrainingEngine.prepare_step(trainer, 17, num_accumulation_steps=3)
 
     torch.testing.assert_close(denominator, torch.tensor(17, dtype=torch.int64))
+    trainer.gc_handler.run.assert_called_once_with(1)
+    assert trainer.num_accumulation_steps == 3
     set_denominator.assert_called_once_with(denominator)
 
 
@@ -127,7 +129,7 @@ def test_close_stops_training_engine() -> None:
 def test_policy_version_is_restored_with_training_engine_state() -> None:
     trainer = object.__new__(Trainer)
     engine = object.__new__(TrainingEngine)
-    engine.step = 0
+    engine.num_completed_steps = 0
     engine.ntokens_seen = 0
     engine.sdc_replayer = None
     trainer.engine = engine
@@ -143,7 +145,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         global_valid_tokens = torch.tensor(3)
         engine = SimpleNamespace(
             device=torch.device("cpu"),
-            step=4,
+            num_completed_steps=4,
             ntokens_seen=10,
             prepare_step=MagicMock(return_value=global_valid_tokens),
             sdc_replayer=None,
@@ -156,7 +158,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             mean_value, max_value = next(metric_values)
             mean_metric.fill_(mean_value)
             max_metric.fill_(max_value)
-            engine._last_loss_metrics = {
+            engine.loss_metrics = {
                 "loss/mean": mean_metric,
                 "loss/max": max_metric,
             }
@@ -190,20 +192,25 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
 
         result = await Trainer.forward_backward_steps(trainer, [[batch], [batch]], 3)
 
-        engine.prepare_step.assert_called_once_with(3, step=5)
+        engine.prepare_step.assert_called_once_with(3, num_accumulation_steps=2)
         assert engine.forward_backward_microbatch.call_count == 2
         assert [
             call.kwargs["accumulation_index"]
             for call in engine.forward_backward_microbatch.call_args_list
         ] == [0, 1]
         assert all(
-            call.kwargs["num_accumulation_steps"] == 2
+            "num_accumulation_steps" not in call.kwargs
             for call in engine.forward_backward_microbatch.call_args_list
         )
         assert all(
             call.kwargs["global_valid_tokens"] is global_valid_tokens
             for call in engine.forward_backward_microbatch.call_args_list
         )
+        assert all(
+            "loss_kwargs" not in call.kwargs
+            for call in engine.forward_backward_microbatch.call_args_list
+        )
+        assert trainer._step_num_tokens_per_dp_rank == 2
         assert trainer._reduce_forward_backward_metrics.call_count == 2
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 
@@ -232,20 +239,26 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
                 )
             ),
             parallel_dims=SimpleNamespace(non_data_parallel_size=1),
-            step=4,
+            num_completed_steps=4,
             ntokens_seen=12,
             num_flops_per_token=200,
             has_quantization=False,
+            device_memory_monitor=device_memory_monitor,
             optimizer_step=MagicMock(return_value=torch.tensor(2.0)),
-            complete_step=MagicMock(),
+            save_checkpoint=MagicMock(),
+            step_profiler=MagicMock(),
         )
+        engine.optimizer_step.side_effect = lambda: (
+            setattr(engine, "num_completed_steps", engine.num_completed_steps + 1),
+            torch.tensor(2.0),
+        )[1]
         trainer.engine = engine
-        trainer.device_memory_monitor = device_memory_monitor
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
-        trainer._step_start_ntokens = 2
+        trainer._step_num_tokens_per_dp_rank = 10
 
         with (
+            patch("torchtitan.rl.trainer.time.perf_counter", return_value=2.0),
             patch(
                 "torchtitan.rl.trainer.collect_aux_loss_metrics",
                 return_value={"aux_loss/mean": 0.5},
@@ -257,7 +270,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
                     "tflops": 2.0,
                     "mfu_percent": 50.0,
                 },
-            ),
+            ) as compute_performance,
         ):
             result = await Trainer.optimizer_step(trainer)
 
@@ -279,7 +292,16 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             "aux_loss/mean": 0.5,
         }
         engine.optimizer_step.assert_called_once_with()
-        engine.complete_step.assert_called_once_with(last_step=False)
+        engine.save_checkpoint.assert_called_once_with(last_step=False)
+        engine.step_profiler.assert_called_once_with()
+        compute_performance.assert_called_once_with(
+            num_tokens=10,
+            elapsed_time=2.0,
+            non_data_parallel_size=1,
+            num_flops_per_token=200,
+            gpu_peak_flops=1000,
+            has_quantization=False,
+        )
         device_memory_monitor.get_peak_stats.assert_called_once_with()
         device_memory_monitor.reset_peak_stats.assert_called_once_with()
 

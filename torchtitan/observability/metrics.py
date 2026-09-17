@@ -295,6 +295,8 @@ class MetricsProcessor(Configurable):
     Args:
         config (Config): Metrics configuration.
         parallel_dims (ParallelDims): Parallel dimensions.
+        device_memory_monitor (DeviceMemoryMonitor): Monitor supplied by the
+            execution component that owns the device.
         dump_folder (str): Base folder for log output.
         pp_schedule (str): Pipeline parallel schedule name.
         ft_enable (bool): Whether fault tolerance is enabled.
@@ -354,6 +356,7 @@ class MetricsProcessor(Configurable):
         config: Config,
         *,
         parallel_dims: ParallelDims,
+        device_memory_monitor: DeviceMemoryMonitor,
         dump_folder: str = "./outputs",
         pp_schedule: str = "1F1B",
         ft_enable: bool = False,
@@ -374,7 +377,7 @@ class MetricsProcessor(Configurable):
         )
         self.parallel_dims = parallel_dims
         self.config = config
-        self.device_memory_monitor = build_device_memory_monitor()
+        self.device_memory_monitor = device_memory_monitor
         # used for colorful printing
         self.color = utils.NoColor() if config.disable_color_printing else utils.Color()
 

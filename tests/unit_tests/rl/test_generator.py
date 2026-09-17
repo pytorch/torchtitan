@@ -27,7 +27,6 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -38,6 +37,7 @@ from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
     GenerationFuture,
+    get_vllm_compilation_config,
     RequestDispatcher,
     SamplingConfig,
     VLLMCudaGraphConfig,
@@ -350,14 +350,15 @@ def test_qwen36_27b_config_applies_offset_rmsnorm_to_both_actors():
     assert config.generator.parallelism.tensor_parallel_degree == 4
     assert config.trainer.optimizer.implementation == "fused_opt_states_bf16"
     assert isinstance(config.trainer.activation_checkpoint, FullAC.Config)
-    assert config.generator.cuda_graph.enable
+    assert config.generator.cuda_graph is not None
 
 
 # --- CUDA graph config (VLLMCudaGraphConfig.get_vllm_compilation_config) ---
 
 
 def test_cuda_graph_disabled_preserves_sequence_parallel_config():
-    compilation_config = VLLMCudaGraphConfig(enable=False).get_vllm_compilation_config(
+    compilation_config = get_vllm_compilation_config(
+        None,
         max_num_seqs=256,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=True,
@@ -373,10 +374,7 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
         tensor_parallel_degree=4,
         expert_parallel_degree=4,
     )
-    cfg = VLLMCudaGraphConfig(
-        enable=True,
-        capture_sizes=[1, 4, 5, 8],
-    ).get_vllm_compilation_config(
+    cfg = VLLMCudaGraphConfig(capture_sizes=[1, 4, 5, 8],).get_vllm_compilation_config(
         max_num_seqs=8,
         expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
         enable_sequence_parallel=False,
@@ -386,7 +384,7 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
 
 
 def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
-    cfg = VLLMCudaGraphConfig(enable=True).get_vllm_compilation_config(
+    cfg = VLLMCudaGraphConfig().get_vllm_compilation_config(
         max_num_seqs=1,
         expert_sequence_parallel_size=8,
         enable_sequence_parallel=False,
@@ -398,10 +396,7 @@ def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
 
 def test_expert_sequence_parallel_padding_rejects_no_valid_cuda_graph_sizes():
     with pytest.raises(ValueError, match="No CUDA graph capture sizes"):
-        VLLMCudaGraphConfig(
-            enable=True,
-            capture_sizes=[1, 2, 3],
-        ).get_vllm_compilation_config(
+        VLLMCudaGraphConfig(capture_sizes=[1, 2, 3],).get_vllm_compilation_config(
             max_num_seqs=3,
             expert_sequence_parallel_size=4,
             enable_sequence_parallel=False,
@@ -449,7 +444,7 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
 def test_cuda_graph_default_mode_is_full_decode_only():
     # Default mode; decode-only graphs avoid the mixed-batch corruption (#3668),
     # with no inductor compile (CompilationMode.NONE == 0).
-    cfg = VLLMCudaGraphConfig(enable=True).get_vllm_compilation_config(
+    cfg = VLLMCudaGraphConfig().get_vllm_compilation_config(
         max_num_seqs=256,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
@@ -460,7 +455,7 @@ def test_cuda_graph_default_mode_is_full_decode_only():
 
 def test_cuda_graph_full_mode_no_compile():
     # FULL captures the whole forward (incl. attention) with no inductor compile.
-    cfg = VLLMCudaGraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
+    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
         max_num_seqs=256,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
@@ -472,9 +467,7 @@ def test_cuda_graph_full_mode_no_compile():
 def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
     # FULL_DECODE_ONLY only graphs decode, so capture up to max_num_seqs (plus
     # max_num_seqs itself when not a power of 2).
-    cfg = VLLMCudaGraphConfig(
-        enable=True, mode="FULL_DECODE_ONLY"
-    ).get_vllm_compilation_config(
+    cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
         max_num_seqs=500,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
@@ -485,7 +478,7 @@ def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
 def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
     # FULL also graphs prefill, so sizes extend to the chunked-prefill chunk
     # (max_num_batched_tokens, 2048) on top of max_num_seqs.
-    cfg = VLLMCudaGraphConfig(enable=True, mode="FULL").get_vllm_compilation_config(
+    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
         max_num_seqs=500,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
@@ -496,7 +489,7 @@ def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
 
 def test_cuda_graph_rejects_nonpositive_max_num_seqs():
     with pytest.raises(ValueError, match="max_num_seqs must be positive"):
-        VLLMCudaGraphConfig(enable=True).get_vllm_compilation_config(
+        VLLMCudaGraphConfig().get_vllm_compilation_config(
             max_num_seqs=0,
             expert_sequence_parallel_size=1,
             enable_sequence_parallel=False,
@@ -544,7 +537,7 @@ def test_vllm_uneven_decode_tp_padding():
         rl_grpo_qwen3_moe_debug_varlen,
     )
 
-    from tests.rl.test_bitwise_parity import (
+    from tests.unit_tests.rl.test_bitwise_parity import (
         _make_prompt_tokens,
         _run_engine,
         build_inference_engine,
@@ -567,7 +560,7 @@ def test_vllm_uneven_decode_tp_padding():
         config.model_spec,
         parallelism=config.generator.parallelism,
         compile_config=config.compile,
-        checkpoint_config=CheckpointManager.Config(enable=False),
+        checkpointer_config=None,
         override=config.generator.override,
     )
 

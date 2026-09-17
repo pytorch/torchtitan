@@ -39,7 +39,9 @@ def inference(config: FluxTrainer.Config):
     # Distribute prompts across processes using round-robin assignment
     prompts = original_prompts[global_rank::world_size]
 
-    trainer.engine.checkpointer.load(step=config.checkpoint.load_step)
+    if config.checkpointer is None:
+        raise ValueError("Flux inference requires a checkpointer configuration.")
+    trainer.engine.load_checkpoint()
 
     # Build tokenizers from the config
     tokenizer = config.tokenizer.build()

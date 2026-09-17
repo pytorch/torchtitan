@@ -45,6 +45,11 @@ from torchtitan.distributed.cuda_graph import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability import structured_logger as sl
+from torchtitan.observability.metrics import (
+    build_device_memory_monitor,
+    DeviceMemoryMonitor,
+    DeviceMemStats,
+)
 from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
@@ -59,7 +64,14 @@ _NUM_CUDA_GRAPH_WARMUP_STEPS = 2
 
 
 class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Stateful):
-    """Shared distributed training engine."""
+    """Shared distributed training engine.
+
+    A microbatch is one data-parallel-rank-local forward/backward input. A
+    microbatch group is one gradient-accumulation unit: it contains one
+    microbatch without pipeline parallelism and all pipeline microbatches for
+    one schedule step with pipeline parallelism. One or more microbatch groups
+    contribute to each optimizer step.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -71,9 +83,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
-        checkpoint: BaseCheckpointManager.Config = field(
-            default_factory=CheckpointManager.Config
-        )
+        checkpointer: CheckpointManager.Config | None = None
         activation_checkpoint: ActivationCheckpointingConfig = field(
             default_factory=SelectiveAC.Config
         )
@@ -162,12 +172,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     checkpointer: BaseCheckpointManager
     pp_has_last_stage: bool
     max_num_documents: int | None
+    num_accumulation_steps: int
+    num_completed_steps: int
     ntokens_seen: int
     sdc_replayer: SDCReplayer | None
     model_param_count: int
     num_flops_per_token: int
     has_quantization: bool
     loss_is_finite: torch.Tensor
+    loss_metrics: dict[str, torch.Tensor]
+    device_memory_monitor: DeviceMemoryMonitor
+    model_device_mem_stats: DeviceMemStats
 
     def __init__(
         self,
@@ -184,30 +199,16 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.max_num_documents = max_num_documents
         self.output_dir = output_dir
         self.has_quantization = has_quantization(model_config)
-        self.step = 0
+        self.num_accumulation_steps = 1
+        self.num_completed_steps = 0
         self.ntokens_seen = 0
         self._num_optimizer_steps_since_cuda_graph_init = 0
         self.sdc_replayer = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
+        self.loss_metrics = {}
+        self._initialize_distributed_runtime()
 
-    def initialize_checkpointer(
-        self,
-        *,
-        dataloader: BaseDataLoader | None,
-        sd_adapter: Any | None,
-    ) -> None:
-        """Build checkpointing around core and optional owner-provided state."""
-        self.checkpointer = self.config.checkpoint.build(
-            dataloader=dataloader,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            states={"train_state": self},
-            sd_adapter=sd_adapter,
-            base_folder=self.output_dir,
-        )
-
-    def initialize_distributed_runtime(self) -> None:
+    def _initialize_distributed_runtime(self) -> None:
         """Initialize the device, distributed meshes, GC, and deterministic RNGs."""
         device_module, device_type = utils.device_module, utils.device_type
         # pyrefly: ignore [read-only]
@@ -233,12 +234,34 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.config.debug,
             distinct_seed_mesh_dims=["pp"],
         )
+        self.device_memory_monitor = build_device_memory_monitor()
 
-    def initialize_model(
+    @sl.log_trace_span("initialize")
+    def initialize(
         self,
         model_spec: ModelSpec,
         *,
-        compile_config: CompileConfig,
+        compile_config: CompileConfig | None,
+        sd_adapter: Any | None,
+        dataloader: BaseDataLoader | None = None,
+        create_seed_checkpoint: bool = False,
+    ) -> None:
+        """Initialize model execution and the state required to train it."""
+        self._initialize_model(
+            model_spec,
+            compile_config=compile_config,
+            create_seed_checkpoint=create_seed_checkpoint,
+        )
+        self.model_device_mem_stats = self.device_memory_monitor.get_peak_stats()
+        self._initialize_optimizer(model_spec)
+        self._initialize_checkpointer(dataloader=dataloader, sd_adapter=sd_adapter)
+        self._initialize_forward_backward()
+
+    def _initialize_model(
+        self,
+        model_spec: ModelSpec,
+        *,
+        compile_config: CompileConfig | None,
         create_seed_checkpoint: bool = False,
     ) -> None:
         """Build the loss and model execution state."""
@@ -334,7 +357,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             f"{self.model_param_count:,} total parameters"
         )
 
-    def initialize_optimizer(self, model_spec: ModelSpec) -> None:
+    def _initialize_optimizer(self, model_spec: ModelSpec) -> None:
         """Construct optimizers and learning-rate schedulers."""
         self.optimizers = self.config.optimizer.build(model_parts=self.model_parts)
         if model_spec.post_optimizer_build_fn is not None:
@@ -346,7 +369,27 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             training_steps=self.config.training.steps,
         )
 
-    def initialize_forward_backward(self) -> None:
+    def _initialize_checkpointer(
+        self,
+        *,
+        dataloader: BaseDataLoader | None,
+        sd_adapter: Any | None,
+    ) -> None:
+        """Build checkpointing around core and optional owner-provided state."""
+        checkpointer_config = self.config.checkpointer
+        if checkpointer_config is None:
+            return
+        self.checkpointer = checkpointer_config.build(
+            dataloader=dataloader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            states={"train_state": self},
+            sd_adapter=sd_adapter,
+            base_folder=self.output_dir,
+        )
+
+    def _initialize_forward_backward(self) -> None:
         """Build SDC replay and select PP/eager or CUDA graph execution."""
         sdc_config = self.config.sdc_replayer
         self.sdc_replayer = None
@@ -405,15 +448,37 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
                 self.forward_backward_body_fn = run_with_cuda_graph
 
-    @sl.log_trace_span("forward_backward")
+    @sl.log_trace_span("prepare_step")
+    def prepare_step(
+        self,
+        global_valid_tokens: int | torch.Tensor,
+        *,
+        num_accumulation_steps: int = 1,
+    ) -> torch.Tensor:
+        """Prepare one optimizer step and record its accumulation plan."""
+        if num_accumulation_steps < 1:
+            raise ValueError("num_accumulation_steps must be greater than 0.")
+        self.num_accumulation_steps = num_accumulation_steps
+        self.gc_handler.run(self.num_completed_steps + 1)
+        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+        if isinstance(global_valid_tokens, int):
+            global_valid_tokens = torch.tensor(
+                global_valid_tokens,
+                dtype=torch.int64,
+                device=self.device,
+            )
+        # TODO(sdmyzlp): Each MTP depth can have a different valid-token count
+        # after shifting and should use its own auxiliary-loss denominator.
+        AuxLoss.set_step_denominator(global_valid_tokens)
+        return global_valid_tokens
+
+    @sl.log_trace_span("forward_backward_microbatch")
     def forward_backward_microbatch(
         self,
         *,
         microbatch_group: list[TrainingMicrobatch],
         global_valid_tokens: torch.Tensor,
-        loss_kwargs: dict[str, Any] | None = None,
         accumulation_index: int = 0,
-        num_accumulation_steps: int = 1,
     ) -> torch.Tensor:
         """Preprocess and execute one gradient-accumulation unit.
 
@@ -423,17 +488,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         Args:
             microbatch_group: Microbatches forming one complete pipeline step.
             global_valid_tokens: Valid-token count used to normalize the loss.
-            loss_kwargs: Additional keyword arguments passed to the loss function.
             accumulation_index: Index of this gradient-accumulation unit.
-            num_accumulation_steps: Number of units in the optimizer step.
 
         Returns:
             The detached loss for this gradient-accumulation unit.
         """
-        loss_kwargs = {
-            **(loss_kwargs or {}),
-            "global_valid_tokens": global_valid_tokens,
-        }
         if accumulation_index == 0:
             # int32 is supported by NCCL reductions, unlike bool.
             self.loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
@@ -442,14 +501,19 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         # Do not toggle under CUDA graphs when accum > 1: the graph is
         # captured on the first group and replayed for later groups.
         if self.parallel_dims.dp_replicate_enabled and (
-            num_accumulation_steps == 1 or self.config.training.disable_cuda_graphs
+            self.num_accumulation_steps == 1 or self.config.training.disable_cuda_graphs
         ):
-            is_last = accumulation_index == num_accumulation_steps - 1
+            is_last = accumulation_index == self.num_accumulation_steps - 1
             for part in self.model_parts:
                 part.set_requires_all_reduce(is_last)  # pyrefly: ignore[not-callable]
 
         def forward_backward() -> torch.Tensor:
             if self.parallel_dims.pp_enabled:
+                if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
+                    raise ValueError(
+                        "Per-microbatch loss arguments are not supported with "
+                        "pipeline parallelism yet."
+                    )
                 arg_mbs: list[tuple[torch.Tensor, ...]] = []
                 kwarg_mbs: list[dict[str, Any]] = []
                 target_mbs: list[torch.Tensor] | None = (
@@ -488,13 +552,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     inputs=arg_mbs if self.pp_has_first_stage else None,
                     model_kwargs=kwarg_mbs,
                     labels=target_mbs,
-                    loss_kwargs=loss_kwargs,
+                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
                 )
 
             assert len(microbatch_group) == 1
-            input_dict = microbatch_group[0].to_input_dict(
-                self.device, non_blocking=True
-            )
+            microbatch = microbatch_group[0]
+            input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
             with sl.log_trace_span("preprocess_inputs"):
                 inputs, labels, extra_kwargs = cast(
                     BaseModel, self.model_parts[0]
@@ -515,11 +578,16 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 inputs=inputs,
                 labels=labels,
                 model_kwargs=extra_kwargs,
-                loss_kwargs=loss_kwargs,
+                loss_kwargs={
+                    **microbatch.to_loss_kwargs(self.device, non_blocking=True),
+                    "global_valid_tokens": global_valid_tokens,
+                },
             )
 
         if self.sdc_replayer is not None and accumulation_index == 0:
-            loss = self.sdc_replayer.run_fwd_bwd(forward_backward, step=self.step)
+            loss = self.sdc_replayer.run_fwd_bwd(
+                forward_backward, step=self.num_completed_steps + 1
+            )
         else:
             loss = forward_backward()
         detached_loss = loss.detach()
@@ -536,7 +604,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     ) -> torch.Tensor:
         with self.train_context():
             pred = self.model_parts[0](inputs, **model_kwargs)
-            loss, self._last_loss_metrics = self.loss_fn(
+            loss, self.loss_metrics = self.loss_fn(
                 pred,
                 labels,  # pyrefly: ignore[bad-argument-type]
                 **loss_kwargs,
@@ -572,27 +640,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             return torch.sum(torch.stack(detached_losses)).to(self.device)
         return self._pp_loss_sentinel_on_non_last_stage
 
-    def prepare_step(
-        self, global_valid_tokens: int | torch.Tensor | None, *, step: int
-    ) -> torch.Tensor | None:
-        """Prepare GC, gradients, and token-normalized auxiliary losses for a step."""
-        self.gc_handler.run(step)
-        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
-        if global_valid_tokens is None:
-            return None
-        if isinstance(global_valid_tokens, int):
-            global_valid_tokens = torch.tensor(
-                global_valid_tokens,
-                dtype=torch.int64,
-                device=self.device,
-            )
-        # TODO(sdmyzlp): Each MTP depth can have a different valid-token count
-        # after shifting and should use its own auxiliary-loss denominator.
-        AuxLoss.set_step_denominator(global_valid_tokens)
-        return global_valid_tokens
-
+    @sl.log_trace_span("optimizer_step")
     def optimizer_step(self) -> torch.Tensor:
         """Validate gradients, then advance optimizer and learning-rate scheduler."""
+        current_step = self.num_completed_steps + 1
         grad_norm = dist_utils.clip_grad_norm_(
             [p for model in self.model_parts for p in model.parameters()],
             self.config.training.max_norm,
@@ -620,46 +671,58 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         torch._assert_async(
             step_is_finite,
-            "Loss or gradient norm is not finite on at least one rank. "
-            "Stopping training before the optimizer update.",
+            "Loss or gradient norm is not finite on at least one rank at "
+            f"step {current_step}. Stopping training before the optimizer update.",
         )
-        self.checkpointer.maybe_wait_for_staging()
+        if hasattr(self, "checkpointer"):
+            self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
+        self.num_completed_steps = current_step
         self._num_optimizer_steps_since_cuda_graph_init += 1
         return grad_norm
 
     def state_dict(self) -> dict[str, Any]:
-        return {"step": self.step, "ntokens_seen": self.ntokens_seen}
+        return {"step": self.num_completed_steps, "ntokens_seen": self.ntokens_seen}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.step = state_dict["step"]
+        self.num_completed_steps = state_dict["step"]
         self.ntokens_seen = state_dict["ntokens_seen"]
         if self.sdc_replayer is not None:
             self.sdc_replayer.reset_schedule()
 
     def load_checkpoint(self) -> bool:
-        return self.checkpointer.load(step=self.config.checkpoint.load_step)
+        checkpointer_config = self.config.checkpointer
+        if checkpointer_config is None:
+            return False
+        return self.checkpointer.load(step=checkpointer_config.load_step)
 
     def save_checkpoint(self, *, last_step: bool = False) -> bool:
-        return self.checkpointer.save(self.step, last_step=last_step)
+        if not hasattr(self, "checkpointer"):
+            return False
+        return self.checkpointer.save(self.num_completed_steps, last_step=last_step)
 
     def start_profiler(self) -> None:
         self.profiler = self.config.profiler.build(
-            global_step=self.step,
+            global_step=self.num_completed_steps,
             base_folder=self.output_dir,
         )
         self.profiler.__enter__()
 
-    def complete_step(self, *, last_step: bool = False) -> None:
-        """Advance step-scoped services after a successful optimizer update."""
+    def step_profiler(self) -> None:
+        """Signal that one training-loop iteration has completed."""
         self.profiler.step()
-        self.save_checkpoint(last_step=last_step)
+
+    def close_profiler(self) -> None:
+        """Close the profiler if it was started."""
+        if hasattr(self, "profiler"):
+            self.profiler.__exit__(None, None, None)
+            del self.profiler
 
     def close(self) -> None:
         """Release CUDA graph and checkpoint resources owned by the trainer."""
-        if hasattr(self, "profiler"):
-            self.profiler.__exit__(None, None, None)
+        self.close_profiler()
         if not self.config.training.disable_cuda_graphs:
             cuda_graph_teardown()
-        self.checkpointer.close()
+        if hasattr(self, "checkpointer"):
+            self.checkpointer.close()

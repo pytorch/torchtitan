@@ -33,7 +33,7 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
     engine = SimpleNamespace(
         device=torch.device("cpu"),
         model_parts=[object()],
-        checkpointer=SimpleNamespace(load=lambda *, step: None),
+        load_checkpoint=lambda: None,
         train_context=train_context,
     )
     trainer = SimpleNamespace(
@@ -55,7 +55,7 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
                 classifier_free_guidance_scale=1.0,
             ),
         ),
-        checkpoint=SimpleNamespace(load_step=-1),
+        checkpointer=SimpleNamespace(load_step=-1),
         tokenizer=SimpleNamespace(build=lambda: object()),
         dump_folder=str(tmp_path),
     )

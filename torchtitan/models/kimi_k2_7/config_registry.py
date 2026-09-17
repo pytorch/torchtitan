@@ -9,7 +9,6 @@ from typing import cast
 
 from torch.distributed.tensor import Shard
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,
@@ -123,10 +122,7 @@ def kimi_k2_5_debugmodel(
             disable_cuda_graphs=True,
         ),
         parallelism=parallelism,
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -169,7 +165,7 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
             disable_cuda_graphs=True,
         ),
         parallelism=parallelism,
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
@@ -215,14 +211,14 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
             disable_cuda_graphs=True,
         ),
         parallelism=parallelism,
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
 
 def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     """Full Kimi K2.5 (~1T-total / ~32B-active)."""
-    compile_config = CompileConfig(enable=True, components=["loss"])
+    compile_config = CompileConfig(components=["loss"])
     # The report uses BF16 compute; its FP8 path only compresses saved activations.
     model_spec = model_registry("Kimi-K2.5", seq_len=seq_len, attn_backend="flex")
     parallelism = ParallelismConfig(
@@ -259,7 +255,7 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
             disable_cuda_graphs=True,
         ),
         parallelism=parallelism,
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
         compile=compile_config,
     )

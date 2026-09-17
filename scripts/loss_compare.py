@@ -374,13 +374,14 @@ def build_training_command(
     cmd = build_base_command(module, config, job_dump_folder)
     cmd += f" {FIXED_OPTIONS} --training.steps={steps}"
     cmd += f" --metrics.save_tb_folder={tb_folder}"
-    if enable_seed_checkpoint:
-        cmd += (
-            " --checkpoint.enable --checkpoint.export_dtype=bfloat16"
-            " --checkpoint.load_only"
-        )
     if options:
         cmd += f" {options}"
+    if enable_seed_checkpoint:
+        cmd += (
+            " checkpointer:config"
+            " --checkpointer.export_dtype=bfloat16"
+            " --checkpointer.load_only"
+        )
     return cmd
 
 
@@ -549,8 +550,8 @@ def create_seed_checkpoint(
             f"MODULE='{module}' CONFIG='{config}' "
             f"./run_train.sh --dump_folder={job_dump_folder} "
             f"--create-seed-checkpoint "
-            f"--checkpoint.enable --checkpoint.last_save_model_only "
-            f"{FIXED_OPTIONS} {SEED_PARALLELISM_OPTIONS}"
+            f"{FIXED_OPTIONS} {SEED_PARALLELISM_OPTIONS} "
+            f"checkpointer:config --checkpointer.last_save_model_only"
         )
 
         env = os.environ.copy()

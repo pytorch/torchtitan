@@ -309,7 +309,7 @@ class Controller(Configurable):
         )
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
-        compile: CompileConfig = field(default_factory=CompileConfig)
+        compile: CompileConfig | None = None
         """torch.compile config shared by trainer and generator."""
 
         trainer: Trainer.Config
@@ -342,11 +342,11 @@ class Controller(Configurable):
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
                 )
-            if self.generator.checkpoint.enable:
+            if self.generator.checkpointer is not None:
                 raise ValueError(
                     "Generator checkpoint must be disabled in the RL loop "
                     "(weights are synced from the trainer via TorchStore). "
-                    "Set generator.checkpoint.enable=False."
+                    "Set generator.checkpointer=None."
                 )
             if self.trainer.training.num_tokens_per_train_step != -1:
                 warnings.warn(

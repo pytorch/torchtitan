@@ -290,8 +290,8 @@ class VLLMModelWrapper(Module):
         *,
         model_spec: ModelSpec,
         parallelism: InferenceParallelismConfig,
-        compile_config: CompileConfig,
-        checkpoint_config: CheckpointManager.Config,
+        compile_config: CompileConfig | None,
+        checkpointer_config: CheckpointManager.Config | None,
         vllm_config: VllmConfig,
         prefix: str = "",
         override: OverrideConfig,
@@ -380,7 +380,7 @@ class VLLMModelWrapper(Module):
         )
 
         # Load initial weights based on checkpoint config.
-        self._checkpoint_config = checkpoint_config
+        self._checkpointer_config = checkpointer_config
 
         # Materialize model on GPU — only allocates local shards (not full
         # model) thanks to EP/TP DTensor sharding applied above.
@@ -509,13 +509,11 @@ class VLLMModelWrapper(Module):
     def _maybe_initial_load_weights(self) -> None:
         """Load initial HF weights via CheckpointManager.
 
-        Controlled by ``self._checkpoint_config``:
-        - ``enable=True`` and ``initial_load_in_hf=True``: load from HF
-          via CheckpointManager (standalone inference path).
-        - ``enable=False``: skip (RL loop — weights arrive via TorchStore).
+        A configured manager loads initial weights. ``None`` skips loading for
+        the RL loop, where weights arrive via TorchStore.
         """
-        cfg = self._checkpoint_config
-        if not cfg.enable:
+        cfg = self._checkpointer_config
+        if cfg is None:
             return
 
         sd_adapter = None

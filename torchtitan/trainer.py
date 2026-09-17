@@ -72,8 +72,8 @@ class Trainer(Configurable):
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
-        compile: CompileConfig = field(default_factory=CompileConfig)
-        validator: Validator.Config = field(default_factory=Validator.Config)
+        compile: CompileConfig | None = None
+        validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
 
         create_seed_checkpoint: bool = False
@@ -89,7 +89,7 @@ class Trainer(Configurable):
             if (
                 not self.training.disable_cuda_graphs
                 and self.parallelism.pipeline_parallel_degree > 1
-                and self.validator.enable
+                and self.validator is not None
             ):
                 raise ValueError(
                     "CUDA graphs with pipeline parallelism do not support "
@@ -186,7 +186,6 @@ class Trainer(Configurable):
             output_dir=config.dump_folder,
         )
         engine = self.engine
-        engine.initialize_distributed_runtime()
         parallel_dims = engine.parallel_dims
 
         # Logging needs to happen after distributed initialized
@@ -201,6 +200,7 @@ class Trainer(Configurable):
         # metrics logging
         self.metrics_processor = config.metrics.build(
             parallel_dims=parallel_dims,
+            device_memory_monitor=engine.device_memory_monitor,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
             config_dict=config.to_dict(),
@@ -228,42 +228,8 @@ class Trainer(Configurable):
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
             num_tokens_per_dp_rank * dp_degree
         )
-        # Build and initialize the model and its parallel execution state.
-        with sl.log_trace_span("model_parallelism_init"):
-            engine.initialize_model(
-                model_spec,
-                compile_config=config.compile,
-                create_seed_checkpoint=config.create_seed_checkpoint,
-            )
-            if parallel_dims.pp_enabled:
-                ensure_pp_loss_visible(
-                    parallel_dims=parallel_dims,
-                    pp_schedule=config.parallelism.pipeline_parallel_schedule,
-                    color=color,
-                )
-        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
 
-        device_memory_monitor = self.metrics_processor.device_memory_monitor
-        logger.info(
-            "Peak FLOPS used for computing MFU: "
-            f"{self.metrics_processor.gpu_peak_flops:.3e}"
-        )
-        device_mem_stats = device_memory_monitor.get_peak_stats()
-        logger.info(
-            f"{engine.device.type.upper()} memory usage for model: "
-            f"{device_mem_stats.max_reserved_gib:.2f}GiB"
-            f"({device_mem_stats.max_reserved_pct:.2f}%)"
-        )
-
-        # build optimizer after applying parallelisms to the model
-        engine.initialize_optimizer(model_spec)
-        self.metrics_processor.optimizers = engine.optimizers
-        self.metrics_processor.model_parts = engine.model_parts
-
-        # build tokenizer
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-
-        # build dataloader
         num_tokens_per_microbatch = (
             config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -274,20 +240,41 @@ class Trainer(Configurable):
             max_context_length=config.training.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
         )
-        # build checkpointer
-        engine.initialize_checkpointer(
+
+        engine.initialize(
+            model_spec,
+            compile_config=config.compile,
             dataloader=self.dataloader,
             sd_adapter=(
                 model_spec.state_dict_adapter(model_config, config.hf_assets_path)
                 if model_spec.state_dict_adapter
                 else None
             ),
+            create_seed_checkpoint=config.create_seed_checkpoint,
         )
 
-        engine.initialize_forward_backward()
+        if parallel_dims.pp_enabled:
+            ensure_pp_loss_visible(
+                parallel_dims=parallel_dims,
+                pp_schedule=config.parallelism.pipeline_parallel_schedule,
+                color=color,
+            )
+        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
+        self.metrics_processor.optimizers = engine.optimizers
+        self.metrics_processor.model_parts = engine.model_parts
+
+        logger.info(
+            "Peak FLOPS used for computing MFU: "
+            f"{self.metrics_processor.gpu_peak_flops:.3e}"
+        )
+        logger.info(
+            f"{engine.device.type.upper()} memory usage for model: "
+            f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
+            f"({engine.model_device_mem_stats.max_reserved_pct:.2f}%)"
+        )
 
         # Build validator if validation is configured
-        if config.validator.enable:
+        if config.validator is not None:
             pp_schedule, pp_has_first_stage, pp_has_last_stage = (
                 (
                     engine.pp_schedule,
@@ -356,7 +343,8 @@ class Trainer(Configurable):
 
     def train_step(self, data_iterator: Iterator[TrainingMicrobatch]):
         engine = self.engine
-        should_log = self.metrics_processor.should_log(engine.step)
+        current_step = engine.num_completed_steps + 1
+        should_log = self.metrics_processor.should_log(current_step)
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -392,11 +380,10 @@ class Trainer(Configurable):
 
         # Auxiliary losses normalize by the same per-step token count as the
         # main loss, so their scale is independent of parallelism degrees.
-        prepared_valid_tokens = engine.prepare_step(
-            global_valid_tokens, step=engine.step
+        global_valid_tokens = engine.prepare_step(
+            global_valid_tokens,
+            num_accumulation_steps=self.gradient_accumulation_steps,
         )
-        assert prepared_valid_tokens is not None
-        global_valid_tokens = prepared_valid_tokens
 
         # Process each gradient accumulation step, then free its inputs.
         accumulated_loss: torch.Tensor | None = None
@@ -405,7 +392,6 @@ class Trainer(Configurable):
                 microbatch_group=microbatch_group,
                 global_valid_tokens=global_valid_tokens,
                 accumulation_index=fwd_bwd_index,
-                num_accumulation_steps=self.gradient_accumulation_steps,
             )
             if should_log:
                 if accumulated_loss is None:
@@ -418,8 +404,7 @@ class Trainer(Configurable):
         # Capture the learning rates used by this optimizer update before the
         # scheduler advances in engine.optimizer_step().
         lr_metrics = engine.lr_schedulers.get_metrics() if should_log else {}
-        with sl.log_trace_span("optim"):
-            grad_norm = engine.optimizer_step()
+        grad_norm = engine.optimizer_step()
 
         # log metrics
         if not should_log:
@@ -467,7 +452,7 @@ class Trainer(Configurable):
             **collect_aux_loss_metrics(parallel_dims),
         }
         self.metrics_processor.log(
-            engine.step,
+            engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
             float(grad_norm.item()),
@@ -484,17 +469,17 @@ class Trainer(Configurable):
         engine.load_checkpoint()
 
         # Capture loaded step for relative_step calculation.
-        # After checkpoint load: self.step = restored step (e.g. 100), or 0 if fresh.
-        loaded_step = engine.step
+        # After checkpoint load, this is the restored number of completed updates.
+        loaded_step = engine.num_completed_steps
 
-        logger.info(f"Training starts at step {engine.step + 1}")
+        logger.info(f"Training starts at step {engine.num_completed_steps + 1}")
 
         engine.start_profiler()
         try:
             data_iterator = self.microbatch_generator(self.dataloader)
             while self.should_continue_training():
-                engine.step += 1
-                sl.set_step(engine.step, relative_step=engine.step - loaded_step)
+                current_step = engine.num_completed_steps + 1
+                sl.set_step(current_step, relative_step=current_step - loaded_step)
 
                 with sl.log_trace_span("step"):
                     try:
@@ -503,20 +488,25 @@ class Trainer(Configurable):
                         logger.warning("Ran out of data; last step was canceled.")
                         break
 
-                    engine.complete_step(
-                        last_step=(engine.step == config.training.steps)
+                    engine.save_checkpoint(
+                        last_step=(engine.num_completed_steps == config.training.steps)
                     )
 
                     # Run validation if validator is available
-                    if self.config.validator.enable and self.validator.should_validate(
-                        engine.step
+                    if (
+                        self.config.validator is not None
+                        and self.validator.should_validate(engine.num_completed_steps)
                     ):
-                        self.validator.validate(engine.model_parts, engine.step)
+                        self.validator.validate(
+                            engine.model_parts, engine.num_completed_steps
+                        )
+
+                    engine.step_profiler()
 
                     # Reduce timeout after the first train step of THIS process
                     # (assuming lazy init and compilation are finished). Use the
                     # relative step so this fires on resumed runs too.
-                    if engine.step - loaded_step == 1:
+                    if engine.num_completed_steps - loaded_step == 1:
                         dist_utils.set_pg_timeouts(
                             timeout=timedelta(
                                 seconds=config.comm.train_timeout_seconds
@@ -527,8 +517,7 @@ class Trainer(Configurable):
             # The entry point also calls close() for checkpoint and graph
             # cleanup; close the profiler here so direct train() callers get
             # balanced lifecycle handling.
-            engine.profiler.__exit__(None, None, None)
-            del engine.profiler
+            engine.close_profiler()
 
         if torch.distributed.get_rank() == 0:
             logger.info("Sleeping 2 seconds for other ranks to complete")
@@ -537,7 +526,7 @@ class Trainer(Configurable):
         logger.info("Training completed")
 
     def should_continue_training(self) -> bool:
-        return self.engine.step < self.config.training.steps
+        return self.engine.num_completed_steps < self.config.training.steps
 
     def close(self) -> None:
         if hasattr(self, "dataloader") and self.dataloader:

@@ -8,6 +8,7 @@
 
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.optimizer import default_adamw
+from torchtitan.config import CompileConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
 
@@ -93,7 +94,7 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2_compile() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 2
-    config.compile.enable = True
+    config.compile = CompileConfig()
     config.override.imports = [
         "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
         "torchtitan.overrides.helion_rope.helion_complex_rope",
@@ -252,7 +253,7 @@ def qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.compile.enable = True
+    config.compile = CompileConfig()
     config.override.imports = ["torchtitan.overrides.helion_rope.helion_cos_sin_rope"]
     return apply_transforms(
         config,
@@ -308,7 +309,7 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4_compile() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
-    config.compile.enable = True
+    config.compile = CompileConfig()
     config.training.disable_cuda_graphs = True
     return config
 

@@ -149,7 +149,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 steps=NUM_STEPS,
             ),
             parallelism=ParallelismConfig(),
-            checkpoint=CheckpointManager.Config(initial_load_model_only=False),
+            checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=SEED, deterministic=True),
         )
         self.model_config.update_from_config(config=runtime_config)
@@ -303,7 +303,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
                 compile=GraphTrainerCompileConfig(
-                    enable=True,
                     mode="aot_fx_trace",
                 ),
                 parallelism=SimpleNamespace(
@@ -339,7 +338,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             load_config = SimpleNamespace(
                 model_spec=SimpleNamespace(model=self.model_config),
                 compile=GraphTrainerCompileConfig(
-                    enable=True,
                     mode="aot_fx_trace",
                     precompile_artifact_dir="precompiled",
                 ),
@@ -608,7 +606,6 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
         maybe_apply_ep_overlap_eager_chunking(
             model,
             GraphTrainerCompileConfig(
-                enable=True,
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     strategy="eager",
