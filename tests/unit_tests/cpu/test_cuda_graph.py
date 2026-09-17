@@ -10,12 +10,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-
 from torchtitan.distributed.cuda_graph import (
     _manager,
     CUDAGraphWrapper,
     get_cuda_graph_annotations,
-    run_on_cuda_graph_stream,
+    run_eager_on_cuda_graph_stream,
     wrap_with_cuda_graph,
 )
 
@@ -43,7 +42,7 @@ def test_cuda_graph_wrapper_rejects_negative_warmup_iterations() -> None:
         )
 
 
-def test_run_on_cuda_graph_stream_synchronizes_streams() -> None:
+def test_run_eager_on_cuda_graph_stream_synchronizes_streams() -> None:
     current_stream = MagicMock()
     graph_stream = MagicMock()
     fn = MagicMock(return_value="output")
@@ -54,7 +53,7 @@ def test_run_on_cuda_graph_stream_synchronizes_streams() -> None:
         patch("torch.cuda.current_stream", return_value=current_stream),
         patch("torch.cuda.stream", return_value=nullcontext()) as use_stream,
     ):
-        output = run_on_cuda_graph_stream(fn, "arg", keyword="value")
+        output = run_eager_on_cuda_graph_stream(fn, "arg", keyword="value")
 
     assert output == "output"
     maybe_initialize.assert_called_once_with()

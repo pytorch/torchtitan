@@ -87,7 +87,7 @@ def build_minimal_trainer(
     engine.loss_fn = CrossEntropyLoss.Config().build()
     engine.parallel_dims = parallel_dims
     engine.train_context = get_spmd_context(parallel_dims=parallel_dims)
-    engine.fwd_bwd_fn = engine._forward_backward_body
+    engine.forward_backward_body_fn = engine._non_pp_forward_backward_body
     engine.model_config = model_config
     engine.device = torch.device("cuda")
     engine.preprocess_inputs_kwargs = {}

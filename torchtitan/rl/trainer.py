@@ -245,7 +245,8 @@ class Trainer(Configurable):
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            training_data: Microbatch-major grid with one microbatch per DP rank.
+            training_data: Microbatch-major grid with shape
+                ``[num_microbatches][dp_degree]``.
             num_global_valid_tokens: Total response tokens with finite generator
                 logprobs across all DP ranks and microbatches for this step.
 

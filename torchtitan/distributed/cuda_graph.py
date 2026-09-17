@@ -187,7 +187,9 @@ def get_cuda_graph_annotations() -> dict[int, list[Any]]:
     return _manager.all_annotations
 
 
-def run_on_cuda_graph_stream(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+def run_eager_on_cuda_graph_stream(
+    fn: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
     """Run a callable eagerly on the stream reserved for CUDA graph capture."""
     _manager.maybe_initialize()
     current_stream = torch.cuda.current_stream()
@@ -321,7 +323,7 @@ class CUDAGraphWrapper:
 
         if self._warmup_remaining > 0:
             self._warmup_remaining -= 1
-            return run_on_cuda_graph_stream(self._fn, *args)
+            return run_eager_on_cuda_graph_stream(self._fn, *args)
 
         if self._graph is None:
             self._args = args

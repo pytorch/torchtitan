@@ -40,7 +40,7 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
-    run_on_cuda_graph_stream,
+    run_eager_on_cuda_graph_stream,
     wrap_with_cuda_graph,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
@@ -368,22 +368,27 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             spmd_typechecking=self.config.debug.spmd_typechecking,
         )
         if self.parallel_dims.pp_enabled:
-            self.fwd_bwd_fn = cast(
+            self.forward_backward_body_fn = cast(
                 Callable[..., torch.Tensor], self._pp_forward_backward_body
             )
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
                 (1,), -1.0, device=self.device
             )
         else:
-            self.fwd_bwd_fn = cast(
-                Callable[..., torch.Tensor], self._forward_backward_body
+            self.forward_backward_body_fn = cast(
+                Callable[..., torch.Tensor], self._non_pp_forward_backward_body
             )
 
         if not self.config.training.disable_cuda_graphs:
-            eager_fwd_bwd_fn = self.fwd_bwd_fn
-            cuda_graph_fwd_bwd_fn = wrap_with_cuda_graph(eager_fwd_bwd_fn)
+            eager_forward_backward_body_fn = self.forward_backward_body_fn
+            cuda_graph_forward_backward_body_fn = wrap_with_cuda_graph(
+                eager_forward_backward_body_fn
+            )
 
-            if cuda_graph_fwd_bwd_fn is not eager_fwd_bwd_fn:
+            if (
+                cuda_graph_forward_backward_body_fn
+                is not eager_forward_backward_body_fn
+            ):
 
                 def run_with_cuda_graph(**kwargs: Any) -> torch.Tensor:
                     # Count complete optimizer steps instead of forward/backward
@@ -393,12 +398,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         self._num_optimizer_steps_since_cuda_graph_init
                         < _NUM_CUDA_GRAPH_WARMUP_STEPS
                     ):
-                        return run_on_cuda_graph_stream(eager_fwd_bwd_fn, **kwargs)
-                    return cuda_graph_fwd_bwd_fn(**kwargs)
+                        return run_eager_on_cuda_graph_stream(
+                            eager_forward_backward_body_fn, **kwargs
+                        )
+                    return cuda_graph_forward_backward_body_fn(**kwargs)
 
-                self.fwd_bwd_fn = run_with_cuda_graph
+                self.forward_backward_body_fn = run_with_cuda_graph
 
-    @sl.log_trace_span("fwd_bwd")
+    @sl.log_trace_span("forward_backward")
     def forward_backward_microbatch(
         self,
         *,
@@ -412,7 +419,21 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         A microbatch group forms one complete PP step. Without PP, the group
         contains exactly one data-parallel-rank-local microbatch.
+
+        Args:
+            microbatch_group: Microbatches forming one complete pipeline step.
+            global_valid_tokens: Valid-token count used to normalize the loss.
+            loss_kwargs: Additional keyword arguments passed to the loss function.
+            accumulation_index: Index of this gradient-accumulation unit.
+            num_accumulation_steps: Number of units in the optimizer step.
+
+        Returns:
+            The detached loss for this gradient-accumulation unit.
         """
+        loss_kwargs = {
+            **(loss_kwargs or {}),
+            "global_valid_tokens": global_valid_tokens,
+        }
         if accumulation_index == 0:
             # int32 is supported by NCCL reductions, unlike bool.
             self.loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
@@ -427,13 +448,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             for part in self.model_parts:
                 part.set_requires_all_reduce(is_last)  # pyrefly: ignore[not-callable]
 
-        def fwd_bwd() -> torch.Tensor:
+        def forward_backward() -> torch.Tensor:
             if self.parallel_dims.pp_enabled:
-                if loss_kwargs:
-                    raise ValueError(
-                        "Per-microbatch loss arguments are not supported with "
-                        "pipeline parallelism yet."
-                    )
                 arg_mbs: list[tuple[torch.Tensor, ...]] = []
                 kwarg_mbs: list[dict[str, Any]] = []
                 target_mbs: list[torch.Tensor] | None = (
@@ -468,11 +484,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     if target_mbs is not None:
                         target_mbs.append(labels_mb)
 
-                return self.fwd_bwd_fn(
-                    arg_mbs=arg_mbs if self.pp_has_first_stage else None,
-                    kwarg_mbs=kwarg_mbs,
-                    target_mbs=target_mbs,
-                    global_valid_tokens=global_valid_tokens,
+                return self.forward_backward_body_fn(
+                    inputs=arg_mbs if self.pp_has_first_stage else None,
+                    model_kwargs=kwarg_mbs,
+                    labels=target_mbs,
+                    loss_kwargs=loss_kwargs,
                 )
 
             assert len(microbatch_group) == 1
@@ -495,28 +511,26 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     // self.parallel_dims.cp
                 )
 
-            return self.fwd_bwd_fn(
+            return self.forward_backward_body_fn(
                 inputs=inputs,
                 labels=labels,
-                global_valid_tokens=global_valid_tokens,
                 model_kwargs=extra_kwargs,
-                loss_kwargs=loss_kwargs or {},
+                loss_kwargs=loss_kwargs,
             )
 
         if self.sdc_replayer is not None and accumulation_index == 0:
-            loss = self.sdc_replayer.run_fwd_bwd(fwd_bwd, step=self.step)
+            loss = self.sdc_replayer.run_fwd_bwd(forward_backward, step=self.step)
         else:
-            loss = fwd_bwd()
+            loss = forward_backward()
         detached_loss = loss.detach()
         self.loss_is_finite.logical_and_(torch.isfinite(detached_loss).all())
         return detached_loss
 
-    def _forward_backward_body(
+    def _non_pp_forward_backward_body(
         self,
         *,
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor,
         model_kwargs: dict[str, Any],
         loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
@@ -525,7 +539,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             loss, self._last_loss_metrics = self.loss_fn(
                 pred,
                 labels,  # pyrefly: ignore[bad-argument-type]
-                global_valid_tokens,
                 **loss_kwargs,
             )
             del pred
@@ -536,18 +549,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _pp_forward_backward_body(
         self,
         *,
-        arg_mbs: list[tuple[torch.Tensor, ...]] | None,
-        kwarg_mbs: list[dict[str, Any]],
-        target_mbs: list[torch.Tensor] | None,
-        global_valid_tokens: torch.Tensor,
+        inputs: list[tuple[torch.Tensor, ...]] | None,
+        labels: list[torch.Tensor] | None,
+        model_kwargs: list[dict[str, Any]],
+        loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        loss_kwargs = {"global_valid_tokens": global_valid_tokens}
         with self.train_context():
             losses = [] if self.pp_has_last_stage else None
             self.pp_schedule.step(
-                arg_mbs=arg_mbs,
-                kwarg_mbs=kwarg_mbs,
-                target_mbs=target_mbs,
+                arg_mbs=inputs,
+                kwarg_mbs=model_kwargs,
+                target_mbs=labels,
                 losses=losses,
                 loss_kwargs=loss_kwargs,
                 return_outputs=False,

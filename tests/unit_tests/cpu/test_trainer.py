@@ -59,8 +59,8 @@ def _dict_microbatch(input_dict: dict[str, Any]) -> TrainingMicrobatch:
 
 
 def _bind_pp_forward_backward_body(trainer: TrainingEngine) -> None:
-    trainer.fwd_bwd_fn = lambda **kwargs: TrainingEngine._pp_forward_backward_body(
-        trainer, **kwargs
+    trainer.forward_backward_body_fn = (
+        lambda **kwargs: TrainingEngine._pp_forward_backward_body(trainer, **kwargs)
     )
 
 
@@ -242,7 +242,7 @@ def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs() -> None:
 
 
 def test_pp_forward_backward_microbatch_prepares_structured_inputs() -> None:
-    fwd_bwd_fn = MagicMock(return_value=torch.tensor(0.0))
+    forward_backward_body_fn = MagicMock(return_value=torch.tensor(0.0))
 
     class _FakeModel:
         def preprocess_inputs(self, input_dict, **kwargs):
@@ -273,7 +273,7 @@ def test_pp_forward_backward_microbatch_prepares_structured_inputs() -> None:
             ),
             ntokens_seen=0,
             device=torch.device("cpu"),
-            fwd_bwd_fn=fwd_bwd_fn,
+            forward_backward_body_fn=forward_backward_body_fn,
             sdc_replayer=None,
             step=0,
         ),
@@ -299,21 +299,23 @@ def test_pp_forward_backward_microbatch_prepares_structured_inputs() -> None:
             ),
         ],
         global_valid_tokens=global_valid_tokens,
+        loss_kwargs={"advantages": torch.tensor([0.1])},
     )
 
     torch.testing.assert_close(result, torch.tensor(0.0))
-    passed_kwargs = fwd_bwd_fn.call_args.kwargs
-    arg_mbs = passed_kwargs["arg_mbs"]
-    kwarg_mbs = passed_kwargs["kwarg_mbs"]
-    target_mbs = passed_kwargs["target_mbs"]
-    passed_valid_tokens = passed_kwargs["global_valid_tokens"]
+    passed_kwargs = forward_backward_body_fn.call_args.kwargs
+    arg_mbs = passed_kwargs["inputs"]
+    kwarg_mbs = passed_kwargs["model_kwargs"]
+    target_mbs = passed_kwargs["labels"]
+    passed_loss_kwargs = passed_kwargs["loss_kwargs"]
     torch.testing.assert_close(arg_mbs[0][0], torch.tensor(2))
     torch.testing.assert_close(arg_mbs[1][0], torch.tensor(3))
     torch.testing.assert_close(kwarg_mbs[0]["positions"], torch.tensor(13))
     torch.testing.assert_close(kwarg_mbs[1]["positions"], torch.tensor(23))
     torch.testing.assert_close(target_mbs[0], torch.tensor([5]))
     torch.testing.assert_close(target_mbs[1], torch.tensor([6]))
-    assert passed_valid_tokens is global_valid_tokens
+    torch.testing.assert_close(passed_loss_kwargs["advantages"], torch.tensor([0.1]))
+    assert passed_loss_kwargs["global_valid_tokens"] is global_valid_tokens
     assert trainer.ntokens_seen == 2
 
 
@@ -325,9 +327,9 @@ def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple():
             captured["preprocess_kwargs"] = kw
             return ("INPUTS", torch.ones(7), {"positions": 1})
 
-    def fwd_bwd_fn(*, inputs, labels, global_valid_tokens, model_kwargs, loss_kwargs):
+    def forward_backward_body_fn(*, inputs, labels, model_kwargs, loss_kwargs):
         captured["fwd_bwd_args"] = (inputs, labels, model_kwargs)
-        assert loss_kwargs == {}
+        torch.testing.assert_close(loss_kwargs["global_valid_tokens"], torch.tensor(1))
         return torch.tensor(0.0, requires_grad=True)
 
     fake = SimpleNamespace(
@@ -348,7 +350,7 @@ def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple():
         preprocess_inputs_kwargs={"processor": "VALUE"},
         ntokens_seen=100,
         device=torch.device("cpu"),
-        fwd_bwd_fn=fwd_bwd_fn,
+        forward_backward_body_fn=forward_backward_body_fn,
         sdc_replayer=None,
         step=0,
     )
@@ -463,8 +465,8 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
 
 
 def test_training_engine_owns_cuda_graph_warmup() -> None:
-    eager_fwd_bwd = MagicMock(return_value=torch.tensor(1.0))
-    cuda_graph_fwd_bwd = MagicMock(return_value=torch.tensor(2.0))
+    eager_forward_backward_body = MagicMock(return_value=torch.tensor(1.0))
+    cuda_graph_forward_backward_body = MagicMock(return_value=torch.tensor(2.0))
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -474,7 +476,7 @@ def test_training_engine_owns_cuda_graph_warmup() -> None:
                 training=SimpleNamespace(disable_cuda_graphs=False),
             ),
             parallel_dims=SimpleNamespace(pp_enabled=False),
-            _forward_backward_body=eager_fwd_bwd,
+            _non_pp_forward_backward_body=eager_forward_backward_body,
             _num_optimizer_steps_since_cuda_graph_init=100,
         ),
     )
@@ -486,10 +488,10 @@ def test_training_engine_owns_cuda_graph_warmup() -> None:
         ),
         patch(
             "torchtitan.training_engine.wrap_with_cuda_graph",
-            return_value=cuda_graph_fwd_bwd,
+            return_value=cuda_graph_forward_backward_body,
         ) as wrap,
         patch(
-            "torchtitan.training_engine.run_on_cuda_graph_stream",
+            "torchtitan.training_engine.run_eager_on_cuda_graph_stream",
             side_effect=lambda fn, **kwargs: fn(**kwargs),
         ) as run_eager,
     ):
@@ -500,27 +502,29 @@ def test_training_engine_owns_cuda_graph_warmup() -> None:
         # optimizer steps have finished.
         for _ in range(3):
             torch.testing.assert_close(
-                engine.fwd_bwd_fn(value=torch.tensor(0)), torch.tensor(1.0)
+                engine.forward_backward_body_fn(value=torch.tensor(0)),
+                torch.tensor(1.0),
             )
         engine._num_optimizer_steps_since_cuda_graph_init = 1
         for _ in range(2):
             torch.testing.assert_close(
-                engine.fwd_bwd_fn(value=torch.tensor(0)), torch.tensor(1.0)
+                engine.forward_backward_body_fn(value=torch.tensor(0)),
+                torch.tensor(1.0),
             )
 
         engine._num_optimizer_steps_since_cuda_graph_init = 2
         torch.testing.assert_close(
-            engine.fwd_bwd_fn(value=torch.tensor(0)), torch.tensor(2.0)
+            engine.forward_backward_body_fn(value=torch.tensor(0)), torch.tensor(2.0)
         )
 
-    wrap.assert_called_once_with(eager_fwd_bwd)
+    wrap.assert_called_once_with(eager_forward_backward_body)
     assert run_eager.call_count == 5
-    assert eager_fwd_bwd.call_count == 5
-    cuda_graph_fwd_bwd.assert_called_once()
+    assert eager_forward_backward_body.call_count == 5
+    cuda_graph_forward_backward_body.assert_called_once()
 
 
 def test_training_engine_skips_cuda_graph_warmup_when_unsupported() -> None:
-    eager_fwd_bwd = MagicMock(return_value=torch.tensor(1.0))
+    eager_forward_backward_body = MagicMock(return_value=torch.tensor(1.0))
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -530,7 +534,7 @@ def test_training_engine_skips_cuda_graph_warmup_when_unsupported() -> None:
                 training=SimpleNamespace(disable_cuda_graphs=False),
             ),
             parallel_dims=SimpleNamespace(pp_enabled=False),
-            _forward_backward_body=eager_fwd_bwd,
+            _non_pp_forward_backward_body=eager_forward_backward_body,
         ),
     )
 
@@ -543,14 +547,14 @@ def test_training_engine_skips_cuda_graph_warmup_when_unsupported() -> None:
             "torchtitan.training_engine.wrap_with_cuda_graph",
             side_effect=lambda fn: fn,
         ),
-        patch("torchtitan.training_engine.run_on_cuda_graph_stream") as run_eager,
+        patch("torchtitan.training_engine.run_eager_on_cuda_graph_stream") as run_eager,
     ):
         TrainingEngine.initialize_forward_backward(engine)
         torch.testing.assert_close(
-            engine.fwd_bwd_fn(value=torch.tensor(0)), torch.tensor(1.0)
+            engine.forward_backward_body_fn(value=torch.tensor(0)), torch.tensor(1.0)
         )
 
-    eager_fwd_bwd.assert_called_once()
+    eager_forward_backward_body.assert_called_once()
     run_eager.assert_not_called()
 
 
@@ -633,7 +637,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
 
 
 def test_engine_replay_checks_only_first_forward_backward():
-    fwd_bwd_fn = MagicMock(return_value=torch.tensor(1.0))
+    forward_backward_body_fn = MagicMock(return_value=torch.tensor(1.0))
     replayer = SimpleNamespace(
         run_fwd_bwd=MagicMock(side_effect=lambda fn, **kwargs: fn()),
     )
@@ -665,7 +669,7 @@ def test_engine_replay_checks_only_first_forward_backward():
             ],
             max_num_documents=None,
             preprocess_inputs_kwargs={},
-            fwd_bwd_fn=fwd_bwd_fn,
+            forward_backward_body_fn=forward_backward_body_fn,
             sdc_replayer=replayer,
             step=1,
             ntokens_seen=0,
@@ -683,7 +687,7 @@ def test_engine_replay_checks_only_first_forward_backward():
 
     replayer.run_fwd_bwd.assert_called_once()
     assert replayer.run_fwd_bwd.call_args.kwargs == {"step": 1}
-    assert fwd_bwd_fn.call_count == 2
+    assert forward_backward_body_fn.call_count == 2
 
 
 def test_replay_failure_propagates_from_engine():
@@ -821,7 +825,7 @@ def _run_forward_backward_recording_all_reduce(
                 cp=1,
             ),
             device=torch.device("cpu"),
-            fwd_bwd_fn=MagicMock(return_value=torch.tensor(1.0)),
+            forward_backward_body_fn=MagicMock(return_value=torch.tensor(1.0)),
             sdc_replayer=None,
             model_parts=[part],
             max_num_documents=None,
