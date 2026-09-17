@@ -113,8 +113,10 @@ class KimiK25Model(DeepSeekV3Model):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch."""
+        del kwargs
         # Function-local import avoids a circular import.
         from torchtitan.distributed.context_parallel.api import (
             prepare_context_parallel_input,

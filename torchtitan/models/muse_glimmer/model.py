@@ -365,8 +365,10 @@ class MuseGlimmerModel(Decoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
+        del kwargs
         from .sharding import vision_bank_indices_placement
 
         batch: dict[str, Any] = dict(input_dict)

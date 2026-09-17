@@ -6,19 +6,24 @@
 
 from dataclasses import replace
 
-from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.checkpointer import (
+    CheckpointManager,
+    DATALOADER,
+    LR_SCHEDULER,
+    OPTIMIZER,
+    TRAIN_STATE,
+)
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
+from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.flux_datasets import (
     DATASETS,
     FluxCollator,
     FluxSampleProcessor,
-    FluxValidationDatasetConfig,
 )
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.trainer import FluxTrainer
@@ -27,7 +32,6 @@ from torchtitan.models.flux.utils import (
     PATCH_HEIGHT,
     PATCH_WIDTH,
 )
-from torchtitan.models.flux.validate import FluxValidator
 from torchtitan.observability.metrics import MetricsProcessor
 
 from . import model_registry
@@ -55,7 +59,6 @@ def flux_debugmodel() -> FluxTrainer.Config:
     img_size = 256
     max_t5_encoding_len = 256
     training_dataset = _flux_dataset("cc12m-test", img_size=img_size)
-    validation_dataset = _flux_dataset("cc12m-test-validation", img_size=img_size)
     return FluxTrainer.Config(
         hf_assets_path=hf_assets_path,
         loss=MSELoss.Config(),
@@ -88,38 +91,22 @@ def flux_debugmodel() -> FluxTrainer.Config:
         ),
         parallelism=ParallelismConfig(context_parallel_degree=1),
         activation_checkpoint=FullAC.Config(),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
-        validator=FluxValidator.Config(
-            freq=5,
-            steps=48,
-            sampling=SamplingConfig(
-                enable_classifier_free_guidance=True,
-                classifier_free_guidance_scale=5.0,
-                denoising_steps=4,
-            ),
-            # Validate on the local cc12m-test asset (no HF download) so CI
-            # does not flake on the network. Production flux_dev/flux_schnell
-            # still validate on the real coco-validation set.
-            dataloader=GrainDataLoader.Config(
-                dataset=FluxValidationDatasetConfig(
-                    dataset=validation_dataset,
-                ),
-                collator=FluxCollator.Config(),
-                streaming_shuffle_buffer_size=128,
-            ),
-            save_img_count=1,
-            save_img_folder="img",
-            all_timesteps=False,
-        ),
+        checkpointer=None,
+        validator=None,
         inference=Inference(
             save_img_folder="inference_results",
             prompts_path="./torchtitan/models/flux/inference/prompts.txt",
             local_batch_size=2,
         ),
     )
+
+
+def flux_debugmodel_inference() -> FluxTrainer.Config:
+    config = flux_debugmodel()
+    config.checkpointer = CheckpointManager.Config(
+        exclude_from_loading=[DATALOADER, LR_SCHEDULER, OPTIMIZER, TRAIN_STATE],
+    )
+    return config
 
 
 def flux_dev() -> FluxTrainer.Config:
@@ -156,26 +143,8 @@ def flux_dev() -> FluxTrainer.Config:
             streaming_shuffle_buffer_size=128,
         ),
         activation_checkpoint=FullAC.Config(),
-        checkpoint=CheckpointManager.Config(interval=1000),
-        validator=FluxValidator.Config(
-            freq=1000,
-            steps=12,
-            sampling=SamplingConfig(
-                enable_classifier_free_guidance=True,
-                classifier_free_guidance_scale=5.0,
-                denoising_steps=50,
-            ),
-            dataloader=GrainDataLoader.Config(
-                dataset=FluxValidationDatasetConfig(
-                    dataset=validation_dataset,
-                ),
-                collator=FluxCollator.Config(),
-                streaming_shuffle_buffer_size=128,
-            ),
-            save_img_count=50,
-            save_img_folder="img",
-            all_timesteps=False,
-        ),
+        checkpointer=None,
+        validator=None,
     )
 
 
@@ -213,26 +182,8 @@ def flux_schnell() -> FluxTrainer.Config:
             streaming_shuffle_buffer_size=128,
         ),
         activation_checkpoint=FullAC.Config(),
-        checkpoint=CheckpointManager.Config(interval=1000),
-        validator=FluxValidator.Config(
-            freq=1000,
-            steps=6,
-            sampling=SamplingConfig(
-                enable_classifier_free_guidance=True,
-                classifier_free_guidance_scale=5.0,
-                denoising_steps=50,
-            ),
-            dataloader=GrainDataLoader.Config(
-                dataset=FluxValidationDatasetConfig(
-                    dataset=validation_dataset,
-                ),
-                collator=FluxCollator.Config(),
-                streaming_shuffle_buffer_size=128,
-            ),
-            save_img_count=50,
-            save_img_folder="img",
-            all_timesteps=False,
-        ),
+        checkpointer=None,
+        validator=None,
     )
 
 
@@ -240,9 +191,9 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     """Flux schnell with MXFP8 quantization and torch.compile.
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_schnell()
-    config.compile = CompileConfig(enable=True)
+    config.compile = CompileConfig()
     model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
+        config.compile is not None and "model" in config.compile.components
     )
     config.model_spec = model_registry(
         "flux-schnell",
@@ -268,9 +219,9 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     """Flux dev with MXFP8 quantization and torch.compile.
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_dev()
-    config.compile = CompileConfig(enable=True)
+    config.compile = CompileConfig()
     model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
+        config.compile is not None and "model" in config.compile.components
     )
     config.model_spec = model_registry(
         "flux-dev",

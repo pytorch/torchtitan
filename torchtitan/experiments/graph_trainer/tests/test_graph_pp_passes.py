@@ -127,7 +127,7 @@ def _trace_dsv3_moe_block_stage(
                 disable_cuda_graphs=True,
             ),
             parallelism=ParallelismConfig(expert_parallel_degree=2),
-            checkpoint=CheckpointManager.Config(initial_load_model_only=False),
+            checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=0, deterministic=True),
         )
         model_config.update_from_config(config=runtime_config)
