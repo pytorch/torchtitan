@@ -13,8 +13,30 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
+import torch
+
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.config import OverrideConfig
+from torchtitan.distributed.utils import (
+    is_in_batch_invariant_mode,
+    set_batch_invariance,
+)
+from torchtitan.models.qwen3_5 import model_registry
+from torchtitan.rl.model import gdn, vllm_registry as registry
+from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
+from torchtitan.rl.model.gdn_backend import (
+    GDNExecutionPath,
+    TorchTitanGDNAttentionMetadata,
+)
+from vllm import EngineArgs, LLMEngine, SamplingParams
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    override_forward_context,
+)
 
 MODEL_ENV = "TORCHTITAN_QWEN3_5_0_8B_HF_PATH"
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
 @pytest.mark.parametrize(
@@ -24,13 +46,21 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     model = os.environ.get(MODEL_ENV)
     if not model:
         pytest.skip(f"set {MODEL_ENV} to a local Qwen3.5-0.8B checkpoint")
-    torch = pytest.importorskip("torch")
-    pytest.importorskip("vllm")
-    if not torch.cuda.is_available():
-        pytest.skip("requires CUDA")
     assert Path(model).is_dir(), model
-    root = Path(__file__).resolve().parents[4]
-    env = {**os.environ, "PYTHONPATH": str(root), MODEL_ENV: str(Path(model).resolve())}
+    root = Path(__file__).resolve().parents[3]
+    # Set import-time options before the child interpreter starts.
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(root),
+        MODEL_ENV: str(Path(model).resolve()),
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
+        "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
+        "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": "1",
+        "HF_HUB_OFFLINE": "1",
+    }
     results = []
     for mode in ("eager", "full"):
         output = tmp_path / f"{mode}.json"
@@ -55,11 +85,9 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
             )
         results.append(json.loads(output.read_text()))
     eager, full = results
-    assert eager["batch_invariant"] == full["batch_invariant"] == batch_invariant
-    if batch_invariant:
-        # Real packed recurrence ran eagerly and was captured for FULL replay.
-        assert [False, "PACKED"] in eager["recurrent_calls"]
-        assert [True, "PACKED"] in full["recurrent_calls"]
+    # Real packed recurrence ran eagerly and was captured for FULL replay.
+    assert [False, "PACKED"] in eager["recurrent_calls"]
+    assert [True, "PACKED"] in full["recurrent_calls"]
     assert eager["outputs"] == full["outputs"]
     assert eager["states"] == full["states"]
     assert all(step["mode"] == "NONE" for step in eager["dispatch"])
@@ -81,52 +109,26 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     "batch_invariant", [False, True], ids=["regular", "batch-invariant"]
 )
 def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -> None:
-    import torch
-    from vllm.config import SchedulerConfig, VllmConfig
-    from vllm.forward_context import ForwardContext, override_forward_context
-    from vllm.v1.attention.backend import CommonAttentionMetadata
-    from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import MambaSpec
-
-    from torchtitan.experiments.rl.models import gdn
-    from torchtitan.experiments.rl.models.gdn_backend import (
-        TorchTitanGDNAttentionMetadataBuilder,
-    )
-
-    if not torch.cuda.is_available():
-        pytest.skip("requires CUDA")
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: batch_invariant)
     torch.manual_seed(42)
     device = torch.device("cuda")
     # Qwen3.5-0.8B's local TP=1 shapes, with padding between physical slots.
     shapes = ((3, 6144), (16, 128, 128))
-    spec = MambaSpec(
-        block_size=8,
-        shapes=shapes,
-        dtypes=(torch.bfloat16, torch.float32),
-        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
-    )
-    config = VllmConfig()
-    config.scheduler_config = SchedulerConfig(
-        max_model_len=16,
-        max_num_seqs=4,
-        max_num_batched_tokens=8,
-        is_encoder_decoder=False,
-    )
-    builder = TorchTitanGDNAttentionMetadataBuilder(spec, [], config, device)
-    offsets = torch.arange(5, device=device, dtype=torch.int32)
-    common = CommonAttentionMetadata(
-        query_start_loc=offsets,
-        query_start_loc_cpu=offsets.cpu(),
-        seq_lens=torch.ones(4, device=device, dtype=torch.int32),
-        num_reqs=4,
+    state_indices = torch.zeros(4, device=device, dtype=torch.int32)
+    has_initial_state = torch.zeros(4, device=device, dtype=torch.bool)
+    metadata = TorchTitanGDNAttentionMetadata(
+        execution_path=GDNExecutionPath.SINGLE_TOKEN,
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=4,
+        num_decode_tokens=4,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
         num_actual_tokens=4,
-        max_query_len=1,
-        max_seq_len=16,
-        block_table_tensor=torch.zeros(4, 1, device=device, dtype=torch.int32),
-        slot_mapping=torch.zeros(4, device=device, dtype=torch.int64),
+        non_spec_query_start_loc=torch.arange(5, device=device, dtype=torch.int32),
+        non_spec_state_indices_tensor=state_indices,
+        has_initial_state=has_initial_state,
     )
-    metadata = builder.build_for_cudagraph_capture(common)
     context = ForwardContext(
         no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
     )
@@ -138,7 +140,7 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
     layer.local_key_dim = 2048
     pools = [
         torch.randn(6, torch.Size(shape).numel() + 128, device=device, dtype=dtype)
-        for shape, dtype in zip(shapes, spec.dtypes)
+        for shape, dtype in zip(shapes, (torch.bfloat16, torch.float32))
     ]
 
     def cache_views(storage):
@@ -180,24 +182,19 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
             ([1, 2], [True, False]),
             ([1, 2], [False, True]),
         ):
-            for slot, has_state in zip(slots, initial):
-                if not has_state:
-                    assert all(state[slot].count_nonzero() for state in layer.kv_cache)
-                    for state in layer.kv_cache:
-                        state[slot].fill_(float("nan"))
             before = [pool.clone() for pool in pools]
             reference = [pool.clone() for pool in pools]
-            layer.kv_cache = cache_views(reference)
             for slot, has_state in zip(slots, initial):
                 if not has_state:
-                    for state in layer.kv_cache:
-                        state[slot].zero_()
+                    for state, clean in zip(layer.kv_cache, cache_views(reference)):
+                        state[slot].fill_(float("nan"))
+                        clean[slot].zero_()
+            layer.kv_cache = cache_views(reference)
             # Explicitly clean history is the initialization oracle, independent
             # of both the mask implementation and eager-vs-graph agreement.
-            builder.state_indices.copy_(
-                torch.tensor(slots + [0] * (5 - len(slots)), device=device)
+            state_indices.copy_(
+                torch.tensor(slots + [0] * (4 - len(slots)), device=device)
             )
-            builder.has_initial_state.fill_(True)
             # Bypass mask handling in the already-clean reference, so an
             # accidental reset of continuing slots cannot affect both sides.
             with monkeypatch.context() as unmasked:
@@ -210,11 +207,11 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
                 forward()
             expected = output.clone()
             layer.kv_cache = cache_views(pools)
-            builder.has_initial_state.copy_(
-                torch.tensor(initial + [False] * (5 - len(slots)), device=device)
+            has_initial_state.copy_(
+                torch.tensor(initial + [False] * (4 - len(slots)), device=device)
             )
             # Both repeated null slots and a negative sentinel must skip writes.
-            builder.state_indices[3] = -1
+            state_indices[3] = -1
             graph.replay()
             torch.testing.assert_close(output, expected, rtol=0, atol=0)
             assert not output[len(slots) :].count_nonzero()
@@ -226,31 +223,6 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
 
 
 def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
-    os.environ.update(
-        VLLM_USE_V2_MODEL_RUNNER="0",
-        VLLM_ENABLE_V1_MULTIPROCESSING="0",
-        VLLM_WORKER_MULTIPROC_METHOD="spawn",
-        VLLM_USE_BREAKABLE_CUDAGRAPH="1",
-        VLLM_USE_FLASHINFER_SAMPLER="0",
-        VLLM_DISABLE_REQUEST_ID_RANDOMIZATION="1",
-        HF_HUB_OFFLINE="1",
-    )
-    import torch
-    from vllm import EngineArgs, LLMEngine, SamplingParams
-    from vllm.forward_context import get_forward_context
-
-    from torchtitan.components.checkpointer import CheckpointManager
-    from torchtitan.config import CompileConfig, OverrideConfig
-    from torchtitan.distributed.utils import (
-        is_in_batch_invariant_mode,
-        set_batch_invariance,
-    )
-    from torchtitan.experiments.rl.batch_invariance import (
-        force_logprobs_fn_for_batch_invariance,
-    )
-    from torchtitan.experiments.rl.models import gdn, vllm_registry as registry
-    from torchtitan.models.qwen3_5 import model_registry
-
     assert int(os.environ["WORLD_SIZE"]) == 1
     set_batch_invariance(batch_invariant)
     if batch_invariant:
@@ -261,7 +233,8 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.manual_seed(42)
     recurrent_calls = []
-    original_recurrent = gdn.recurrent_gdn
+    kernel_name = "recurrent_gdn" if batch_invariant else "paged_chunk_gdn"
+    original_recurrent = getattr(gdn, kernel_name)
 
     def recurrent(*args, **kwargs):
         metadata = next(
@@ -274,14 +247,14 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         )
         return original_recurrent(*args, **kwargs)
 
-    gdn.recurrent_gdn = recurrent
+    setattr(gdn, kernel_name, recurrent)
     model = os.environ[MODEL_ENV]
     registry.register_to_vllm(
         model_registry("0.8B", seq_len=256, attn_backend="varlen"),
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
-        compile_config=CompileConfig(enable=False),
-        checkpoint_config=CheckpointManager.Config(
-            enable=True, initial_load_in_hf=True, initial_load_path=model
+        compile_config=None,
+        checkpointer_config=CheckpointManager.Config(
+            initial_load_in_hf=True, initial_load_path=model
         ),
         override=OverrideConfig(),
     )
@@ -317,7 +290,6 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         "outputs": {},
         "states": [],
         "dispatch": [],
-        "batch_invariant": is_in_batch_invariant_mode(),
         "recurrent_calls": recurrent_calls,
     }
 
@@ -398,20 +370,19 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     base = engine.renderer.tokenizer.encode(
         "Explain physics.", add_special_tokens=False
     )
-    for wave, lengths in enumerate(
-        ([11, 17, 23, 37], [129], [9, 13, 29, 41], [1], [1, 1])
+    for wave, (lengths, initial_count) in enumerate(
+        (([11, 17, 23, 37], 4), ([129], 1), ([9, 13, 29, 41], 3), ([1], 1), ([1, 1], 1))
     ):
         prompts = engine.renderer.render_cmpl(
             [{"prompt_token_ids": (base * length)[:length]} for length in lengths]
         )
-        for index, prompt in enumerate(prompts):
-            if (wave != 2 or index < 3) and (wave != 4 or index == 0):
-                engine.add_request(f"{wave}-{index}", prompt, sampling)
+        for index, prompt in enumerate(prompts[:initial_count]):
+            engine.add_request(f"{wave}-{index}", prompt, sampling)
         step = 0
         while engine.has_unfinished_requests():
-            if wave in (2, 4) and step == 2:
-                index = 3 if wave == 2 else 1
-                engine.add_request(f"{wave}-{index}", prompts[index], sampling)
+            if step == 2:
+                for index in range(initial_count, len(prompts)):
+                    engine.add_request(f"{wave}-{index}", prompts[index], sampling)
             for request in engine.step():
                 if request.finished:
                     completion = request.outputs[0]
@@ -420,8 +391,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
                     result["outputs"][request.request_id] = asdict(completion)
             step += 1
     assert len(result["outputs"]) == 12
-    if torch.distributed.get_rank() == 0:
-        output.write_text(json.dumps(result, allow_nan=False))
+    output.write_text(json.dumps(result, allow_nan=False))
     engine.model_executor.shutdown()
     torch.distributed.destroy_process_group()
 

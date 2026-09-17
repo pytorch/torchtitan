@@ -8,7 +8,7 @@
 
 from collections.abc import Set
 
-from torchtitan.experiments.rl.models.gdn_backend import TorchTitanGDNAttentionBackend
+from torchtitan.rl.model.gdn_backend import TorchTitanGDNAttentionBackend
 from vllm.config import CUDAGraphMode, get_layers_from_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -19,9 +19,10 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
 
-class TorchTitanGDNDispatcher(CudagraphDispatcher):
+class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
     """Keep native FULL descriptors distinct for packed GDN and fused decode.
 
+    Currently installed only for TorchTitan's Attention Gym GDN wrapper.
     vLLM at c6fa1f0 erases the uniform-decode discriminator in FULL mode:
     four one-token decodes collide with one four-token prefill. Attention Gym's
     different numerical paths need distinct keys. Delegate decode keys to the
@@ -29,6 +30,9 @@ class TorchTitanGDNDispatcher(CudagraphDispatcher):
     specialization; native capture, replay and graph ownership stay intact.
     The single-token key also covers fresh requests: initialization is GPU mask
     data, not another dispatch key or a reason to switch to packed arithmetic.
+
+    This costs one additional graph capture per decode-specialized batch size
+    and additional memory for the expanded graph pool.
     """
 
     def initialize_cudagraph_keys(
@@ -82,7 +86,7 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
             ).values()
         ):
             assert not self.cudagraph_dispatcher.keys_initialized
-            self.cudagraph_dispatcher = TorchTitanGDNDispatcher(self.vllm_config)
+            self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size

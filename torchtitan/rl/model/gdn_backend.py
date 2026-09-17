@@ -93,10 +93,8 @@ class TorchTitanGDNAttentionMetadataBuilder(
                 "Attention Gym GDN does not support intermediate prefix-cache checkpoints; use 'none' or 'align'"
             )
         self.num_reqs_capacity = vllm_config.scheduler_config.max_num_seqs
-        # max_num_seqs + 1 request slots need max_num_seqs + 2 offsets. The
-        # extra local null request owns [real_tokens, padded_capacity), even
-        # with all real slots full; it is not an extra scheduler request.
-        # Common metadata remains untouched.
+        # Always allocate one extra interval in query_start_loc (cu_seqlens)
+        # so any tokens left in the padded buffer belong to the last, null request.
         self.query_start_loc = torch.zeros(
             self.num_reqs_capacity + 2, device=device, dtype=torch.int32
         )
@@ -144,9 +142,8 @@ class TorchTitanGDNAttentionMetadataBuilder(
             if m.num_reqs
             else (0, 0, 0, 0)
         )
-        # Match the native graph key, not the native split counts: a general
-        # capture dummy can contain only one-token requests. Freshness does not
-        # select the execution path; both paths consume the initialization mask.
+        # If every request is processing one token, use the single-token
+        # (decode-style) path.
         single_token = m.max_query_len == 1
         return TorchTitanGDNAttentionMetadata(
             execution_path=(

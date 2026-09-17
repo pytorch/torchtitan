@@ -33,12 +33,12 @@ from attn_gym.linear import (
 )
 
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.experiments.rl.models.gdn_backend import (
+from torchtitan.protocols.module import Module
+from torchtitan.rl.model.gdn_backend import (
     GDNExecutionPath,
     TorchTitanGDNAttentionBackend,
     TorchTitanGDNAttentionMetadata,
 )
-from torchtitan.protocols.module import Module
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context

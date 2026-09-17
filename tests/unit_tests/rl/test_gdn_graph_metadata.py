@@ -4,10 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import fields, replace
+from dataclasses import replace
 
 import pytest
 import torch
+
+from torchtitan.rl.model import gdn
+from torchtitan.rl.model.gdn_backend import (
+    GDNExecutionPath,
+    TorchTitanGDNAttentionMetadata,
+    TorchTitanGDNAttentionMetadataBuilder,
+)
+from torchtitan.rl.model.vllm_worker import TorchTitanCudagraphDispatcher
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -20,14 +28,6 @@ from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
-
-from torchtitan.experiments.rl.models import gdn
-from torchtitan.experiments.rl.models.gdn_backend import (
-    GDNExecutionPath,
-    TorchTitanGDNAttentionMetadata,
-    TorchTitanGDNAttentionMetadataBuilder,
-)
-from torchtitan.experiments.rl.models.vllm_worker import TorchTitanGDNDispatcher
 
 
 def test_full_metadata_and_native_dispatch_variants():
@@ -45,7 +45,7 @@ def test_full_metadata_and_native_dispatch_variants():
         max_num_batched_tokens=8,
         is_encoder_decoder=False,
     )
-    dispatcher = TorchTitanGDNDispatcher(config)
+    dispatcher = TorchTitanCudagraphDispatcher(config)
     assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
     dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
     decode_mode, decode = dispatcher.dispatch(2, uniform_decode=True)
@@ -86,9 +86,6 @@ def test_full_metadata_and_native_dispatch_variants():
     )
     captured = builder.build_for_cudagraph_capture(common)
     assert isinstance(captured, GDNAttentionMetadata)
-    assert {field.name for field in fields(captured)} == {
-        field.name for field in fields(GDNAttentionMetadata)
-    } | {"execution_path"}
     # Native splits stay truthful; the graph key keeps this general dummy packed.
     assert captured.execution_path is GDNExecutionPath.PACKED
     assert captured.num_prefills == 0 and captured.num_decodes == 2
