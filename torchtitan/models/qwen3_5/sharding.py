@@ -209,20 +209,20 @@ def _set_qwen35_layer_sharding(
         )
         if shared_experts is not None:
             assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
-            _set_qwen35_shared_experts_sharding_config(
+            set_sigmoid_gated_feed_forward_sharding_config(
                 shared_experts,
                 enable_ep=enable_ep,
                 enable_sp=enable_sp,
             )
 
 
-def _set_qwen35_shared_experts_sharding_config(
+def set_sigmoid_gated_feed_forward_sharding_config(
     shared_experts: SigmoidGatedFeedForward.Config,
     *,
     enable_ep: bool,
     enable_sp: bool,
 ) -> None:
-    """Gather once for Qwen's shared w13 projection and sigmoid gate."""
+    """Configure Qwen's shared w13 projection and sigmoid gate."""
     input_layout = (
         dense_sequence_parallel_placement()
         if enable_ep and enable_sp

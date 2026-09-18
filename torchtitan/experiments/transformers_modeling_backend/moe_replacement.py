@@ -19,7 +19,6 @@ Two-phase replacement:
 import logging
 from dataclasses import replace
 from functools import partial
-from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -38,13 +37,6 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
-from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
-    dense_activation_placement,
-    dense_param_placement,
-    dense_sequence_parallel_placement,
-    rowwise_config,
-)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import (
@@ -52,62 +44,9 @@ from torchtitan.models.common.moe_sharding import (
     set_routed_moe_sharding_config,
 )
 from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
-from torchtitan.protocols.sharding import ShardingConfig
-
-if TYPE_CHECKING:
-    from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
 
 
 logger = logging.getLogger(__name__)
-
-
-def _set_sigmoid_gated_shared_experts_sharding_config(
-    shared_experts: "SigmoidGatedFeedForward.Config",
-    *,
-    enable_ep: bool,
-    enable_sp: bool,
-) -> None:
-    """Configure the HF sigmoid-gated shared-expert topology."""
-    input_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(
-            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
-        )
-    )
-    output_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
-    )
-    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    shared_experts.sharding_config = ShardingConfig(
-        in_src_shardings={"x": input_layout},
-        out_src_shardings=output_layout,
-    )
-    shared_experts.w13.sharding_config = colwise_config(
-        input_layout=replicated_input_layout
-    )
-    shared_experts.w2.sharding_config = rowwise_config(output_layout=output_layout)
-    assert shared_experts.w2.sharding_config.state_shardings is not None
-    shared_experts.w2.sharding_config.state_shardings["bias"] = dense_param_placement(
-        tp=spmd.R
-    )
-
-    gate_output_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else replicated_input_layout
-    )
-    shared_experts.gate.sharding_config = ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.R),
-            "bias": dense_param_placement(tp=spmd.R),
-        },
-        in_src_shardings={"input": replicated_input_layout},
-        out_src_shardings=replicated_input_layout,
-        out_dst_shardings=gate_output_layout,
-    )
 
 
 class _HFBatchedMoE(MoE):
@@ -183,6 +122,9 @@ def build_and_swap_native_moe(
             # Avoid loading Qwen3.5's optional model dependencies for other HF
             # architectures handled by this generic experiment.
             from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
+            from torchtitan.models.qwen3_5.sharding import (
+                set_sigmoid_gated_feed_forward_sharding_config,
+            )
 
             assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
             set_routed_moe_sharding_config(
@@ -191,7 +133,7 @@ def build_and_swap_native_moe(
                 enable_sp=enable_sp,
                 expert_param_layout=expert_layout,
             )
-            _set_sigmoid_gated_shared_experts_sharding_config(
+            set_sigmoid_gated_feed_forward_sharding_config(
                 shared_experts,
                 enable_ep=enable_ep,
                 enable_sp=enable_sp,

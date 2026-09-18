@@ -155,6 +155,8 @@ class RowParallelLinear(Linear):
         return self._reduce_output(output)
 
     def _reduce_output(self, output: torch.Tensor) -> torch.Tensor:
+        # PartialBiasRowwiseLinear also uses this after adding its bias as a
+        # Partial value before the shared output reduction.
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return output
@@ -170,18 +172,6 @@ class RowParallelLinear(Linear):
             dst=_tp_type(output_layout),
             backward_options={"op_dtype": output.dtype},
         )
-
-
-def get_parallel_linear_cls(
-    config: Linear.Config,
-) -> type[ColumnParallelLinear] | type[RowParallelLinear] | None:
-    """Return the canonical column- or row-parallel class for a config."""
-    owner = config._owner
-    if owner is not None and issubclass(owner, ColumnParallelLinear):
-        return ColumnParallelLinear
-    if owner is not None and issubclass(owner, RowParallelLinear):
-        return RowParallelLinear
-    return None
 
 
 @spmd.register_local_autograd_function
@@ -283,6 +273,25 @@ class PartialBiasRowwiseLinear(RowParallelLinear):
             )
         output = self._linear(input, self.weight, bias)
         return self._reduce_output(output)
+
+
+def get_parallel_linear_cls(
+    config: Linear.Config,
+) -> (
+    type[ColumnParallelLinear]
+    | type[RowParallelLinear]
+    | type[PartialBiasRowwiseLinear]
+    | None
+):
+    """Return the canonical TP boundary class for a linear config."""
+    owner = config._owner
+    if owner is not None and issubclass(owner, PartialBiasRowwiseLinear):
+        return PartialBiasRowwiseLinear
+    if owner is not None and issubclass(owner, ColumnParallelLinear):
+        return ColumnParallelLinear
+    if owner is not None and issubclass(owner, RowParallelLinear):
+        return RowParallelLinear
+    return None
 
 
 __all__ = [

@@ -18,6 +18,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     get_parallel_linear_cls,
     Linear,
+    PartialBiasRowwiseLinear,
     RowParallelLinear,
 )
 from torchtitan.protocols.module import Module
@@ -48,7 +49,9 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
             parallel_cls = get_parallel_linear_cls(config)
             if parallel_cls is None:
                 continue
-            if type(config) is not parallel_cls.Config:
+            if parallel_cls is PartialBiasRowwiseLinear or type(config) is not (
+                parallel_cls.Config
+            ):
                 projection_name = fqn or type(config).__qualname__
                 raise ValueError(
                     "Async tensor parallelism does not support converted "

@@ -21,6 +21,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import (
+    get_parallel_linear_cls,
     Linear,
     PartialBiasRowwiseLinear,
     RowParallelLinear,
@@ -147,6 +148,14 @@ class TestLinear(unittest.TestCase):
 class TestPartialBiasRowwiseLinear(unittest.TestCase):
     def test_is_row_parallel(self):
         self.assertTrue(issubclass(PartialBiasRowwiseLinear, RowParallelLinear))
+
+    def test_preserves_concrete_parallel_linear_class(self):
+        config = PartialBiasRowwiseLinear.Config(
+            in_features=4,
+            out_features=2,
+            bias=True,
+        )
+        self.assertIs(get_parallel_linear_cls(config), PartialBiasRowwiseLinear)
 
     def test_requires_bias(self):
         with self.assertRaisesRegex(ValueError, "requires bias=True"):
