@@ -424,6 +424,8 @@ class MuseGlimmerVisionEncoder(Module):
         device = self.conv1_linear.weight.device
         dtype = self.conv1_linear.weight.dtype
         if pixel_values is None:
+            # Inherit FSDP's runtime device and dtype; requiring grad ensures its
+            # backward hook runs on image-free ranks.
             empty_TO = self.conv1_linear.weight.new_empty(
                 (0, self.output_dim),
                 requires_grad=torch.is_grad_enabled(),

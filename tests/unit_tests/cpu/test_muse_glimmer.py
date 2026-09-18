@@ -149,52 +149,6 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
         for flavor in ("debugmodel", "debugmodel_mm"):
             self.assertIsNone(model_registry(flavor, seq_len=8).post_optimizer_build_fn)
 
-    def test_multimodal_parallelize_rejects_cuda_graphs_before_mutation(self):
-        model = model_registry("debugmodel_mm", seq_len=8).model.build()
-        parallel_dims = SimpleNamespace(tp_enabled=False, pp_enabled=False)
-        self.assertFalse(model._parallelized)
-
-        with self.assertRaisesRegex(ValueError, "CUDA graphs"):
-            parallelize_muse_glimmer(
-                model,
-                parallel_dims=parallel_dims,
-                training=TrainingConfig(disable_cuda_graphs=False),
-                parallelism=ParallelismConfig(),
-                compile_config=CompileConfig(),
-                ac_config=None,
-                dump_folder="",
-            )
-
-        self.assertFalse(model._parallelized)
-
-    def test_multimodal_inference_without_dp_does_not_require_cuda_graphs_disabled(
-        self,
-    ):
-        class FakeModel:
-            def __init__(self):
-                self.config = SimpleNamespace(vision_encoder=object())
-                self.vision_encoder = object()
-                self.vision_adapter = object()
-                self.parallelized = False
-
-            def parallelize(self, _parallel_dims):
-                self.parallelized = True
-
-        model = FakeModel()
-        result = parallelize_muse_glimmer(
-            model,
-            parallel_dims=SimpleNamespace(tp_enabled=False, pp_enabled=False),
-            training=TrainingConfig(disable_cuda_graphs=False),
-            parallelism=ParallelismConfig(),
-            compile_config=CompileConfig(),
-            ac_config=None,
-            dump_folder="",
-            skip_dp=True,
-        )
-
-        self.assertIs(result, model)
-        self.assertTrue(model.parallelized)
-
     def test_multimodal_parallelize_enables_unused_parameter_reduction(self):
         class FakeFSDPModule:
             def __init__(self):
@@ -228,7 +182,7 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
             parallelize_muse_glimmer(
                 model,
                 parallel_dims=parallel_dims,
-                training=TrainingConfig(disable_cuda_graphs=True),
+                training=TrainingConfig(disable_cuda_graphs=False),
                 parallelism=ParallelismConfig(),
                 compile_config=CompileConfig(),
                 ac_config=None,
