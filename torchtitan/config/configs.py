@@ -164,12 +164,6 @@ class ParallelismConfig:
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
 
-    fsdp_defer_gradient_reduction: Annotated[bool, tyro.conf.Suppress] = False
-    """
-    Keep FSDP parameters unsharded across gradient accumulation iterations and
-    reduce gradients only after the final backward.
-    """
-
     fsdp_symm_mem_scope: Annotated[FSDPSymmMemScope, tyro.conf.Suppress] = None
     """
     Which FSDP modules use symmetric-memory communication. None disables it.
@@ -317,9 +311,6 @@ class ParallelismConfig:
 
 @dataclass(kw_only=True, slots=True)
 class CompileConfig:
-    enable: bool = False
-    """Whether to apply torch.compile"""
-
     enable_async_tensor_parallel: bool = False
     """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
 
@@ -336,13 +327,8 @@ class CompileConfig:
                 f"Unknown compile.components entries {unknown}; "
                 f"allowed values are {sorted(allowed)}"
             )
-        if self.enable_async_tensor_parallel and not (
-            self.enable and "model" in self.components
-        ):
-            raise ValueError(
-                "Async TP requires 'model' in --compile.components and "
-                "--compile.enable"
-            )
+        if self.enable_async_tensor_parallel and "model" not in self.components:
+            raise ValueError("Async TP requires 'model' in --compile.components.")
 
 
 @dataclass(kw_only=True, slots=True)

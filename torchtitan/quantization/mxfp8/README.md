@@ -263,7 +263,7 @@ model_spec = model_registry(
 )
 
 # In your Trainer.Config:
-compile=CompileConfig(enable=True),
+compile=CompileConfig(),
 ```
 
 ### Performance

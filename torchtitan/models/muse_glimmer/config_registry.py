@@ -6,7 +6,6 @@
 
 from dataclasses import replace
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -100,7 +99,7 @@ def _muse_glimmer_mm_dataloader(
     return GrainDataLoader.Config(
         dataset=dataset,
         collator=MultiModalCollator.Config(
-            max_images_per_batch=8,
+            max_images_per_microbatch=8,
             patch_size=processor.patch_size,
             temporal_patch_size=processor.temporal_patch_size,
             spatial_merge_size=processor.spatial_merge_size,
@@ -143,10 +142,7 @@ def muse_glimmer_debugmodel(
             steps=10,
         ),
         parallelism=ParallelismConfig(),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -194,10 +190,7 @@ def muse_glimmer_debugmodel_mm(
             disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -231,10 +224,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
@@ -268,9 +258,6 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )

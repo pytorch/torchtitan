@@ -6,7 +6,6 @@
 
 from dataclasses import replace
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -72,10 +71,7 @@ def qwen36_debugmodel(
             max_context_length=model_spec.max_context_length,
             steps=10,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -127,10 +123,7 @@ def qwen36_debugmodel_moe(
             expert_parallel_degree=4,
             tensor_parallel_degree=2,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -162,10 +155,7 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
             data_parallel_shard_degree=-1,
             tensor_parallel_degree=4,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
@@ -199,9 +189,6 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
             tensor_parallel_degree=2,
             expert_parallel_degree=8,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )

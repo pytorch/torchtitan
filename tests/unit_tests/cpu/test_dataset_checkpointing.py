@@ -53,20 +53,16 @@ class TestDatasetCheckpointing(unittest.TestCase):
                         expected_inputs = next(iterator)
                         actual_inputs = next(resumed_iterator)
                         self.assertTrue(
-                            torch.equal(
-                                actual_inputs["input"], expected_inputs["input"]
-                            )
+                            torch.equal(actual_inputs.input, expected_inputs.input)
                         )
                         self.assertTrue(
                             torch.equal(
-                                actual_inputs["positions"],
-                                expected_inputs["positions"],
+                                actual_inputs.positions,
+                                expected_inputs.positions,
                             )
                         )
                         self.assertTrue(
-                            torch.equal(
-                                actual_inputs["labels"], expected_inputs["labels"]
-                            )
+                            torch.equal(actual_inputs.labels, expected_inputs.labels)
                         )
 
     def _build_dataloader(self, source_type, rank):
@@ -90,14 +86,14 @@ class TestDatasetCheckpointing(unittest.TestCase):
             seed=42,
             shuffle=True,
             repeat=True,
-            num_prefetch_batches=1,
+            num_prefetch_microbatches=1,
         )
         return config.build(
             dp_world_size=2,
             dp_rank=rank,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
             max_context_length=128,
-            num_tokens_per_batch=128,
+            num_tokens_per_microbatch=128,
         )
 
 
