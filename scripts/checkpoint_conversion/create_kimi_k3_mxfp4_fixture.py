@@ -143,6 +143,35 @@ def create_fixture(
     hf_state_dict = adapter.to_hf(model.state_dict())
     converted, pair_count = convert_hf_state_dict_to_mxfp4(hf_state_dict)
     storage = write_sharded_checkpoint(converted, output, max_shard_bytes)
+    (output / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "kimi_k3",
+                "text_config": {
+                    "quantization_config": {
+                        "format": "mxfp4-pack-quantized",
+                        "quant_method": "compressed-tensors",
+                        "config_groups": {
+                            "group_0": {
+                                "targets": ["Linear"],
+                                "weights": {"group_size": 32},
+                            }
+                        },
+                        "ignore": [
+                            "re:.*self_attn.*",
+                            "re:.*shared_experts.*",
+                            "re:.*vision_tower.*",
+                            "re:.*mm_projector.*",
+                            "re:.*lm_head.*",
+                        ],
+                    }
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
     repo_root = Path(__file__).resolve().parents[2]
     manifest = {
