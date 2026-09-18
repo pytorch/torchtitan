@@ -177,15 +177,6 @@ class ComputeLayout:
                     "dp_shard": BlockShard(dim=0, block_size=4),
                 }
             )
-
-        Shard complete five-row blocks that each hold a three-row and a
-        two-row matrix, e.g. a per-head ``[K_nope; V]`` stack::
-
-            ComputeLayout(
-                shardings_by_mesh_axis={
-                    "dp_shard": BlockShard(dim=0, block_size=(3, 2)),
-                }
-            )
     """
 
     shardings_by_mesh_axis: Mapping[str, _ComputeSharding]
