@@ -159,6 +159,29 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
+            if (
+                self.training.enable_optimizer_cuda_graph
+                and self.training.disable_cuda_graphs
+            ):
+                raise ValueError(
+                    "enable_optimizer_cuda_graph requires CUDA graphs to be enabled."
+                )
+            if self.training.enable_optimizer_cuda_graph:
+                if self.optimizer.implementation not in (
+                    "fused",
+                    "fused_opt_states_bf16",
+                ):
+                    raise ValueError(
+                        "Optimizer CUDA graphs require the fused implementation."
+                    )
+                if any(
+                    group.optimizer_name not in ("Adam", "AdamW")
+                    or group.optimizer_kwargs.get("fused") is False
+                    for group in self.optimizer.param_groups
+                ):
+                    raise ValueError(
+                        "Optimizer CUDA graphs support only fused Adam and AdamW."
+                    )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
                 self.parallelism.tensor_parallel_degree
@@ -290,6 +313,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         self.model_device_mem_stats = self.device_memory_monitor.get_peak_stats()
         self._initialize_optimizer(model_spec)
+        self._initialize_optimizer_step()
         self._initialize_checkpointer(dataloader=dataloader, sd_adapter=sd_adapter)
         self._initialize_forward_backward()
 
@@ -421,7 +445,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
     def _initialize_optimizer(self, model_spec: ModelSpec) -> None:
         """Construct optimizers and learning-rate schedulers."""
-        self.optimizers = self.config.optimizer.build(model_parts=self.model_parts)
+        self.optimizers = self.config.optimizer.build(
+            model_parts=self.model_parts,
+            capturable=self.config.training.enable_optimizer_cuda_graph,
+        )
         if model_spec.post_optimizer_build_fn is not None:
             model_spec.post_optimizer_build_fn(
                 self.optimizers, self.model_parts, self.parallel_dims
@@ -430,6 +457,27 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             optimizers=self.optimizers,
             training_steps=self.config.training.steps,
         )
+
+    def _initialize_optimizer_step(self) -> None:
+        """Select eager or CUDA graph execution for the optimizer update."""
+        eager_optimizer_step = self._optimizer_step_body
+        self._run_optimizer_step = eager_optimizer_step
+        if not self.config.training.enable_optimizer_cuda_graph:
+            return
+
+        cuda_graph_optimizer_step = wrap_with_cuda_graph(eager_optimizer_step)
+
+        def run_with_cuda_graph(loss_is_finite: torch.Tensor) -> torch.Tensor:
+            if (
+                self._num_optimizer_steps_since_cuda_graph_init
+                < _NUM_CUDA_GRAPH_WARMUP_STEPS
+            ):
+                return run_eager_on_cuda_graph_stream(
+                    eager_optimizer_step, loss_is_finite
+                )
+            return cuda_graph_optimizer_step(loss_is_finite)
+
+        self._run_optimizer_step = run_with_cuda_graph
 
     def _initialize_checkpointer(
         self,
@@ -739,8 +787,20 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
     @sl.log_trace_span("optimizer_step")
     def optimizer_step(self) -> torch.Tensor:
-        """Validate gradients, then advance optimizer and learning-rate scheduler."""
+        """Run one optimizer update and advance its eager state."""
         current_step = self.num_completed_steps + 1
+        if hasattr(self, "checkpointer"):
+            self.checkpointer.maybe_wait_for_staging()
+        grad_norm = self._run_optimizer_step(self.loss_is_finite)
+        self.lr_schedulers.step()
+        self.num_completed_steps = current_step
+        self._num_optimizer_steps_since_cuda_graph_init += 1
+        return grad_norm
+
+    def _clip_and_validate_gradients(
+        self, loss_is_finite: torch.Tensor
+    ) -> torch.Tensor:
+        """Clip gradients and stop on non-finite values."""
         grad_norm = dist_utils.clip_grad_norm_(
             [p for model in self.model_parts for p in model.parameters()],
             self.config.training.max_norm,
@@ -752,31 +812,38 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             loss_mesh = self.parallel_dims.get_optional_mesh("loss")
             if loss_mesh is not None:
                 torch.distributed.all_reduce(
-                    self.loss_is_finite,
+                    loss_is_finite,
                     op=torch.distributed.ReduceOp.MIN,
                     group=loss_mesh.get_group(),
                 )
         pp_mesh = self.parallel_dims.get_optional_mesh("pp")
         if pp_mesh is not None:
             torch.distributed.all_reduce(
-                self.loss_is_finite,
+                loss_is_finite,
                 op=torch.distributed.ReduceOp.MIN,
                 group=pp_mesh.get_group(),
             )
-        step_is_finite = self.loss_is_finite.logical_and(
-            torch.isfinite(grad_norm).all()
-        )
+        step_is_finite = loss_is_finite.logical_and(torch.isfinite(grad_norm).all())
+        if self.config.training.enable_optimizer_cuda_graph:
+            error_message = (
+                "Loss or gradient norm is not finite. Stopping before the update."
+            )
+        else:
+            error_message = (
+                "Loss or gradient norm is not finite on at least one rank at "
+                f"step {self.num_completed_steps + 1}. "
+                "Stopping training before the optimizer update."
+            )
         torch._assert_async(
             step_is_finite,
-            "Loss or gradient norm is not finite on at least one rank at "
-            f"step {current_step}. Stopping training before the optimizer update.",
+            error_message,
         )
-        if hasattr(self, "checkpointer"):
-            self.checkpointer.maybe_wait_for_staging()
+        return grad_norm
+
+    def _optimizer_step_body(self, loss_is_finite: torch.Tensor) -> torch.Tensor:
+        """Clip gradients, validate numerics, and update parameters."""
+        grad_norm = self._clip_and_validate_gradients(loss_is_finite)
         self.optimizers.step()
-        self.lr_schedulers.step()
-        self.num_completed_steps = current_step
-        self._num_optimizer_steps_since_cuda_graph_init += 1
         return grad_norm
 
     def state_dict(self) -> dict[str, Any]:

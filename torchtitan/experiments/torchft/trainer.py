@@ -53,6 +53,8 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         output_dir: str,
         fault_tolerance: FaultTolerance,
     ) -> None:
+        if config.training.enable_optimizer_cuda_graph:
+            raise ValueError("Optimizer CUDA graphs are not supported with TorchFT.")
         # The base constructor invokes the distributed-runtime hook.
         self.fault_tolerance = fault_tolerance
         super().__init__(
