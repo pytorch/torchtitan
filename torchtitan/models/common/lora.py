@@ -25,7 +25,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-    specialize_parallel_linear,
+    compose_parallel_linear_cls,
 )
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -123,7 +123,7 @@ def specialize_lora_linear(parent_cls: type[Module]) -> type[Module]:
         return LoRALinear
 
     if parent_cls in (ColumnParallelLinear, RowParallelLinear):
-        return specialize_parallel_linear(LoRALinear, parent_cls)
+        return compose_parallel_linear_cls(LoRALinear, parent_cls)
 
     # Quantization runs before LoRA and may add fields to the parent config.
     # Retain that exact implementation while inserting the adapter into its
@@ -149,5 +149,5 @@ def specialize_lora_linear(parent_cls: type[Module]) -> type[Module]:
     return SpecializedLoRALinear
 
 
-LoRAColumnParallelLinear = specialize_parallel_linear(LoRALinear, ColumnParallelLinear)
-LoRARowParallelLinear = specialize_parallel_linear(LoRALinear, RowParallelLinear)
+LoRAColumnParallelLinear = compose_parallel_linear_cls(LoRALinear, ColumnParallelLinear)
+LoRARowParallelLinear = compose_parallel_linear_cls(LoRALinear, RowParallelLinear)

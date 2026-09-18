@@ -15,8 +15,8 @@ from torchtitan.models.common.async_linear import (
 )
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    get_parallel_linear_cls,
     Linear,
-    parallel_linear_role,
     RowParallelLinear,
 )
 from torchtitan.protocols.module import Module
@@ -27,61 +27,39 @@ from .lora import LoRATransform
 __all__ = ["AsyncTensorParallelTransform"]
 
 
-def _convert_linear(
-    config: Linear.Config,
-    replacement: type[ColumnParallelLinear] | type[RowParallelLinear],
-    *,
-    projection_name: str,
-) -> ColumnParallelLinear.Config | RowParallelLinear.Config:
-    expected = (
-        ColumnParallelLinear.Config
-        if replacement is AsyncColumnParallelLinear
-        else RowParallelLinear.Config
-    )
-    if type(config) is expected:
-        return cast(
-            ColumnParallelLinear.Config | RowParallelLinear.Config,
-            convert_config_type(config, replacement),
-        )
-    raise ValueError(
-        "Async tensor parallelism does not support converted "
-        f"{projection_name} projections"
-    )
-
-
-def _transform_parallel_linears(model: Module.Config) -> Module.Config:
-    """Replace synchronous TP projection configs with async implementations."""
-    for fqn, traversed, parent, attr in list(model.traverse(Linear.Config)):
-        role = parallel_linear_role(traversed)
-        if role is None:
-            continue
-        replacement = (
-            AsyncColumnParallelLinear
-            if role is ColumnParallelLinear
-            else AsyncRowParallelLinear
-        )
-        converted = _convert_linear(
-            traversed,
-            replacement,
-            projection_name=fqn or type(traversed).__qualname__,
-        )
-        if parent is None:
-            model = cast(Module.Config, converted)
-        elif isinstance(parent, list):
-            assert isinstance(attr, int)
-            parent[attr] = converted
-        else:
-            assert isinstance(attr, str)
-            setattr(parent, attr, converted)
-    return model
-
-
 @dataclass(kw_only=True, slots=True)
 class AsyncTensorParallelTransform(ModelConfigTransform):
     """Replace synchronous tensor-parallel projections with async versions."""
 
     def transform(self, model: Module.Config) -> Module.Config:
-        return _transform_parallel_linears(model)
+        for fqn, config, parent, attr in list(model.traverse(Linear.Config)):
+            parallel_cls = get_parallel_linear_cls(config)
+            if parallel_cls is None:
+                continue
+            if type(config) is not parallel_cls.Config:
+                projection_name = fqn or type(config).__qualname__
+                raise ValueError(
+                    "Async tensor parallelism does not support converted "
+                    f"{projection_name} projections"
+                )
+            replacement = (
+                AsyncColumnParallelLinear
+                if parallel_cls is ColumnParallelLinear
+                else AsyncRowParallelLinear
+            )
+            converted = cast(
+                ColumnParallelLinear.Config | RowParallelLinear.Config,
+                convert_config_type(config, replacement),
+            )
+            if parent is None:
+                model = cast(Module.Config, converted)
+            elif isinstance(parent, list):
+                assert isinstance(attr, int)
+                parent[attr] = converted
+            else:
+                assert isinstance(attr, str)
+                setattr(parent, attr, converted)
+        return model
 
 
 # Async kernels call their fused autograd functions directly instead of the

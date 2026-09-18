@@ -252,10 +252,15 @@ def _set_full_attention_sharding(
     attention_cfg.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
-    for projection in (attention_cfg.wq, attention_cfg.wk, attention_cfg.wv):
-        projection.sharding_config = colwise_config(
-            input_layout=replicated_input_layout
-        )
+    attention_cfg.wq.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    attention_cfg.wk.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    attention_cfg.wv.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
     # RowwiseParallel out_proj: reduce-scatter to Shard(1) under SP, else all-reduce
     # to Replicate.
     attention_cfg.wo.sharding_config = rowwise_config(

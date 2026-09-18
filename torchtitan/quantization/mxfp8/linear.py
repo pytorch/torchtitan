@@ -30,7 +30,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-    specialize_parallel_linear,
+    compose_parallel_linear_cls,
 )
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
@@ -403,7 +403,7 @@ class MXFP8Linear(Linear):
         )
 
 
-MXFP8ColumnParallelLinear = specialize_parallel_linear(
+MXFP8ColumnParallelLinear = compose_parallel_linear_cls(
     MXFP8Linear, ColumnParallelLinear
 )
-MXFP8RowParallelLinear = specialize_parallel_linear(MXFP8Linear, RowParallelLinear)
+MXFP8RowParallelLinear = compose_parallel_linear_cls(MXFP8Linear, RowParallelLinear)

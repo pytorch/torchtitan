@@ -23,11 +23,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    get_parallel_linear_cls,
     Linear,
-    parallel_linear_role,
     PartialBiasRowwiseLinear,
     RowParallelLinear,
-    specialize_parallel_linear,
+    compose_parallel_linear_cls,
 )
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -162,7 +162,7 @@ class TestLinear(unittest.TestCase):
 
     def test_parallel_specialization_preserves_compute_and_role(self):
         for role in (ColumnParallelLinear, RowParallelLinear):
-            specialized = specialize_parallel_linear(_ScaledLinear, role)
+            specialized = compose_parallel_linear_cls(_ScaledLinear, role)
             config = specialized.Config(
                 in_features=4,
                 out_features=2,
@@ -170,10 +170,10 @@ class TestLinear(unittest.TestCase):
             )
             linear = config.build()
 
-            self.assertIs(specialized, specialize_parallel_linear(_ScaledLinear, role))
+            self.assertIs(specialized, compose_parallel_linear_cls(_ScaledLinear, role))
             self.assertTrue(issubclass(specialized, role))
             self.assertTrue(issubclass(specialized.Config, _ScaledLinear.Config))
-            self.assertIs(parallel_linear_role(config), role)
+            self.assertIs(get_parallel_linear_cls(config), role)
 
             input = torch.randn(3, 4)
             expected = 3.0 * F.linear(input, linear.weight, linear.bias)

@@ -28,10 +28,10 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    get_parallel_linear_cls,
     Linear,
-    parallel_linear_role,
     RowParallelLinear,
-    specialize_parallel_linear,
+    compose_parallel_linear_cls,
 )
 from torchtitan.protocols.module import Module
 
@@ -131,7 +131,7 @@ try:
                             }
                         ),
                     }
-                    if parallel_linear_role(self) is not None:
+                    if get_parallel_linear_cls(self) is not None:
                         # The explicit TP classes execute their collective in
                         # forward(). Turning the whole module into a local SPMD
                         # region would localize the input before that collective.
@@ -254,10 +254,12 @@ try:
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return self._linear(input)
 
-    NVFP4ColumnParallelLinear = specialize_parallel_linear(
+    NVFP4ColumnParallelLinear = compose_parallel_linear_cls(
         NVFP4Linear, ColumnParallelLinear
     )
-    NVFP4RowParallelLinear = specialize_parallel_linear(NVFP4Linear, RowParallelLinear)
+    NVFP4RowParallelLinear = compose_parallel_linear_cls(
+        NVFP4Linear, RowParallelLinear
+    )
 
 except ImportError:
     NVFP4Linear = None

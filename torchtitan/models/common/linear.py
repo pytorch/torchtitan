@@ -156,10 +156,10 @@ class RowParallelLinear(Linear):
         )
 
 
-def parallel_linear_role(
+def get_parallel_linear_cls(
     config: Linear.Config,
 ) -> type[ColumnParallelLinear] | type[RowParallelLinear] | None:
-    """Return the column/row role implemented by a Linear config's owner."""
+    """Return the canonical column- or row-parallel class for a config."""
     owner = config._owner
     if owner is not None and issubclass(owner, ColumnParallelLinear):
         return ColumnParallelLinear
@@ -169,7 +169,7 @@ def parallel_linear_role(
 
 
 @functools.cache
-def specialize_parallel_linear(
+def compose_parallel_linear_cls(
     compute_cls: type[Module],
     parallel_cls: type[ColumnParallelLinear] | type[RowParallelLinear],
 ) -> type[Module]:
@@ -311,6 +311,6 @@ __all__ = [
     "RowParallelLinear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
-    "parallel_linear_role",
-    "specialize_parallel_linear",
+    "get_parallel_linear_cls",
+    "compose_parallel_linear_cls",
 ]

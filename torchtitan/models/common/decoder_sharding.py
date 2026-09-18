@@ -15,7 +15,7 @@ from torchtitan.models.common.async_linear import (
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    parallel_linear_role,
+    get_parallel_linear_cls,
     RowParallelLinear,
 )
 from torchtitan.protocols.sharding import ShardingConfig
@@ -217,8 +217,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     qkv = attention_cfg.qkv_linear.wqkv
-    assert parallel_linear_role(qkv) is ColumnParallelLinear
-    assert parallel_linear_role(attention_cfg.wo) is RowParallelLinear
+    assert get_parallel_linear_cls(qkv) is ColumnParallelLinear
+    assert get_parallel_linear_cls(attention_cfg.wo) is RowParallelLinear
     if isinstance(qkv, AsyncColumnParallelLinear.Config):
         validate_async_tp_preconditions(enable_sp=enable_sp)
 
@@ -275,8 +275,8 @@ def set_dense_ffn_sharding(
     a no-op redistribute when placements already agree.
     """
     w13 = feed_forward_cfg.w13
-    assert parallel_linear_role(w13) is ColumnParallelLinear
-    assert parallel_linear_role(feed_forward_cfg.w2) is RowParallelLinear
+    assert get_parallel_linear_cls(w13) is ColumnParallelLinear
+    assert get_parallel_linear_cls(feed_forward_cfg.w2) is RowParallelLinear
     if isinstance(w13, AsyncColumnParallelLinear.Config):
         validate_async_tp_preconditions(enable_sp=enable_sp)
 

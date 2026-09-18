@@ -153,10 +153,15 @@ def _set_mla_sharding(
     attention_cfg.q_norm.sharding_config = replicate_weight
     attention_cfg.wkv_a.sharding_config = replicate_weight
     attention_cfg.kv_norm.sharding_config = replicate_weight
-    for projection in (attention_cfg.wq_b, attention_cfg.wkv_b, attention_cfg.gate):
-        projection.sharding_config = colwise_config(
-            input_layout=replicated_input_layout
-        )
+    attention_cfg.wq_b.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    attention_cfg.wkv_b.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    attention_cfg.gate.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
     attention_cfg.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
     set_gqa_inner_attention_local_spmd(attention_cfg.inner_attention)
 

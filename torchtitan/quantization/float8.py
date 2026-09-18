@@ -12,7 +12,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-    specialize_parallel_linear,
+    compose_parallel_linear_cls,
 )
 from torchtitan.protocols.module import Module
 
@@ -48,10 +48,10 @@ try:
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return self._linear(input)
 
-    Float8ColumnParallelLinear = specialize_parallel_linear(
+    Float8ColumnParallelLinear = compose_parallel_linear_cls(
         Float8Linear, ColumnParallelLinear
     )
-    Float8RowParallelLinear = specialize_parallel_linear(
+    Float8RowParallelLinear = compose_parallel_linear_cls(
         Float8Linear, RowParallelLinear
     )
 
