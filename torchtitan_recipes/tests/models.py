@@ -191,6 +191,28 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     return config
 
 
+def deepseek_v4_debugmodel_fsdp2_pp2() -> Trainer.Config:
+    from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel(seq_len=512)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 2
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v4_debugmodel_pp4() -> Trainer.Config:
+    config = deepseek_v4_debugmodel_fsdp2_pp2()
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.pipeline_parallel_degree = 4
+    config.parallelism.num_pp_microbatches = 4
+    return config
+
+
 def deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
