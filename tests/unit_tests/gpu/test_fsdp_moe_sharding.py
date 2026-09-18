@@ -86,7 +86,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     @with_comms
     def test_no_ep_fsdp_gt_num_experts_shards_dim1(self):
         """ep_degree=1, fsdp_size(8) > num_experts(4) → Shard(1)."""
-        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        dp_mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
+        )
         model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
 
         apply_fsdp_to_decoder(
@@ -103,7 +105,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     @with_comms
     def test_no_ep_fsdp_le_num_experts_shards_dim0(self):
         """ep_degree=1, fsdp_size(8) <= num_experts(8) → Shard(0)."""
-        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        dp_mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
+        )
         model = _build_qwen3_moe_model(num_experts=8).to(self.device_type)
 
         apply_fsdp_to_decoder(
@@ -124,7 +128,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         edp_mesh = init_device_mesh(
             self.device_type, (4, 2), mesh_dim_names=("efsdp", "ep")
         )
-        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        dp_mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
+        )
         model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
 
         apply_fsdp_to_decoder(
@@ -138,6 +144,31 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         self.assertEqual(_get_expert_shard_dim(model), 1)
+
+    @with_comms
+    def test_no_ep_hsdp_ignores_dp_replicate(self):
+        """ep_degree=1 under HSDP: dp_replicate must not count as shard degree.
+
+        The mesh is (dp_replicate=2, dp_shard=4), so FSDP cuts dim 0 of the
+        expert weights 4 ways, and 4 <= num_experts(4) -> Shard(0). Counting
+        dp_replicate gives 2*4=8 > 4 -> Shard(1), which pads dim 0 needlessly
+        and changes the on-disk checkpoint layout.
+        """
+        dp_mesh = init_device_mesh(
+            self.device_type, (2, 4), mesh_dim_names=("dp_replicate", "dp_shard")
+        )
+        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            ep_degree=1,
+        )
+
+        self.assertEqual(_get_expert_shard_dim(model), 0)
 
 
 if __name__ == "__main__":
