@@ -50,6 +50,82 @@ class TestDistMuon(DTensorTestBase):
         return "cuda"
 
     @with_comms
+    def test_segments_match_independent_matrix_updates(self):
+        lr = 0.03
+        num_rows_per_segment = (3, 2)
+        block_rows = sum(num_rows_per_segment)
+        num_blocks = self.world_size
+        matrix_columns = 2
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+
+        value = (
+            torch.arange(num_blocks * block_rows * matrix_columns, device=device)
+            .reshape(num_blocks * block_rows, matrix_columns)
+            .float()
+            .div_(7)
+        )
+        grad = value.sin()
+        param = torch.nn.Parameter(distribute_tensor(value.clone(), mesh, (Shard(0),)))
+        param.grad = distribute_tensor(grad.clone(), mesh, (Shard(0),))
+        fqn = "layers.0.attention.wkv_b.weight"
+        optimizer = build_dist_muon(
+            [{"params": [param], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": BlockShard(dim=0, block_size=num_rows_per_segment)
+                    },
+                ),
+            },
+            bucket_configs=[BucketConfig(patterns=("layers.0.*",))],
+            lr=lr,
+            weight_decay=0.0,
+            momentum=0.0,
+            nesterov=False,
+            ns_steps=2,
+            adjust_lr_fn="match_rms_adamw",
+        )
+
+        # One reference parameter per (block, segment) matrix.
+        segments = torch.split(
+            value.view(num_blocks, block_rows, matrix_columns),
+            list(num_rows_per_segment),
+            dim=1,
+        )
+        grad_segments = torch.split(
+            grad.view(num_blocks, block_rows, matrix_columns),
+            list(num_rows_per_segment),
+            dim=1,
+        )
+        reference = []
+        for block in range(num_blocks):
+            for segment, grad_segment in zip(segments, grad_segments, strict=True):
+                matrix = torch.nn.Parameter(segment[block].clone())
+                matrix.grad = grad_segment[block].clone()
+                reference.append(matrix)
+        reference_optimizer = torch.optim.Muon(
+            reference,
+            lr=lr,
+            weight_decay=0.0,
+            momentum=0.0,
+            nesterov=False,
+            ns_steps=2,
+            adjust_lr_fn="match_rms_adamw",
+        )
+
+        optimizer.step()
+        reference_optimizer.step()
+
+        expected = torch.cat([matrix.detach() for matrix in reference])
+        expected_local = distribute_tensor(expected, mesh, (Shard(0),)).to_local()
+        torch.testing.assert_close(param.to_local(), expected_local, rtol=0, atol=1e-3)
+
+    @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
         lr = 0.03
         num_matrices = 3
