@@ -28,6 +28,12 @@ from .lora import LoRATransform
 
 __all__ = ["AsyncTensorParallelTransform"]
 
+# A column/row role alone does not imply that its collective is eligible for
+# the fused async kernel. Shared-input projections, such as Muse Glimmer's QKV
+# and output gate or an MoE shared expert's gate and w13, gather once at their
+# parent. Keep the transform scoped to common GQA and dense FFN boundaries until
+# async implementations can honor each projection's declared source layout.
+
 
 def _convert_linear(
     config: Linear.Config,

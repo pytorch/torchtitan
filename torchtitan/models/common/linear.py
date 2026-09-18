@@ -13,6 +13,7 @@
   from ``Configurable.Config``.
 """
 
+import functools
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -155,6 +156,56 @@ class RowParallelLinear(Linear):
         )
 
 
+def parallel_linear_role(
+    config: Linear.Config,
+) -> type[ColumnParallelLinear] | type[RowParallelLinear] | None:
+    """Return the column/row role implemented by a Linear config's owner."""
+    owner = config._owner
+    if owner is not None and issubclass(owner, ColumnParallelLinear):
+        return ColumnParallelLinear
+    if owner is not None and issubclass(owner, RowParallelLinear):
+        return RowParallelLinear
+    return None
+
+
+@functools.cache
+def specialize_parallel_linear(
+    compute_cls: type[Module],
+    parallel_cls: type[ColumnParallelLinear] | type[RowParallelLinear],
+) -> type[Module]:
+    """Combine one local Linear implementation with a column/row TP role.
+
+    The parallel class owns ``forward`` and its collective. The compute class
+    owns parameter construction and ``_linear``. This is used when LoRA or a
+    quantization converter replaces the local compute without changing the
+    projection's tensor-parallel role.
+    """
+    if compute_cls is Linear:
+        return parallel_cls
+
+    compute_config_cls = compute_cls.Config
+
+    class SpecializedParallelLinear(parallel_cls, compute_cls):  # type: ignore[misc, valid-type]
+        @dataclass(kw_only=True, slots=True)
+        class Config(compute_config_cls):  # type: ignore[misc]
+            pass
+
+        def __init__(self, config: Config):
+            compute_cls.__init__(self, config)
+
+        def _linear(self, input: torch.Tensor) -> torch.Tensor:
+            return compute_cls._linear(self, input)  # type: ignore[attr-defined]
+
+    compute_name = compute_cls.__name__.removesuffix("Linear")
+    specialized_name = f"{compute_name}{parallel_cls.__name__}"
+    SpecializedParallelLinear.__name__ = specialized_name
+    SpecializedParallelLinear.__qualname__ = specialized_name
+    SpecializedParallelLinear.__module__ = compute_cls.__module__
+    SpecializedParallelLinear.Config.__qualname__ = f"{specialized_name}.Config"
+    SpecializedParallelLinear.Config.__module__ = compute_cls.__module__
+    return SpecializedParallelLinear
+
+
 @spmd.register_local_autograd_function
 class _RouterGateLinearFunction(torch.autograd.Function):
     """Router projection with FP32 output and backward GEMMs."""
@@ -260,4 +311,6 @@ __all__ = [
     "RowParallelLinear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
+    "parallel_linear_role",
+    "specialize_parallel_linear",
 ]

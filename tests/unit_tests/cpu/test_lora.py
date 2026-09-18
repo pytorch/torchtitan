@@ -21,6 +21,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.lora import (
     LoRAColumnParallelLinear,
+    LoRALinear,
     LoRARowParallelLinear,
 )
 from torchtitan.models.llama3 import model_registry
@@ -50,6 +51,8 @@ def test_lora_model_builds():
     for layer in model.layers.values():
         assert isinstance(layer.attention.qkv_linear.wqkv, LoRAColumnParallelLinear)
         assert isinstance(layer.attention.wo, LoRARowParallelLinear)
+    assert issubclass(LoRAColumnParallelLinear.Config, LoRALinear.Config)
+    assert issubclass(LoRARowParallelLinear.Config, LoRALinear.Config)
 
     lora_params = {
         n for n, p in model.named_parameters() if "lora_a" in n or "lora_b" in n

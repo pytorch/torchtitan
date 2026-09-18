@@ -35,6 +35,7 @@ from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_routed_experts_config,
 )
+from torchtitan.models.common.linear import parallel_linear_role
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.deepseek_v3.parallelize import (
     parallelize_deepseekv3 as parallelize_deepseek_v4,
@@ -565,8 +566,8 @@ def _build_mtp_layers(
             if block_cfg.moe.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
                 shared_experts = block_cfg.moe.shared_experts
-                assert isinstance(shared_experts.w13, ColumnParallelLinear.Config)
-                assert isinstance(shared_experts.w2, RowParallelLinear.Config)
+                assert parallel_linear_role(shared_experts.w13) is ColumnParallelLinear
+                assert parallel_linear_role(shared_experts.w2) is RowParallelLinear
                 shared_experts.w2.param_init = depth_init
                 shared_experts.w13.param_init = fused_gate_up_param_init(
                     _LINEAR_INIT, depth_init

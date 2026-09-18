@@ -20,7 +20,11 @@ from torchtitan.models.common.decoder_sharding import (
     token_id_placement,
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
-from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    parallel_linear_role,
+    RowParallelLinear,
+)
 from torchtitan.protocols.sharding import ShardingConfig
 
 
@@ -175,8 +179,8 @@ def set_shared_experts_sharding_config(
     enable_sp: bool,
 ) -> None:
     """Configure a standard FeedForward used as an MoE shared expert."""
-    assert isinstance(shared_experts_cfg.w13, ColumnParallelLinear.Config)
-    assert isinstance(shared_experts_cfg.w2, RowParallelLinear.Config)
+    assert parallel_linear_role(shared_experts_cfg.w13) is ColumnParallelLinear
+    assert parallel_linear_role(shared_experts_cfg.w2) is RowParallelLinear
     shared_config, w13_config, w2_config = _shared_experts_sharding_configs(
         enable_ep=enable_ep,
         enable_sp=enable_sp,

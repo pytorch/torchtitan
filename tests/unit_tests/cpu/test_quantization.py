@@ -380,7 +380,7 @@ def test_nvfp4_parallel_build_preserves_collective_boundary(linear_cls):
     boundary_layout = dense_sequence_parallel_placement()
     sharding_config = (
         colwise_config(input_layout=boundary_layout)
-        if issubclass(linear_cls.Config, ColumnParallelLinear.Config)
+        if issubclass(linear_cls, ColumnParallelLinear)
         else rowwise_config(output_layout=boundary_layout)
     )
     module = linear_cls.Config(

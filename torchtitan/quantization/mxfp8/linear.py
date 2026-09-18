@@ -30,6 +30,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
+    specialize_parallel_linear,
 )
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
@@ -402,17 +403,7 @@ class MXFP8Linear(Linear):
         )
 
 
-class MXFP8ColumnParallelLinear(ColumnParallelLinear, MXFP8Linear):
-    """MXFP8 projection with a synchronous column-parallel boundary."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(MXFP8Linear.Config, ColumnParallelLinear.Config):
-        pass
-
-
-class MXFP8RowParallelLinear(RowParallelLinear, MXFP8Linear):
-    """MXFP8 projection with a synchronous row-parallel boundary."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(MXFP8Linear.Config, RowParallelLinear.Config):
-        pass
+MXFP8ColumnParallelLinear = specialize_parallel_linear(
+    MXFP8Linear, ColumnParallelLinear
+)
+MXFP8RowParallelLinear = specialize_parallel_linear(MXFP8Linear, RowParallelLinear)

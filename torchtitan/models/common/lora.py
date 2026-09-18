@@ -13,6 +13,7 @@ Shape suffixes: ``X`` arbitrary leading dimensions, ``I`` input features,
 import functools
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import spmd_types as spmd
 
@@ -24,6 +25,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
+    specialize_parallel_linear,
 )
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -36,18 +38,28 @@ __all__ = [
 ]
 
 
-class _LoRALinearMixin:
-    """Add LoRA adapter parameters and computation to a linear module."""
+class LoRALinear(Linear):
+    """Linear with a LoRA update on its local computation."""
 
-    def __init__(self, config) -> None:
-        super().__init__(config)  # type: ignore[misc]
-        for param in nn.Module.parameters(self):  # type: ignore[arg-type]
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        rank: int
+        alpha: float
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self._init_adapters(self, config)
+
+    @staticmethod
+    def _init_adapters(module, config: Any) -> None:
+        """Freeze the base projection and construct its trainable adapters."""
+        for param in nn.Module.parameters(module):
             param.requires_grad_(False)
-        self._lora_scaling = config.alpha / config.rank
-        lora_a_sharding, lora_b_sharding = self._adapter_sharding(
+        module._lora_scaling = config.alpha / config.rank
+        lora_a_sharding, lora_b_sharding = LoRALinear._adapter_sharding(
             config.sharding_config
         )
-        self.lora_a = Linear.Config(
+        module.lora_a = Linear.Config(
             in_features=config.in_features,
             out_features=config.rank,
             bias=False,
@@ -56,7 +68,7 @@ class _LoRALinearMixin:
                 "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
             },
         ).build()
-        self.lora_b = Linear.Config(
+        module.lora_b = Linear.Config(
             in_features=config.rank,
             out_features=config.out_features,
             bias=False,
@@ -66,9 +78,16 @@ class _LoRALinearMixin:
 
     def _linear(self, input: torch.Tensor) -> torch.Tensor:
         """Apply the base projection and add the LoRA adapter output."""
-        base_out_XO = super()._linear(input)  # type: ignore[misc]
-        lora_out_XO = self.lora_b(self.lora_a(input))
-        return base_out_XO + self._lora_scaling * lora_out_XO
+        base_out_XO = super()._linear(input)
+        return self._add_adapter_output(self, input, base_out_XO)
+
+    @staticmethod
+    def _add_adapter_output(
+        module, input: torch.Tensor, base_out_XO: torch.Tensor
+    ) -> torch.Tensor:
+        """Add the adapter update to an already-computed base projection."""
+        lora_out_XO = module.lora_b(module.lora_a(input))
+        return base_out_XO + module._lora_scaling * lora_out_XO
 
     @staticmethod
     def _adapter_sharding(
@@ -97,58 +116,38 @@ class _LoRALinearMixin:
         return lora_a_sharding, replicated_weight
 
 
-class LoRALinear(_LoRALinearMixin, Linear):
-    """Linear with a LoRA update on its local computation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        rank: int
-        alpha: float
-
-
-class LoRAColumnParallelLinear(_LoRALinearMixin, ColumnParallelLinear):
-    """Column-parallel Linear with a LoRA update inside its TP boundary."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ColumnParallelLinear.Config):
-        rank: int
-        alpha: float
-
-
-class LoRARowParallelLinear(_LoRALinearMixin, RowParallelLinear):
-    """Row-parallel Linear with a LoRA update inside its TP boundary."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(RowParallelLinear.Config):
-        rank: int
-        alpha: float
-
-
 @functools.cache
 def specialize_lora_linear(parent_cls: type[Module]) -> type[Module]:
-    """Return the explicit LoRA class or specialize another Linear backend."""
+    """Add LoRA local compute without changing a Linear's TP role."""
     if parent_cls is Linear:
         return LoRALinear
-    if parent_cls is ColumnParallelLinear:
-        return LoRAColumnParallelLinear
-    if parent_cls is RowParallelLinear:
-        return LoRARowParallelLinear
 
-    # This fallback composes LoRA with another Linear backend, such as
-    # Float8Linear or its column-/row-parallel variants, when quantization is
-    # applied before LoRA. The common BF16 TP cases above use explicit classes.
-    # TODO: Remove dynamic specialization once every supported quantized Linear
-    # backend has explicit LoRA classes or exposes a non-inheritance extension.
+    if parent_cls in (ColumnParallelLinear, RowParallelLinear):
+        return specialize_parallel_linear(LoRALinear, parent_cls)
+
+    # Quantization runs before LoRA and may add fields to the parent config.
+    # Retain that exact implementation while inserting the adapter into its
+    # local compute.
     parent_config_cls = parent_cls.Config
 
-    class SpecializedLoRALinear(  # type: ignore[misc, valid-type]
-        _LoRALinearMixin, parent_cls
-    ):
+    class SpecializedLoRALinear(parent_cls):  # type: ignore[misc, valid-type]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             rank: int
             alpha: float
 
+        def __init__(self, config: Config):
+            parent_cls.__init__(self, config)
+            LoRALinear._init_adapters(self, config)
+
+        def _linear(self, input: torch.Tensor) -> torch.Tensor:
+            base_out_XO = parent_cls._linear(self, input)  # type: ignore[attr-defined]
+            return LoRALinear._add_adapter_output(self, input, base_out_XO)
+
     SpecializedLoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
     SpecializedLoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
     return SpecializedLoRALinear
+
+
+LoRAColumnParallelLinear = specialize_parallel_linear(LoRALinear, ColumnParallelLinear)
+LoRARowParallelLinear = specialize_parallel_linear(LoRALinear, RowParallelLinear)

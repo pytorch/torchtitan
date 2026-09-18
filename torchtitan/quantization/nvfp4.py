@@ -29,7 +29,9 @@ from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
+    parallel_linear_role,
     RowParallelLinear,
+    specialize_parallel_linear,
 )
 from torchtitan.protocols.module import Module
 
@@ -129,10 +131,7 @@ try:
                             }
                         ),
                     }
-                    if isinstance(
-                        self,
-                        (ColumnParallelLinear.Config, RowParallelLinear.Config),
-                    ):
+                    if parallel_linear_role(self) is not None:
                         # The explicit TP classes execute their collective in
                         # forward(). Turning the whole module into a local SPMD
                         # region would localize the input before that collective.
@@ -255,39 +254,10 @@ try:
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return self._linear(input)
 
-    class NVFP4ColumnParallelLinear(ColumnParallelLinear, NVFP4Linear):
-        """NVFP4 projection with a synchronous column-parallel boundary."""
-
-        @dataclass(kw_only=True, slots=True)
-        class Config(NVFP4Linear.Config, ColumnParallelLinear.Config):
-            pass
-
-        # ColumnParallelLinear appears first so its forward owns communication;
-        # explicitly retain NVFP4 parameter construction and local compute.
-        def __init__(self, config: Config):
-            NVFP4Linear.__init__(self, config)  # pyrefly: ignore[bad-argument-count]
-
-        def _linear(self, input: torch.Tensor) -> torch.Tensor:
-            return NVFP4Linear._linear(  # pyrefly: ignore[missing-attribute]
-                self, input
-            )
-
-    class NVFP4RowParallelLinear(RowParallelLinear, NVFP4Linear):
-        """NVFP4 projection with a synchronous row-parallel boundary."""
-
-        @dataclass(kw_only=True, slots=True)
-        class Config(NVFP4Linear.Config, RowParallelLinear.Config):
-            pass
-
-        # RowParallelLinear appears first so its forward owns communication;
-        # explicitly retain NVFP4 parameter construction and local compute.
-        def __init__(self, config: Config):
-            NVFP4Linear.__init__(self, config)  # pyrefly: ignore[bad-argument-count]
-
-        def _linear(self, input: torch.Tensor) -> torch.Tensor:
-            return NVFP4Linear._linear(  # pyrefly: ignore[missing-attribute]
-                self, input
-            )
+    NVFP4ColumnParallelLinear = specialize_parallel_linear(
+        NVFP4Linear, ColumnParallelLinear
+    )
+    NVFP4RowParallelLinear = specialize_parallel_linear(NVFP4Linear, RowParallelLinear)
 
 except ImportError:
     NVFP4Linear = None
