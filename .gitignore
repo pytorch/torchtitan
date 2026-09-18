@@ -43,6 +43,10 @@ Sessionx.vim
 # env files
 .env
 
+# Python virtual environments
+.venv/
+venv/
+
 # Claude Code local configuration
 CLAUDE.local.md
 /test_*.py
