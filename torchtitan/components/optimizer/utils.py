@@ -93,6 +93,7 @@ def get_flat_optim_state_dict(optim: torch.optim.Optimizer) -> dict[str, Any]:
     pipeline-parallel checkpoints (multiple chunks reusing index 0).
 
     The optimizer state must already exist; call ``init_optim_state`` first.
+    ``capturable`` is omitted because the runtime selects it.
     """
     fqn_sd = _optim_state_dict_to_fqn_keys(optim.state_dict())
 
@@ -116,6 +117,7 @@ def load_flat_optim_state_dict(
     exist (it tells us which state tensors to expect); call ``init_optim_state``
     first. Keys in ``flat_sd`` that this optimizer does not own are ignored, so a
     single flat dict covering several optimizers can be passed to each of them.
+    A saved ``capturable`` value is ignored because the runtime selects it.
     """
     optim.load_state_dict(_unflatten_optim_state_dict(optim, flat_sd))
 
@@ -138,7 +140,11 @@ def _optim_state_dict_to_fqn_keys(optim_sd: dict[str, Any]) -> dict[str, Any]:
         fqns = param_group["param_names"]
         for param_id, fqn in zip(param_group["params"], fqns):
             id_to_fqn[param_id] = fqn
-        new_group = {k: v for k, v in param_group.items() if k != "param_names"}
+        new_group = {
+            key: value
+            for key, value in param_group.items()
+            if key not in ("param_names", "capturable")
+        }
         new_group["params"] = list(fqns)
         new_param_groups.append(new_group)
 
@@ -193,12 +199,23 @@ def _unflatten_optim_state_dict(
         for key in param_group:
             if key in ("params", "param_names"):
                 continue
+            if key == "capturable":
+                new_group[key] = param_group[key]
+                continue
             flat_key = f"param_groups.{fqns[0]}.{key}"
             if flat_key not in flat_sd:
                 raise KeyError(
                     f"Optimizer param group key {key!r} not found in checkpoint "
                     f"(looked up via param {fqns[0]!r})."
                 )
+            if (
+                key == "lr"
+                and param_group.get("capturable")
+                and isinstance(param_group[key], torch.Tensor)
+            ):
+                param_group[key].fill_(flat_sd[flat_key])
+                new_group[key] = param_group[key]
+                continue
             new_group[key] = flat_sd[flat_key]
         param_groups.append(new_group)
 
