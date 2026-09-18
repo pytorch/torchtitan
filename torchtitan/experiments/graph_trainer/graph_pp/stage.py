@@ -21,6 +21,13 @@ from torch.distributed.pipelining.stage import PipelineStage
 class StageGraphs(Protocol):
     """Common contract shared by all stage graph executors."""
 
+    @property
+    def accumulates_gradients_in_graph(self) -> bool:
+        """Return whether backward writes into graph-owned accumulators."""
+
+    def zero_grad_(self) -> list[Any]:
+        """Zero graph-owned accumulators and return them in gradient order."""
+
     def param_grads_for_accumulation(
         self,
         param_grads: list[Any],

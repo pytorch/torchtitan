@@ -116,6 +116,33 @@ class GraphTrainerCompileConfig(CompileConfig):
         - PP=1 and PP>1: explicit ``REDUCE_GRAD``
     """
 
+    gradient_accumulation_mode: Literal["auto", "runtime", "in_graph"] = "auto"
+    """Choose where gradients accumulate across schedule microbatches.
+
+    - ``auto``
+        - PP=1: in-graph for WGrad fusion or supported multi-microbatch schedules
+        - PP>1: runtime
+    - ``runtime``
+        - PP=1 and PP>1: accumulate backward outputs in ``GraphRuntime``
+    - ``in_graph``
+        - PP=1: accumulate into persistent graph inputs
+        - PP>1: error
+    """
+
+    gradient_accum_in_wgrad_fusion: Literal["auto", "disabled", "enabled"] = "auto"
+    """Control fusion of WGrad producers with gradient accumulation.
+
+    - ``auto``
+        - In-graph accumulation with ``numerics_changing_optim``: fuse
+          supported WGrad producers
+        - Otherwise: explicit accumulation
+    - ``disabled``
+        - Keep explicit accumulation
+    - ``enabled``
+        - PP=1: enable in-graph accumulation and fuse supported WGrad producers
+        - PP>1: error
+    """
+
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.
