@@ -13,6 +13,7 @@ import torch.nn as nn
 from torch.optim import swap_in_optimizer_params_and_state
 from torch.testing._internal.common_fsdp import FSDPTest
 
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -169,8 +170,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             OptimizersContainer,
             ParamGroupConfig,
         )
-        from torchtitan.distributed.cudagraph import (
-            cudagraph_teardown,
+        from torchtitan.distributed.cuda_graph import (
+            cuda_graph_teardown,
             CUDAGraphWrapper,
         )
         from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
@@ -194,7 +195,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 compile_inductor_compilation="full",
                 parallel_dims=parallel_dims,
             )
-            trainer.optimizers = OptimizersContainer(
+            trainer.engine.optimizers = OptimizersContainer(
                 OptimizersContainer.Config(
                     param_groups=[
                         ParamGroupConfig(
@@ -208,7 +209,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 model_parts=[model],
             )
             if inplace:
-                trainer._ensure_graph_gradient_state(model)
+                trainer.engine._ensure_graph_gradient_state(model)
             return trainer
 
         microbatches = [
@@ -221,7 +222,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
         def run_trainer(model, *, use_inplace_accumulation):
             trainer = make_trainer(model, inplace=use_inplace_accumulation)
-            gradient_state = trainer._graph_gradient_state
+            gradient_state = trainer.engine._graph_gradient_state
             grad_buffers = ()
             grad_ptrs = ()
             if use_inplace_accumulation:
@@ -250,7 +251,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                     valid_tokens = torch.tensor(
                         labels.numel(), device="cuda", dtype=torch.float
                     )
-                    loss = trainer._make_fx_forward_backward_step(
+                    loss = trainer.engine._make_fx_forward_backward_microbatch(
                         model,
                         inputs,
                         labels,
@@ -270,25 +271,25 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 first_losses, first_grads = run_microbatches(
                     trainer, model, first_batches
                 )
-                wrapper = trainer._traced_step.gm.forward
+                wrapper = trainer.engine._traced_step.gm.forward
                 self.assertIsInstance(wrapper, CUDAGraphWrapper)
                 self.assertIsNotNone(wrapper._graph)
 
                 if use_inplace_accumulation:
                     gradient_input_indices = {
                         index
-                        for mapping in trainer._traced_step.graph_state.mappings
+                        for mapping in trainer.engine._traced_step.graph_state.mappings
                         for index in mapping.input_indices
                     }
                     self.assertTrue(
                         gradient_input_indices.issubset(wrapper._static_input_indices)
                     )
 
-                trainer.optimizers.step()
+                trainer.engine.optimizers.step()
                 first_params = [
                     param.detach().cpu().clone() for param in model.parameters()
                 ]
-                trainer.optimizers.zero_grad(set_to_none=True)
+                trainer.engine.optimizers.zero_grad(set_to_none=True)
 
                 if use_inplace_accumulation:
                     for param in model.parameters():
@@ -301,7 +302,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                     self.assertEqual(
                         tuple(grad.data_ptr() for grad in grad_buffers), grad_ptrs
                     )
-                trainer.optimizers.step()
+                trainer.engine.optimizers.step()
                 second_params = [
                     param.detach().cpu().clone() for param in model.parameters()
                 ]
@@ -314,7 +315,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                     second_params,
                 )
             finally:
-                cudagraph_teardown()
+                cuda_graph_teardown()
 
         default_result = run_trainer(model_default, use_inplace_accumulation=False)
         inplace_result = run_trainer(model_inplace, use_inplace_accumulation=True)
@@ -1614,7 +1615,7 @@ class TestTraceDTensor(unittest.TestCase):
         torch.testing.assert_close(actual, expected)
 
     def test_full_inductor_pass_migrates_cpu_attrs(self):
-        from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_pass
+        from torchtitan.experiments.graph_trainer.cuda_graph import cuda_graph_pass
         from torchtitan.experiments.graph_trainer.inductor_passes import (
             full_inductor_compilation_pass,
         )
@@ -1647,7 +1648,7 @@ class TestTraceDTensor(unittest.TestCase):
                 f"{name} should have been migrated to CUDA",
             )
 
-        gm = cudagraph_pass(gm, traced.example_inputs)
+        gm = cuda_graph_pass(gm, traced.example_inputs)
         real_x = torch.zeros(4, dtype=torch.float32, device=self.DEVICE)
         expected = f({}, real_x.clone())
         for _ in range(3):
@@ -2276,11 +2277,11 @@ class TestTraceFSDP(FSDPTest):
     def test_graph_gradient_accumulation_preserves_fsdp_layout(self):
         from torch.distributed.tensor import DTensor
 
-        from torchtitan.distributed.cudagraph import (
-            cudagraph_teardown,
+        from torchtitan.distributed.cuda_graph import (
+            cuda_graph_teardown,
             CUDAGraphWrapper,
         )
-        from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_pass
+        from torchtitan.experiments.graph_trainer.cuda_graph import cuda_graph_pass
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 
         torch.manual_seed(42)
@@ -2326,7 +2327,7 @@ class TestTraceFSDP(FSDPTest):
         traced.gm = remove_parameter_gradient_markers_pass(
             traced.gm, traced.example_inputs
         )
-        traced.gm = cudagraph_pass(
+        traced.gm = cuda_graph_pass(
             traced.gm,
             traced.example_inputs,
             static_input_indices=list(range(traced.num_static_inputs)),
@@ -2371,7 +2372,7 @@ class TestTraceFSDP(FSDPTest):
                     )
             self.assertIsNotNone(wrapper._graph)
         finally:
-            cudagraph_teardown()
+            cuda_graph_teardown()
 
         optimizer_ref.step()
         optimizer_test.step()
@@ -2612,7 +2613,7 @@ class TestTraceContextParallel(FSDPTest):
                 config.parallelism.context_parallel_degree = context_parallel_degree
                 config.parallelism.tensor_parallel_degree = 1
                 config.activation_checkpoint = None
-                config.compile.enable = False
+                config.compile.mode = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
                 config.model_spec.model.layers = config.model_spec.model.layers[:1]
@@ -2621,38 +2622,42 @@ class TestTraceContextParallel(FSDPTest):
                 num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
                 tokens = torch.randint(
                     0,
-                    trainer.model_config.vocab_size,
+                    trainer.engine.model_config.vocab_size,
                     (num_tokens,),
-                    device=trainer.device,
+                    device=trainer.engine.device,
                 )
                 labels = torch.randint(
                     0,
-                    trainer.model_config.vocab_size,
+                    trainer.engine.model_config.vocab_size,
                     (num_tokens,),
-                    device=trainer.device,
+                    device=trainer.engine.device,
                 )
                 # The dataloader always supplies per-document positions, which
                 # drive RoPE (SDPA itself is maskless and uses is_causal).
                 positions = (
                     torch.arange(
                         num_tokens,
-                        device=trainer.device,
+                        device=trainer.engine.device,
                         dtype=torch.int32,
                     )
                     % config.training.max_context_length
                 )
-                trainer.forward_backward_step(
-                    input_dict={
-                        "input": tokens,
-                        "positions": positions,
-                        "labels": labels,
-                    },
+                trainer.engine.forward_backward_microbatch(
+                    microbatch_group=[
+                        TokenizedTrainingMicrobatch(
+                            input=tokens,
+                            positions=positions,
+                            labels=labels,
+                            padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                            num_valid_tokens=labels.numel(),
+                        )
+                    ],
                     global_valid_tokens=torch.tensor(
-                        labels.numel(), device=trainer.device
+                        labels.numel(), device=trainer.engine.device
                     ),
                 )
-                assert trainer._traced_step is not None
-                code_lines = trainer._traced_step.gm.graph.python_code(
+                assert trainer.engine._traced_step is not None
+                code_lines = trainer.engine._traced_step.gm.graph.python_code(
                     "self"
                 ).src.splitlines()
                 sdpa_line = next(
@@ -2669,21 +2674,23 @@ class TestTraceContextParallel(FSDPTest):
                 )
                 assert sdpa_line is not None
                 all_gather_pg_names_before_sdpa = []
-                for node in trainer._traced_step.gm.graph.nodes:
+                for node in trainer.engine._traced_step.gm.graph.nodes:
                     if "scaled_dot_product" in str(node.target):
                         break
                     if "all_gather_into_tensor" in str(node.target):
                         all_gather_pg_names_before_sdpa.append(node.args[2])
 
                 cp_pg_name = (
-                    trainer.parallel_dims.get_mesh("cp").get_group().group_name
-                    if trainer.parallel_dims.cp_enabled
+                    trainer.engine.parallel_dims.get_mesh("cp").get_group().group_name
+                    if trainer.engine.parallel_dims.cp_enabled
                     else None
                 )
                 fsdp_pg_name = (
-                    get_simple_fsdp_mesh(trainer.parallel_dims).get_group().group_name
+                    get_simple_fsdp_mesh(trainer.engine.parallel_dims)
+                    .get_group()
+                    .group_name
                 )
-                code = trainer._traced_step.gm.graph.python_code("self").src
+                code = trainer.engine._traced_step.gm.graph.python_code("self").src
                 trainer.close()
                 trainer = None
                 return {
