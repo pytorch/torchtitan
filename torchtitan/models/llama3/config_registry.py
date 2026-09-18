@@ -8,7 +8,6 @@ from typing import cast
 
 from renderers import Message
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     FirstFitPackingConfig,
@@ -18,7 +17,6 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -96,19 +94,9 @@ def llama3_debugmodel(
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        validator=Validator.Config(
-            freq=5,
-            steps=10,
-            dataloader=GrainDataLoader.Config(
-                dataset=packed,
-                shuffle=False,
-            ),
-        ),
+        validator=None,
     )
 
 
@@ -146,7 +134,7 @@ def llama3_debugmodel_float8(
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
+        config.compile is not None and "model" in config.compile.components
     )
     config.model_spec = model_registry(
         "debugmodel",
@@ -162,7 +150,7 @@ def llama3_debugmodel_mxfp8(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
-    config.compile = CompileConfig(enable=True, components=["model"])
+    config.compile = CompileConfig(components=["model"])
     config.model_spec = model_registry(
         "debugmodel_mxfp8",
         seq_len=seq_len,
@@ -178,7 +166,7 @@ def llama3_debugmodel_nvfp4(
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
+        config.compile is not None and "model" in config.compile.components
     )
     # fqns=["layers"] converts every in-layer Linear (attention + feed_forward)
     # while leaving the lm_head stock: NVFP4 requires each GEMM dim divisible by
@@ -202,7 +190,7 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
     config = llama3_debugmodel(seq_len=seq_len)
     assert config.model_spec is not None
     model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
+        config.compile is not None and "model" in config.compile.components
     )
     # Mixed precision: convert the leading decoder layers to NVFP4 and keep the
     # last _NVFP4_BF16_TAIL_FRACTION of layers (plus the lm_head) in bf16.
@@ -287,12 +275,9 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        validator=Validator.Config(
-            freq=500,
-            steps=1200,
-        ),
+        validator=None,
     )
 
 
@@ -300,7 +285,7 @@ def llama3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.C
     config = llama3_8b(seq_len=seq_len)
     assert config.model_spec is not None
     # Enable compile so NVFP4's dynamic quantization runs at competitive perf.
-    config.compile = CompileConfig(enable=True, components=["model"])
+    config.compile = CompileConfig(components=["model"])
     # Mixed precision: convert the leading decoder layers to NVFP4 and keep the
     # last _NVFP4_BF16_TAIL_FRACTION of layers (plus the lm_head) in bf16.
     n_layers = len(cast(Llama3Model.Config, config.model_spec.model).layers)
@@ -324,7 +309,7 @@ def llama3_8b_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     # Swap dense Linear layers for MXFP8Linear. compile is enabled so the
     # converter's compile requirement is satisfied. This is the regular-Trainer
     # (torch.compile) baseline counterpart to graph_trainer_llama3_8b_mxfp8.
-    config.compile = CompileConfig(enable=True, components=["model"])
+    config.compile = CompileConfig(components=["model"])
     config.model_spec = model_registry(
         "8B",
         seq_len=seq_len,
@@ -364,18 +349,14 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
         ),
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
-        validator=Validator.Config(
-            freq=500,
-            steps=1200,
-        ),
+        validator=None,
     )
 
 
 def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
     compile_config = CompileConfig(
-        enable=True,
         enable_async_tensor_parallel=True,
     )
     model_spec = model_registry(
@@ -385,7 +366,7 @@ def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
             Float8LinearConverter.Config(
                 filter_fqns=["lm_head"],
                 model_compile_enabled=(
-                    compile_config.enable and "model" in compile_config.components
+                    compile_config is not None and "model" in compile_config.components
                 ),
             ),
         ],
@@ -418,13 +399,10 @@ def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
         parallelism=ParallelismConfig(
             tensor_parallel_degree=8,
         ),
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
         compile=compile_config,
-        validator=Validator.Config(
-            freq=500,
-            steps=1200,
-        ),
+        validator=None,
     )
 
 
@@ -477,9 +455,6 @@ def sft_debugmodel(
             ),
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )

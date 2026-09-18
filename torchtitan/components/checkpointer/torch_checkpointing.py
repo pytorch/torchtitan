@@ -88,7 +88,7 @@ class _BackendCheckpointStorage:
 
     ``Path`` would mangle a remote URI -- it collapses the double slash in
     ``gs://bucket/x`` -- but every path arriving here is joined off
-    ``checkpoint.folder`` or ``checkpoint.initial_load_path``, and the manager
+    ``checkpointer.folder`` or ``checkpointer.initial_load_path``, and the manager
     rejects a remote value for either at construction. So there is nothing left
     to guard against by the time a path reaches this class.
     """
@@ -236,9 +236,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         base_folder: str = "",
         storage_config: StorageConfig | None = None,
     ) -> None:
-        self.enable = config.enable
-        if not self.enable:
-            return
         self.save_future: Future[Any] | None = None
         self.purge_thread: threading.Thread | None = None
 
@@ -247,8 +244,8 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # probe when retention is off, so it would otherwise reach the backend
         # and be mangled by Path() rather than failing.
         for label, candidate in (
-            ("checkpoint.folder", self.folder),
-            ("checkpoint.initial_load_path", config.initial_load_path),
+            ("checkpointer.folder", self.folder),
+            ("checkpointer.initial_load_path", config.initial_load_path),
         ):
             if candidate and filesystem.is_remote(candidate):
                 raise ValueError(
@@ -301,7 +298,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.sd_adapter = sd_adapter
         if self.last_save_in_hf and self.sd_adapter is None:
             raise ValueError(
-                "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+                "checkpointer.last_save_in_hf is True, but sd_adapter is not provided."
             )
 
         self._manager = self._manager_config.build()
@@ -342,7 +339,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         if not self._is_valid_checkpoint(checkpoint_id):
             raise ValueError(
                 f"Checkpoint {checkpoint_id!r} is not a native "
-                "torch_checkpointing checkpoint."
+                "torch_checkpointing checkpointer."
             )
         # strict: the backend defaults to skipping anything the checkpoint does
         # not carry, which would silently leave parameters at their initialized
@@ -542,4 +539,4 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         GarbageCollection.collect("GC collection invoked by checkpointer.")
 
     def _should_prewarm(self) -> bool:
-        return self.enable and not self._prewarmed and not self.load_only
+        return not self._prewarmed and not self.load_only

@@ -6,7 +6,6 @@
 
 from dataclasses import replace
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,
@@ -76,10 +75,7 @@ def qwen38_debugmodel(
             max_context_length=model_spec.max_context_length,
             steps=10,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -131,10 +127,7 @@ def qwen38_debugmodel_moe(
             expert_parallel_degree=4,
             tensor_parallel_degree=2,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -166,10 +159,7 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
             data_parallel_shard_degree=-1,
             tensor_parallel_degree=4,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
@@ -203,9 +193,6 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
             tensor_parallel_degree=4,
             expert_parallel_degree=64,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
