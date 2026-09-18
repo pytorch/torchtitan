@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from dataclasses import dataclass
 from functools import partial
 
 import spmd_types as spmd
@@ -22,28 +21,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    compose_parallel_linear_cls,
-    get_parallel_linear_cls,
     Linear,
     PartialBiasRowwiseLinear,
     RowParallelLinear,
 )
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
-
-
-class _ScaledLinear(Linear):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        scale: float = 2.0
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.scale = config.scale
-
-    def _linear(self, input: torch.Tensor) -> torch.Tensor:
-        return self.scale * super()._linear(input)
 
 
 class TestLinear(unittest.TestCase):
@@ -159,25 +142,6 @@ class TestLinear(unittest.TestCase):
         linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
-
-    def test_parallel_specialization_preserves_compute_and_role(self):
-        for role in (ColumnParallelLinear, RowParallelLinear):
-            specialized = compose_parallel_linear_cls(_ScaledLinear, role)
-            config = specialized.Config(
-                in_features=4,
-                out_features=2,
-                scale=3.0,
-            )
-            linear = config.build()
-
-            self.assertIs(specialized, compose_parallel_linear_cls(_ScaledLinear, role))
-            self.assertTrue(issubclass(specialized, role))
-            self.assertTrue(issubclass(specialized.Config, _ScaledLinear.Config))
-            self.assertIs(get_parallel_linear_cls(config), role)
-
-            input = torch.randn(3, 4)
-            expected = 3.0 * F.linear(input, linear.weight, linear.bias)
-            torch.testing.assert_close(linear(input), expected)
 
 
 class TestPartialBiasRowwiseLinear(unittest.TestCase):

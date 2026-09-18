@@ -351,10 +351,15 @@ class MXFP8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
-    def _linear(self, input: torch.Tensor) -> torch.Tensor:
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
         # Always a plain tensor: spmd_types carries TP and EP as annotations
         # instead of wrapping the weight as a model-parallel DTensor.
-        weight_NK = self.weight
+        weight_NK = weight
         # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
         # not what forward usually sees. Under FSDP the post-all-gather hook has
         # already replaced it for this unshard lifetime with the storage-free
@@ -391,6 +396,6 @@ class MXFP8Linear(Linear):
             operands.weight_scale_fprop_swizzled,
             operands.weight_qdata_dgrad_NK,
             operands.weight_scale_dgrad_swizzled,
-            self.bias,
+            bias,
             self.input_activation_format_for_backward,
         )

@@ -296,7 +296,7 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
-            return self._linear(input)
+            return self._linear(input, self.weight, self.bias)
         return AsyncAllGatherLinear.apply(
             input,
             self.weight,
@@ -321,7 +321,7 @@ class AsyncRowParallelLinear(RowParallelLinear):
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
-            return self._linear(input)
+            return self._linear(input, self.weight, self.bias)
         return AsyncLinearReduceScatter.apply(
             input,
             self.weight,

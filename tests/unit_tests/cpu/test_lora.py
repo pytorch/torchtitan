@@ -21,6 +21,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
+    PartialBiasRowwiseLinear,
     RowParallelLinear,
 )
 from torchtitan.models.llama3 import model_registry
@@ -233,6 +234,26 @@ def test_lora_handler_matches_linear_config_subclass():
     assert not model.weight.requires_grad
     assert model.lora_a.weight.requires_grad
     assert model.lora_b.weight.requires_grad
+
+
+def test_lora_preserves_partial_bias_row_parallel_linear():
+    config = PartialBiasRowwiseLinear.Config(
+        in_features=4,
+        out_features=3,
+        bias=True,
+    )
+    transformed = LoRATransform(
+        handlers=LINEAR_LORA_HANDLERS,
+        rank=2,
+        alpha=4.0,
+    ).transform(config)
+    linear = transformed.build()
+
+    assert isinstance(linear, PartialBiasRowwiseLinear)
+    x = torch.randn(5, 4)
+    expected = F.linear(x, linear.weight, linear.bias)
+    expected += 2 * linear.lora_b(linear.lora_a(x))
+    torch.testing.assert_close(linear(x), expected)
 
 
 def test_lora_transform_rejects_duplicate_handler_type():

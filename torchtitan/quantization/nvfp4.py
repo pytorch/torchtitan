@@ -236,17 +236,22 @@ try:
             )
             self._refresh_rht_sign_vector_tuple()
 
-        def _linear(self, input: torch.Tensor) -> torch.Tensor:
+        def _linear(
+            self,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            bias: torch.Tensor | None,
+        ) -> torch.Tensor:
             return nvfp4_linear(
                 input,
-                self.weight,
-                self.bias,
+                weight,
+                bias,
                 sr_seed=self._sr_seed,
                 sign_vector=self.rht_sign_vector,
             )
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return self._linear(input)
+            return self._linear(input, self.weight, self.bias)
 
 except ImportError:
     NVFP4Linear = None

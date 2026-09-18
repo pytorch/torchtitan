@@ -13,7 +13,6 @@
   from ``Configurable.Config``.
 """
 
-import functools
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -47,16 +46,23 @@ class Linear(nn.Linear, Module):
             bias=config.bias,
         )
 
-    def _linear(self, input: torch.Tensor) -> torch.Tensor:
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
         """Apply local projection compute without outer communication.
 
         LoRA and quantized subclasses override this method so column- and
         row-parallel ``forward`` methods continue to own their collectives.
+        Explicit operands let those boundaries adjust an operand's SPMD type
+        before invoking the selected local compute implementation.
         """
-        return F.linear(input, self.weight, self.bias)
+        return F.linear(input, weight, bias)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return self._linear(input)
+        return self._linear(input, self.weight, self.bias)
 
 
 class CastLinear(Linear):
@@ -76,12 +82,17 @@ class CastLinear(Linear):
         super().__init__(config)
         self.compute_dtype = TORCH_DTYPE_MAP[config.compute_dtype]
 
-    def _linear(self, input: torch.Tensor) -> torch.Tensor:
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
         # The optimizer updates the weight each step, so training cannot cache
         # the upcast copy. Inference may be able to cache it between syncs.
-        bias = None if self.bias is None else self.bias.to(self.compute_dtype)
+        bias = None if bias is None else bias.to(self.compute_dtype)
         return F.linear(
-            input.to(self.compute_dtype), self.weight.to(self.compute_dtype), bias
+            input.to(self.compute_dtype), weight.to(self.compute_dtype), bias
         )
 
 
@@ -123,7 +134,7 @@ class ColumnParallelLinear(Linear):
                 dst=spmd.R,
                 backward_options={"op_dtype": input.dtype},
             )
-        return self._linear(input)
+        return self._linear(input, self.weight, self.bias)
 
 
 class RowParallelLinear(Linear):
@@ -140,7 +151,10 @@ class RowParallelLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = self._linear(input)
+        output = self._linear(input, self.weight, self.bias)
+        return self._reduce_output(output)
+
+    def _reduce_output(self, output: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return output
@@ -168,46 +182,6 @@ def get_parallel_linear_cls(
     if owner is not None and issubclass(owner, RowParallelLinear):
         return RowParallelLinear
     return None
-
-
-@functools.cache
-def compose_parallel_linear_cls(
-    compute_cls: type[Module],
-    parallel_cls: type[ColumnParallelLinear] | type[RowParallelLinear],
-) -> type[Module]:
-    """Combine one local Linear implementation with a column/row TP role.
-
-    The parallel class owns ``forward`` and its collective. The compute class
-    owns parameter construction and ``_linear``. This is used when LoRA or a
-    quantization converter replaces the local compute without changing the
-    projection's tensor-parallel role.
-    """
-    if compute_cls is Linear:
-        return parallel_cls
-
-    compute_config_cls = compute_cls.Config
-
-    class SpecializedParallelLinear(parallel_cls, compute_cls):  # type: ignore[misc, valid-type]
-        @dataclass(kw_only=True, slots=True)
-        class Config(compute_config_cls):  # type: ignore[misc]
-            pass
-
-        # Some quantized implementations inherit nn.Linear directly rather
-        # than TorchTitan's Linear, whose methods otherwise win MRO lookup.
-        def __init__(self, config: Config):
-            compute_cls.__init__(self, config)
-
-        def _linear(self, input: torch.Tensor) -> torch.Tensor:
-            return compute_cls._linear(self, input)  # type: ignore[attr-defined]
-
-    compute_name = compute_cls.__name__.removesuffix("Linear")
-    specialized_name = f"{compute_name}{parallel_cls.__name__}"
-    SpecializedParallelLinear.__name__ = specialized_name
-    SpecializedParallelLinear.__qualname__ = specialized_name
-    SpecializedParallelLinear.__module__ = compute_cls.__module__
-    SpecializedParallelLinear.Config.__qualname__ = f"{specialized_name}.Config"
-    SpecializedParallelLinear.Config.__module__ = compute_cls.__module__
-    return SpecializedParallelLinear
 
 
 @spmd.register_local_autograd_function
@@ -274,10 +248,15 @@ class RouterGateLinear(Linear):
     class Config(Linear.Config):
         pass
 
-    def _linear(self, input: torch.Tensor) -> torch.Tensor:
-        output_TE = _RouterGateLinearFunction.apply(input, self.weight)
-        if self.bias is not None:
-            output_TE = output_TE + self.bias.float()
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        output_TE = _RouterGateLinearFunction.apply(input, weight)
+        if bias is not None:
+            output_TE = output_TE + bias.float()
         return output_TE
 
 
@@ -293,7 +272,7 @@ class PartialBiasRowwiseLinear(RowParallelLinear):
             raise ValueError("PartialBiasRowwiseLinear requires bias=True")
         super().__init__(config)
 
-    def _linear(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         bias = self.bias
         assert bias is not None
         tp_group = spmd_mesh_group("tp")
@@ -305,7 +284,8 @@ class PartialBiasRowwiseLinear(RowParallelLinear):
                 dst=spmd.P,
                 expert_mode=True,
             )
-        return F.linear(input, self.weight, bias)
+        output = self._linear(input, self.weight, bias)
+        return self._reduce_output(output)
 
 
 __all__ = [
@@ -316,5 +296,4 @@ __all__ = [
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
     "get_parallel_linear_cls",
-    "compose_parallel_linear_cls",
 ]

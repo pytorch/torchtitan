@@ -17,9 +17,9 @@ import torch._inductor.config
 
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
-    compose_parallel_linear_cls,
     get_parallel_linear_cls,
     Linear,
+    PartialBiasRowwiseLinear,
     RouterGateLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
@@ -28,7 +28,11 @@ from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls, Floa
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
 from torchtitan.quantization.nvfp4 import NVFP4Linear
-from torchtitan.quantization.utils import module_filter_fn, swap_token_dispatcher
+from torchtitan.quantization.utils import (
+    module_filter_fn,
+    specialize_quantized_linear,
+    swap_token_dispatcher,
+)
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
 from .converter import ModelConfigConverter
@@ -42,11 +46,16 @@ def _quantized_linear_config_cls(
     linear_cls: type[Module],
 ) -> type[Any]:
     """Select a quantized config without changing a projection's TP role."""
-    parallel_cls = get_parallel_linear_cls(config)
+    if isinstance(config, PartialBiasRowwiseLinear.Config):
+        if not config.bias:
+            raise ValueError("PartialBiasRowwiseLinear requires bias=True")
+        parallel_cls = PartialBiasRowwiseLinear
+    else:
+        parallel_cls = get_parallel_linear_cls(config)
     module_cls = (
         linear_cls
         if parallel_cls is None
-        else compose_parallel_linear_cls(linear_cls, parallel_cls)
+        else specialize_quantized_linear(linear_cls, parallel_cls)
     )
     return cast(type[Any], module_cls.Config)
 

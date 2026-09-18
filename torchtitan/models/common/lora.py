@@ -59,8 +59,13 @@ class _LoRALinearMixin:
             param_init={"weight": nn.init.zeros_},
         ).build()
 
-    def _linear(self, input: torch.Tensor) -> torch.Tensor:
-        base_out_XO = super()._linear(input)  # type: ignore[misc]
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        base_out_XO = super()._linear(input, weight, bias)  # type: ignore[misc]
         lora_out_XO = self.lora_b(self.lora_a(input))
         return base_out_XO + self._lora_scaling * lora_out_XO
 
