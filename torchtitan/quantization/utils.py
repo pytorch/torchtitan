@@ -24,7 +24,18 @@ from torchtitan.protocols.module import Module
 
 
 class _QuantizedLinearMixin:
-    """Delegate local initialization and computation to a quantized backend."""
+    """Add quantized local compute while preserving an outer TP boundary.
+
+    This follows the same composition pattern as ``_LoRALinearMixin``: the
+    mixin overrides ``_linear``, while ``ColumnParallelLinear`` or
+    ``RowParallelLinear`` continues to own communication in ``forward``.
+
+    Unlike LoRA, some quantized implementations are complete TorchAO modules
+    rather than cooperative TorchTitan mixins. In particular, Float8 and
+    NVFP4 own their parameter and buffer initialization. Keeping the selected
+    backend in ``_quantized_linear_cls`` lets this mixin explicitly delegate
+    both initialization and local compute across that TorchAO boundary.
+    """
 
     _quantized_linear_cls: type[Module]
 
