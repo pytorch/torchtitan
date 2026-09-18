@@ -78,9 +78,8 @@ class TestDistMuon(DTensorTestBase):
             compute_sharding_by_fqn={
                 fqn: ComputeLayout(
                     shardings_by_mesh_axis={
-                        "dp_shard": BlockShard(dim=0, block_size=block_rows)
+                        "dp_shard": BlockShard(dim=0, block_size=num_rows_per_segment)
                     },
-                    num_rows_per_segment=num_rows_per_segment,
                 ),
             },
             bucket_configs=[BucketConfig(patterns=("layers.0.*",))],
