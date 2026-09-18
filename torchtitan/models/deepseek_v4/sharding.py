@@ -125,9 +125,6 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
         in_src_shardings={
             "x": attn_x_layout,
         },
-        in_dst_shardings={
-            "x": replicated_input_layout,
-        },
     )
 
     set_dsa_flex_attention_sharding(attention.inner_attention)

@@ -23,10 +23,13 @@ Shape suffixes:
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import _per_axis_types, spmd_mesh_group
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
@@ -151,6 +154,24 @@ class VisionAttention(Module):
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            sharding_config = self._sharding_config
+            assert sharding_config is not None
+            assert sharding_config.in_src_shardings is not None
+            input_layout = sharding_config.in_src_shardings["x"]
+            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
+            assert input_tp_type is not None
+            # q, k, and v all consume x, so gather once at their common
+            # attention boundary.
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=input_tp_type,
+                dst=spmd.R,
+                backward_options={"op_dtype": x.dtype},
+            )
+
         num_tokens = x.shape[0]
 
         # -1 infers the head count locally (= num_heads / TP under tensor

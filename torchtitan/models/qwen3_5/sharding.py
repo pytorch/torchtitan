@@ -238,7 +238,6 @@ def _set_qwen35_shared_experts_sharding_config(
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     shared_experts.sharding_config = ShardingConfig(
         in_src_shardings={"x": input_layout},
-        in_dst_shardings={"x": replicated_input_layout},
         out_src_shardings=output_layout,
     )
     shared_experts.w13.sharding_config = colwise_config(
@@ -305,7 +304,6 @@ def _set_full_attention_sharding(
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x_TD": attention_input_layout},
-        in_dst_shardings={"x_TD": replicated_input_layout},
         out_src_shardings=attention_input_layout,
     )
     # The per-layer rope ``cache`` buffer is replicated on TP.
@@ -435,6 +433,5 @@ def _set_deltanet_sharding(
             "dt_bias": parameter_placement,
         },
         in_src_shardings={"x_TD": attention_input_layout},
-        in_dst_shardings={"x_TD": replicated_input_layout},
         out_src_shardings=attention_input_layout,
     )

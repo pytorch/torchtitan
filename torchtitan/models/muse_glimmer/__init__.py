@@ -18,6 +18,7 @@ from torchtitan.config.transform import (
 
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     ComplexRoPE,
     Embedding,
     Linear,
@@ -323,7 +324,12 @@ def muse_glimmer_vision_encoder_config(
             ),
             norm2=_vision_layer_norm(latent_dim),
             mlp=VisionMLP.Config(
-                fc1=_vision_linear(latent_dim, mlp_hidden, bias=True),
+                fc1=ColumnParallelLinear.Config(
+                    in_features=latent_dim,
+                    out_features=mlp_hidden,
+                    bias=True,
+                    param_init=_VISION_LINEAR_INIT,
+                ),
                 fc2=_vision_partial_bias_rowwise_linear(mlp_hidden, latent_dim),
                 act_fn=GELU.Config(approximate="none"),
             ),

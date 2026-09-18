@@ -174,25 +174,7 @@ class Attention(BaseAttention):
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
         ).contiguous()
         output = output.view(num_tokens, -1)
-        output = self.wo(output)
-        if tp_group is None:
-            return output
-
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        output_layout = sharding_config.out_src_shardings
-        assert output_layout is not None and not isinstance(output_layout, tuple)
-        output_tp_type = _per_axis_types(output_layout).get(MeshAxisName.TP)
-        assert output_tp_type is not None
-        # Complete the row-parallel output at the same attention boundary that
-        # gathered the input shared by MLA's projection branches.
-        return spmd.redistribute(
-            output,
-            tp_group,
-            src=spmd.P,
-            dst=output_tp_type,
-            backward_options={"op_dtype": output.dtype},
-        )
+        return self.wo(output)
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):

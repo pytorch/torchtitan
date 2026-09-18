@@ -122,11 +122,6 @@ def vision_colwise_config(
                 tp=input_tp, include_cp_axis=include_cp_axis
             ),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(
-                tp=spmd.R, include_cp_axis=include_cp_axis
-            ),
-        },
         out_src_shardings=_vision_activation_placement(
             tp=spmd.S(-1), include_cp_axis=include_cp_axis
         ),
@@ -177,9 +172,6 @@ def set_vision_transformer_block_sharding_config(
             ),
         },
         in_dst_shardings={
-            "x": _vision_activation_placement(
-                tp=spmd.R, include_cp_axis=include_cp_axis
-            ),
             "rope_cache": _vision_activation_placement(
                 dp=rope_cache_dp,
                 tp=spmd.R,

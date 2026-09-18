@@ -40,16 +40,18 @@ def test_qwen35_shared_expert_gathers_once_for_w13_and_gate(
 
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None
-    assert shared_experts.sharding_config.in_dst_shardings is not None
+    assert shared_experts.sharding_config.in_src_shardings is not None
+    assert shared_experts.sharding_config.in_dst_shardings is None
     assert shared_experts.w13.sharding_config is not None
     assert shared_experts.w13.sharding_config.in_src_shardings is not None
     assert shared_experts.gate.sharding_config is not None
     assert shared_experts.gate.sharding_config.in_src_shardings is not None
     assert shared_experts.w2.sharding_config is not None
 
-    parent_input = shared_experts.sharding_config.in_dst_shardings["x"]
-    assert shared_experts.w13.sharding_config.in_src_shardings["input"] == parent_input
-    assert shared_experts.gate.sharding_config.in_src_shardings["input"] == parent_input
+    projection_input = shared_experts.w13.sharding_config.in_src_shardings["input"]
+    assert shared_experts.gate.sharding_config.in_src_shardings["input"] == (
+        projection_input
+    )
     assert (
         shared_experts.w2.sharding_config.out_src_shardings
         == shared_experts.sharding_config.out_src_shardings

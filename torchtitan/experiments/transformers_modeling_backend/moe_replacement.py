@@ -74,13 +74,12 @@ def _set_sigmoid_gated_shared_experts_sharding_config(
     )
     output_layout = (
         dense_sequence_parallel_placement()
-        if enable_sp
+        if enable_ep and enable_sp
         else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     shared_experts.sharding_config = ShardingConfig(
         in_src_shardings={"x": input_layout},
-        in_dst_shardings={"x": replicated_input_layout},
         out_src_shardings=output_layout,
     )
     shared_experts.w13.sharding_config = colwise_config(
@@ -93,7 +92,9 @@ def _set_sigmoid_gated_shared_experts_sharding_config(
     )
 
     gate_output_layout = (
-        dense_sequence_parallel_placement() if enable_sp else replicated_input_layout
+        dense_sequence_parallel_placement()
+        if enable_ep and enable_sp
+        else replicated_input_layout
     )
     shared_experts.gate.sharding_config = ShardingConfig(
         state_shardings={

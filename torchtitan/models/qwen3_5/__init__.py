@@ -17,6 +17,7 @@ from torchtitan.config.transform import (
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
+    ColumnParallelLinear,
     Conv1d,
     Embedding,
     Linear,
@@ -196,7 +197,12 @@ def _qwen35_vision_encoder_config(
                 proj=_partial_bias_rowwise_linear(dim, dim),
             ),
             mlp=VisionMLP.Config(
-                fc1=_linear(dim, ffn_dim),
+                fc1=ColumnParallelLinear.Config(
+                    in_features=dim,
+                    out_features=ffn_dim,
+                    bias=True,
+                    param_init=_LINEAR_INIT,
+                ),
                 fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
             ),
         ),
@@ -207,7 +213,12 @@ def _qwen35_vision_encoder_config(
             spatial_merge_size=spatial_merge_size,
             merged_hidden_size=merged_hidden_size,
             norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
-            fc1=_linear(merged_hidden_size, merged_hidden_size),
+            fc1=ColumnParallelLinear.Config(
+                in_features=merged_hidden_size,
+                out_features=merged_hidden_size,
+                bias=True,
+                param_init=_LINEAR_INIT,
+            ),
             fc2=_partial_bias_rowwise_linear(merged_hidden_size, out_hidden_size),
         ),
         param_init=_POS_EMBED_INIT,

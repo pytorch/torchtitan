@@ -17,6 +17,7 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     Conv1d,
     Embedding,
     FeedForward,
@@ -336,17 +337,21 @@ def _vision_encoder_config(
             wq=_linear(dim, qkv_dim),
             wk=_linear(dim, qkv_dim),
             wv=_linear(dim, qkv_dim),
-            proj=_linear(qkv_dim, dim),
+            proj=RowParallelLinear.Config(
+                in_features=qkv_dim,
+                out_features=dim,
+                param_init=_LINEAR_INIT,
+            ),
         ),
         mlp=VisionMLP.Config(
-            fc1=_linear(
-                dim,
-                hidden_dim,
+            fc1=ColumnParallelLinear.Config(
+                in_features=dim,
+                out_features=hidden_dim,
                 param_init=_fan_in_linear_init(dim),
             ),
-            fc2=_linear(
-                hidden_dim,
-                dim,
+            fc2=RowParallelLinear.Config(
+                in_features=hidden_dim,
+                out_features=dim,
                 param_init=_fan_in_linear_init(hidden_dim),
             ),
             act_fn=GELU.Config(approximate="tanh"),
@@ -367,14 +372,14 @@ def _vision_encoder_config(
         block=block,
         final_norm=vision_norm,
         projector=KimiK3VisionProjector.Config(
-            linear_1=_linear(
-                merged_dim,
-                merged_dim,
+            linear_1=ColumnParallelLinear.Config(
+                in_features=merged_dim,
+                out_features=merged_dim,
                 param_init=_fan_in_linear_init(merged_dim),
             ),
-            linear_2=_linear(
-                merged_dim,
-                text_dim,
+            linear_2=RowParallelLinear.Config(
+                in_features=merged_dim,
+                out_features=text_dim,
                 param_init=_fan_in_linear_init(merged_dim),
             ),
             post_norm=RMSNorm.Config(
