@@ -20,11 +20,7 @@ from torchtitan.models.common.decoder_sharding import (
     token_id_placement,
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    parallel_linear_role,
-    RowParallelLinear,
-)
+from torchtitan.models.common.linear import parallel_linear_role, RowParallelLinear
 from torchtitan.protocols.sharding import ShardingConfig
 
 
@@ -162,12 +158,16 @@ def _shared_experts_sharding_configs(
         if enable_sp
         else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return (
         ShardingConfig(
             in_src_shardings={"x": input_layout},
+            # The shared-expert input projection is not an independent async-TP
+            # boundary. Gather at its parent so w13 remains a plain Linear.
+            in_dst_shardings={"x": replicated_input_layout},
             out_src_shardings=desired_output_layout,
         ),
-        colwise_config(input_layout=input_layout),
+        colwise_config(input_layout=replicated_input_layout),
         rowwise_config(output_layout=desired_output_layout),
     )
 
@@ -179,7 +179,6 @@ def set_shared_experts_sharding_config(
     enable_sp: bool,
 ) -> None:
     """Configure a standard FeedForward used as an MoE shared expert."""
-    assert parallel_linear_role(shared_experts_cfg.w13) is ColumnParallelLinear
     assert parallel_linear_role(shared_experts_cfg.w2) is RowParallelLinear
     shared_config, w13_config, w2_config = _shared_experts_sharding_configs(
         enable_ep=enable_ep,
@@ -187,9 +186,6 @@ def set_shared_experts_sharding_config(
     )
     if isinstance(shared_experts_cfg, SigmoidGatedFeedForward.Config):
         replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        # The gate and w13 both consume x, so gather once at their parent.
-        shared_config.in_dst_shardings = {"x": replicated_input_layout}
-        w13_config = colwise_config(input_layout=replicated_input_layout)
         gate_output_layout = (
             dense_sequence_parallel_placement()
             if enable_sp

@@ -202,7 +202,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             rank=2,
             alpha=4,
         ).transform(qkv.wqkv)
-        with self.assertRaisesRegex(ValueError, "converted QKV projections"):
+        with self.assertRaisesRegex(ValueError, "converted .*wqkv projections"):
             transform_model_config_(model, [AsyncTensorParallelTransform()])
 
 

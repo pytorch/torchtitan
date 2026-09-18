@@ -13,12 +13,10 @@ from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
-
-from torchtitan.models.common.attention import GQAttention, QKVLinear
-from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
+    parallel_linear_role,
     RowParallelLinear,
 )
 from torchtitan.protocols.module import Module
@@ -27,12 +25,6 @@ from .base import convert_config_type, ModelConfigTransform
 from .lora import LoRATransform
 
 __all__ = ["AsyncTensorParallelTransform"]
-
-# A column/row role alone does not imply that its collective is eligible for
-# the fused async kernel. Shared-input projections, such as Muse Glimmer's QKV
-# and output gate or an MoE shared expert's gate and w13, gather once at their
-# parent. Keep the transform scoped to common GQA and dense FFN boundaries until
-# async implementations can honor each projection's declared source layout.
 
 
 def _convert_linear(
@@ -57,69 +49,39 @@ def _convert_linear(
     )
 
 
-def _transform_attention(model: Module.Config) -> Module.Config:
-    """Replace common GQA synchronous projections with async implementations."""
-    for _, traversed, parent, attr in model.traverse(GQAttention.Config):
-        existing = cast(GQAttention.Config, traversed)
-        if existing._owner is not GQAttention:
+def _transform_parallel_linears(model: Module.Config) -> Module.Config:
+    """Replace synchronous TP projection configs with async implementations."""
+    for fqn, traversed, parent, attr in list(model.traverse(Linear.Config)):
+        role = parallel_linear_role(traversed)
+        if role is None:
             continue
-
-        if existing.qkv_linear._owner is not QKVLinear:
-            raise ValueError(
-                "Async tensor parallelism requires the common QKVLinear "
-                "implementation"
-            )
-        existing.qkv_linear.wqkv = _convert_linear(
-            existing.qkv_linear.wqkv,
-            AsyncColumnParallelLinear,
-            projection_name="QKV",
+        replacement = (
+            AsyncColumnParallelLinear
+            if role is ColumnParallelLinear
+            else AsyncRowParallelLinear
         )
-        existing.wo = _convert_linear(
-            existing.wo,
-            AsyncRowParallelLinear,
-            projection_name="attention output",
+        converted = _convert_linear(
+            traversed,
+            replacement,
+            projection_name=fqn or type(traversed).__qualname__,
         )
-    return model
-
-
-def _transform_feed_forward(
-    model: Module.Config,
-) -> Module.Config:
-    """Replace common dense FFN synchronous projections with async versions.
-
-    Configs stored as ``feed_forward`` fields are transformed, along with a
-    root FFN config. Shared experts remain synchronous because their input
-    layout depends on EP.
-    """
-    for _, traversed, parent, attr in model.traverse(FeedForward.Config):
-        is_root = parent is None
-        is_dense_block = attr == "feed_forward"
-        if not is_root and not is_dense_block:
-            continue
-        existing = cast(FeedForward.Config, traversed)
-        if existing._owner is not FeedForward:
-            continue
-
-        existing.w13 = _convert_linear(
-            existing.w13,
-            AsyncColumnParallelLinear,
-            projection_name="w13",
-        )
-        existing.w2 = _convert_linear(
-            existing.w2,
-            AsyncRowParallelLinear,
-            projection_name="w2",
-        )
+        if parent is None:
+            model = cast(Module.Config, converted)
+        elif isinstance(parent, list):
+            assert isinstance(attr, int)
+            parent[attr] = converted
+        else:
+            assert isinstance(attr, str)
+            setattr(parent, attr, converted)
     return model
 
 
 @dataclass(kw_only=True, slots=True)
 class AsyncTensorParallelTransform(ModelConfigTransform):
-    """Select async tensor-parallel attention and dense FFN projections."""
+    """Replace synchronous tensor-parallel projections with async versions."""
 
     def transform(self, model: Module.Config) -> Module.Config:
-        model = _transform_attention(model)
-        return _transform_feed_forward(model)
+        return _transform_parallel_linears(model)
 
 
 # Async kernels call their fused autograd functions directly instead of the

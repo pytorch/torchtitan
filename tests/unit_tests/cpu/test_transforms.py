@@ -25,6 +25,10 @@ from torchtitan.config.transform import (
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 
+from torchtitan.models.common.async_linear import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     GQAttention,
@@ -303,21 +307,28 @@ class TestTensorParallelModules(unittest.TestCase):
             self.assertIsNone(layer.feed_forward.w13.sharding_config)
             self.assertIsNone(layer.feed_forward.w2.sharding_config)
 
-    def test_common_moe_shared_experts_use_sync_tp_projections(self):
-        source = self._config().model_spec.model.layers[0].feed_forward
-        model = _FeedForwardSlots.Config(
-            feed_forward=copy.deepcopy(source),
-            shared_experts=copy.deepcopy(source),
+    def test_shared_expert_input_projection_is_parent_owned(self):
+        from torchtitan.models.common.config_utils import make_shared_expert_ffn_config
+
+        shared_experts = make_shared_expert_ffn_config(
+            dim=8,
+            hidden_dim=16,
+            w1_param_init={},
+            w2w3_param_init={},
         )
 
-        self.assertIs(type(model.feed_forward), FeedForward.Config)
-        self.assertIsInstance(model.feed_forward.w13, ColumnParallelLinear.Config)
-        self.assertIs(type(model.shared_experts), FeedForward.Config)
-        self.assertIsInstance(model.shared_experts.w13, ColumnParallelLinear.Config)
-        self.assertIsInstance(model.shared_experts.w2, RowParallelLinear.Config)
+        self.assertIs(type(shared_experts.w13), Linear.Config)
+        self.assertIsInstance(shared_experts.w2, RowParallelLinear.Config)
 
-    def test_async_does_not_replace_moe_shared_experts(self):
-        source = self._config().model_spec.model.layers[0].feed_forward
+    def test_async_replaces_parallel_linears_without_parent_knowledge(self):
+        from torchtitan.models.common.config_utils import make_ffn_config
+
+        source = make_ffn_config(
+            dim=8,
+            hidden_dim=16,
+            w1_param_init={},
+            w2w3_param_init={},
+        )
         model = _FeedForwardSlots.Config(
             feed_forward=copy.deepcopy(source),
             shared_experts=copy.deepcopy(source),
@@ -326,9 +337,11 @@ class TestTensorParallelModules(unittest.TestCase):
         transformed = AsyncTensorParallelTransform().transform(model)
 
         self.assertIsInstance(
-            transformed.shared_experts.w13, ColumnParallelLinear.Config
+            transformed.shared_experts.w13, AsyncColumnParallelLinear.Config
         )
-        self.assertIsInstance(transformed.shared_experts.w2, RowParallelLinear.Config)
+        self.assertIsInstance(
+            transformed.shared_experts.w2, AsyncRowParallelLinear.Config
+        )
 
     def test_shared_expert_sharding_uses_projection_boundaries(self):
         from torchtitan.models.common.moe_sharding import set_moe_sharding_config
@@ -344,7 +357,7 @@ class TestTensorParallelModules(unittest.TestCase):
             enable_sp=True,
             expert_param_layout={},
         )
-        self.assertIsNone(moe.shared_experts.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(moe.shared_experts.sharding_config.in_dst_shardings)
         self.assertIsNone(moe.shared_experts.w13.sharding_config.in_dst_shardings)
         self.assertIsNone(moe.shared_experts.w2.sharding_config.out_dst_shardings)
 
@@ -354,6 +367,23 @@ class TestTensorParallelModules(unittest.TestCase):
         self.assertIs(type(config), GQAttention.Config)
         self.assertIsInstance(config.qkv_linear.wqkv, ColumnParallelLinear.Config)
         self.assertIsInstance(config.wo, RowParallelLinear.Config)
+
+    def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
+        from torchtitan.models.muse_glimmer import muse_glimmer_configs
+
+        build_config, max_context_length = muse_glimmer_configs["debugmodel"]
+        model = build_config(attn_backend="flex", seq_len=max_context_length)
+        attention = model.layers[0].attention
+
+        self.assertIs(type(attention.qkv_linear.wqkv), Linear.Config)
+        self.assertIs(type(attention.o_gate), Linear.Config)
+        self.assertIsInstance(attention.wo, RowParallelLinear.Config)
+
+        transformed = AsyncTensorParallelTransform().transform(model)
+        attention = transformed.layers[0].attention
+        self.assertIs(type(attention.qkv_linear.wqkv), Linear.Config)
+        self.assertIs(type(attention.o_gate), Linear.Config)
+        self.assertIsInstance(attention.wo, AsyncRowParallelLinear.Config)
 
     def test_async_transform_rejects_converted_projection(self):
         config = copy.deepcopy(self._config().model_spec.model.layers[0].feed_forward)

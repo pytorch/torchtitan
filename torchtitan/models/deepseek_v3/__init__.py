@@ -18,7 +18,6 @@ from torchtitan.config.transform import (
 )
 from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
-    ColumnParallelLinear,
     ComplexRoPE,
     Embedding,
     Linear,
@@ -38,6 +37,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -150,7 +150,7 @@ def make_mla_attention_config(
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     if q_lora_rank == 0:
-        wq = ColumnParallelLinear.Config(
+        wq = Linear.Config(
             in_features=dim,
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
@@ -167,7 +167,7 @@ def make_mla_attention_config(
             out_features=q_lora_rank,
             param_init=linear_init,
         )
-        wq_b = ColumnParallelLinear.Config(
+        wq_b = Linear.Config(
             in_features=q_lora_rank,
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
@@ -197,7 +197,7 @@ def make_mla_attention_config(
         kv_norm=RMSNorm.Config(
             normalized_shape=kv_lora_rank, eps=1e-6, param_init=norm_init
         ),
-        wkv_b=ColumnParallelLinear.Config(
+        wkv_b=Linear.Config(
             in_features=kv_lora_rank,
             out_features=n_heads * (qk_nope_head_dim + v_head_dim),
             param_init=linear_init,
@@ -306,7 +306,7 @@ def build_mla_moe_layers(
                     comm_backend=moe_comm_backend,
                     non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),
-                shared_experts=make_ffn_config(
+                shared_experts=make_shared_expert_ffn_config(
                     dim=dim,
                     hidden_dim=moe_hidden_dim * num_shared_experts,
                     w1_param_init=linear_init,

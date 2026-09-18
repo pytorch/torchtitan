@@ -18,7 +18,6 @@ from torchtitan.config.transform import (
 
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
-    ColumnParallelLinear,
     ComplexRoPE,
     Embedding,
     Linear,
@@ -172,7 +171,7 @@ def _build_muse_glimmer_attention(
             head_dim=head_dim,
             n_heads=n_heads,
             n_kv_heads=n_kv_heads,
-            wqkv=ColumnParallelLinear.Config(
+            wqkv=Linear.Config(
                 in_features=dim,
                 out_features=(n_heads + 2 * n_kv_heads) * head_dim,
                 param_init=fused_qkv_param_init(
@@ -198,7 +197,7 @@ def _build_muse_glimmer_attention(
         if _layer_use_rope(layer_id, n_layers)
         else None,
         scale_query_by=_SCALE_QUERY_NUMERATOR / math.sqrt(head_dim),
-        o_gate=ColumnParallelLinear.Config(
+        o_gate=Linear.Config(
             in_features=dim,
             out_features=n_heads * head_dim,
             param_init=_LINEAR_INIT,

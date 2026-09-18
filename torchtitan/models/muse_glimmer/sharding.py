@@ -166,8 +166,8 @@ def _set_muse_glimmer_layer_sharding(
             out_dst_shardings=head_shard,
         )
 
-    # Output gate: colwise so its Shard(-1) output aligns with the head-sharded
-    # attention output before ``wo``.
+    # The attention boundary gathers the input shared by qkv and o_gate. These
+    # plain Linear projections only shard their compute and output features.
     if attention.o_gate is not None:
         attention.o_gate.sharding_config = colwise_config(
             input_layout=dense_activation_placement(tp=spmd.R, cp=spmd.S(0))

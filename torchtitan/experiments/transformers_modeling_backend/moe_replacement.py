@@ -31,10 +31,10 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
 )
 from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
-    make_ffn_config,
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
@@ -553,7 +553,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
     shared_experts = None
     shared_info = params["shared_expert_info"]
     if shared_info is not None:
-        ffn_config = make_ffn_config(
+        ffn_config = make_shared_expert_ffn_config(
             dim=shared_info["dim"],
             hidden_dim=shared_info["hidden_dim"],
             w1_param_init=_LINEAR_INIT,

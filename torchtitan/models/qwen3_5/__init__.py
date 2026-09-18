@@ -17,7 +17,6 @@ from torchtitan.config.transform import (
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
-    ColumnParallelLinear,
     Conv1d,
     Embedding,
     Linear,
@@ -141,7 +140,7 @@ def _shared_experts_config(
     return SigmoidGatedFeedForward.Config(
         # The gate and w13 share x, so the enclosing shared-expert boundary
         # performs their input all-gather once.
-        w13=ColumnParallelLinear.Config(
+        w13=Linear.Config(
             in_features=dim,
             out_features=2 * hidden_dim,
             param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
@@ -234,17 +233,17 @@ def _qwen35_attention_config(
         head_dim=head_dim,
         rotary_dim=rotary_dim,
         rope=rope,
-        wq=ColumnParallelLinear.Config(
+        wq=Linear.Config(
             in_features=dim,
             out_features=n_heads * head_dim * 2,
             param_init=_LINEAR_INIT,
         ),
-        wk=ColumnParallelLinear.Config(
+        wk=Linear.Config(
             in_features=dim,
             out_features=n_kv_heads * head_dim,
             param_init=_LINEAR_INIT,
         ),
-        wv=ColumnParallelLinear.Config(
+        wv=Linear.Config(
             in_features=dim,
             out_features=n_kv_heads * head_dim,
             param_init=_LINEAR_INIT,
@@ -290,32 +289,32 @@ def _qwen35_deltanet_config(
         key_head_dim=key_head_dim,
         value_head_dim=value_head_dim,
         conv_kernel_size=conv_kernel_size,
-        in_proj_q=ColumnParallelLinear.Config(
+        in_proj_q=Linear.Config(
             in_features=dim,
             out_features=key_dim,
             param_init=_LINEAR_INIT,
         ),
-        in_proj_k=ColumnParallelLinear.Config(
+        in_proj_k=Linear.Config(
             in_features=dim,
             out_features=key_dim,
             param_init=_LINEAR_INIT,
         ),
-        in_proj_v=ColumnParallelLinear.Config(
+        in_proj_v=Linear.Config(
             in_features=dim,
             out_features=value_dim,
             param_init=_LINEAR_INIT,
         ),
-        in_proj_z=ColumnParallelLinear.Config(
+        in_proj_z=Linear.Config(
             in_features=dim,
             out_features=value_dim,
             param_init=_LINEAR_INIT,
         ),
-        in_proj_a=ColumnParallelLinear.Config(
+        in_proj_a=Linear.Config(
             in_features=dim,
             out_features=n_value_heads,
             param_init=_LINEAR_INIT,
         ),
-        in_proj_b=ColumnParallelLinear.Config(
+        in_proj_b=Linear.Config(
             in_features=dim,
             out_features=n_value_heads,
             param_init=_LINEAR_INIT,

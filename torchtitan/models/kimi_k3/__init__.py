@@ -17,7 +17,6 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import (
-    ColumnParallelLinear,
     Conv1d,
     Embedding,
     FeedForward,
@@ -30,6 +29,7 @@ from torchtitan.models.common import (
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
+    make_shared_expert_ffn_config,
     make_token_dispatcher_config,
 )
 from torchtitan.models.common.moe import (
@@ -150,6 +150,22 @@ def _feed_forward_config(
     )
 
 
+def _shared_experts_config(
+    *,
+    dim: int,
+    hidden_dim: int,
+) -> FeedForward.Config:
+    return replace(
+        make_shared_expert_ffn_config(
+            dim=dim,
+            hidden_dim=hidden_dim,
+            w1_param_init=_LINEAR_INIT,
+            w2w3_param_init=_LINEAR_INIT,
+        ),
+        activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
+    )
+
+
 def _mla_config(
     *,
     dim: int,
@@ -173,19 +189,19 @@ def _mla_config(
         v_head_dim=v_head_dim,
         wq_a=_linear(dim, q_lora_rank),
         q_norm=_norm(q_lora_rank),
-        wq_b=ColumnParallelLinear.Config(
+        wq_b=Linear.Config(
             in_features=q_lora_rank,
             out_features=num_heads * q_head_dim,
             param_init=_LINEAR_INIT,
         ),
         wkv_a=_linear(dim, kv_lora_rank + qk_rope_head_dim),
         kv_norm=_norm(kv_lora_rank),
-        wkv_b=ColumnParallelLinear.Config(
+        wkv_b=Linear.Config(
             in_features=kv_lora_rank,
             out_features=num_heads * (qk_nope_head_dim + v_head_dim),
             param_init=_LINEAR_INIT,
         ),
-        gate=ColumnParallelLinear.Config(
+        gate=Linear.Config(
             in_features=dim,
             out_features=num_heads * v_head_dim,
             param_init=_LINEAR_INIT,
@@ -222,17 +238,17 @@ def _kda_config(
         num_heads=num_heads,
         head_dim=head_dim,
         conv_kernel_size=conv_kernel_size,
-        q_proj=ColumnParallelLinear.Config(
+        q_proj=Linear.Config(
             in_features=dim,
             out_features=projection_dim,
             param_init=_LINEAR_INIT,
         ),
-        k_proj=ColumnParallelLinear.Config(
+        k_proj=Linear.Config(
             in_features=dim,
             out_features=projection_dim,
             param_init=_LINEAR_INIT,
         ),
-        v_proj=ColumnParallelLinear.Config(
+        v_proj=Linear.Config(
             in_features=dim,
             out_features=projection_dim,
             param_init=_LINEAR_INIT,
@@ -241,17 +257,17 @@ def _kda_config(
         k_conv=conv(),
         v_conv=conv(),
         forget_a=_linear(dim, head_dim),
-        forget_b=ColumnParallelLinear.Config(
+        forget_b=Linear.Config(
             in_features=head_dim,
             out_features=projection_dim,
             param_init=_LINEAR_INIT,
         ),
-        beta=ColumnParallelLinear.Config(
+        beta=Linear.Config(
             in_features=dim,
             out_features=num_heads,
             param_init=_LINEAR_INIT,
         ),
-        output_gate=ColumnParallelLinear.Config(
+        output_gate=Linear.Config(
             in_features=dim,
             out_features=projection_dim,
             param_init=_LINEAR_INIT,
@@ -330,7 +346,7 @@ def _latent_moe_config(
         ),
         routed_norm=_norm(latent_dim),
         routed_up=_linear(latent_dim, dim),
-        shared_experts=_feed_forward_config(
+        shared_experts=_shared_experts_config(
             dim=dim,
             hidden_dim=num_shared_experts * expert_hidden_dim,
         ),
