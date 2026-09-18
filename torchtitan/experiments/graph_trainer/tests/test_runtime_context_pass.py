@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import functools
 import unittest
 
 import torch
@@ -12,55 +13,56 @@ import torch
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     GraphPassRuntimeContext,
-    RuntimeContextGraphPass,
 )
 
 
-class TestRuntimeContextGraphPass(unittest.TestCase):
-    def setUp(self) -> None:
-        self.gm = torch.fx.symbolic_trace(lambda x: x + 1)
-        self.example_inputs = (torch.ones(2),)
-        self.runtime_context = GraphPassRuntimeContext(
-            traced_result=object(),
+class TestGraphPassRuntimeContext(unittest.TestCase):
+    def test_pipeline_can_bind_runtime_context_with_partial(self) -> None:
+        gm = torch.fx.symbolic_trace(lambda x: x + 1)
+        example_inputs = (torch.ones(2),)
+        traced_result = object()
+        runtime_context = GraphPassRuntimeContext(
             module=torch.nn.Linear(2, 2),
             args=(torch.ones(2),),
             train_context=contextlib.nullcontext,
         )
+        received = []
 
-    def test_context_is_only_passed_to_opted_in_pass(self) -> None:
-        calls = []
-
-        def ordinary_pass(gm, example_inputs):
-            calls.append(("ordinary", example_inputs))
+        def runtime_pass(
+            gm,
+            example_inputs,
+            *,
+            traced_result,
+            runtime_context,
+        ):
+            received.append((traced_result, runtime_context))
             return gm
 
-        def runtime_pass(gm, example_inputs, *, runtime_context):
-            calls.append(("runtime", runtime_context))
-            return gm
+        def pipeline_fn(
+            traced_result,
+            config,
+            *,
+            parallel_dims=None,
+            runtime_context=None,
+        ):
+            return [
+                functools.partial(
+                    runtime_pass,
+                    traced_result=traced_result,
+                    runtime_context=runtime_context,
+                )
+            ]
 
-        result = apply_graph_passes(
-            self.gm,
-            self.example_inputs,
-            [ordinary_pass, RuntimeContextGraphPass(runtime_pass)],
-            runtime_context=self.runtime_context,
+        passes = pipeline_fn(
+            traced_result,
+            None,
+            runtime_context=runtime_context,
         )
 
-        self.assertIs(result, self.gm)
-        self.assertEqual(calls[0][0], "ordinary")
-        self.assertIs(calls[1][1], self.runtime_context)
+        result = apply_graph_passes(gm, example_inputs, passes)
 
-    def test_context_aware_pass_requires_context(self) -> None:
-        def runtime_pass(gm, example_inputs, *, runtime_context):
-            return gm
-
-        with self.assertRaisesRegex(
-            RuntimeError, "requires a graph pass runtime context"
-        ):
-            apply_graph_passes(
-                self.gm,
-                self.example_inputs,
-                [RuntimeContextGraphPass(runtime_pass)],
-            )
+        self.assertIs(result, gm)
+        self.assertEqual(received, [(traced_result, runtime_context)])
 
 
 if __name__ == "__main__":
