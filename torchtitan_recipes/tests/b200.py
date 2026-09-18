@@ -6,6 +6,7 @@
 
 """Configurations for the ``b200`` integration test suite."""
 
+from torchtitan.components.optimizer import default_adamw
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests import _set_spmd_typechecking
@@ -15,10 +16,24 @@ def kimi_k3_debugmodel_mm() -> Trainer.Config:
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
     config = kimi_k3_debugmodel()
+    # DistMuon rejects TP-produced _StridedShard storage, so the TP coverage
+    # keeps AdamW; kimi_k3_debugmodel_mm_muon covers the default optimizer.
+    config.optimizer = default_adamw(lr=8e-4)
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.enable_sequence_parallel = True
+    config.parallelism.expert_parallel_degree = 2
+    return config
+
+
+def kimi_k3_debugmodel_mm_muon() -> Trainer.Config:
+    """Per-head DistMuon with FSDP and EP."""
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+
+    config = kimi_k3_debugmodel()
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.expert_parallel_degree = 2
     return config
 
