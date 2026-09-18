@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import Any, cast, TypeVar
 
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
@@ -128,8 +128,9 @@ class ComputeLayout:
     shard it, outermost first: the leading axis partitions the whole dimension
     and every following axis partitions its predecessor's shard. Declaring an
     order is only necessary when it differs from the default, which applies the
-    axes in storage-mesh order. Each named axis must declare ``Shard`` on that
-    same tensor dimension, written as a non-negative index.
+    axes in storage-mesh order. Every axis in one order must use the same
+    sharding type: either ``Shard`` on that tensor dimension or ``BlockShard``
+    with the same tensor dimension and block size.
 
     Examples:
         Shard a logical batch of matrices over EP first, then split each
@@ -142,6 +143,16 @@ class ComputeLayout:
                     "ep": Shard(0),
                 },
                 shard_order_by_tensor_dim={0: ("ep", "efsdp")},
+            )
+
+        Preserve TP head ownership, then distribute complete heads over DP::
+
+            ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(dim=0, block_size=head_dim),
+                    "tp": BlockShard(dim=0, block_size=head_dim),
+                },
+                shard_order_by_tensor_dim={0: ("tp", "dp_shard")},
             )
 
         Assign the complete subgroup-local logical tensor to one owner rank
@@ -226,6 +237,7 @@ class ComputeLayout:
                     f"mesh axis; tensor dimension {tensor_dim} lists "
                     f"{list(ordered_axis_names)}"
                 )
+            ordered_shardings = []
             for axis_name in ordered_axis_names:
                 sharding = shardings_by_mesh_axis.get(axis_name)
                 if sharding is None:
@@ -234,12 +246,42 @@ class ComputeLayout:
                         f"{axis_name!r}, which shardings_by_mesh_axis does not "
                         "declare"
                     )
-                if type(sharding) is not Shard or sharding.dim != tensor_dim:
+                if type(sharding) not in (Shard, BlockShard):
                     raise ValueError(
                         "ComputeLayout.shard_order_by_tensor_dim requires "
-                        f"Shard({tensor_dim}) on mesh axis {axis_name!r}; got "
-                        f"{sharding!r}"
+                        f"Shard({tensor_dim}) or BlockShard({tensor_dim}, ...) "
+                        f"on mesh axis {axis_name!r}; got {sharding!r}"
                     )
+                ordered_sharding = cast(Shard | BlockShard, sharding)
+                if ordered_sharding.dim != tensor_dim:
+                    raise ValueError(
+                        "ComputeLayout.shard_order_by_tensor_dim requires "
+                        f"Shard({tensor_dim}) or BlockShard({tensor_dim}, ...) "
+                        f"on mesh axis {axis_name!r}; got {sharding!r}"
+                    )
+                ordered_shardings.append(ordered_sharding)
+            sharding_type = type(ordered_shardings[0])
+            if any(
+                type(sharding) is not sharding_type for sharding in ordered_shardings
+            ):
+                raise ValueError(
+                    "ComputeLayout.shard_order_by_tensor_dim cannot mix Shard "
+                    "and BlockShard"
+                )
+            if (
+                sharding_type is BlockShard
+                and len(
+                    {
+                        cast(BlockShard, sharding).block_size
+                        for sharding in ordered_shardings
+                    }
+                )
+                != 1
+            ):
+                raise ValueError(
+                    "ComputeLayout.shard_order_by_tensor_dim requires equal "
+                    "BlockShard block sizes"
+                )
             validated_shard_order[tensor_dim] = ordered_axis_names
         return dict(sorted(validated_shard_order.items()))
 

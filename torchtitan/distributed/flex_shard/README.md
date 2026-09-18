@@ -33,9 +33,12 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   transitions.
 
 Storage placements describe persistent ownership only; they do not define
-Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
-most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
-`Replicate`; every other non-unit storage mesh axis must be replicated.
+Muon matrix boundaries. Flat matrix-batch compute may use `BlockShard` on one
+or more non-unit mesh axes. FlexShard routes complete matrices across the
+required optimizer transport axes and restores the original DTensor storage
+layout after the update. This supports combined DP and TP storage, including
+the strided shards produced when TP and FSDP shard the same tensor dimension.
+Non-transport mesh axes retain their storage placement.
 
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,
@@ -44,6 +47,12 @@ repartitioning its local expert domain over a preceding EFSDP axis uses
 `Shard(0)` on both axes with `shard_order_by_tensor_dim={0: ("ep", "efsdp")}`.
 FlexShard derives each axis's split factor from the bound mesh, then lowers the
 EFSDP placement to subgroup-local `Shard(0)` for optimizer execution.
+
+The same ordering applies to `BlockShard`. A per-head matrix stored with TP
+ownership first can declare `shard_order_by_tensor_dim={0: ("tp",
+"dp_shard")}`. When storage preserves each TP rank's head range, FlexShard
+uses only the innermost DP axis for redistribution. It skips redistribution
+entirely when the persistent shards already contain complete heads.
 
 Compute sharding is construction-time configuration. It is validated and
 frozen when the optimizer is built, but is not stored in its state dict;
