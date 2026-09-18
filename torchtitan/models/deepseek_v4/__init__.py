@@ -16,7 +16,6 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -50,6 +49,7 @@ from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4Router
 from .mtp import MTPBlock
+from .pipeline import pipeline_deepseek_v4
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 __all__ = [
@@ -1056,7 +1056,7 @@ def model_registry(
         model=config,
         max_context_length=context_len,
         parallelize_fn=parallelize_deepseek_v4,
-        pipelining_fn=pipeline_llm,
+        pipelining_fn=pipeline_deepseek_v4,
         post_optimizer_build_fn=register_moe_load_balancing_hook,
         state_dict_adapter=DeepSeekV4StateDictAdapter,
     )

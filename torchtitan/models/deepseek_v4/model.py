@@ -230,12 +230,20 @@ class DeepSeekV4Model(Decoder):
         del positions, padding_mask, max_num_documents, max_context_length
         return None
 
+    def preprocess_inputs(self, input_dict, **kwargs):
+        inputs, labels, model_kwargs = super().preprocess_inputs(input_dict, **kwargs)
+        # Every PP rank has the batch; keep token IDs in the per-microbatch kwargs.
+        model_kwargs["input_ids_T"] = inputs
+        return inputs, labels, model_kwargs
+
     def forward(
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         padding_mask: torch.Tensor | None = None,
+        *,
+        input_ids_T: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
@@ -246,22 +254,29 @@ class DeepSeekV4Model(Decoder):
                 "cross entropy is not supported."
             )
 
-        input_ids_T = tokens.detach().long()
-        h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        h = h.unsqueeze(1).repeat(1, self.hc_mult, 1)
+        # T: tokens, M: HC branches, D: hidden width.
+        if input_ids_T is None:
+            if self.tok_embeddings is None:
+                raise ValueError(
+                    "DeepSeek V4 pipeline stages require input_ids_T for hash routing."
+                )
+            input_ids_T = tokens.detach().long()
+        if self.tok_embeddings is not None:
+            h_TMD = self.tok_embeddings(tokens).unsqueeze(1).repeat(1, self.hc_mult, 1)
+        else:
+            h_TMD = tokens
 
-        for i in range(self.n_main_layers):
-            layer = self.layers[str(i)]
-            h = layer(
-                h,
+        for layer in self.layers.values():
+            h_TMD = layer(
+                h_TMD,
                 input_ids_T,
                 attention_masks,
                 positions,
                 padding_mask=padding_mask,
             )
 
-        prev_hc_hidden = h
-        main_hidden = self.hc_head(h)
+        prev_hc_hidden = h_TMD
+        main_hidden = self.hc_head(h_TMD) if self.hc_head is not None else h_TMD
         main_hidden = self.norm(main_hidden) if self.norm is not None else main_hidden
 
         if len(self.mtp_layers) == 0:
