@@ -4,15 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import tempfile
 import unittest
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
 from torchtitan.components.checkpointer.base import ModelWrapper
+from torchtitan.components.checkpointer.packed_hf_storage import (
+    PackedPairHuggingFaceStorageReader,
+)
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.models.deepseek_v4 import model_registry as deepseek_v4_model_registry
@@ -20,6 +26,79 @@ from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.state_dict_adapter import DeepSeekV4StateDictAdapter
 from torchtitan.models.gpt_oss import gptoss_configs
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
+from torchtitan.models.kimi_k3 import model_registry as kimi_k3_model_registry
+from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
+
+
+class KimiK3StateDictAdapterTest(unittest.TestCase):
+    def setUp(self) -> None:
+        model_spec = kimi_k3_model_registry("debugmodel", seq_len=128)
+        self.adapter = KimiK3StateDictAdapter(
+            model_spec.model,
+            hf_assets_path=None,
+        )
+
+    def test_quantized_load_uses_packed_pair_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "config.json").write_text(
+                json.dumps(
+                    {
+                        "text_config": {
+                            "quantization_config": {
+                                "format": "mxfp4-pack-quantized",
+                                "quant_method": "compressed-tensors",
+                                "config_groups": {
+                                    "group_0": {
+                                        "targets": ["Linear"],
+                                        "weights": {"group_size": 32},
+                                    }
+                                },
+                                "ignore": ["re:.*shared_experts.*"],
+                            }
+                        }
+                    }
+                )
+            )
+            reader = self.adapter.get_hf_storage_reader(
+                directory,
+                from_quantized=True,
+            )
+
+        self.assertIsInstance(reader, PackedPairHuggingFaceStorageReader)
+        self.assertEqual(reader.spec.packed_suffix, ".weight_packed")
+        self.assertEqual(reader.spec.scale_suffix, ".weight_scale")
+        self.assertEqual(reader.spec.virtual_suffix, ".weight")
+        self.assertEqual(reader.spec.block_size, 32)
+        self.assertEqual(reader.spec.target_dtype, torch.bfloat16)
+        self.assertTrue(
+            reader.spec.is_target(
+                "language_model.model.layers.1.block_sparse_moe.experts.3.w1.weight"
+            )
+        )
+        self.assertFalse(
+            reader.spec.is_target(
+                "language_model.model.layers.1.block_sparse_moe.shared_experts.w1.weight"
+            )
+        )
+        self.assertTrue(
+            reader.spec.is_target(
+                "language_model.model.layers.1.block_sparse_moe.experts.3.w4.weight"
+            )
+        )
+
+    def test_quantized_load_rejects_missing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "missing quantization_config"):
+                Path(directory, "config.json").write_text("{}")
+                self.adapter.get_hf_storage_reader(directory, from_quantized=True)
+
+    def test_unquantized_load_keeps_plain_reader(self) -> None:
+        reader = self.adapter.get_hf_storage_reader(
+            "/tmp/kimi-k3-checkpoint",
+            from_quantized=False,
+        )
+
+        self.assertIs(type(reader), HuggingFaceStorageReader)
 
 
 class DeepSeekV3StateDictAdapterTest(unittest.TestCase):

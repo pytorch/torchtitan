@@ -6,21 +6,98 @@
 
 """HuggingFace checkpoint adapter for unquantized Kimi K3 weights."""
 
+import json
 import re
+from pathlib import Path
 from typing import Any
 
 import torch
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor
 
+from torchtitan.components.checkpointer.packed_hf_storage import (
+    PackedPairHuggingFaceStorageReader,
+    PackedPairSpec,
+)
 from torchtitan.models.utils import MoEStateDictAdapter
 
 from .model import KimiK3Model
-
 
 _UNUSED_HF_LAYER_ZERO_ATTN_RES_KEYS = {
     "language_model.model.layers.0.self_attention_res_norm.weight",
     "language_model.model.layers.0.self_attention_res_proj.weight",
 }
+
+
+def _released_mxfp4_policy(path: str) -> tuple[int, Any]:
+    config_path = Path(path) / "config.json"
+    if not config_path.is_file():
+        raise ValueError(f"Quantized Kimi checkpoint is missing {config_path}.")
+    config = json.loads(config_path.read_text())
+    text_config = config.get("text_config", config)
+    quantization = text_config.get("quantization_config")
+    if not isinstance(quantization, dict):
+        raise ValueError("Kimi checkpoint is missing quantization_config metadata.")
+    if (
+        quantization.get("format") != "mxfp4-pack-quantized"
+        or quantization.get("quant_method") != "compressed-tensors"
+    ):
+        raise ValueError("Kimi checkpoint does not declare compressed MXFP4 weights.")
+
+    config_groups = quantization.get("config_groups")
+    if not isinstance(config_groups, dict) or not config_groups:
+        raise ValueError("Kimi quantization_config has no config groups.")
+    group_sizes = set()
+    targets = set()
+    for group in config_groups.values():
+        if not isinstance(group, dict):
+            raise ValueError("Kimi quantization config group must be an object.")
+        targets.update(group.get("targets", ()))
+        weights = group.get("weights")
+        if not isinstance(weights, dict):
+            raise ValueError("Kimi quantization config group has no weight config.")
+        group_sizes.add(weights.get("group_size"))
+    if targets != {"Linear"} or len(group_sizes) != 1:
+        raise ValueError(
+            "Kimi packed import currently requires one Linear MXFP4 group size."
+        )
+    block_size = group_sizes.pop()
+    if not isinstance(block_size, int):
+        raise ValueError("Kimi MXFP4 group_size must be an integer.")
+
+    ignore_patterns = []
+    for pattern in quantization.get("ignore", ()):
+        if not isinstance(pattern, str) or not pattern.startswith("re:"):
+            raise ValueError("Kimi packed import requires regex ignore entries.")
+        ignore_patterns.append(re.compile(pattern.removeprefix("re:")))
+
+    def is_target(weight_fqn: str) -> bool:
+        if not weight_fqn.endswith(".weight"):
+            return False
+        module_fqn = weight_fqn.removesuffix(".weight")
+        return not any(pattern.fullmatch(module_fqn) for pattern in ignore_patterns)
+
+    return block_size, is_target
+
+
+def _decode_mxfp4(
+    packed: torch.Tensor,
+    scales: torch.Tensor,
+    block_size: int,
+    target_dtype: torch.dtype,
+) -> torch.Tensor:
+    from torchao.prototype.mx_formats.mx_tensor import MXTensor
+
+    return MXTensor(
+        packed,
+        scales.view(torch.float8_e8m0fnu),
+        torch.float4_e2m1fn_x2,
+        block_size,
+        target_dtype,
+        None,
+        None,
+        False,
+    ).dequantize(target_dtype)
 
 
 class KimiK3StateDictAdapter(MoEStateDictAdapter):
@@ -132,6 +209,29 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             else self.kda_from_hf_map
         )
         return attention_map.get(abstract_key)
+
+    def get_hf_storage_reader(
+        self,
+        path: str,
+        from_quantized: bool = False,
+    ) -> HuggingFaceStorageReader:
+        if not from_quantized:
+            return super().get_hf_storage_reader(path, from_quantized=False)
+        block_size, is_target = _released_mxfp4_policy(path)
+        return PackedPairHuggingFaceStorageReader(
+            path=path,
+            thread_count=4,
+            spec=PackedPairSpec(
+                packed_suffix=".weight_packed",
+                scale_suffix=".weight_scale",
+                virtual_suffix=".weight",
+                block_size=block_size,
+                packed_values_per_byte=2,
+                target_dtype=torch.bfloat16,
+                is_target=is_target,
+                decode=_decode_mxfp4,
+            ),
+        )
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
