@@ -37,6 +37,7 @@ from torchtitan.models.common.decoder_sharding import (
     token_id_placement,
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
     set_moe_sharding_config,
@@ -197,15 +198,17 @@ def _set_qwen35_layer_sharding(
         )
 
     if layer_cfg.moe is not None:
+        moe_cfg = layer_cfg.moe
+        assert isinstance(moe_cfg, MoE.Config)
         set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
-            layer_cfg.moe,
+            moe_cfg,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
             configure_shared_experts=False,
         )
-        shared_experts = layer_cfg.moe.shared_experts
+        shared_experts = moe_cfg.shared_experts
         if shared_experts is not None:
             assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
             set_sigmoid_gated_shared_experts_sharding_config(
