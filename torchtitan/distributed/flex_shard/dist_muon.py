@@ -163,7 +163,8 @@ def _matrix_batch_view_from_compute_layout(
         )
     return _MatrixBatchView.from_storage_shape(
         storage_shape,
-        matrix_rows=block_size,
+        matrix_rows=block_shards[0].total_block_size,
+        num_rows_per_segment=block_size if type(block_size) is tuple else None,
     )
 
 
@@ -211,7 +212,11 @@ def _initialize_dist_muon(
             compute_view_key = ("identity",)
             global_compute_shape = global_storage_shape
         else:
-            compute_view_key = ("matrix_batch", compute_view.matrix_rows)
+            compute_view_key = (
+                "matrix_batch",
+                compute_view.matrix_rows,
+                compute_view.num_rows_per_segment,
+            )
             global_compute_shape = compute_view.matrix_batch_shape(global_storage_shape)
         if len(global_compute_shape) not in (2, 3):
             raise ValueError(
@@ -611,8 +616,30 @@ class DistMuon(Optimizer):
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
         group = self._group(compute_layout)
-        if compute_layout.compute_view is not None:
-            compute = compute_layout.compute_view.view_as_matrix_batch(compute)
+        compute_view = compute_layout.compute_view
+        if compute_view is not None and compute_view.num_rows_per_segment is not None:
+            # _apply_update adjusts the lr for the whole block's shape. Pieces
+            # have their own shapes, so rescale each direction here to end up
+            # with the adjustment of its own shape.
+            adjust_lr_fn = group["adjust_lr_fn"]
+            block_ratio = _adjust_muon_learning_rate(
+                1.0, adjust_lr_fn, compute_layout.global_compute_shape
+            )
+            for segment in compute_view.segment_matrix_batches(compute):
+                _compute_muon_direction(
+                    segment,
+                    ns_coefficients=group["ns_coefficients"],
+                    ns_steps=group["ns_steps"],
+                    eps=group["eps"],
+                    out=segment,
+                )
+                segment.mul_(
+                    _adjust_muon_learning_rate(1.0, adjust_lr_fn, segment.shape[-2:])
+                    / block_ratio
+                )
+            return
+        if compute_view is not None:
+            compute = compute_view.view_as_matrix_batch(compute)
         _compute_muon_direction(
             compute,
             ns_coefficients=group["ns_coefficients"],
@@ -651,6 +678,7 @@ class DistMuon(Optimizer):
 class _MatrixBatchView:
     matrix_rows: int
     matrix_columns: int
+    num_rows_per_segment: tuple[int, ...] | None = None
 
     @classmethod
     def from_storage_shape(
@@ -658,6 +686,7 @@ class _MatrixBatchView:
         storage_shape: torch.Size,
         *,
         matrix_rows: int,
+        num_rows_per_segment: tuple[int, ...] | None = None,
     ) -> _MatrixBatchView:
         if (
             len(storage_shape) != 2
@@ -671,7 +700,21 @@ class _MatrixBatchView:
         return cls(
             matrix_rows=matrix_rows,
             matrix_columns=storage_shape[1],
+            num_rows_per_segment=num_rows_per_segment,
         )
+
+    def segment_matrix_batches(self, compute_tensor: Tensor) -> tuple[Tensor, ...]:
+        """Return one zero-copy ``[M, rows_i, C]`` batch per segment."""
+        assert self.num_rows_per_segment is not None
+        blocks = compute_tensor.view(
+            self.matrix_batch_shape(torch.Size(compute_tensor.shape))
+        )
+        batches = []
+        row_offset = 0
+        for rows in self.num_rows_per_segment:
+            batches.append(blocks.narrow(1, row_offset, rows))
+            row_offset += rows
+        return tuple(batches)
 
     def matrix_batch_shape(self, compute_tensor_shape: torch.Size) -> torch.Size:
         if not (
@@ -738,9 +781,9 @@ def _row_intervals_by_mesh_axis_coordinate(
         return ((0, num_rows),) * mesh_axis_size
 
     if type(sharding) is BlockShard:
-        assert sharding.dim == 0 and not num_rows % sharding.block_size
-        num_sharding_units = num_rows // sharding.block_size
-        rows_per_unit = sharding.block_size
+        rows_per_unit = sharding.total_block_size
+        assert sharding.dim == 0 and not num_rows % rows_per_unit
+        num_sharding_units = num_rows // rows_per_unit
     else:
         assert type(sharding) is Shard and sharding.dim == 0
         num_sharding_units = num_rows

@@ -40,20 +40,37 @@ class BlockShard:
     contiguous partitioning as ``Shard``. A block is never split between
     participants. ``BlockShard`` describes only distribution; it does not
     reshape or reinterpret the tensor.
+
+    ``block_size`` may be a tuple for a block made of contiguous pieces with
+    different lengths, e.g. ``(128, 64)`` for a per-head ``[K_nope; V]`` stack.
+    The block is still ``sum(block_size)`` elements and is never split; the
+    pieces only tell a consumer such as DistMuon where one matrix ends and the
+    next begins inside the block.
     """
 
     dim: int
-    block_size: int
+    block_size: int | tuple[int, ...]
 
     def __post_init__(self) -> None:
         if isinstance(self.dim, bool) or not isinstance(self.dim, int):
             raise ValueError("BlockShard.dim must be an integer")
-        if (
-            isinstance(self.block_size, bool)
-            or not isinstance(self.block_size, int)
-            or self.block_size <= 0
+        pieces = (
+            self.block_size if type(self.block_size) is tuple else (self.block_size,)
+        )
+        if (type(self.block_size) is tuple and len(pieces) < 2) or any(
+            isinstance(piece, bool) or not isinstance(piece, int) or piece <= 0
+            for piece in pieces
         ):
-            raise ValueError("BlockShard.block_size must be a positive integer")
+            raise ValueError(
+                "BlockShard.block_size must be a positive integer or a tuple of "
+                "at least two positive integers"
+            )
+
+    @property
+    def total_block_size(self) -> int:
+        if isinstance(self.block_size, int):
+            return self.block_size
+        return sum(self.block_size)
 
 
 _ComputeSharding = Owned | Replicate | Shard | BlockShard
