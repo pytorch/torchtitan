@@ -404,9 +404,11 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             example_inputs,
             *,
             num_warmup_iterations,
+            gradient_state=None,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
+            assert gradient_state is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -450,9 +452,11 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
             example_inputs,
             *,
             num_warmup_iterations,
+            gradient_state=None,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
+            assert gradient_state is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -482,6 +486,7 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
 
 
 def test_training_engine_owns_gradient_accumulation_cuda_graph_warmup() -> None:
+    model = torch.nn.Linear(2, 2)
     eager_gradient_accumulation = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])
     )
@@ -494,6 +499,7 @@ def test_training_engine_owns_gradient_accumulation_cuda_graph_warmup() -> None:
             config=SimpleNamespace(
                 training=SimpleNamespace(disable_cuda_graphs=False),
             ),
+            model_parts=[model],
             _gradient_accumulation_body=eager_gradient_accumulation,
             _num_optimizer_steps_since_cuda_graph_init=0,
         ),
@@ -530,7 +536,10 @@ def test_training_engine_owns_gradient_accumulation_cuda_graph_warmup() -> None:
             torch.tensor(2.0),
         )
 
-    wrap.assert_called_once_with(eager_gradient_accumulation)
+    wrap.assert_called_once()
+    assert wrap.call_args.args == (eager_gradient_accumulation,)
+    gradient_state = wrap.call_args.kwargs["gradient_state"]
+    assert gradient_state.parameters == tuple(model.parameters())
     assert run_eager.call_count == 5
     assert eager_gradient_accumulation.call_count == 5
     cuda_graph_gradient_accumulation.assert_called_once()
@@ -546,6 +555,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
             config=SimpleNamespace(
                 training=SimpleNamespace(disable_cuda_graphs=False),
             ),
+            model_parts=[],
             _gradient_accumulation_body=eager_gradient_accumulation,
         ),
     )
@@ -553,7 +563,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     with (
         patch(
             "torchtitan.training_engine.wrap_with_cuda_graph",
-            side_effect=lambda fn: fn,
+            side_effect=lambda fn, **kwargs: fn,
         ),
         patch("torchtitan.training_engine.run_eager_on_cuda_graph_stream") as run_eager,
     ):

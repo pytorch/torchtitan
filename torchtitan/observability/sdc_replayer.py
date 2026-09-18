@@ -233,10 +233,7 @@ class _ReplayStateProvider:
             assert snapshot.value is not None
             _local_tensor(snapshot.original).copy_(snapshot.value)
 
-        # Rebuild the entry gradient state from the contract (None or zeros):
-        # reinstate each parameter's entry gradient identity (None, or the
-        # entry tensor if the execution swapped it) and zero surviving
-        # tensors in place, preserving storage addresses for CUDA graphs.
+        # Restore each entry gradient identity and zero surviving tensors.
         for snapshot in state.gradients:
             if snapshot.original is None:
                 snapshot.parameter.grad = None
