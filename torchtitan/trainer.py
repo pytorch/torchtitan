@@ -27,6 +27,7 @@ from torchtitan.config.configs import CompileConfig
 from torchtitan.config.override import apply_overrides
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -88,6 +89,7 @@ class Trainer(Configurable):
 
             if (
                 not self.training.disable_cuda_graphs
+                and cuda_graphs_supported()
                 and self.parallelism.pipeline_parallel_degree > 1
                 and self.validator is not None
             ):
