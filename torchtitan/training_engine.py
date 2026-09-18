@@ -41,6 +41,7 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
+    CUDAGraphGradientState,
     run_eager_on_cuda_graph_stream,
     wrap_with_cuda_graph,
 )
@@ -479,8 +480,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if self.config.training.disable_cuda_graphs:
             return
 
+        gradient_state = CUDAGraphGradientState(
+            parameter
+            for model_part in self.model_parts
+            for parameter in model_part.parameters()
+        )
         cuda_graph_gradient_accumulation_fn = wrap_with_cuda_graph(
-            self._run_gradient_accumulation
+            self._run_gradient_accumulation,
+            gradient_state=gradient_state,
         )
         # The wrapper returns its input when CUDA graph capture is unavailable.
         if cuda_graph_gradient_accumulation_fn is self._run_gradient_accumulation:
@@ -519,7 +526,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_accumulation_steps = len(accumulation_step_inputs)
         self._configure_fsdp_gradient_accumulation()
         self.gc_handler.run(self.num_completed_steps + 1)
-        self.optimizers.zero_grad(set_to_none=self.config.training.disable_cuda_graphs)
+        self.optimizers.zero_grad(set_to_none=True)
         if isinstance(global_valid_tokens, int):
             global_valid_tokens = torch.tensor(
                 global_valid_tokens,
