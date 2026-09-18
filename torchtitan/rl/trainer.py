@@ -243,31 +243,24 @@ class Trainer(Configurable):
         self._step_num_tokens_per_dp_rank = sum(
             rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
         )
-        microbatch_metrics: list[dict[str, float]] = []
-        num_accumulation_steps = len(training_data)
-        prepared_global_valid_tokens = engine.prepare_step(
-            num_global_valid_tokens,
-            num_accumulation_steps=num_accumulation_steps,
+        result = engine.forward_backward_step(
+            accumulation_step_inputs=[
+                [rank_batches[self.dp_rank]] for rank_batches in training_data
+            ],
+            global_valid_tokens=num_global_valid_tokens,
         )
-
-        for microbatch_index, rank_batches in enumerate(training_data):
-            local_batch = rank_batches[self.dp_rank]
-
-            engine.forward_backward_microbatch(
-                microbatch_group=[local_batch],
-                global_valid_tokens=prepared_global_valid_tokens,
-                accumulation_index=microbatch_index,
-            )
+        microbatch_metrics: list[dict[str, float]] = []
+        for loss_metrics in result.loss_metrics:
             microbatch_metrics.append(
                 self._reduce_forward_backward_metrics(
                     sum_reduced_metrics={
                         key: value
-                        for key, value in engine.loss_metrics.items()
+                        for key, value in loss_metrics.items()
                         if not key.endswith("/max")
                     },
                     max_reduced_metrics={
                         key: value
-                        for key, value in engine.loss_metrics.items()
+                        for key, value in loss_metrics.items()
                         if key.endswith("/max")
                     },
                 )

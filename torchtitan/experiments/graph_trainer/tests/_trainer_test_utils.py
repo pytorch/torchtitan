@@ -97,6 +97,10 @@ def build_minimal_trainer(
     engine.ntokens_seen = 0
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
+    engine.gc_handler = SimpleNamespace(run=lambda _step: False)
+    engine.optimizers = SimpleNamespace(zero_grad=model.zero_grad)
+    engine.loss_metrics = {}
+    engine._fsdp_root = None
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
@@ -131,7 +135,7 @@ def build_minimal_trainer(
                 "full": FullAC.Config(),
             }[activation_checkpoint_mode],
             dataloader=SimpleNamespace(max_num_documents=None),
-            training=TrainingConfig(),
+            training=TrainingConfig(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
@@ -145,10 +149,11 @@ def build_minimal_trainer(
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
-            training=TrainingConfig(),
-            parallelism=SimpleNamespace(),
+            training=TrainingConfig(disable_cuda_graphs=True),
+            parallelism=SimpleNamespace(fsdp_reshard_after_forward="default"),
         )
 
     engine.config = trainer.config
+    engine._run_gradient_accumulation = engine._gradient_accumulation_body
 
     return trainer

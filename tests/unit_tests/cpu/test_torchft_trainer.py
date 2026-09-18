@@ -18,7 +18,7 @@ from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import model_registry
-from torchtitan.training_engine import TrainingEngine
+from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
@@ -97,8 +97,9 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])]),
         num_completed_steps=1,
         ntokens_seen=4,
-        prepare_step=Mock(return_value=torch.tensor(4)),
-        forward_backward_microbatch=Mock(return_value=torch.tensor(2.0)),
+        forward_backward_step=Mock(
+            return_value=ForwardBackwardResult(torch.tensor(2.0), [])
+        ),
         optimizer_step=Mock(return_value=torch.tensor(0.0)),
     )
     trainer = Mock(
@@ -113,10 +114,13 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     monkeypatch.setattr(ft.dist_utils, "dist_max", Mock(return_value=2.0))
     monkeypatch.setattr(ft, "collect_aux_loss_metrics", Mock(return_value={}))
 
-    ft.FaultTolerantTrainer.train_step(
-        trainer, iter([SimpleNamespace(num_valid_tokens=4)])
-    )
+    microbatch = SimpleNamespace(num_valid_tokens=4)
+    ft.FaultTolerantTrainer.train_step(trainer, iter([microbatch]))
 
+    engine.forward_backward_step.assert_called_once()
+    forward_backward_args = engine.forward_backward_step.call_args.kwargs
+    assert forward_backward_args["accumulation_step_inputs"] == [[microbatch]]
+    assert forward_backward_args["global_valid_tokens"].item() == 4
     trainer.metrics_processor.log.assert_called_once()
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
     assert logged_loss == 2.0

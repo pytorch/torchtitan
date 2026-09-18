@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 class FaultTolerantTrainingEngine(TrainingEngine):
     """Training engine with TorchFT process groups and component adapters."""
 
+    _supports_deferred_fsdp_gradient_reduction = False
+
     def __init__(
         self,
         config: TrainingEngine.Config,
@@ -345,17 +347,17 @@ class FaultTolerantTrainer(Configurable):
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
         parallel_dims = engine.parallel_dims
-        # All groups form one optimizer step. Each microbatch group forms one
-        # complete PP step, or one local forward/backward when PP is disabled.
-        microbatch_groups: list[list[TrainingMicrobatch]] = []
+        # Each accumulation step contains one complete PP schedule step, or one
+        # local forward/backward when PP is disabled.
+        accumulation_step_inputs: list[list[TrainingMicrobatch]] = []
         local_valid_tokens = 0
         for _ in range(self.gradient_accumulation_steps):
-            microbatch_group = []
+            accumulation_step = []
             for _ in range(self.num_pp_microbatches):
                 microbatch = next(data_iterator)
                 local_valid_tokens += microbatch.num_valid_tokens
-                microbatch_group.append(microbatch)
-            microbatch_groups.append(microbatch_group)
+                accumulation_step.append(microbatch)
+            accumulation_step_inputs.append(accumulation_step)
 
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
@@ -370,25 +372,10 @@ class FaultTolerantTrainer(Configurable):
                 global_valid_tokens, dp_mesh
             )
 
-        global_valid_tokens = engine.prepare_step(
-            global_valid_tokens,
-            num_accumulation_steps=self.gradient_accumulation_steps,
+        forward_backward_result = engine.forward_backward_step(
+            accumulation_step_inputs=accumulation_step_inputs,
+            global_valid_tokens=global_valid_tokens,
         )
-
-        accumulated_loss: torch.Tensor | None = None
-        for fwd_bwd_index, microbatch_group in enumerate(microbatch_groups):
-            detached_loss = engine.forward_backward_microbatch(
-                microbatch_group=microbatch_group,
-                global_valid_tokens=global_valid_tokens,
-                accumulation_index=fwd_bwd_index,
-            )
-            if should_log:
-                if accumulated_loss is None:
-                    # Take ownership before the next replay overwrites the
-                    # graph-owned output. Later losses accumulate in place.
-                    accumulated_loss = detached_loss.clone()
-                else:
-                    accumulated_loss.add_(detached_loss)
 
         grad_norm = engine.optimizer_step()
 
@@ -396,7 +383,7 @@ class FaultTolerantTrainer(Configurable):
         if not should_log:
             return
 
-        assert accumulated_loss is not None
+        accumulated_loss = forward_backward_result.loss
 
         if parallel_dims.dp_cp_enabled:
             # FT addition: use ft_manager.loss_sync_pg for extra process group

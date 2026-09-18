@@ -235,21 +235,25 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
-            loss = trainer.engine.forward_backward_microbatch(
-                microbatch_group=[
-                    TokenizedTrainingMicrobatch(
-                        input=self.inputs,
-                        positions=self.positions,
-                        labels=self.labels,
-                        padding_mask=torch.zeros_like(self.labels, dtype=torch.bool),
-                        num_valid_tokens=self.labels.numel(),
-                    )
+            result = trainer.engine.forward_backward_step(
+                accumulation_step_inputs=[
+                    [
+                        TokenizedTrainingMicrobatch(
+                            input=self.inputs,
+                            positions=self.positions,
+                            labels=self.labels,
+                            padding_mask=torch.zeros_like(
+                                self.labels, dtype=torch.bool
+                            ),
+                            num_valid_tokens=self.labels.numel(),
+                        )
+                    ]
                 ],
                 global_valid_tokens=global_valid_tokens,
             )
             optimizer.step()
 
-        return loss.detach().clone(), hash_model(model), hash_gradient(model)
+        return result.loss.detach().clone(), hash_model(model), hash_gradient(model)
 
     def _run_steps_with_precompile(
         self, model: nn.Module, *, enable_passes: bool = True
