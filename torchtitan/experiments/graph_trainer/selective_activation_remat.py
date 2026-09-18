@@ -17,7 +17,6 @@ from torch._functorch.partitioners import (
     has_recomputable_rng_ops,
     must_recompute,
 )
-
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_module_fqn,
     _is_backward_node,

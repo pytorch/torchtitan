@@ -12,26 +12,27 @@ Each saved forward activation can independently be tagged as MUST_SAVE,
 MUST_RECOMPUTE, or MUST_CPU_OFFLOAD.  The ``tag_with_memory_policy_pass``
 entry point selects a tagging strategy via ``--compile.memory_policy``.
 """
-
 from __future__ import annotations
 
 import operator
+import os
 from collections import defaultdict
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import torch
 from torch.utils.checkpoint import CheckpointPolicy
-
+from torchinsights.graph_estimation.runtime_estimator import (
+    BENCHMARK,
+    COST_MODEL,
+    INTERPRETER,
+)
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
-    _get_module_fqn,
     _is_backward_node,
     _MODULE_FQN,
     _NOT_IN_LAYERS,
-    matches_module_fqn_pattern,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
     tag_all_offloadable_activations,
@@ -39,17 +40,88 @@ from torchtitan.experiments.graph_trainer.cpu_offload import (
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_unshard_save_nodes,
 )
+from torchtitan.experiments.graph_trainer.greedy_memory_policy_pass import greedy_solve
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
+)
+from torchtitan.experiments.graph_trainer.one_level_ilp_memory_policy_pass import (
+    _is_recomputable,
+    HOST_MEMORY_FRACTION,
+    MEM_MULTIPLIER,
+    one_level_ilp,
 )
 from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
     register_memory_policy,
 )
+from torchtitan.experiments.graph_trainer.two_level_ilp_greedy_memory_policy_pass import (
+    two_level_ilp_greedy,
+)
+from torchtitan.experiments.graph_trainer.two_level_ilp_ilp_memory_policy_pass import (
+    _is_recomputable,
+    HOST_MEMORY_FRACTION,
+    MEM_MULTIPLIER,
+    two_level_ilp_ilp,
+)
 from torchtitan.tools.logging import logger
 
-if TYPE_CHECKING:
-    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+
+def resolve_host_offload_cap_gib(cpu_offload_budget_gb: float) -> float:
+    """Per-rank pinned-memory budget for offload, equal on every rank.
+
+    Offloaded activations are pinned on the host and every local rank pins its
+    own set, so the binding limit is the node's free memory shared across the
+    ranks on it, not the per-rank number alone. The returned value v satisfies
+    local_ranks * v <= fraction * MemFree by construction.
+
+    MemFree: only free memory on CPU. MemAvailable: PageCache+Free Mem, might take
+    longer to reclaim memory/pages.
+    """
+    local_ranks = max(1, int(os.environ.get("LOCAL_WORLD_SIZE", "1")))
+    avail_gib = 0.0
+    try:
+        with open("/proc/meminfo") as mi:
+            for line in mi:
+                if line.startswith("MemFree:"):
+                    avail_gib = float(line.split()[1]) * 1024 / MEM_MULTIPLIER
+                    break
+    except OSError:
+        pass
+    frac = HOST_MEMORY_FRACTION
+    host_limit = frac * avail_gib / local_ranks if avail_gib > 0 else float("inf")
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        _dev = "cuda" if torch.cuda.is_available() else "cpu"
+        t = torch.tensor([host_limit], dtype=torch.float64, device=_dev)
+        torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MIN)
+        host_limit = float(t.item())
+
+    requested = float(cpu_offload_budget_gb)
+    if requested < 0:
+        # Negative asks for whatever the host allows
+        cap = host_limit
+    elif requested > host_limit:
+        raise ValueError(
+            f"--compile.cpu_offload_budget_gb {requested:.1f} GiB/rank exceeds "
+            f"what this node can pin: {host_limit:.1f} GiB/rank "
+            f"({host_limit * local_ranks:.0f} GiB across {local_ranks} local "
+            f"ranks, {frac:.0%} of {avail_gib:.0f} GiB MemFree). Pinned "
+            f"pages cannot be swapped, so overcommitting them fails in the "
+            f"driver rather than degrading. Lower it to {host_limit:.1f} or "
+            f"less, set 0 to disable offload, or -1 to use the host limit."
+        )
+    else:
+        cap = requested
+    logger.info(
+        "Host (CPU) offload limit: %.2f GiB/rank x %d local ranks = %.0f GiB of "
+        "%.0f GiB MemFree (fraction %.2f, config cap %.1f)",
+        cap,
+        local_ranks,
+        cap * local_ranks,
+        avail_gib,
+        frac,
+        cpu_offload_budget_gb,
+    )
+    return cap
 
 
 def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
@@ -72,63 +144,7 @@ def _find_fsdp_unshard_save_nodes(gm: torch.fx.GraphModule) -> set[torch.fx.Node
     return save_nodes
 
 
-def _resolve_op_target(op_name: str) -> object:
-    """Resolve ``aten.mm.default``-style names through ``torch.ops``."""
-    if op_name.startswith("torch.ops."):
-        op_name = op_name.removeprefix("torch.ops.")
-
-    target = torch.ops
-    try:
-        for component in op_name.split("."):
-            target = getattr(target, component)
-    except AttributeError as exc:
-        raise ValueError(
-            f"Unknown op in --compile.full_recompute_save_ops: {op_name!r}"
-        ) from exc
-
-    if not isinstance(target, (torch._ops.OpOverload, torch._ops.HigherOrderOperator)):
-        raise ValueError(
-            "Ops in --compile.full_recompute_save_ops must name a specific "
-            f"overload or higher-order op, got {op_name!r}"
-        )
-    return target
-
-
-def _parse_full_recompute_save_ops(
-    value: str,
-) -> tuple[tuple[str, object], ...]:
-    """Parse ``FQN::OP | FQN::OP`` save selectors."""
-    if not value.strip():
-        return ()
-
-    selectors: list[tuple[str, object]] = []
-    for raw_selector in value.split("|"):
-        parts = raw_selector.split("::")
-        if len(parts) != 2 or not all(part.strip() for part in parts):
-            raise ValueError(
-                "Invalid --compile.full_recompute_save_ops selector "
-                f"{raw_selector.strip()!r}; expected 'MODULE_FQN_PATTERN::OP'"
-            )
-        module_fqn_pattern, op_name = (part.strip() for part in parts)
-        selectors.append((module_fqn_pattern, _resolve_op_target(op_name)))
-    return tuple(selectors)
-
-
-def validate_memory_policy_config(
-    compile_config: "GraphTrainerCompileConfig",
-) -> None:
-    """Validate memory-policy options before tracing the training graph."""
-    if (
-        compile_config.full_recompute_save_ops
-        and compile_config.memory_policy != "full"
-    ):
-        raise ValueError(
-            "--compile.full_recompute_save_ops requires --compile.memory_policy full"
-        )
-    _parse_full_recompute_save_ops(compile_config.full_recompute_save_ops)
-
-
-def _make_full_memory_policy(save_ops: str = "") -> Callable:
+def _make_full_memory_policy() -> Callable:
     """Full recompute policy: mark everything as MUST_RECOMPUTE.
 
     The layer boundary pass in tag_sac_policy will force MUST_SAVE on nodes
@@ -142,24 +158,13 @@ def _make_full_memory_policy(save_ops: str = "") -> Callable:
     state (``preserve_rng_state=True``); the graph path lacks that, so it
     saves them instead.
 
-    Higher-order ops (e.g. flex_attention) ARE recomputed: ``node_copy``
+    Higher-order ops (e.g. flex_attention) are recomputed: ``node_copy``
     duplicates them together with their ``get_attr`` subgraph references, and
     the subsequent regional_inductor pass compiles the duplicate as well.
-
-    ``save_ops`` can make exact module-FQN-pattern and op pairs exceptions to
-    full recompute. Matching nodes are marked MUST_SAVE.
     """
-
-    save_selectors = _parse_full_recompute_save_ops(save_ops)
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set()):
-            return CheckpointPolicy.MUST_SAVE
-        fqn = _get_module_fqn(node)
-        if any(
-            node.target == target and matches_module_fqn_pattern(fqn_pattern, fqn)
-            for fqn_pattern, target in save_selectors
-        ):
             return CheckpointPolicy.MUST_SAVE
         return CheckpointPolicy.MUST_RECOMPUTE
 
@@ -346,6 +351,8 @@ def _default_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC policy that saves compute-intensive ops and required FSDP unshards."""
     fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
@@ -363,17 +370,53 @@ def _default_memory_policy_pass(
     return gm
 
 
+def _apply_offload_node_overrides(gm: torch.fx.GraphModule) -> None:
+    """Retag the nodes named in OFFLOAD_NODES as MUST_CPU_OFFLOAD.
+
+    Debugging hook for studying how individual offload choices affect the
+    schedule and the peak, e.g. ``OFFLOAD_NODES=silu_1,_unsafe_view_9``.
+    Names are exact FX node names as printed in the graph dumps. Names that
+    match nothing are reported: a typo would otherwise silently do nothing.
+    """
+    raw = os.environ.get("OFFLOAD_NODES", "")
+    wanted = {name.strip() for name in raw.split(",") if name.strip()}
+    if not wanted:
+        return
+
+    found = set()
+    for node in gm.graph.nodes:
+        if node.name in wanted:
+            found.add(node.name)
+            node.meta["recompute"] = (
+                CheckpointPolicy.MUST_SAVE
+            )  # CheckpointPolicy.MUST_CPU_OFFLOAD
+
+    logger.info(
+        "OFFLOAD_NODES: tagged %d/%d nodes as MUST_CPU_OFFLOAD: %s",
+        len(found),
+        len(wanted),
+        ", ".join(sorted(found)) or "(none)",
+    )
+    missing = wanted - found
+    if missing:
+        logger.warning(
+            "OFFLOAD_NODES: no node named %s in the graph; check the name "
+            "against the graph dump",
+            ", ".join(sorted(missing)),
+        )
+
+
 @register_memory_policy("full")
 def _full_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
-    """Full recompute except for user-selected module operations."""
-    tag_sac_policy(
-        gm,
-        policy_fn=_make_full_memory_policy(config.compile.full_recompute_save_ops),
-    )
+    """Full recompute: only layer outputs are saved."""
+    tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+    _apply_offload_node_overrides(gm)
     return gm
 
 
@@ -382,6 +425,8 @@ def _eager_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC policy that alternates mm ops between save/recompute."""
     tag_sac_policy(gm, policy_fn=_make_eager_memory_policy())
@@ -393,14 +438,358 @@ def _sac_and_offload_memory_policy_pass(
     gm: torch.fx.GraphModule,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """SAC + CPU offload: apply default SAC, then offload within budget."""
+
     _default_memory_policy_pass(gm, config=config)
     tag_all_offloadable_activations(
         gm,
-        cpu_budget_gb=config.compile.cpu_offload_budget_gb,
+        cpu_budget_gb=resolve_host_offload_cap_gib(
+            config.compile.cpu_offload_budget_gb
+        ),
     )
     return gm
+
+
+@register_memory_policy("auto_perf_maxing_greedy")
+def two_level_ilp_greedy_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
+) -> torch.fx.GraphModule:
+    """Graph tagging with two-level ILP: the outer solves per-layer keep/recompute/
+    offload budgets under the GPU memory budget, the inner tags individual nodes
+    to realize them. Only tags the graph nodes; later apply_cpu_offload_pass
+    and selective_activation_remat_pass passes materialize the plan afterwards,
+    so do not disable them for this policy.
+
+    Budget:``config.compile.memory_budget_gb``. Runtime cost model:
+    ``config.compile.runtime_est_mode``, default: COST_MODEL (deterministic).
+    """
+
+    # Budget defaults to 1000 GB (configs.py), i.e. effectively "no budget": with
+    # that default the ILP finds budget >= all-keep peak and no-ops. Warn so a user
+    # who selected this policy but forgot --compile.memory_budget_gb isn't silently
+    # left with an untagged graph.
+    budget_gb = float(config.compile.memory_budget_gb)
+    if budget_gb >= 1000.0:  # the default case
+        logger.warning(
+            "auto_perf_maxing: memory_budget_gb=%.1f (default is 1000 = no budget); "
+            "the policy will likely no-op. Set --compile.memory_budget_gb to a real "
+            "per-rank budget.",
+            budget_gb,
+        )
+
+        return gm
+    mode = config.compile.runtime_est_mode
+    mode = mode.lower()
+    if mode == "cost_model":  # default if not provided by the user
+        mode = COST_MODEL
+    elif mode == "benchmark":
+        mode = BENCHMARK
+    elif mode == "interpreter":
+        mode = INTERPRETER
+    else:
+        raise ValueError(
+            f"Unknown runtime estimation mode: {mode}, use cost_model, benchmark, or interpreter"
+        )
+
+    cpu_offload_bw = int(config.compile.cpu_offload_bw)
+    # each_layer_separately: True -> solve one ILP per layer;
+    # False -> group layers by allocation and
+    # solve once per group. The default path will be `False` for now.
+    each_layer_separately = False  # no plan to make this configurable
+    new_gm, metrics = two_level_ilp_greedy(
+        trace,
+        int(budget_gb * (1 << 30)),  # GiB to match units
+        config.optimizer,
+        model_parts,
+        runtime_estimation_mode=mode,
+        cpu_offload_budget_gb=resolve_host_offload_cap_gib(
+            config.compile.cpu_offload_budget_gb
+        ),
+        each_layer_separately=each_layer_separately,  # by default, false
+        # The calibration probe materializes the plan with the same offload
+        # pass settings the real pipeline uses, so its peak matches the run's.
+        prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+        defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        debug_logging=config.compile.debug_memory_policy_solver,
+        cpu_offload_bw=cpu_offload_bw,
+    )
+    # we can also dump the metrics to a file later
+
+    return new_gm if new_gm is not None else gm
+
+
+@register_memory_policy("auto_perf_maxing_ilp")
+def two_level_ilp_ilp_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
+) -> torch.fx.GraphModule:
+    """Graph tagging with two-level ILP: the outer solves per-layer keep/recompute/
+    offload budgets under the GPU memory budget, the inner tags individual nodes
+    to realize them. Only tags the graph nodes; later apply_cpu_offload_pass
+    and selective_activation_remat_pass passes materialize the plan afterwards,
+    so do not disable them for this policy.
+
+    Budget:``config.compile.memory_budget_gb``. Runtime cost model:
+    ``config.compile.runtime_est_mode``, default: COST_MODEL (deterministic).
+    """
+
+    # Budget defaults to 1000 GB (configs.py), i.e. effectively "no budget": with
+    # that default the ILP finds budget >= all-keep peak and no-ops. Warn so a user
+    # who selected this policy but forgot --compile.memory_budget_gb isn't silently
+    # left with an untagged graph.
+    budget_gb = float(config.compile.memory_budget_gb)
+    if budget_gb >= 1000.0:  # the default case
+        logger.warning(
+            "auto_perf_maxing: memory_budget_gb=%.1f (default is 1000 = no budget); "
+            "the policy will likely no-op. Set --compile.memory_budget_gb to a real "
+            "per-rank budget.",
+            budget_gb,
+        )
+
+        return gm
+    mode = config.compile.runtime_est_mode
+    mode = mode.lower()
+    if mode == "cost_model":  # default if not provided by the user
+        mode = COST_MODEL
+    elif mode == "benchmark":
+        mode = BENCHMARK
+    elif mode == "interpreter":
+        mode = INTERPRETER
+    else:
+        raise ValueError(
+            f"Unknown runtime estimation mode: {mode}, use cost_model, benchmark, or interpreter"
+        )
+
+    cpu_offload_bw = int(config.compile.cpu_offload_bw)
+    # each_layer_separately: True -> solve one ILP per layer;
+    # False -> group layers by allocation and
+    # solve once per group. The default path will be `False` for now.
+    each_layer_separately = False  # no plan to make this configurable
+    new_gm, metrics = two_level_ilp_ilp(
+        trace,
+        int(budget_gb * (1 << 30)),  # GiB to match units
+        config.optimizer,
+        model_parts,
+        runtime_estimation_mode=mode,
+        cpu_offload_budget_gb=resolve_host_offload_cap_gib(
+            config.compile.cpu_offload_budget_gb
+        ),
+        each_layer_separately=each_layer_separately,  # by default, false
+        # The calibration probe materializes the plan with the same offload
+        # pass settings the real pipeline uses, so its peak matches the run's.
+        prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+        defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        debug_logging=config.compile.debug_memory_policy_solver,
+        cpu_offload_bw=cpu_offload_bw,
+    )
+    # we can also dump the metrics to a file later
+
+    return new_gm if new_gm is not None else gm
+
+
+@register_memory_policy("one_level_ilp")
+def one_level_ilp_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
+) -> torch.fx.GraphModule:
+    """Graph tagging with two-level ILP: the outer solves per-layer keep/recompute/
+    offload budgets under the GPU memory budget, the inner tags individual nodes
+    to realize them. Only tags the graph nodes; later apply_cpu_offload_pass
+    and selective_activation_remat_pass passes materialize the plan afterwards,
+    so do not disable them for this policy.
+
+    Budget:``config.compile.memory_budget_gb``. Runtime cost model:
+    ``config.compile.runtime_est_mode``, default: COST_MODEL (deterministic).
+    """
+
+    # Budget defaults to 1000 GB (configs.py), i.e. effectively "no budget": with
+    # that default the ILP finds budget >= all-keep peak and no-ops. Warn so a user
+    # who selected this policy but forgot --compile.memory_budget_gb isn't silently
+    # left with an untagged graph.
+    budget_gb = float(config.compile.memory_budget_gb)
+    if budget_gb >= 1000.0:  # the default case
+        logger.warning(
+            "auto_perf_maxing: memory_budget_gb=%.1f (default is 1000 = no budget); "
+            "the policy will likely no-op. Set --compile.memory_budget_gb to a real "
+            "per-rank budget.",
+            budget_gb,
+        )
+
+        return gm
+    mode = config.compile.runtime_est_mode
+    mode = mode.lower()
+    if mode == "cost_model":  # default if not provided by the user
+        mode = COST_MODEL
+    elif mode == "benchmark":
+        mode = BENCHMARK
+    elif mode == "interpreter":
+        mode = INTERPRETER
+    else:
+        raise ValueError(
+            f"Unknown runtime estimation mode: {mode}, use cost_model, benchmark, or interpreter"
+        )
+
+    cpu_offload_bw = int(config.compile.cpu_offload_bw)
+    # each_layer_separately: True -> solve one ILP per layer;
+    # False -> group layers by allocation and
+    # solve once per group. The default path will be `False` for now.
+    each_layer_separately = False  # no plan to make this configurable
+    new_gm, metrics = one_level_ilp(
+        trace,
+        int(budget_gb * (1 << 30)),  # GiB to match units
+        config.optimizer,
+        model_parts,
+        runtime_estimation_mode=mode,
+        cpu_offload_budget_gb=resolve_host_offload_cap_gib(
+            config.compile.cpu_offload_budget_gb
+        ),
+        each_layer_separately=each_layer_separately,  # by default, false
+        # The calibration probe materializes the plan with the same offload
+        # pass settings the real pipeline uses, so its peak matches the run's.
+        prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+        defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        debug_logging=config.compile.debug_memory_policy_solver,
+        cpu_offload_bw=cpu_offload_bw,
+    )
+    # we can also dump the metrics to a file later
+
+    return new_gm if new_gm is not None else gm
+
+
+@register_memory_policy("greedy_solver")
+def greedy_solve_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
+) -> torch.fx.GraphModule:
+    """Graph tagging with two-level ILP: the outer solves per-layer keep/recompute/
+    offload budgets under the GPU memory budget, the inner tags individual nodes
+    to realize them. Only tags the graph nodes; later apply_cpu_offload_pass
+    and selective_activation_remat_pass passes materialize the plan afterwards,
+    so do not disable them for this policy.
+
+    Budget:``config.compile.memory_budget_gb``. Runtime cost model:
+    ``config.compile.runtime_est_mode``, default: COST_MODEL (deterministic).
+    """
+
+    # Budget defaults to 1000 GB (configs.py), i.e. effectively "no budget": with
+    # that default the ILP finds budget >= all-keep peak and no-ops. Warn so a user
+    # who selected this policy but forgot --compile.memory_budget_gb isn't silently
+    # left with an untagged graph.
+    budget_gb = float(config.compile.memory_budget_gb)
+    if budget_gb >= 1000.0:  # the default case
+        logger.warning(
+            "auto_perf_maxing: memory_budget_gb=%.1f (default is 1000 = no budget); "
+            "the policy will likely no-op. Set --compile.memory_budget_gb to a real "
+            "per-rank budget.",
+            budget_gb,
+        )
+
+        return gm
+    mode = config.compile.runtime_est_mode
+    mode = mode.lower()
+    if mode == "cost_model":  # default if not provided by the user
+        mode = COST_MODEL
+    elif mode == "benchmark":
+        mode = BENCHMARK
+    elif mode == "interpreter":
+        mode = INTERPRETER
+    else:
+        raise ValueError(
+            f"Unknown runtime estimation mode: {mode}, use cost_model, benchmark, or interpreter"
+        )
+
+    cpu_offload_bw = int(config.compile.cpu_offload_bw)
+    # each_layer_separately: True -> solve one ILP per layer;
+    # False -> group layers by allocation and
+    # solve once per group. The default path will be `False` for now.
+    each_layer_separately = False  # no plan to make this configurable
+    new_gm, metrics = greedy_solve(
+        trace,
+        int(budget_gb * (1 << 30)),  # GiB to match units
+        config.optimizer,
+        model_parts,
+        runtime_estimation_mode=mode,
+        cpu_offload_budget_gb=resolve_host_offload_cap_gib(
+            config.compile.cpu_offload_budget_gb
+        ),
+        each_layer_separately=each_layer_separately,  # by default, false
+        # The calibration probe materializes the plan with the same offload
+        # pass settings the real pipeline uses, so its peak matches the run's.
+        prefetch_lookahead=config.compile.cpu_offload_prefetch_n_layers,
+        defer_n_layers=config.compile.cpu_offload_defer_n_layers,
+        debug_logging=config.compile.debug_memory_policy_solver,
+        cpu_offload_bw=cpu_offload_bw,
+    )
+    # we can also dump the metrics to a file later
+
+    return new_gm if new_gm is not None else gm
+
+
+@register_memory_policy("greedy")
+def greedy(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
+) -> torch.fx.GraphModule:
+    """ """
+    from torchtitan.experiments.graph_trainer.memory_estimator import per_node_memory
+
+    mode = config.compile.runtime_est_mode
+    mode = mode.lower()
+    if mode == "cost_model":  # default if not provided by the user
+        mode = COST_MODEL
+    elif mode == "benchmark":
+        mode = BENCHMARK
+    elif mode == "interpreter":
+        mode = INTERPRETER
+    else:
+        raise ValueError(
+            f"Unknown runtime estimation mode: {mode}, use cost_model, benchmark, or interpreter"
+        )
+
+    budget_gb = float(config.compile.memory_budget_gb)
+    if budget_gb >= 1000.0:  # the default case
+        logger.warning(
+            "auto_perf_maxing: memory_budget_gb=%.1f (default is 1000 = no budget); "
+            "the policy will likely no-op. Set --compile.memory_budget_gb to a real "
+            "per-rank budget.",
+            budget_gb,
+        )
+
+        return gm
+
+    new_gm = per_node_memory(
+        gm,
+        runtime_estimation_mode=mode,
+        cpu_offload_budget_gb=resolve_host_offload_cap_gib(
+            config.compile.cpu_offload_budget_gb
+        ),
+        requested_budget=int(budget_gb * (1 << 30)),
+        optimizer=config.optimizer,
+        model_parts=model_parts,
+        num_state_inputs=trace.num_static_inputs,
+        trace=trace,
+    )
+
+    return new_gm if new_gm is not None else gm
 
 
 def tag_with_memory_policy_pass(
@@ -408,12 +797,14 @@ def tag_with_memory_policy_pass(
     example_inputs: tuple | None = None,
     *,
     config: "GraphTrainer.Config",
+    trace: TracedResult = None,
+    model_parts: list | None = None,
 ) -> torch.fx.GraphModule:
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
     The ``config.compile.memory_policy`` selects the tagging strategy:
         default: SAC with all compute-intensive ops saved.
-        full: full recompute except user-selected module operations.
+        full: full recompute — only layer outputs are saved.
         eager: SAC alternating mm ops between save/recompute.
         sac_and_offload: SAC + CPU offload within budget.
 
@@ -426,6 +817,8 @@ def tag_with_memory_policy_pass(
             f"Unknown memory_policy: {memory_policy!r}. "
             f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
         )
-    gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
+    gm = MEMORY_POLICY_REGISTRY[memory_policy](
+        gm, config=config, trace=trace, model_parts=model_parts
+    )
     log_activation_memory_policy(gm)
     return gm
