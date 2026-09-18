@@ -15,7 +15,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     norm_config,
     pre_lm_head_norm_config,
-    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_spmd,
@@ -120,7 +119,16 @@ def _set_deepseek_v3_layer_sharding(
     attention.wkv_b.sharding_config = colwise_config(
         input_layout=replicated_input_layout
     )
-    attention.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
+    attention.wo.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.I),
+        },
+        in_src_shardings={
+            "input": dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
+        },
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
+    )
 
     set_gqa_inner_attention_local_spmd(attention.inner_attention)
 

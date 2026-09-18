@@ -24,7 +24,6 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
-    RowParallelLinear,
     Sigmoid,
     Softmax,
     TransformerBlock,
@@ -201,7 +200,7 @@ def make_mla_attention_config(
             out_features=n_heads * (qk_nope_head_dim + v_head_dim),
             param_init=linear_init,
         ),
-        wo=RowParallelLinear.Config(
+        wo=Linear.Config(
             in_features=n_heads * v_head_dim,
             out_features=dim,
             param_init=depth_init(layer_id),
