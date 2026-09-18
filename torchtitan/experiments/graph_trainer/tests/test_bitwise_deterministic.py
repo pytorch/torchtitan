@@ -261,6 +261,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
         the loaded artifact — identical to what happens during
         torchrun training with --compile.precompile_artifact_dir.
         """
+        from torchtitan.experiments.graph_trainer.graph_pp.graph_builder import (
+            make_fwd_bwd_step,
+        )
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
             minimal_fx_tracer,
             run_traced,
@@ -276,7 +279,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             precompile_fx_trace_save,
         )
         from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-        from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
         self.annotate_model(model)
         loss_fn = CrossEntropyLoss.Config().build()
