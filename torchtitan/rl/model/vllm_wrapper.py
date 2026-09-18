@@ -41,6 +41,7 @@ from torchtitan.distributed.spmd_types import (
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import resolve_placements
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from vllm.compilation.decorators import support_torch_compile
@@ -143,7 +144,17 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
         )
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        return dtensor_to_plain_tensor_state_dict(self.adapter.from_hf(hf_state_dict))
+        state_dict = self.adapter.from_hf(hf_state_dict)
+        for name, value in state_dict.items():
+            if isinstance(value, DTensor):
+                # Format conversions can reshard tensors, e.g. fused QKV splits.
+                # Restore the model's layout before discarding DTensor metadata.
+                state_dict[name] = value.redistribute(
+                    placements=resolve_placements(
+                        self.state_dict_layouts[name], value.device_mesh
+                    )
+                )
+        return dtensor_to_plain_tensor_state_dict(state_dict)
 
     def get_hf_storage_reader(
         self,
