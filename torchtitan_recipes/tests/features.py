@@ -300,6 +300,19 @@ def llama3_debugmodel_fsdp2_pp2_1f1b() -> Trainer.Config:
     return config
 
 
+def muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.fsdp_reshard_after_forward = "never"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.num_tokens_per_train_step = 65536
+    return config
+
+
 def llama3_debugmodel_fsdp2_pp2_1f1b_layers_per_stage() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_pp2_1f1b()
     config.parallelism.pipeline_parallel_layers_per_stage = 4
@@ -545,6 +558,15 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     """Two gradient accumulation steps on 2 GPUs."""
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    config.training.num_tokens_per_train_step = 65536
+    return config
+
+
+def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.fsdp_reshard_after_forward = "never"
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.training.num_tokens_per_train_step = 65536
     return config

@@ -2642,15 +2642,17 @@ class TestTraceContextParallel(FSDPTest):
                     )
                     % config.training.max_context_length
                 )
-                trainer.engine.forward_backward_microbatch(
-                    microbatch_group=[
-                        TokenizedTrainingMicrobatch(
-                            input=tokens,
-                            positions=positions,
-                            labels=labels,
-                            padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                            num_valid_tokens=labels.numel(),
-                        )
+                trainer.engine.forward_backward_step(
+                    accumulation_step_inputs=[
+                        [
+                            TokenizedTrainingMicrobatch(
+                                input=tokens,
+                                positions=positions,
+                                labels=labels,
+                                padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                                num_valid_tokens=labels.numel(),
+                            )
+                        ]
                     ],
                     global_valid_tokens=torch.tensor(
                         labels.numel(), device=trainer.engine.device

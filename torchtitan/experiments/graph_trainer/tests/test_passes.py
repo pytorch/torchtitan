@@ -2723,17 +2723,18 @@ class TestBucketingPrefetchOrder(FSDPTest):
         )
         global_valid_tokens = torch.tensor(num_tokens, dtype=torch.float, device="cuda")
 
-        # One forward/backward microbatch triggers the graph-specific implementation.
-        # which traces the model and applies all graph passes.
-        trainer.engine.forward_backward_microbatch(
-            microbatch_group=[
-                TokenizedTrainingMicrobatch(
-                    input=inputs,
-                    positions=positions,
-                    labels=labels,
-                    padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                    num_valid_tokens=labels.numel(),
-                )
+        # One accumulation step traces the model and applies all graph passes.
+        trainer.engine.forward_backward_step(
+            accumulation_step_inputs=[
+                [
+                    TokenizedTrainingMicrobatch(
+                        input=inputs,
+                        positions=positions,
+                        labels=labels,
+                        padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                        num_valid_tokens=labels.numel(),
+                    )
+                ]
             ],
             global_valid_tokens=global_valid_tokens,
         )
