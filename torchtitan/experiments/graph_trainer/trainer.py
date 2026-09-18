@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.cudagraph import cudagraph_teardown, CUDAGraphWrapper
+from torchtitan.distributed.cuda_graph import cuda_graph_teardown, CUDAGraphWrapper
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
@@ -48,9 +48,9 @@ from torchtitan.experiments.graph_trainer.registry import (
     TRACE_INPUT_PREPARERS,
 )
 from torchtitan.experiments.graph_trainer.runner import GraphRunner
-from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 
 logger = logging.getLogger(__name__)
@@ -132,33 +132,42 @@ def make_fwd_bwd_step(model, loss_fn, *, accumulate_gradients: bool = False):
     return fwd_bwd_step
 
 
-class GraphTrainer(Trainer):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Trainer.Config):
-        compile: GraphTrainerCompileConfig = field(
-            default_factory=GraphTrainerCompileConfig
-        )
+class GraphTrainingEngine(TrainingEngine):
+    """Training engine for the experimental whole-step graph backend.
 
-    def _init_gradient_accumulation(self) -> None:
-        """Keep CUDA graph ownership in GraphTrainer."""
-        self._run_gradient_accumulation = self._gradient_accumulation_body
+    TODO: Validate this as an optional execution backend for other workflows,
+    such as RL training.
+    """
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config: "GraphTrainer.Config",
+        *,
+        model_config: BaseModel.Config,
+        max_num_documents: int | None,
+        output_dir: str,
+    ) -> None:
         if config.training.enable_optimizer_cuda_graph:
             raise ValueError(
                 "Optimizer CUDA graphs are not supported with GraphTrainer."
             )
-        super().__init__(config)
-
-        validate_memory_policy_config(self.config.compile)
-
-        _maybe_apply_numa_binding(self.device.index, self.device.type)
-
+        validate_memory_policy_config(config.compile)
+        super().__init__(
+            config,
+            model_config=model_config,
+            max_num_documents=max_num_documents,
+            output_dir=output_dir,
+        )
         # Lazy state for aot_fx_trace mode
         self._traced_step: TracedResult | None = None
         self._graph_runner: GraphRunner | None = None
         self._trainable_params: tuple[torch.Tensor, ...] | None = None
         self._graph_gradient_state: GraphGradientState | None = None
+        self._pinned_pool_ctx = None
+
+    def _initialize_forward_backward(self) -> None:
+        super()._initialize_forward_backward()
+        _maybe_apply_numa_binding(self.device.index, self.device.type)
         self._validate_inplace_graph_gradient_accumulation_config()
         if self.config.compile.enable_inplace_graph_gradient_accumulation:
             self._ensure_graph_gradient_state(self.model_parts[0])
@@ -173,37 +182,41 @@ class GraphTrainer(Trainer):
         else:
             self._pinned_pool_ctx = None
 
-        # Run post-init hook for the active pass pipeline
-        POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
+    def _initialize_gradient_accumulation(self) -> None:
+        """Keep CUDA graph ownership in GraphTrainingEngine."""
+        self._run_gradient_accumulation = self._gradient_accumulation_body
 
-    def forward_backward_step(
+    def _non_pp_forward_backward_body(
         self,
         *,
-        prepared_inputs: tuple[Any, ...],
-        global_valid_tokens: torch.Tensor,
-        finalize_gradients: bool = True,
+        inputs: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        model_kwargs: dict[str, Any],
+        loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
-            return super().forward_backward_step(
-                prepared_inputs=prepared_inputs,
-                global_valid_tokens=global_valid_tokens,
-                finalize_gradients=finalize_gradients,
+        if self.config.compile.mode != "aot_fx_trace":
+            return super()._non_pp_forward_backward_body(
+                inputs=inputs,
+                labels=labels,
+                model_kwargs=model_kwargs,
+                loss_kwargs=loss_kwargs,
             )
 
-        assert finalize_gradients or self._fsdp_root is not None
+        if set(loss_kwargs) != {"global_valid_tokens"}:
+            raise ValueError(
+                "GraphTrainingEngine does not support per-microbatch loss arguments."
+            )
+
         assert len(self.model_parts) == 1
         model = self.model_parts[0]
-        inputs, labels, extra_kwargs = prepared_inputs
-        # remove_duplicate=False to preserve duplicate parameter entries
-        # from weight tying (e.g. shared embedding/output weights).
         params = self._get_trainable_parameters(model)
-        return self._make_fx_forward_backward_step(
+        return self._make_fx_forward_backward_microbatch(
             model,
             inputs,
             labels,
-            global_valid_tokens,
+            loss_kwargs["global_valid_tokens"],
             params,
-            extra_kwargs,
+            model_kwargs,
         )
 
     def _load_precompiled_fx_trace(
@@ -247,7 +260,7 @@ class GraphTrainer(Trainer):
             ),
         )
 
-    def _make_fx_forward_backward_step(
+    def _make_fx_forward_backward_microbatch(
         self,
         model: nn.Module,
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
@@ -433,14 +446,6 @@ class GraphTrainer(Trainer):
                     args, kwargs = prepared
         return args, kwargs
 
-    def train_step(self, data_iterator: Iterator[dict[str, Any]]):
-        PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
-            self
-        )
-        if self._graph_gradient_state is not None:
-            self._graph_gradient_state.validate_grad_bindings()
-        super().train_step(data_iterator)
-
     def close(self) -> None:
         if self._pinned_pool_ctx is not None:
             self._pinned_pool_ctx.__exit__(None, None, None)
@@ -451,5 +456,28 @@ class GraphTrainer(Trainer):
         self._graph_runner = None
         self._trainable_params = None
 
-        # See Note [explicit cudagraph teardown] in cudagraph.py
-        cudagraph_teardown()
+        # See Note [explicit CUDA graph teardown] in CUDA graph.py
+        cuda_graph_teardown()
+
+
+class GraphTrainer(Trainer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Trainer.Config):
+        compile: GraphTrainerCompileConfig = field(
+            default_factory=GraphTrainerCompileConfig
+        )
+
+    engine_cls = GraphTrainingEngine
+    engine: GraphTrainingEngine
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
+
+    def train_step(self, data_iterator: Iterator[dict[str, Any]]) -> None:
+        PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
+            self
+        )
+        if self.engine._graph_gradient_state is not None:
+            self.engine._graph_gradient_state.validate_grad_bindings()
+        super().train_step(data_iterator)

@@ -4,11 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
@@ -59,11 +58,8 @@ def deepseek_v4_debugmodel(
             expert_parallel_degree=1,
         ),
         activation_checkpoint=None,
-        compile=CompileConfig(enable=False),
-        checkpoint=CheckpointManager.Config(
-            enable=False,
-            interval=100,
-        ),
+        compile=None,
+        checkpointer=None,
     )
 
 
@@ -102,11 +98,8 @@ def deepseek_v4_mtp_debugmodel(
             expert_parallel_degree=1,
         ),
         activation_checkpoint=None,
-        compile=CompileConfig(enable=False),
-        checkpoint=CheckpointManager.Config(
-            enable=False,
-            interval=100,
-        ),
+        compile=None,
+        checkpointer=None,
     )
 
 
@@ -145,11 +138,8 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
             expert_parallel_degree=1,
         ),
         activation_checkpoint=None,
-        compile=CompileConfig(enable=False),
-        checkpoint=CheckpointManager.Config(
-            enable=False,
-            interval=100,
-        ),
+        compile=None,
+        checkpointer=None,
     )
 
 
@@ -188,9 +178,6 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
             expert_parallel_degree=1,
         ),
         activation_checkpoint=None,
-        compile=CompileConfig(enable=False),
-        checkpoint=CheckpointManager.Config(
-            enable=False,
-            interval=100,
-        ),
+        compile=None,
+        checkpointer=None,
     )

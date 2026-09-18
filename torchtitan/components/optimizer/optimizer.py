@@ -244,6 +244,12 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 if opt_name in ("Adam", "AdamW"):
                     for group in opt_param_groups:
                         group["capturable"] = capturable
+                        if capturable:
+                            group["lr"] = torch.tensor(
+                                group["lr"],
+                                dtype=torch.float32,
+                                device=group["params"][0].device,
+                            )
                 optimizer = self._resolve_optimizer_factory(opt_name)(
                     opt_param_groups,
                     **config.optimizer_factory_kwargs_by_name.get(opt_name, {}),
@@ -325,15 +331,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     def step(self, closure: Callable[[], float] | None = None) -> float | None:
         assert closure is None, "OptimizersContainer does not support closures"
         for optimizer in self.optimizers:
-            # The first eager step creates the stable device LR used by replay.
-            for group in optimizer.param_groups:
-                lr = group["lr"]
-                if group.get("capturable") and not isinstance(lr, torch.Tensor):
-                    group["lr"] = torch.tensor(
-                        lr,
-                        dtype=torch.float32,
-                        device=group["params"][0].device,
-                    )
             optimizer.step()
         return None
 

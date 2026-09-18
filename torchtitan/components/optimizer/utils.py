@@ -208,6 +208,14 @@ def _unflatten_optim_state_dict(
                     f"Optimizer param group key {key!r} not found in checkpoint "
                     f"(looked up via param {fqns[0]!r})."
                 )
+            if (
+                key == "lr"
+                and param_group.get("capturable")
+                and isinstance(param_group[key], torch.Tensor)
+            ):
+                param_group[key].fill_(flat_sd[flat_key])
+                new_group[key] = param_group[key]
+                continue
             new_group[key] = flat_sd[flat_key]
         param_groups.append(new_group)
 

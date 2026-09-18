@@ -132,7 +132,6 @@ class TestFTCheckpointManager(unittest.TestCase):
         Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
         config = TorchFTCheckpointManager.Config(
-            enable=True,
             async_mode="async",
             folder=self.test_folder,
             interval=1,
@@ -172,7 +171,6 @@ class TestFTCheckpointManager(unittest.TestCase):
 
     def _manager(self, participating_rank: int) -> TorchFTCheckpointManager:
         config = TorchFTCheckpointManager.Config(
-            enable=True,
             async_mode="disabled",
             folder=self.test_folder,
             interval=1,
@@ -244,15 +242,6 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.assertEqual([False], ft_grad_enabled)
         manager.close()
 
-    def test_disabled_load_does_not_restore_ft_checkpoint(self):
-        manager = TorchFTCheckpointManager.__new__(TorchFTCheckpointManager)
-        manager.enable = False
-
-        with mock.patch.object(manager, "_ft_load") as ft_load:
-            self.assertFalse(manager.load())
-
-        ft_load.assert_not_called()
-
     def _build_replica(self, replica_id):
         model = nn.Linear(1, 1, bias=False)
         ft_manager = DummyFTManager(replica_id=replica_id)
@@ -277,7 +266,6 @@ class TestFTCheckpointManager(unittest.TestCase):
         )
         checkpoint = TorchFTCheckpointManager(
             TorchFTCheckpointManager.Config(
-                enable=True,
                 folder=os.path.join(self.test_folder, str(replica_id)),
                 keep_latest_k=0,
                 initial_load_model_only=False,

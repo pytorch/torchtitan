@@ -110,7 +110,7 @@ def set_step(step: int, *, relative_step: int | None = None) -> None:
             -- correct for runs without checkpoint resume. Resumed
             trainers must pass it explicitly.
     Example::
-        self.checkpointer.load(step=config.checkpoint.load_step)
+        self.checkpointer.load(step=config.checkpointer.load_step)
         loaded_step = self.step
         for step in range(loaded_step + 1, num_steps + 1):
             set_step(step, relative_step=step - loaded_step)

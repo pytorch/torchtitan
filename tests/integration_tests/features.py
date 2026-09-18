@@ -18,9 +18,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
     """
     return [
         OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_sdc_replay_cudagraph],
+            configs=[recipes.llama3_debugmodel_sdc_replay_cuda_graph],
             test_descr="SDC replay with CUDA graphs",
-            test_name="sdc_replay_cudagraph",
+            test_name="sdc_replay_cuda_graph",
             ngpu=1,
             skip_rocm_test=True,
         ),
@@ -307,9 +307,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=2,
         ),
         OverrideDefinitions(
-            configs=[
-                recipes.muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction
-            ],
+            configs=[recipes.muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction],
             test_descr="FSDP deferred gradient reduction with accumulation",
             test_name="fsdp_deferred_gradient_reduction",
             ngpu=2,

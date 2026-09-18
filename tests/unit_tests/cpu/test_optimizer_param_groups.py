@@ -660,8 +660,6 @@ class TestDCPWithParamGroups(unittest.TestCase):
         captured_group = source.optimizers[0].param_groups[0]
         self.assertIsNot(captured_group, old_group)
         self.assertTrue(captured_group["capturable"])
-        self.assertIsInstance(captured_group["lr"], float)
-        source.step()
         self.assertIsInstance(captured_group["lr"], torch.Tensor)
 
         with TemporaryDirectory() as checkpoint_dir:
@@ -908,6 +906,9 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         model = torch.nn.Linear(2, 2)
         container = default_adamw(lr=1e-3).build(model_parts=[model], capturable=True)
         optimizer = container.optimizers[0]
+        group = optimizer.param_groups[0]
+        lr = group["lr"]
+        self.assertIsInstance(lr, torch.Tensor)
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer, lr_lambda=lambda step: 1.0 / (step + 1)
         )
@@ -916,13 +917,10 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         container.step()
         scheduler.step()
 
-        group = optimizer.param_groups[0]
         self.assertTrue(group["capturable"])
-        self.assertIsInstance(group["lr"], torch.Tensor)
         self.assertEqual(group["lr"].device, model.weight.device)
         self.assertAlmostEqual(group["lr"].item(), 5e-4)
 
-        lr = group["lr"]
         model(torch.ones(1, 2)).sum().backward()
         optimizer.step()
         scheduler.step()
@@ -944,7 +942,7 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         group = optimizers.optimizers[0].param_groups[0]
         self.assertIsInstance(group["lr"], torch.Tensor)
         self.assertIsInstance(schedulers.get_host_lrs_per_scheduler()[0][0], float)
-        self.assertEqual(schedulers.get_metrics(), {"lr/AdamW": 5e-4})
+        self.assertAlmostEqual(schedulers.get_metrics()["lr/AdamW"], 5e-4)
 
     def test_capturable_rejects_unsupported_optimizer(self):
         model = torch.nn.Linear(2, 2)

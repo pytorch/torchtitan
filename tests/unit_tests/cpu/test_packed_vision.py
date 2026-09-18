@@ -40,7 +40,7 @@ class TestPackedVision(unittest.TestCase):
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
         context = SimpleNamespace(
             tokenizer=tokenizer,
-            num_tokens_per_batch=8,
+            num_tokens_per_microbatch=8,
             max_context_length=4,
         )
         collator = MultiModalCollator.Config(
@@ -72,7 +72,7 @@ class TestPackedVision(unittest.TestCase):
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
         context = SimpleNamespace(
             tokenizer=tokenizer,
-            num_tokens_per_batch=10,
+            num_tokens_per_microbatch=10,
             max_context_length=4,
         )
         collator = MultiModalCollator.Config(
@@ -105,7 +105,7 @@ class TestPackedVision(unittest.TestCase):
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
         context = SimpleNamespace(
             tokenizer=tokenizer,
-            num_tokens_per_batch=8,
+            num_tokens_per_microbatch=8,
             max_context_length=4,
         )
         collator = MultiModalCollator.Config(
@@ -125,12 +125,12 @@ class TestPackedVision(unittest.TestCase):
 
     def test_collator_counts_partial_temporal_patch(self) -> None:
         collator = MultiModalCollator.Config(
-            max_images_per_batch=1,
+            max_images_per_microbatch=1,
             temporal_patch_size=2,
         ).build(
             context=SimpleNamespace(
                 tokenizer=None,
-                num_tokens_per_batch=0,
+                num_tokens_per_microbatch=0,
                 max_context_length=0,
             )
         )
