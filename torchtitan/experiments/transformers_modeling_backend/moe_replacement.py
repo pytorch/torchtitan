@@ -32,10 +32,10 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
 from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
-    make_ffn_config,
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE
@@ -133,11 +133,7 @@ def build_and_swap_native_moe(
                 enable_sp=enable_sp,
                 expert_param_layout=expert_layout,
             )
-            set_sigmoid_gated_feed_forward_sharding_config(
-                shared_experts,
-                enable_ep=enable_ep,
-                enable_sp=enable_sp,
-            )
+            set_sigmoid_gated_feed_forward_sharding_config(shared_experts)
         else:
             set_moe_sharding_config(
                 moe_config,
@@ -578,7 +574,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
     shared_experts = None
     shared_info = params["shared_expert_info"]
     if shared_info is not None:
-        ffn_config = make_ffn_config(
+        ffn_config = make_shared_expert_ffn_config(
             dim=shared_info["dim"],
             hidden_dim=shared_info["hidden_dim"],
             w1_param_init=_LINEAR_INIT,
@@ -590,8 +586,8 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
 
             shared_experts = SigmoidGatedFeedForward.Config(
-                # Gather once at this FFN boundary because both w13 and the
-                # sigmoid gate consume the same input.
+                # The enclosing MoE gathers once because w13 and the sigmoid
+                # gate consume the same input.
                 w13=Linear.Config(
                     in_features=shared_info["dim"],
                     out_features=2 * shared_info["hidden_dim"],

@@ -22,9 +22,10 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.decoder_sharding import token_id_placement
-from torchtitan.models.common.linear import RouterGateLinear
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.moe_sharding import (
     _moe_sharding_config,
@@ -376,14 +377,52 @@ class TestMoE(unittest.TestCase):
             ],
         )
 
-    def test_expert_branches_remain_partial_until_common_reduction(self):
+    def test_moe_owns_shared_tp_collectives_with_ep_and_sp(self):
+        moe = self._build_moe()
+        moe.shared_experts = _PassthroughSharedExperts()
+        moe._sharding_config = _moe_sharding_config(enable_sp=True)
+        calls = []
+
+        def redistribute(tensor, _group, *, src, dst, **_kwargs):
+            calls.append((src, dst))
+            return tensor
+
+        with mock.patch.object(
+            moe_module, "spmd_mesh_group", return_value=object()
+        ), mock.patch.object(
+            moe_module, "spmd_sparse_mesh", return_value=object()
+        ), mock.patch.object(
+            moe_module.spmd, "redistribute", redistribute
+        ):
+            moe(
+                torch.randn(4, 4),
+                padding_mask_T=torch.zeros(4, dtype=torch.bool),
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                (spmd.S(0), spmd.R),
+                (spmd.P, spmd.S(0)),
+            ],
+        )
+
+    def test_shared_expert_ffn_uses_compute_only_linears(self):
+        config = make_shared_expert_ffn_config(
+            dim=4,
+            hidden_dim=8,
+            w1_param_init={},
+            w2w3_param_init={},
+        )
+
+        self.assertIs(type(config.w13), Linear.Config)
+        self.assertIs(type(config.w2), Linear.Config)
+
+    def test_expert_branch_layouts_before_moe_boundary(self):
         for enable_sp in (False, True):
             for enable_ep in (False, True):
-                expected = spmd.S(0) if enable_ep and enable_sp else spmd.P
-                shared, _w13, w2 = _shared_experts_sharding_configs(
-                    enable_ep=enable_ep,
-                    enable_sp=enable_sp,
-                )
+                routed_expected = spmd.S(0) if enable_ep and enable_sp else spmd.P
+                shared, _w13, w2 = _shared_experts_sharding_configs()
                 routed, _inner = _routed_experts_sharding_configs(
                     enable_ep=enable_ep,
                     enable_sp=enable_sp,
@@ -398,14 +437,14 @@ class TestMoE(unittest.TestCase):
                 assert isinstance(routed_output, SpmdType)
                 self.assertEqual(
                     _per_axis_types(shared_output).get(MeshAxisName.TP),
-                    expected,
+                    spmd.P,
                 )
                 self.assertEqual(
-                    _per_axis_types(w2_output).get(MeshAxisName.TP), expected
+                    _per_axis_types(w2_output).get(MeshAxisName.TP), spmd.P
                 )
                 self.assertEqual(
                     _per_axis_types(routed_output).get(MeshAxisName.TP),
-                    expected,
+                    routed_expected,
                 )
 
     def test_moe_block_sequence_shards_padding_mask(self):

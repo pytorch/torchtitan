@@ -17,11 +17,7 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.models.common.linear import (
-    _tp_type,
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
+from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 
 
 logger = logging.getLogger(__name__)
@@ -302,15 +298,6 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             _warn_once_no_tp_overlap()
             return self._linear(input, self.weight, self.bias)
 
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        assert sharding_config.in_src_shardings is not None
-        input_layout = sharding_config.in_src_shardings["input"]
-        if _tp_type(input_layout) != spmd.S(0):
-            # A surrounding module may already have gathered a shared input.
-            # In that case there is no all-gather to fuse with this projection.
-            return super().forward(input)
-
         return AsyncAllGatherLinear.apply(
             input,
             self.weight,
@@ -336,15 +323,6 @@ class AsyncRowParallelLinear(RowParallelLinear):
         if tp_group is None:
             _warn_once_no_tp_overlap()
             return self._linear(input, self.weight, self.bias)
-
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        output_layout = sharding_config.out_src_shardings
-        assert output_layout is not None and not isinstance(output_layout, tuple)
-        if _tp_type(output_layout) != spmd.S(0):
-            # Some MoE paths keep this projection Partial and reduce only
-            # after combining routed and shared expert outputs.
-            return super().forward(input)
 
         return AsyncLinearReduceScatter.apply(
             input,

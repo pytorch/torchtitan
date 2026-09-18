@@ -136,33 +136,19 @@ def _router_gate_sharding_config() -> ShardingConfig:
     )
 
 
-def _shared_experts_sharding_configs(
-    *,
-    enable_ep: bool,
-    enable_sp: bool,
-) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig]:
-    """Configs for shared FeedForward parent and w13/w2 linears."""
-    # With EP, both branches return the sequence shard used for their sum. With
-    # ETP, both stay Partial so the MoE can add them before one reduction.
-    input_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(
-            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
-        )
-    )
-    branch_output_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
-    )
+def _shared_experts_sharding_configs() -> tuple[
+    ShardingConfig, ShardingConfig, ShardingConfig
+]:
+    """Compute-only configs for shared FeedForward and its projections."""
+    input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    output_layout = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     return (
         ShardingConfig(
             in_src_shardings={"x": input_layout},
-            out_src_shardings=branch_output_layout,
+            out_src_shardings=output_layout,
         ),
         colwise_config(input_layout=input_layout),
-        rowwise_config(output_layout=branch_output_layout),
+        rowwise_config(output_layout=output_layout),
     )
 
 
@@ -307,19 +293,13 @@ def set_routed_moe_sharding_config(
 
 def set_shared_moe_sharding_config(
     shared_experts_cfg,
-    *,
-    enable_ep: bool,
-    enable_sp: bool,
 ) -> None:
-    """Configure the standard shared-expert FeedForward path."""
-    shared_config, w13_config, w2_config = _shared_experts_sharding_configs(
-        enable_ep=enable_ep,
-        enable_sp=enable_sp,
-    )
+    """Configure compute-only shared-expert projections."""
+    shared_config, w13_config, w2_config = _shared_experts_sharding_configs()
     shared_experts_cfg.sharding_config = shared_config
     shared_experts_cfg.w13.sharding_config = w13_config
-    # The shared output may remain Partial until it is added to the routed
-    # output, so its rowwise bias remains Replicate.
+    # The shared output remains Partial until the MoE boundary reduces it, so
+    # a w2 bias must be Replicate rather than input-feature sharded.
     w2_config.state_shardings["bias"] = dense_param_placement(tp=spmd.R)
     shared_experts_cfg.w2.sharding_config = w2_config
 
@@ -341,11 +321,7 @@ def set_moe_sharding_config(
 
     shared = moe_cfg.shared_experts
     if shared is not None:
-        set_shared_moe_sharding_config(
-            shared,
-            enable_ep=enable_ep,
-            enable_sp=enable_sp,
-        )
+        set_shared_moe_sharding_config(shared)
 
 
 def set_moe_block_padding_mask_sharding(block_cfg, *, enable_sp: bool) -> None:

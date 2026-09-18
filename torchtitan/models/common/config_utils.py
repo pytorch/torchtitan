@@ -28,6 +28,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    Linear,
     RouterGateLinear,
     RowParallelLinear,
 )
@@ -267,6 +268,28 @@ def make_ffn_config(
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
         w2=RowParallelLinear.Config(
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init=w2w3_param_init,
+        ),
+    )
+
+
+def make_shared_expert_ffn_config(
+    *,
+    dim: int,
+    hidden_dim: int,
+    w1_param_init: dict[str, Callable],
+    w2w3_param_init: dict[str, Callable],
+) -> FeedForward.Config:
+    """Build a shared FFN whose enclosing MoE owns TP communication."""
+    return FeedForward.Config(
+        w13=Linear.Config(
+            in_features=dim,
+            out_features=2 * hidden_dim,
+            param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
+        ),
+        w2=Linear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=w2w3_param_init,

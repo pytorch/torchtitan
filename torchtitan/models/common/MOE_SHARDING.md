@@ -28,16 +28,16 @@ for all four parallelism configurations (EP on/off × SP on/off).
 
 - **MoE boundary**: without EP, `MoE.forward` gathers its input once for the
   routed and shared branches. It adds their `Partial` outputs before one final
-  reduction. With EP, the routed path retains sequence-sharded tokens and the
-  shared path owns its required communication.
+  reduction. With EP, the routed path retains its dispatcher layout while
+  `MoE.forward` explicitly prepares and reduces the shared branch.
 - **Router gate**: weights `Replicate`, output stays DTensor.
-- **Shared experts** (w13/w2): dense-family TP plan. With EP, the standard w13
-  is a `ColumnParallelLinear` that gathers only the shared branch, and w2 is a
-  `RowParallelLinear` that restores the routed branch's token layout. Without
-  EP, the MoE boundary gathers once for both branches, adds their partial
-  outputs, and reduces once. A model with multiple shared-expert projections
-  may instead gather once at its shared-expert boundary; Qwen3.5 uses this for
-  w13 and its sigmoid gate.
+- **Shared experts** (w13/w2): compute-only `Linear` projections with
+  column-/row-sharded weights. Without EP, they consume the input already
+  gathered by the MoE and return `Partial`. With EP and SP, the MoE gathers
+  the shared input independently and reduce-scatters its output to match the
+  routed token shard. With EP and no SP, the input `Invariant -> Replicate`
+  conversion is a forward no-op and both branch outputs remain `Partial` until
+  their sum is all-reduced.
 - **Routed experts** (`RoutedExperts`): the local SPMD region runs
   dispatch/compute/combine on local tensors while checking its input and
   output layout contracts. The expert-weight `state_shardings` live on its

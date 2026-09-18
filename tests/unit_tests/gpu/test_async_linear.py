@@ -24,7 +24,6 @@ CUDA-guarded is developer-run only.
 import unittest
 from unittest.mock import patch
 
-import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import init_device_mesh
 
@@ -45,18 +44,12 @@ from torchtitan.models.common.async_linear import (
 )
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (
-    dense_activation_placement,
     dense_sequence_parallel_placement,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    Linear,
-    RowParallelLinear,
-)
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
@@ -139,44 +132,6 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         )
         self.assertIsNone(layer.feed_forward.sharding_config.in_dst_shardings)
         self.assertIsNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
-
-    def test_async_linears_preserve_non_collective_boundary_contracts(self):
-        replicated = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        partial = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
-        column = AsyncColumnParallelLinear.Config(
-            in_features=4,
-            out_features=8,
-            sharding_config=ShardingConfig(
-                in_src_shardings={"input": replicated},
-            ),
-        ).build()
-        row = AsyncRowParallelLinear.Config(
-            in_features=8,
-            out_features=4,
-            sharding_config=ShardingConfig(out_src_shardings=partial),
-        ).build()
-        x = torch.randn(2, 4)
-        expected = torch.randn(2, 8)
-
-        with patch(
-            "torchtitan.models.common.async_linear._tp_group_from_context",
-            return_value=object(),
-        ), patch.object(
-            ColumnParallelLinear, "forward", return_value=expected
-        ) as column_forward:
-            self.assertIs(column(x), expected)
-            column_forward.assert_called_once_with(x)
-
-        x = torch.randn(2, 8)
-        expected = torch.randn(2, 4)
-        with patch(
-            "torchtitan.models.common.async_linear._tp_group_from_context",
-            return_value=object(),
-        ), patch.object(
-            RowParallelLinear, "forward", return_value=expected
-        ) as row_forward:
-            self.assertIs(row(x), expected)
-            row_forward.assert_called_once_with(x)
 
 
 class TestAsyncTensorParallelSharding(DTensorTestBase):

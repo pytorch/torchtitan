@@ -78,8 +78,9 @@ class KimiLatentMoE(MoE):
             num_tokens_per_expert_E,
         )
         out_TD = self.routed_up(self.routed_norm(routed_TD))
-        if self.shared_experts is not None:
-            out_TD = out_TD + self.shared_experts(x_TD)
+        shared_out_TD = self._forward_shared_experts(x_TD)
+        if shared_out_TD is not None:
+            out_TD = out_TD + shared_out_TD
         return self._reduce_tp_output(out_TD)
 
     def _combined_output_tp_type(

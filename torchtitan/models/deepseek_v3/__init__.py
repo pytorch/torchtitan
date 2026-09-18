@@ -37,6 +37,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -305,7 +306,7 @@ def build_mla_moe_layers(
                     comm_backend=moe_comm_backend,
                     non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),
-                shared_experts=make_ffn_config(
+                shared_experts=make_shared_expert_ffn_config(
                     dim=dim,
                     hidden_dim=moe_hidden_dim * num_shared_experts,
                     w1_param_init=linear_init,

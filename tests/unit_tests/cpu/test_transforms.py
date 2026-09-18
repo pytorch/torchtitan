@@ -26,6 +26,7 @@ from torchtitan.models.common.async_linear import (
     AsyncRowParallelLinear,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.config_utils import make_shared_expert_ffn_config
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -300,6 +301,21 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
             layer.attention.qkv_linear.wqkv, ColumnParallelLinear.Config
         )
         self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
+
+    def test_shared_expert_compute_linears_are_not_transformed(self):
+        config = make_shared_expert_ffn_config(
+            dim=4,
+            hidden_dim=8,
+            w1_param_init={},
+            w2w3_param_init={},
+        )
+
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(config)
+
+        self.assertIs(type(transformed.w13), Linear.Config)
+        self.assertIs(type(transformed.w2), Linear.Config)
 
     def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
         from torchtitan.models.muse_glimmer import muse_glimmer_configs

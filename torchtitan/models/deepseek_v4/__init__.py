@@ -33,6 +33,7 @@ from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
     make_ffn_config,
     make_routed_experts_config,
+    make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.deepseek_v3.parallelize import (
@@ -363,7 +364,7 @@ def _make_v4_moe_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
         shared_experts=(
-            make_ffn_config(
+            make_shared_expert_ffn_config(
                 dim=dim,
                 hidden_dim=moe_inter_dim * num_shared_experts,
                 w1_param_init=_LINEAR_INIT,

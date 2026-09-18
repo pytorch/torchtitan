@@ -5,11 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 from typing import cast
-from unittest import mock
 
 import pytest
-import spmd_types as spmd
-import torch
 
 pytest.importorskip("fla")
 
@@ -18,45 +15,13 @@ from torchtitan.models.qwen3_5.config_registry import qwen35_0_8b, qwen35_27b
 from torchtitan.models.qwen3_8 import model_registry as qwen3_8_model_registry
 
 
-def test_qwen35_shared_expert_gathers_input_once() -> None:
-    import torchtitan.models.qwen3_5.moe as qwen35_moe
-
-    from torchtitan.models.common.decoder_sharding import (
-        dense_sequence_parallel_placement,
-    )
-    from torchtitan.models.common.linear import Linear
-    from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
-    from torchtitan.protocols.sharding import ShardingConfig
-
-    shared_experts = SigmoidGatedFeedForward.Config(
-        w13=Linear.Config(in_features=4, out_features=16),
-        w2=Linear.Config(in_features=8, out_features=4),
-        gate=Linear.Config(in_features=4, out_features=4),
-        sharding_config=ShardingConfig(
-            in_src_shardings={"x": dense_sequence_parallel_placement()}
-        ),
-    ).build()
-    calls = []
-
-    def redistribute(tensor, _group, *, src, dst, **_kwargs):
-        calls.append((src, dst))
-        return tensor
-
-    with mock.patch.object(
-        qwen35_moe, "spmd_mesh_group", return_value=object()
-    ), mock.patch.object(qwen35_moe.spmd, "redistribute", redistribute):
-        shared_experts(torch.randn(3, 4))
-
-    assert calls == [(spmd.S(0), spmd.R)]
-
-
 @pytest.mark.parametrize("enable_ep", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_qwen35_shared_expert_gathers_once_for_w13_and_gate(
+def test_qwen35_shared_expert_uses_compute_only_linears(
     enable_ep: bool,
     enable_sp: bool,
 ) -> None:
-    from torchtitan.models.common.linear import Linear, RowParallelLinear
+    from torchtitan.models.common.linear import Linear
     from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
@@ -71,7 +36,7 @@ def test_qwen35_shared_expert_gathers_once_for_w13_and_gate(
 
     assert type(shared_experts.w13) is Linear.Config
     assert type(shared_experts.gate) is Linear.Config
-    assert isinstance(shared_experts.w2, RowParallelLinear.Config)
+    assert type(shared_experts.w2) is Linear.Config
 
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None
