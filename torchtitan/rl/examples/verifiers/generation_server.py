@@ -60,20 +60,19 @@ class GenerationServer(Configurable):
         port: int = 0
         """Listening port; zero requests an ephemeral port."""
 
-        max_rollout_tokens: int | None = None
+        max_rollout_tokens: int
         """Inclusive upper bound for the rendered prompt length.
 
-        When configured, the server advertises this value as
-        ``max_model_len`` through ``GET /v1/models`` so Verifiers can reject
-        longer prompts before forwarding them to the generator. ``None``
-        leaves the limit undisclosed.
+        The server advertises this value as ``max_model_len`` through
+        ``GET /v1/models`` so Verifiers can reject longer prompts before
+        forwarding them to the generator.
         """
 
         def __post_init__(self) -> None:
             if not 0 <= self.port <= 65535:
                 raise ValueError("port must be between 0 and 65535")
-            if self.max_rollout_tokens is not None and self.max_rollout_tokens <= 0:
-                raise ValueError("max_rollout_tokens must be positive or None")
+            if self.max_rollout_tokens <= 0:
+                raise ValueError("max_rollout_tokens must be positive")
 
     model_id = "torchtitan"
 
@@ -152,9 +151,8 @@ class GenerationServer(Configurable):
             "object": "model",
             "created": 0,
             "owned_by": "torchtitan",
+            "max_model_len": self.max_rollout_tokens,
         }
-        if self.max_rollout_tokens is not None:
-            model["max_model_len"] = self.max_rollout_tokens
         return web.json_response({"object": "list", "data": [model]})
 
     async def _handle_generate_request(self, request: web.Request) -> web.Response:

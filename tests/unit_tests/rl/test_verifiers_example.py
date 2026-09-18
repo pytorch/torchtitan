@@ -78,7 +78,7 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
 
 
 def test_verifiers_environment_uses_no_sandbox() -> None:
-    rollouter_config = _verifiers_math_rollouter_config()
+    rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
     config = rollouter_config.verifiers_env_server
 
     assert isinstance(config.environment, vf.SingleAgentEnvConfig)

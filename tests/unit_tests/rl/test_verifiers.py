@@ -220,7 +220,7 @@ def test_generation_server_rejects_aborted_generation() -> None:
                 finish_reason="abort",
             )
 
-        server = GenerationServer.Config().build()
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
         server.set_generate_fn(generate_fn)
         await server.start()
         try:
