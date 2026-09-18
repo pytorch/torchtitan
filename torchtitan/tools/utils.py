@@ -39,6 +39,14 @@ def has_cuda_capability(major: int, minor: int) -> bool:
 def get_cuda_flash_attention_impl() -> str | None:
     """Return the FlashAttention implementation for the current CUDA architecture."""
 
+    # ROCm has neither FA3 nor FA4: torch's flash_attn_interface is CUDA-only.
+    # This has to be checked explicitly, because has_cuda_capability() below is
+    # just torch.cuda.get_device_capability() >= (major, minor) and AMD devices
+    # report a capability too -- gfx950 (MI350X) reports (9, 5), which satisfies
+    # the (9, 0) test and would select FA3 on hardware that cannot run it.
+    if torch.version.hip is not None:
+        return None
+
     # FA4 advertises Hopper support, but as of writing it hangs under
     # torch.compile there, so Hopper (sm90) stays on FA3.
     # https://github.com/pytorch/torchtitan/pull/4413
