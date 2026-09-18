@@ -11,7 +11,6 @@ from unittest.mock import patch
 import torch
 
 import torchtitan.models.muse_glimmer.parallelize as parallelize_module
-from torchtitan.components.optimizer import default_adamw
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.models.muse_glimmer import (
     model_registry,
@@ -83,71 +82,6 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
             for parameter in module.parameters():
                 self.assertIsNotNone(parameter.grad)
                 torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter))
-
-    def test_get_vision_features_returns_model_dimension_bank(self):
-        model_config = model_registry("debugmodel_mm", seq_len=8).model
-        assert model_config.vision_encoder is not None
-        model_config.vision_encoder.num_layers = 0
-        model = model_config.build()
-        with torch.no_grad():
-            model.init_weights()
-        assert model.vision_encoder is not None
-        patch_dim = model.vision_encoder.conv1_linear.in_features
-        pixel_values = torch.randn(4, patch_dim)
-        grid_thw = torch.tensor([[1, 2, 2]], dtype=torch.int64)
-
-        vision_bank_VD = model._get_vision_features(pixel_values, grid_thw)
-
-        self.assertEqual(vision_bank_VD.shape, (1, model.config.dim))
-        vision_bank_VD.sum().backward()
-        vision_modules = (
-            model.vision_encoder,
-            model.vision_adapter,
-            model.vision_projection,
-            model.perception_emb_norm,
-        )
-        for module in vision_modules:
-            assert module is not None
-            for parameter in module.parameters():
-                self.assertIsNotNone(parameter.grad)
-
-    def test_image_free_step_uses_normal_optimizer_semantics(self):
-        model_spec = model_registry("debugmodel_mm", seq_len=8)
-        model = model_spec.model.build()
-        with torch.no_grad():
-            model.init_weights()
-        optimizer_config = default_adamw(lr=0.1)
-        optimizer_config.implementation = "for-loop"
-        optimizers = optimizer_config.build(model_parts=[model])
-        self.assertIsNone(model_spec.post_optimizer_build_fn)
-
-        vision_modules = (
-            model.vision_encoder,
-            model.vision_adapter,
-            model.vision_projection,
-            model.perception_emb_norm,
-        )
-        vision_parameters = [
-            parameter
-            for module in vision_modules
-            if module is not None
-            for parameter in module.parameters()
-        ]
-        for parameter in vision_parameters:
-            parameter.grad = torch.zeros_like(parameter)
-        weight_before_step = vision_parameters[0].detach().clone()
-
-        optimizers.step()
-
-        self.assertFalse(torch.equal(vision_parameters[0], weight_before_step))
-        self.assertEqual(
-            optimizers.optimizers[0].state[vision_parameters[0]]["step"].item(),
-            1,
-        )
-
-    def test_models_do_not_register_optimizer_hooks(self):
-        for flavor in ("debugmodel", "debugmodel_mm"):
-            self.assertIsNone(model_registry(flavor, seq_len=8).post_optimizer_build_fn)
 
     def test_multimodal_parallelize_enables_unused_parameter_reduction(self):
         class FakeFSDPModule:

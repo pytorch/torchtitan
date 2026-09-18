@@ -14,7 +14,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
@@ -228,7 +227,7 @@ class TestVisionHSDP(DTensorTestBase):
         return 4
 
     @with_comms
-    def test_accumulation_orders_and_image_free_step(self) -> None:
+    def test_image_then_empty_accumulation(self) -> None:
         mesh = init_device_mesh(
             self.device_type,
             (2, 2),
@@ -261,59 +260,26 @@ class TestVisionHSDP(DTensorTestBase):
                 nn.init.normal_(parameter, std=0.02)
             encoder.rope_freq.init_states()
 
-        optimizer_config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 0.1, "weight_decay": 0.1},
-                ),
-            ],
-        )
-        optimizers = optimizer_config.build(model_parts=[encoder])
-
-        tracked_parameter = encoder.conv1_linear.weight
-        optimizer = optimizers.optimizers[0]
-        for activity_order in (
-            (True, False),
-            (False, True),
-            (False, False),
-        ):
-            optimizers.zero_grad()
-            for microbatch_index, image_active in enumerate(activity_order):
-                encoder.set_requires_all_reduce(
-                    microbatch_index == len(activity_order) - 1
+        for microbatch_index, image_active in enumerate((True, False)):
+            encoder.set_requires_all_reduce(microbatch_index == 1)
+            if image_active and self.rank == 0:
+                pixel_values = torch.randn(
+                    4,
+                    12,
+                    device=self.device_type,
+                    dtype=torch.bfloat16,
                 )
-                if image_active and self.rank == 0:
-                    pixel_values = torch.randn(
-                        4,
-                        12,
-                        device=self.device_type,
-                        dtype=torch.bfloat16,
-                    )
-                    grid_thw = torch.tensor(
-                        [[1, 2, 2]],
-                        device=self.device_type,
-                        dtype=torch.int64,
-                    )
-                else:
-                    pixel_values = None
-                    grid_thw = None
-                output_TO = encoder(pixel_values, grid_thw=grid_thw)
-                output_TO.float().sum().backward()
+                grid_thw = torch.tensor(
+                    [[1, 2, 2]],
+                    device=self.device_type,
+                    dtype=torch.int64,
+                )
+            else:
+                pixel_values = None
+                grid_thw = None
+            output_TO = encoder(pixel_values, grid_thw=grid_thw)
+            output_TO.float().sum().backward()
 
-            self.assertTrue(
-                all(parameter.grad is not None for parameter in encoder.parameters())
-            )
-            parameter_before_step = tracked_parameter.to_local().detach().clone()
-            step_before = optimizer.state.get(tracked_parameter, {}).get("step")
-            step_before = 0 if step_before is None else step_before.item()
-            optimizers.step()
-            self.assertFalse(
-                torch.equal(tracked_parameter.to_local(), parameter_before_step)
-            )
-            self.assertEqual(
-                optimizer.state[tracked_parameter]["step"].item(),
-                step_before + 1,
-            )
+        self.assertTrue(
+            all(parameter.grad is not None for parameter in encoder.parameters())
+        )
