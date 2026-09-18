@@ -7,7 +7,7 @@
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
@@ -31,11 +31,9 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
-    "ConditionalOptimizerGroup",
     "OptimizersContainer",
     "ParamGroupConfig",
     "default_adamw",
-    "register_conditional_optimizer_groups",
     "register_moe_load_balancing_hook",
     "register_moe_quantile_balancing_hook",
 ]
@@ -69,102 +67,6 @@ class ParamGroupConfig:
     optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
     """Keyword arguments passed to the optimizer constructor.
     Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class ConditionalOptimizerGroup:
-    """Parameters whose optimizer update depends on step-level activity.
-
-    ``consume_activity`` returns whether this process used the group since the
-    previous optimizer step and resets that process-local state.
-    """
-
-    name: str
-    parameters: tuple[nn.Parameter, ...]
-    consume_activity: Callable[[], bool]
-
-
-def register_conditional_optimizer_groups(
-    optimizers: "OptimizersContainer",
-    groups: Sequence[ConditionalOptimizerGroup],
-    parallel_dims: ParallelDims,
-) -> None:
-    """Skip Adam/AdamW updates for groups inactive across the loss mesh.
-
-    Parameters must be trainable, unique across conditional groups, and owned by
-    exactly one Adam or AdamW instance in ``optimizers``. Immediately before an
-    optimizer step, local activity is consumed and reduced with MAX across the
-    loss mesh. Globally inactive parameters have their gradients set to ``None``
-    so Adam and AdamW skip weight decay and optimizer-state advancement.
-    """
-    groups = tuple(groups)
-    parameter_owners: dict[int, list[Optimizer]] = defaultdict(list)
-    for optimizer in optimizers:
-        for optimizer_group in optimizer.param_groups:
-            for parameter in optimizer_group["params"]:
-                parameter_owners[id(parameter)].append(optimizer)
-
-    seen_parameter_ids: set[int] = set()
-    for group in groups:
-        if not group.parameters:
-            raise ValueError(
-                f"Conditional optimizer group {group.name!r} has no parameters"
-            )
-        for parameter in group.parameters:
-            if not parameter.requires_grad:
-                raise ValueError(
-                    f"Conditional optimizer group {group.name!r} contains a "
-                    "parameter that is not trainable"
-                )
-            parameter_id = id(parameter)
-            if parameter_id in seen_parameter_ids:
-                raise ValueError(
-                    f"Conditional optimizer group {group.name!r} contains a "
-                    "duplicate parameter"
-                )
-            seen_parameter_ids.add(parameter_id)
-            owners = parameter_owners.get(parameter_id, [])
-            if len(owners) != 1:
-                raise ValueError(
-                    f"Conditional optimizer group {group.name!r} parameter must "
-                    f"belong to exactly one optimizer, but found {len(owners)}"
-                )
-            owner = owners[0]
-            if not isinstance(owner, (torch.optim.Adam, torch.optim.AdamW)):
-                raise ValueError(
-                    f"Conditional optimizer group {group.name!r} uses unsupported "
-                    f"optimizer {type(owner).__name__}; only Adam and AdamW are "
-                    "supported"
-                )
-
-    def _skip_globally_inactive_groups(
-        _optimizer: Optimizer,
-        _args: tuple[Any, ...],
-        _kwargs: dict[str, Any],
-    ) -> None:
-        local_activity = [group.consume_activity() for group in groups]
-        loss_mesh = parallel_dims.get_optional_mesh("loss")
-        if loss_mesh is None:
-            global_activity = local_activity
-        else:
-            activity = torch.tensor(
-                local_activity,
-                dtype=torch.int32,
-                device=loss_mesh.device_type,
-            )
-            torch.distributed.all_reduce(
-                activity,
-                op=torch.distributed.ReduceOp.MAX,
-                group=loss_mesh.get_group(),
-            )
-            global_activity = activity.tolist()
-
-        for group, is_active in zip(groups, global_activity, strict=True):
-            if not is_active:
-                for parameter in group.parameters:
-                    parameter.grad = None
-
-    optimizers.register_step_pre_hook(_skip_globally_inactive_groups)
 
 
 T = TypeVar("T", bound=Optimizer)

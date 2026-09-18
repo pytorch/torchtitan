@@ -14,12 +14,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.components.optimizer import (
-    ConditionalOptimizerGroup,
-    OptimizersContainer,
-    ParamGroupConfig,
-    register_conditional_optimizer_groups,
-)
+from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_vision_encoder,
@@ -46,14 +41,6 @@ class _Block(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w(x)
-
-
-class _LossMeshParallelDims:
-    def __init__(self, loss_mesh):
-        self.loss_mesh = loss_mesh
-
-    def get_optional_mesh(self, name):
-        return self.loss_mesh if name == "loss" else None
 
 
 class _TinyVLM(nn.Module):
@@ -235,19 +222,18 @@ class TestConditionalVisionFSDP(DTensorTestBase):
         self._run_mixed_rank_image_presence(cpu_offload=True)
 
 
-class TestConditionalVisionHSDP(DTensorTestBase):
+class TestVisionHSDP(DTensorTestBase):
     @property
     def world_size(self) -> int:
         return 4
 
     @with_comms
-    def test_accumulation_orders_and_globally_inactive_step(self) -> None:
+    def test_accumulation_orders_and_image_free_step(self) -> None:
         mesh = init_device_mesh(
             self.device_type,
             (2, 2),
             mesh_dim_names=("dp_replicate", "dp_shard"),
         )
-        loss_mesh = mesh._flatten("loss")
         with torch.device("meta"):
             encoder = muse_glimmer_vision_encoder_config(
                 latent_dim=8,
@@ -286,40 +272,20 @@ class TestConditionalVisionHSDP(DTensorTestBase):
             ],
         )
         optimizers = optimizer_config.build(model_parts=[encoder])
-        local_activity = False
-
-        def consume_local_activity() -> bool:
-            nonlocal local_activity
-            result = local_activity
-            local_activity = False
-            return result
-
-        register_conditional_optimizer_groups(
-            optimizers,
-            [
-                ConditionalOptimizerGroup(
-                    name="vision",
-                    parameters=tuple(encoder.parameters()),
-                    consume_activity=consume_local_activity,
-                )
-            ],
-            _LossMeshParallelDims(loss_mesh),
-        )
 
         tracked_parameter = encoder.conv1_linear.weight
-        for activity_order, expect_update in (
-            ((True, False), True),
-            ((False, True), True),
-            ((False, False), False),
+        optimizer = optimizers.optimizers[0]
+        for activity_order in (
+            (True, False),
+            (False, True),
+            (False, False),
         ):
             optimizers.zero_grad()
-            for microbatch_index, globally_active in enumerate(activity_order):
+            for microbatch_index, image_active in enumerate(activity_order):
                 encoder.set_requires_all_reduce(
                     microbatch_index == len(activity_order) - 1
                 )
-                locally_active = globally_active and self.rank == 0
-                local_activity = local_activity or locally_active
-                if locally_active:
+                if image_active and self.rank == 0:
                     pixel_values = torch.randn(
                         4,
                         12,
@@ -341,26 +307,13 @@ class TestConditionalVisionHSDP(DTensorTestBase):
                 all(parameter.grad is not None for parameter in encoder.parameters())
             )
             parameter_before_step = tracked_parameter.to_local().detach().clone()
-            optimizer_state_before_step = {
-                name: value.clone()
-                for name, value in optimizers.optimizers[0]
-                .state.get(tracked_parameter, {})
-                .items()
-            }
+            step_before = optimizer.state.get(tracked_parameter, {}).get("step")
+            step_before = 0 if step_before is None else step_before.item()
             optimizers.step()
-            if expect_update:
-                self.assertFalse(
-                    torch.equal(tracked_parameter.to_local(), parameter_before_step)
-                )
-            else:
-                torch.testing.assert_close(
-                    tracked_parameter.to_local(), parameter_before_step
-                )
-                self.assertTrue(
-                    all(parameter.grad is None for parameter in encoder.parameters())
-                )
-                for name, value in optimizer_state_before_step.items():
-                    torch.testing.assert_close(
-                        optimizers.optimizers[0].state[tracked_parameter][name],
-                        value,
-                    )
+            self.assertFalse(
+                torch.equal(tracked_parameter.to_local(), parameter_before_step)
+            )
+            self.assertEqual(
+                optimizer.state[tracked_parameter]["step"].item(),
+                step_before + 1,
+            )

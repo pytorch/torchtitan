@@ -160,8 +160,7 @@ class TestMuseGlimmerDPGradientAccumulation(DTensorTestBase):
 
         optimizer_config = default_adamw(lr=0.1)
         optimizers = optimizer_config.build(model_parts=[model])
-        assert model_spec.post_optimizer_build_fn is not None
-        model_spec.post_optimizer_build_fn(optimizers, [model], parallel_dims)
+        self.assertIsNone(model_spec.post_optimizer_build_fn)
         loss_fn = CrossEntropyLoss.Config(
             global_vocab_size=model_config.vocab_size
         ).build(compile_config=compile_config)
@@ -186,10 +185,10 @@ class TestMuseGlimmerDPGradientAccumulation(DTensorTestBase):
         self.assertEqual(len(optimizers.optimizers), 1)
         optimizer = optimizers.optimizers[0]
 
-        for active_dp_rank, activity_order, expect_vision_update in (
-            (0, (True, False), True),
-            (1, (False, True), True),
-            (None, (False, False), False),
+        for active_dp_rank, activity_order in (
+            (0, (True, False)),
+            (1, (False, True)),
+            (None, (False, False)),
         ):
             batches = (
                 _build_input(
@@ -206,34 +205,25 @@ class TestMuseGlimmerDPGradientAccumulation(DTensorTestBase):
 
             vision_parameter_before = tracked_parameter.to_local().detach().clone()
             text_parameter_before = text_parameter.to_local().detach().clone()
-            vision_state_before = {
-                parameter: {
-                    name: value.detach().clone()
-                    if isinstance(value, torch.Tensor)
-                    else value
-                    for name, value in optimizer.state[parameter].items()
-                }
+            vision_steps_before = {
+                parameter: optimizer.state.get(parameter, {})
+                .get("step", torch.tensor(0))
+                .item()
                 for parameter in vision_parameters
             }
             text_step_before = optimizer.state[text_parameter].get("step")
             if text_step_before is not None:
                 text_step_before = text_step_before.item()
             trainer.train_step(iter(batches))
-            if expect_vision_update:
-                self.assertFalse(
-                    torch.equal(tracked_parameter.to_local(), vision_parameter_before)
+            self.assertFalse(
+                torch.equal(tracked_parameter.to_local(), vision_parameter_before)
+            )
+            for parameter in vision_parameters:
+                self.assertIsNotNone(parameter.grad)
+                self.assertEqual(
+                    optimizer.state[parameter]["step"].item(),
+                    vision_steps_before[parameter] + 1,
                 )
-            else:
-                self.assertEqual(tracked_parameter.to_local(), vision_parameter_before)
-                for parameter in vision_parameters:
-                    self.assertIsNone(parameter.grad)
-                    self.assertEqual(
-                        optimizer.state[parameter]["step"].item(),
-                        vision_state_before[parameter]["step"].item(),
-                    )
-                    self.assertEqual(
-                        optimizer.state[parameter], vision_state_before[parameter]
-                    )
             self.assertFalse(
                 torch.equal(text_parameter.to_local(), text_parameter_before)
             )
@@ -242,7 +232,6 @@ class TestMuseGlimmerDPGradientAccumulation(DTensorTestBase):
                     optimizer.state[text_parameter]["step"].item(),
                     text_step_before + 1,
                 )
-            self.assertFalse(model._consume_vision_activity())
 
 
 class TestMuseGlimmerDPPipeline(DTensorTestBase):
@@ -305,8 +294,7 @@ class TestMuseGlimmerDPPipeline(DTensorTestBase):
         optimizer_config = default_adamw(lr=0.1)
         optimizer_config.implementation = "for-loop"
         optimizers = optimizer_config.build(model_parts=model_parts)
-        assert model_spec.post_optimizer_build_fn is not None
-        model_spec.post_optimizer_build_fn(optimizers, model_parts, parallel_dims)
+        self.assertIsNone(model_spec.post_optimizer_build_fn)
         trainer = _build_trainer(
             training=training,
             parallelism=parallelism,
@@ -349,11 +337,10 @@ class TestMuseGlimmerDPPipeline(DTensorTestBase):
             self.assertFalse(
                 torch.equal(tracked_parameter.to_local(), first_vision_parameter_before)
             )
-            self.assertFalse(model_part._consume_vision_activity())
 
         empty_vision_parameter_before: torch.Tensor | None = None
         text_parameter_before: torch.Tensor | None = None
-        vision_state_before: dict[nn.Parameter, dict[str, object]] | None = None
+        vision_steps_before: dict[nn.Parameter, float] | None = None
         text_step_before: float | None = None
         if has_first_stage:
             self.assertEqual(len(optimizers.optimizers), 1)
@@ -367,13 +354,8 @@ class TestMuseGlimmerDPPipeline(DTensorTestBase):
                 tracked_parameter.to_local().detach().clone()
             )
             text_parameter_before = text_parameter.to_local().detach().clone()
-            vision_state_before = {
-                parameter: {
-                    name: value.detach().clone()
-                    if isinstance(value, torch.Tensor)
-                    else value
-                    for name, value in optimizer.state[parameter].items()
-                }
+            vision_steps_before = {
+                parameter: optimizer.state[parameter]["step"].item()
                 for parameter in vision_parameters
             }
             text_step_before = optimizer.state[text_parameter]["step"].item()
@@ -390,7 +372,7 @@ class TestMuseGlimmerDPPipeline(DTensorTestBase):
         if has_first_stage:
             assert empty_vision_parameter_before is not None
             assert text_parameter_before is not None
-            assert vision_state_before is not None
+            assert vision_steps_before is not None
             assert text_step_before is not None
             self.assertEqual(len(optimizers.optimizers), 1)
             optimizer = optimizers.optimizers[0]
@@ -399,19 +381,14 @@ class TestMuseGlimmerDPPipeline(DTensorTestBase):
             vision_parameters = _vision_parameters(model_part)
             assert model_part.tok_embeddings is not None
             text_parameter = model_part.tok_embeddings.embedding.weight
-            self.assertEqual(
-                tracked_parameter.to_local(), empty_vision_parameter_before
+            self.assertFalse(
+                torch.equal(tracked_parameter.to_local(), empty_vision_parameter_before)
             )
             for parameter in vision_parameters:
-                self.assertIsNone(parameter.grad)
-                vision_step_before = vision_state_before[parameter]["step"]
-                assert isinstance(vision_step_before, torch.Tensor)
+                self.assertIsNotNone(parameter.grad)
                 self.assertEqual(
                     optimizer.state[parameter]["step"].item(),
-                    vision_step_before.item(),
-                )
-                self.assertEqual(
-                    optimizer.state[parameter], vision_state_before[parameter]
+                    vision_steps_before[parameter] + 1,
                 )
             self.assertFalse(
                 torch.equal(text_parameter.to_local(), text_parameter_before)
@@ -420,7 +397,6 @@ class TestMuseGlimmerDPPipeline(DTensorTestBase):
                 optimizer.state[text_parameter]["step"].item(),
                 text_step_before + 1,
             )
-            self.assertFalse(model_part._consume_vision_activity())
 
 
 if __name__ == "__main__":

@@ -8,20 +8,13 @@ import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
-from typing import cast
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import (
-    ConditionalOptimizerGroup,
-    OptimizersContainer,
-    register_conditional_optimizer_groups,
-)
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed import ParallelDims
 
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
@@ -539,78 +532,6 @@ muse_glimmer_configs = {
 }
 
 
-def _register_optimizer_hooks(
-    optimizers: OptimizersContainer,
-    model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
-) -> None:
-    vision_owner: MuseGlimmerModel | None = None
-    for model_part in model_parts:
-        if not isinstance(model_part, MuseGlimmerModel):
-            continue
-
-        vision_modules = (
-            model_part.vision_encoder,
-            model_part.vision_adapter,
-            model_part.vision_projection,
-            model_part.perception_emb_norm,
-        )
-        num_present = sum(module is not None for module in vision_modules)
-        if num_present not in (0, len(vision_modules)):
-            raise ValueError(
-                "Muse Glimmer pipeline stages must own either all vision modules "
-                "or none of them"
-            )
-        if num_present == 0:
-            if (
-                model_part.tok_embeddings is not None
-                and cast(MuseGlimmerModel.Config, model_part.config).vision_encoder
-                is not None
-            ):
-                raise ValueError(
-                    "The Muse Glimmer token embedding stage must own all vision "
-                    "modules"
-                )
-            continue
-        if model_part.tok_embeddings is None:
-            raise ValueError(
-                "Muse Glimmer vision modules must be colocated with token embeddings"
-            )
-        if vision_owner is not None:
-            raise ValueError(
-                "Muse Glimmer vision modules must be owned by exactly one local "
-                "pipeline stage"
-            )
-        vision_owner = model_part
-
-    if vision_owner is None:
-        return
-
-    modules = (
-        vision_owner.vision_encoder,
-        vision_owner.vision_adapter,
-        vision_owner.vision_projection,
-        vision_owner.perception_emb_norm,
-    )
-    vision_parameters = tuple(
-        parameter
-        for module in modules
-        if module is not None
-        for parameter in module.parameters()
-    )
-    register_conditional_optimizer_groups(
-        optimizers,
-        [
-            ConditionalOptimizerGroup(
-                name="vision",
-                parameters=vision_parameters,
-                consume_activity=vision_owner._consume_vision_activity,
-            )
-        ],
-        parallel_dims,
-    )
-
-
 def model_registry(
     flavor: str,
     *,
@@ -645,8 +566,6 @@ def model_registry(
                 "perception_emb_norm",
             ),
         ),
-        post_optimizer_build_fn=(
-            _register_optimizer_hooks if config.vision_encoder is not None else None
-        ),
+        post_optimizer_build_fn=None,
         state_dict_adapter=MuseGlimmerStateDictAdapter,
     )

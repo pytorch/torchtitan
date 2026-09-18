@@ -356,12 +356,6 @@ class MuseGlimmerModel(Decoder):
         self.vision_adapter = (
             config.vision_adapter.build() if config.vision_adapter is not None else None
         )
-        self._vision_active_this_step = False
-
-    def _consume_vision_activity(self) -> bool:
-        was_active = self._vision_active_this_step
-        self._vision_active_this_step = False
-        return was_active
 
     def preprocess_inputs(
         self,
@@ -377,8 +371,6 @@ class MuseGlimmerModel(Decoder):
 
         batch: dict[str, Any] = dict(input_dict)
         pixel_values = batch.get("pixel_values")
-        if self.training and pixel_values is not None:
-            self._vision_active_this_step = True
         grid_thw = batch.get("grid_thw")
         pixel_values_videos = batch.get("pixel_values_videos")
         grid_thw_videos = batch.get("grid_thw_videos")
