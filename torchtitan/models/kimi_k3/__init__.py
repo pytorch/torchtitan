@@ -77,6 +77,9 @@ _LINEAR_INIT = {
 }
 _CONV_INIT = {"weight": partial(nn.init.trunc_normal_, std=0.02)}
 _NORM_INIT = {"weight": nn.init.ones_}
+# Zero init makes the initial depth weights uniform, which the report requires
+# for training stability.
+_RES_PROJ_INIT = {"weight": nn.init.zeros_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 _POS_EMBED_INIT = {"pos_embed": partial(nn.init.normal_, std=1.0)}
 
@@ -462,9 +465,13 @@ def _kimi_k3_config(
                 attention_norm=_norm(dim),
                 ffn_norm=_norm(dim),
                 attention_res_norm=None if layer_idx == 0 else _norm(dim),
-                attention_res_proj=None if layer_idx == 0 else _linear(dim, 1),
+                attention_res_proj=(
+                    None
+                    if layer_idx == 0
+                    else _linear(dim, 1, param_init=_RES_PROJ_INIT)
+                ),
                 ffn_res_norm=_norm(dim),
-                ffn_res_proj=_linear(dim, 1),
+                ffn_res_proj=_linear(dim, 1, param_init=_RES_PROJ_INIT),
             )
         )
 
@@ -484,7 +491,7 @@ def _kimi_k3_config(
             param_init=_output_linear_init(dim),
         ),
         output_res_norm=_norm(dim),
-        output_res_proj=_linear(dim, 1),
+        output_res_proj=_linear(dim, 1, param_init=_RES_PROJ_INIT),
         vision_encoder=vision_encoder,
     )
 

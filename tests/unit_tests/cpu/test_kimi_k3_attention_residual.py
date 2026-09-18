@@ -100,7 +100,55 @@ class TestKimiK3AttentionResidual(unittest.TestCase):
             types.SimpleNamespace(weight=projection),
             types.SimpleNamespace(weight=norm_weight, eps=EPS),
         )
-        torch.testing.assert_close(actual.float(), expected.float(), rtol=2e-3, atol=2e-3)
+        torch.testing.assert_close(
+            actual.float(), expected.float(), rtol=2e-3, atol=2e-3
+        )
+
+    def test_zero_projection_gives_uniform_depth_weights(self):
+        # Zero initialisation makes the initial depth weights uniform, so the
+        # aggregation returns the mean of its sources exactly.
+        generator = torch.Generator().manual_seed(0)
+        prefix = torch.randn(TOKENS, DIM, generator=generator)
+        stack = torch.randn(TOKENS, BLOCKS, DIM, generator=generator)
+        actual = _apply_attention_residual(
+            prefix,
+            stack,
+            types.SimpleNamespace(weight=torch.zeros(1, DIM)),
+            types.SimpleNamespace(weight=torch.ones(DIM), eps=EPS),
+        )
+        expected = torch.cat((stack, prefix.unsqueeze(1)), dim=1).mean(dim=1)
+        torch.testing.assert_close(actual, expected)
+
+    def test_zero_projection_moves_the_projection_but_not_the_norm(self):
+        # The norm weight reaches the loss only through its product with the
+        # projection, so at zero initialisation it has no gradient. It gains one
+        # as soon as the projection leaves zero.
+        generator = torch.Generator().manual_seed(0)
+        prefix = torch.randn(TOKENS, DIM, generator=generator)
+        stack = torch.randn(TOKENS, BLOCKS, DIM, generator=generator)
+        projection = torch.zeros(1, DIM, requires_grad=True)
+        norm_weight = torch.ones(DIM, requires_grad=True)
+        output = _apply_attention_residual(
+            prefix,
+            stack,
+            types.SimpleNamespace(weight=projection),
+            types.SimpleNamespace(weight=norm_weight, eps=EPS),
+        )
+        output.backward(torch.randn(TOKENS, DIM, generator=generator))
+        self.assertGreater(projection.grad.abs().max().item(), 0.0)
+        self.assertEqual(norm_weight.grad.abs().max().item(), 0.0)
+
+    def test_residual_projections_are_zero_initialised(self):
+        from torchtitan.models.kimi_k3 import model_registry
+
+        model = model_registry("debugmodel").model
+        self.assertIsNone(model.layers[0].attention_res_proj)
+        for projection in (
+            model.layers[0].ffn_res_proj,
+            model.layers[1].attention_res_proj,
+            model.output_res_proj,
+        ):
+            self.assertIs(projection.param_init["weight"], torch.nn.init.zeros_)
 
     def test_registered_for_spmd_type_checking(self):
         # An autograd Function the checker does not know about raises under the
