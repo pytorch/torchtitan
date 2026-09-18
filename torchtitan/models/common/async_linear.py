@@ -281,23 +281,6 @@ def _tp_group_from_context() -> dist.ProcessGroup | None:
     return tp_group if tp_group.size() > 1 else None
 
 
-def validate_async_tp_preconditions(*, enable_sp: bool) -> None:
-    """Reject configurations the fused modules cannot serve.
-
-    Called from the sharding setup, which is the first point that sees both the
-    selected modules and the parallelism settings. Neither condition is detectable
-    from inside a module at runtime: under spmd_types an activation is a plain
-    local tensor with no placements to inspect.
-    """
-    if not enable_sp:
-        raise ValueError(
-            "Async tensor parallelism requires "
-            "parallelism.enable_sequence_parallel; its fused kernels implement "
-            "an all-gather before column-parallel GEMMs and a reduce-scatter "
-            "after row-parallel GEMMs."
-        )
-
-
 class AsyncColumnParallelLinear(ColumnParallelLinear):
     """Overlap an input all-gather with a column-parallel GEMM."""
 
@@ -353,5 +336,4 @@ __all__ = [
     "AsyncColumnParallelLinear",
     "AsyncLinearReduceScatter",
     "AsyncRowParallelLinear",
-    "validate_async_tp_preconditions",
 ]

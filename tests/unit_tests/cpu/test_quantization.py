@@ -35,23 +35,13 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    compose_parallel_linear_cls,
     Linear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
-from torchtitan.protocols.module import Module
-from torchtitan.quantization import (
-    Float8ColumnParallelLinear,
-    Float8Linear,
-    Float8RowParallelLinear,
-    MXFP8ColumnParallelLinear,
-    MXFP8Linear,
-    MXFP8RowParallelLinear,
-    NVFP4ColumnParallelLinear,
-    NVFP4Linear,
-    NVFP4RowParallelLinear,
-)
+from torchtitan.quantization import Float8Linear, MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
 from torchtitan.quantization.utils import has_quantization
@@ -91,22 +81,24 @@ def test_float8_converter_rejects_router_gate():
 
 
 @pytest.mark.parametrize(
-    ("config_cls", "expected_cls"),
+    ("config_cls", "parallel_cls"),
     [
-        (ColumnParallelLinear.Config, Float8ColumnParallelLinear),
-        (RowParallelLinear.Config, Float8RowParallelLinear),
+        (ColumnParallelLinear.Config, ColumnParallelLinear),
+        (RowParallelLinear.Config, RowParallelLinear),
     ],
 )
-def test_float8_converter_preserves_tensor_parallel_role(config_cls, expected_cls):
+def test_float8_converter_preserves_tensor_parallel_role(config_cls, parallel_cls):
     pytest.importorskip("torchao")
-    if expected_cls is None:
+    if Float8Linear is None:
         pytest.skip("torchao Float8Linear is unavailable")
     converter = Float8LinearConverter(
         Float8LinearConverter.Config(emulate=True, model_compile_enabled=False)
     )
     converted = converter.convert(config_cls(in_features=16, out_features=16))
 
-    assert isinstance(converted, expected_cls.Config)
+    assert converted._owner is not None
+    assert issubclass(converted._owner, Float8Linear)
+    assert issubclass(converted._owner, parallel_cls)
 
 
 def test_mxfp8_converter_rejects_router_gate(monkeypatch):
@@ -120,16 +112,16 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("config_cls", "expected_cls"),
+    ("config_cls", "parallel_cls"),
     [
-        (ColumnParallelLinear.Config, MXFP8ColumnParallelLinear),
-        (RowParallelLinear.Config, MXFP8RowParallelLinear),
+        (ColumnParallelLinear.Config, ColumnParallelLinear),
+        (RowParallelLinear.Config, RowParallelLinear),
     ],
 )
 def test_mxfp8_converter_preserves_tensor_parallel_role(
-    monkeypatch, config_cls, expected_cls
+    monkeypatch, config_cls, parallel_cls
 ):
-    if expected_cls is None:
+    if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(
@@ -137,7 +129,9 @@ def test_mxfp8_converter_preserves_tensor_parallel_role(
     )
     converted = converter.convert(config_cls(in_features=128, out_features=128))
 
-    assert isinstance(converted, expected_cls.Config)
+    assert converted._owner is not None
+    assert issubclass(converted._owner, MXFP8Linear)
+    assert issubclass(converted._owner, parallel_cls)
 
 
 def test_nvfp4_converter_rejects_router_gate(monkeypatch):
@@ -151,16 +145,16 @@ def test_nvfp4_converter_rejects_router_gate(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("config_cls", "expected_cls"),
+    ("config_cls", "parallel_cls"),
     [
-        (ColumnParallelLinear.Config, NVFP4ColumnParallelLinear),
-        (RowParallelLinear.Config, NVFP4RowParallelLinear),
+        (ColumnParallelLinear.Config, ColumnParallelLinear),
+        (RowParallelLinear.Config, RowParallelLinear),
     ],
 )
 def test_nvfp4_converter_preserves_tensor_parallel_role(
-    monkeypatch, config_cls, expected_cls
+    monkeypatch, config_cls, parallel_cls
 ):
-    if expected_cls is None:
+    if NVFP4Linear is None:
         pytest.skip("torchao NVFP4Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = NVFP4LinearConverter(
@@ -168,7 +162,9 @@ def test_nvfp4_converter_preserves_tensor_parallel_role(
     )
     converted = converter.convert(config_cls(in_features=128, out_features=128))
 
-    assert isinstance(converted, expected_cls.Config)
+    assert converted._owner is not None
+    assert issubclass(converted._owner, NVFP4Linear)
+    assert issubclass(converted._owner, parallel_cls)
 
 
 def test_float8_applied_by_model_registry():
@@ -188,9 +184,7 @@ def test_float8_applied_by_model_registry():
     assert len(converted) > 0
     lora_converted = {
         fqn
-        for fqn, lc, _parent, _attr in model_config.traverse(
-            Module.Config, recurse=True
-        )
+        for fqn, lc, _parent, _attr in model_config.traverse(Linear.Config)
         if hasattr(lc, "rank") and hasattr(lc, "alpha")
     }
     assert lora_converted == {
@@ -364,23 +358,16 @@ def test_nvfp4_build_configures_local_spmd_sharding(sharding_config_factory, inp
     )
 
 
-@pytest.mark.parametrize(
-    "linear_cls",
-    [NVFP4ColumnParallelLinear, NVFP4RowParallelLinear],
-)
-def test_nvfp4_parallel_build_preserves_collective_boundary(linear_cls):
-    if linear_cls is None:
+@pytest.mark.parametrize("parallel_cls", [ColumnParallelLinear, RowParallelLinear])
+def test_nvfp4_parallel_build_preserves_collective_boundary(parallel_cls):
+    if NVFP4Linear is None:
         pytest.skip("torchao NVFP4 training prototype not available")
-    from torchtitan.models.common.decoder_sharding import (
-        colwise_config,
-        dense_sequence_parallel_placement,
-        rowwise_config,
-    )
 
     boundary_layout = dense_sequence_parallel_placement()
+    linear_cls = compose_parallel_linear_cls(NVFP4Linear, parallel_cls)
     sharding_config = (
         colwise_config(input_layout=boundary_layout)
-        if issubclass(linear_cls, ColumnParallelLinear)
+        if parallel_cls is ColumnParallelLinear
         else rowwise_config(output_layout=boundary_layout)
     )
     module = linear_cls.Config(

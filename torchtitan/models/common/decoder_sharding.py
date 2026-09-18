@@ -8,16 +8,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.async_linear import (
-    AsyncColumnParallelLinear,
-    validate_async_tp_preconditions,
-)
 from torchtitan.models.common.attention import GQAttention
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    get_parallel_linear_cls,
-    RowParallelLinear,
-)
 from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
@@ -217,10 +208,6 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     qkv = attention_cfg.qkv_linear.wqkv
-    assert get_parallel_linear_cls(qkv) is ColumnParallelLinear
-    assert get_parallel_linear_cls(attention_cfg.wo) is RowParallelLinear
-    if isinstance(qkv, AsyncColumnParallelLinear.Config):
-        validate_async_tp_preconditions(enable_sp=enable_sp)
 
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x_TD": attn_x_layout},
@@ -275,10 +262,6 @@ def set_dense_ffn_sharding(
     a no-op redistribute when placements already agree.
     """
     w13 = feed_forward_cfg.w13
-    assert get_parallel_linear_cls(w13) is ColumnParallelLinear
-    assert get_parallel_linear_cls(feed_forward_cfg.w2) is RowParallelLinear
-    if isinstance(w13, AsyncColumnParallelLinear.Config):
-        validate_async_tp_preconditions(enable_sp=enable_sp)
 
     feed_forward_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x": attn_x_layout},

@@ -98,15 +98,13 @@ def _set_deepseek_v3_layer_sharding(
     )
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
-    # MLA attention input: x is gathered to Replicate. RoPE is read from the
-    # attention layer's local cache.
+    # Attention.forward explicitly gathers x once for all MLA branches. This
+    # config only declares its external input and output layout contracts.
     attention.sharding_config = ShardingConfig(
         in_src_shardings={
             "x": attn_x_layout,
         },
-        in_dst_shardings={
-            "x": replicated_input_layout,
-        },
+        out_src_shardings=attn_x_layout,
     )
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},

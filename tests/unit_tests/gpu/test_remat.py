@@ -323,19 +323,16 @@ class TestRematRegions(unittest.TestCase):
             gate=_linear_config(4, 4),
         )
 
-        def silu_and_mul(
-            gate: torch.Tensor, up: torch.Tensor, **kwargs
-        ) -> torch.Tensor:
-            del kwargs
+        def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
             return torch.nn.functional.silu(gate) * up
 
         with patch(
             "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
             side_effect=silu_and_mul,
         ):
-            async_config = AsyncTensorParallelTransform().transform(
-                deepcopy(feed_forward_config)
-            )
+            async_config = AsyncTensorParallelTransform(
+                enable_sequence_parallel=True
+            ).transform(deepcopy(feed_forward_config))
             fused_config = deepcopy(feed_forward_config)
             fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)
             fused_async_config = deepcopy(async_config)

@@ -10,7 +10,6 @@ import copy
 import unittest
 from dataclasses import dataclass
 
-import spmd_types as spmd
 import torchtitan.config.transform as transform_api
 from torchtitan.config.transform import (
     apply_transforms,
@@ -22,26 +21,17 @@ from torchtitan.config.transform import (
     ModelConfigTransform,
     transform_model_config_,
 )
-from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import _per_axis_types
-
 from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
-from torchtitan.models.common.attention import (
-    FlexInnerAttention,
-    GQAttention,
-    QKVLinear,
-)
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
-from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
 )
-from torchtitan.protocols.module import Module
 
 
 def _llama3_cp_ready():
@@ -96,19 +86,9 @@ class _Boom(ModelConfigTransform):
         raise ValueError("boom")
 
 
-class _FeedForwardSlots(Module):
+class _ConvertedLinear(ColumnParallelLinear):
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        feed_forward: FeedForward.Config
-        shared_experts: FeedForward.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-
-
-class _ConvertedLinear(Linear):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
+    class Config(ColumnParallelLinear.Config):
         pass
 
 
@@ -284,136 +264,41 @@ class TestContextParallelTransform(unittest.TestCase):
         self.assertTrue(all("lora_a" in name or "lora_b" in name for name in trainable))
 
 
-class TestTensorParallelModules(unittest.TestCase):
+class TestAsyncTensorParallelTransform(unittest.TestCase):
     @staticmethod
-    def _config():
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+    def _model_config():
+        from torchtitan.models.llama3 import model_registry
 
-        config = llama3_debugmodel()
-        config.parallelism.tensor_parallel_degree = 2
-        return config
+        return model_registry("debugmodel").model
 
-    def test_common_attention_and_feed_forward_use_sync_tp_projections(self):
-        config = self._config()
+    def test_replaces_all_parallel_linear_roles(self):
+        model = AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
+            self._model_config()
+        )
 
-        for layer in config.model_spec.model.layers:
-            self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
+        for layer in model.layers:
             self.assertIsInstance(
-                layer.attention.qkv_linear.wqkv, ColumnParallelLinear.Config
+                layer.attention.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
             )
-            self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
-            self.assertIsInstance(layer.feed_forward.w13, ColumnParallelLinear.Config)
-            self.assertIsInstance(layer.feed_forward.w2, RowParallelLinear.Config)
-            self.assertIsNone(layer.feed_forward.w13.sharding_config)
-            self.assertIsNone(layer.feed_forward.w2.sharding_config)
+            self.assertIsInstance(layer.attention.wo, AsyncRowParallelLinear.Config)
+            self.assertIsInstance(
+                layer.feed_forward.w13, AsyncColumnParallelLinear.Config
+            )
+            self.assertIsInstance(layer.feed_forward.w2, AsyncRowParallelLinear.Config)
 
-    def test_shared_expert_uses_projection_owned_boundaries(self):
-        from torchtitan.models.common.config_utils import make_ffn_config
+    def test_sequence_parallel_disabled_keeps_sync_roles(self):
+        with self.assertLogs(
+            "torchtitan.config.transform.async_tensor_parallel", level="WARNING"
+        ):
+            model = AsyncTensorParallelTransform(
+                enable_sequence_parallel=False
+            ).transform(self._model_config())
 
-        shared_experts = make_ffn_config(
-            dim=8,
-            hidden_dim=16,
-            w1_param_init={},
-            w2w3_param_init={},
-        )
-
-        self.assertIsInstance(shared_experts.w13, ColumnParallelLinear.Config)
-        self.assertIsInstance(shared_experts.w2, RowParallelLinear.Config)
-
-    def test_async_replaces_parallel_linears_without_parent_knowledge(self):
-        from torchtitan.models.common.config_utils import make_ffn_config
-
-        source = make_ffn_config(
-            dim=8,
-            hidden_dim=16,
-            w1_param_init={},
-            w2w3_param_init={},
-        )
-        model = _FeedForwardSlots.Config(
-            feed_forward=copy.deepcopy(source),
-            shared_experts=copy.deepcopy(source),
-        )
-
-        transformed = AsyncTensorParallelTransform().transform(model)
-
+        layer = model.layers[0]
         self.assertIsInstance(
-            transformed.shared_experts.w13, AsyncColumnParallelLinear.Config
+            layer.attention.qkv_linear.wqkv, ColumnParallelLinear.Config
         )
-        self.assertIsInstance(
-            transformed.shared_experts.w2, AsyncRowParallelLinear.Config
-        )
-
-    def test_sigmoid_shared_expert_parent_owns_input_gather(self):
-        from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
-        from torchtitan.models.common.moe_sharding import (
-            set_sigmoid_gated_shared_experts_sharding_config,
-        )
-
-        for enable_ep in (False, True):
-            for enable_sp in (False, True):
-                with self.subTest(enable_ep=enable_ep, enable_sp=enable_sp):
-                    shared_experts = SigmoidGatedFeedForward.Config(
-                        w13=Linear.Config(in_features=8, out_features=32),
-                        w2=RowParallelLinear.Config(in_features=16, out_features=8),
-                        gate=Linear.Config(in_features=8, out_features=1),
-                    )
-                    set_sigmoid_gated_shared_experts_sharding_config(
-                        shared_experts,
-                        enable_ep=enable_ep,
-                        enable_sp=enable_sp,
-                    )
-
-                    assert shared_experts.sharding_config is not None
-                    assert shared_experts.sharding_config.in_dst_shardings is not None
-                    assert shared_experts.w13.sharding_config is not None
-                    assert (
-                        shared_experts.w13.sharding_config.in_src_shardings is not None
-                    )
-                    assert shared_experts.gate.sharding_config is not None
-                    assert (
-                        shared_experts.gate.sharding_config.in_src_shardings is not None
-                    )
-                    assert shared_experts.w2.sharding_config is not None
-
-                    parent_input = shared_experts.sharding_config.in_dst_shardings["x"]
-                    self.assertEqual(
-                        shared_experts.w13.sharding_config.in_src_shardings["input"],
-                        parent_input,
-                    )
-                    self.assertEqual(
-                        shared_experts.gate.sharding_config.in_src_shardings["input"],
-                        parent_input,
-                    )
-                    self.assertEqual(
-                        shared_experts.w2.sharding_config.out_src_shardings,
-                        shared_experts.sharding_config.out_src_shardings,
-                    )
-
-    def test_shared_expert_sharding_uses_projection_boundaries(self):
-        from torchtitan.models.common.moe_sharding import set_moe_sharding_config
-        from torchtitan.models.deepseek_v3 import model_registry
-
-        model = model_registry("debugmodel", seq_len=128).model
-        moe = next(layer.moe for layer in model.layers if layer.moe is not None)
-        assert moe.shared_experts is not None
-
-        set_moe_sharding_config(
-            moe,
-            enable_ep=True,
-            enable_sp=True,
-            expert_param_layout={},
-        )
-        self.assertIsNone(moe.shared_experts.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(moe.shared_experts.w13.sharding_config.in_src_shardings)
-        self.assertIsNone(moe.shared_experts.w13.sharding_config.in_dst_shardings)
-        self.assertIsNone(moe.shared_experts.w2.sharding_config.out_dst_shardings)
-
-    def test_root_attention_uses_sync_tp_projections(self):
-        config = copy.deepcopy(self._config().model_spec.model.layers[0].attention)
-
-        self.assertIs(type(config), GQAttention.Config)
-        self.assertIsInstance(config.qkv_linear.wqkv, ColumnParallelLinear.Config)
-        self.assertIsInstance(config.wo, RowParallelLinear.Config)
+        self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
 
     def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
         from torchtitan.models.muse_glimmer import muse_glimmer_configs
@@ -426,14 +311,16 @@ class TestTensorParallelModules(unittest.TestCase):
         self.assertIs(type(attention.o_gate), Linear.Config)
         self.assertIsInstance(attention.wo, RowParallelLinear.Config)
 
-        transformed = AsyncTensorParallelTransform().transform(model)
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(model)
         attention = transformed.layers[0].attention
         self.assertIs(type(attention.qkv_linear.wqkv), Linear.Config)
         self.assertIs(type(attention.o_gate), Linear.Config)
         self.assertIsInstance(attention.wo, AsyncRowParallelLinear.Config)
 
     def test_async_transform_rejects_converted_projection(self):
-        config = copy.deepcopy(self._config().model_spec.model.layers[0].feed_forward)
+        config = copy.deepcopy(self._model_config().layers[0].feed_forward)
         config.w13 = _ConvertedLinear.Config(
             in_features=config.w13.in_features,
             out_features=config.w13.out_features,
@@ -441,73 +328,21 @@ class TestTensorParallelModules(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "converted w13 projections"):
-            AsyncTensorParallelTransform().transform(config)
+            AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
+                config
+            )
 
     def test_async_transform_conflicts_with_lora(self):
-        config = self._config().model_spec.model
+        config = self._model_config()
 
         with self.assertRaisesRegex(ValueError, "cannot be combined"):
             transform_model_config_(
                 config,
                 [
-                    AsyncTensorParallelTransform(),
+                    AsyncTensorParallelTransform(enable_sequence_parallel=True),
                     LoRATransform(handlers=(LinearLoRAHandler(),)),
                 ],
             )
-
-    def test_sharding_leaves_collectives_to_transformed_feed_forward(self):
-        from torchtitan.models.llama3.sharding import set_llama3_sharding_config
-
-        config = self._config()
-        model = config.model_spec.model
-        set_llama3_sharding_config(model, enable_sp=True)
-        feed_forward = model.layers[0].feed_forward
-        assert feed_forward.sharding_config is not None
-        assert feed_forward.w13.sharding_config is not None
-        assert feed_forward.w2.sharding_config is not None
-
-        self.assertIsNone(feed_forward.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(feed_forward.sharding_config.out_src_shardings)
-        self.assertIsNone(feed_forward.w13.sharding_config.in_dst_shardings)
-        self.assertIsNotNone(feed_forward.w2.sharding_config.out_src_shardings)
-        self.assertIsNone(feed_forward.w2.sharding_config.out_dst_shardings)
-        self.assertEqual(
-            _per_axis_types(feed_forward.w13.sharding_config.in_src_shardings["input"])[
-                MeshAxisName.TP
-            ],
-            spmd.S(0),
-        )
-        self.assertEqual(
-            _per_axis_types(feed_forward.w2.sharding_config.out_src_shardings)[
-                MeshAxisName.TP
-            ],
-            spmd.S(0),
-        )
-
-    def test_sharding_sets_no_sequence_parallel_contract(self):
-        from torchtitan.models.llama3.sharding import set_llama3_sharding_config
-
-        config = self._config()
-        model = config.model_spec.model
-        set_llama3_sharding_config(model, enable_sp=False)
-
-        feed_forward = model.layers[0].feed_forward
-        assert feed_forward.w13.sharding_config is not None
-        assert feed_forward.w2.sharding_config is not None
-        self.assertIsNone(feed_forward.w13.sharding_config.in_dst_shardings)
-        self.assertIsNone(feed_forward.w2.sharding_config.out_dst_shardings)
-        self.assertEqual(
-            _per_axis_types(feed_forward.w13.sharding_config.in_src_shardings["input"])[
-                MeshAxisName.TP
-            ],
-            spmd.I,
-        )
-        self.assertEqual(
-            _per_axis_types(feed_forward.w2.sharding_config.out_src_shardings)[
-                MeshAxisName.TP
-            ],
-            spmd.I,
-        )
 
 
 if __name__ == "__main__":

@@ -32,10 +32,11 @@ for all four parallelism configurations (EP on/off × SP on/off).
 - **Router gate**: weights `Replicate`, output stays DTensor.
 - **Shared experts** (w13/w2): dense-family TP plan. The standard w13 is a
   `ColumnParallelLinear` that owns its input redistribution, and w2 is a
-  `RowParallelLinear` that owns its output reduction. The output stays
-  `Partial` so reduction happens once at the MoE boundary. A model with
-  multiple projections consuming the same input may instead gather once at
-  its shared-expert boundary; Qwen3.5 uses this for w13 and its sigmoid gate.
+  `RowParallelLinear` that owns its output redistribution. Without SP, the
+  output stays `Partial` so reduction happens once at the MoE boundary. A
+  model with multiple projections consuming the same input may instead gather
+  once at its shared-expert boundary; Qwen3.5 uses this for w13 and its sigmoid
+  gate.
 - **Routed experts** (`RoutedExperts`): the local SPMD region runs
   dispatch/compute/combine on local tensors while checking its input and
   output layout contracts. The expert-weight `state_shardings` live on its

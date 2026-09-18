@@ -40,8 +40,7 @@ from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
-    set_moe_sharding_config,
-    set_sigmoid_gated_shared_experts_sharding_config,
+    set_routed_moe_sharding_config,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
@@ -201,21 +200,68 @@ def _set_qwen35_layer_sharding(
         moe_cfg = layer_cfg.moe
         assert isinstance(moe_cfg, MoE.Config)
         set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
-        set_moe_sharding_config(
+        shared_experts = moe_cfg.shared_experts
+        set_routed_moe_sharding_config(
             moe_cfg,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
-            configure_shared_experts=False,
         )
-        shared_experts = moe_cfg.shared_experts
         if shared_experts is not None:
             assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
-            set_sigmoid_gated_shared_experts_sharding_config(
+            _set_qwen35_shared_experts_sharding_config(
                 shared_experts,
                 enable_ep=enable_ep,
                 enable_sp=enable_sp,
             )
+
+
+def _set_qwen35_shared_experts_sharding_config(
+    shared_experts: SigmoidGatedFeedForward.Config,
+    *,
+    enable_ep: bool,
+    enable_sp: bool,
+) -> None:
+    """Gather once for Qwen's shared w13 projection and sigmoid gate."""
+    input_layout = (
+        dense_sequence_parallel_placement()
+        if enable_ep and enable_sp
+        else dense_activation_placement(
+            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
+        )
+    )
+    output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
+    )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    shared_experts.sharding_config = ShardingConfig(
+        in_src_shardings={"x": input_layout},
+        in_dst_shardings={"x": replicated_input_layout},
+        out_src_shardings=output_layout,
+    )
+    shared_experts.w13.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    shared_experts.w2.sharding_config = rowwise_config(output_layout=output_layout)
+    assert shared_experts.w2.sharding_config.state_shardings is not None
+    shared_experts.w2.sharding_config.state_shardings["bias"] = dense_param_placement(
+        tp=spmd.R
+    )
+
+    gate_output_layout = (
+        dense_sequence_parallel_placement() if enable_sp else replicated_input_layout
+    )
+    shared_experts.gate.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R),
+            "bias": dense_param_placement(tp=spmd.R),
+        },
+        in_src_shardings={"input": replicated_input_layout},
+        out_src_shardings=replicated_input_layout,
+        out_dst_shardings=gate_output_layout,
+    )
 
 
 def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:

@@ -26,13 +26,7 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    compose_parallel_linear_cls,
-    get_parallel_linear_cls,
-    Linear,
-    RowParallelLinear,
-)
+from torchtitan.models.common.linear import get_parallel_linear_cls, Linear
 from torchtitan.protocols.module import Module
 
 
@@ -254,15 +248,8 @@ try:
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return self._linear(input)
 
-    NVFP4ColumnParallelLinear = compose_parallel_linear_cls(
-        NVFP4Linear, ColumnParallelLinear
-    )
-    NVFP4RowParallelLinear = compose_parallel_linear_cls(NVFP4Linear, RowParallelLinear)
-
 except ImportError:
     NVFP4Linear = None
-    NVFP4ColumnParallelLinear = None
-    NVFP4RowParallelLinear = None
 
 
 def nvfp4_bf16_tail_fqns(num_layers: int, bf16_tail_fraction: float) -> list[str]:

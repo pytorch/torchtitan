@@ -6,6 +6,7 @@
 
 """Asynchronous tensor-parallel model transform."""
 
+import logging
 from dataclasses import dataclass
 from typing import cast
 
@@ -26,12 +27,23 @@ from .lora import LoRATransform
 
 __all__ = ["AsyncTensorParallelTransform"]
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(kw_only=True, slots=True)
 class AsyncTensorParallelTransform(ModelConfigTransform):
     """Replace synchronous tensor-parallel projections with async versions."""
 
+    enable_sequence_parallel: bool
+
     def transform(self, model: Module.Config) -> Module.Config:
+        if not self.enable_sequence_parallel:
+            logger.warning(
+                "Async tensor parallelism requires sequence parallelism; "
+                "leaving synchronous tensor-parallel projections unchanged."
+            )
+            return model
+
         for fqn, config, parent, attr in list(model.traverse(Linear.Config)):
             parallel_cls = get_parallel_linear_cls(config)
             if parallel_cls is None:

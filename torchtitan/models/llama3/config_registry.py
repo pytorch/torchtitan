@@ -126,7 +126,11 @@ def llama3_debugmodel_dist_gemm(
     config = llama3_debugmodel(seq_len=seq_len)
     config = apply_transforms(
         config,
-        [AsyncTensorParallelTransform()],
+        [
+            AsyncTensorParallelTransform(
+                enable_sequence_parallel=config.parallelism.enable_sequence_parallel
+            )
+        ],
     )
     return config
 

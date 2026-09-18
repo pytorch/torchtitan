@@ -26,12 +26,7 @@ from torchao.prototype.mx_formats.kernels import (
     triton_mx_block_rearrange,
 )
 
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    compose_parallel_linear_cls,
-    Linear,
-    RowParallelLinear,
-)
+from torchtitan.models.common.linear import Linear
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
@@ -43,9 +38,7 @@ from .tensor import (
 
 __all__ = [
     "InputActivationFormatForBackward",
-    "MXFP8ColumnParallelLinear",
     "MXFP8Linear",
-    "MXFP8RowParallelLinear",
 ]
 
 # Activation and gradient quantization takes a scaling mode; the 32x32 weight
@@ -401,9 +394,3 @@ class MXFP8Linear(Linear):
             self.bias,
             self.input_activation_format_for_backward,
         )
-
-
-MXFP8ColumnParallelLinear = compose_parallel_linear_cls(
-    MXFP8Linear, ColumnParallelLinear
-)
-MXFP8RowParallelLinear = compose_parallel_linear_cls(MXFP8Linear, RowParallelLinear)

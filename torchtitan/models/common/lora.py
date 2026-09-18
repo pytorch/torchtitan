@@ -13,7 +13,6 @@ Shape suffixes: ``X`` arbitrary leading dimensions, ``I`` input features,
 import functools
 import math
 from dataclasses import dataclass
-from typing import Any
 
 import spmd_types as spmd
 
@@ -21,45 +20,29 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    compose_parallel_linear_cls,
-    Linear,
-    RowParallelLinear,
-)
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 
-__all__ = [
-    "LoRAColumnParallelLinear",
-    "LoRALinear",
-    "LoRARowParallelLinear",
-    "specialize_lora_linear",
-]
+__all__ = ["specialize_lora_linear"]
 
 
-class LoRALinear(Linear):
-    """Linear with a LoRA update on its local computation."""
+class _LoRALinearMixin:
+    """Add a LoRA update to a Linear's local computation."""
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        rank: int
-        alpha: float
+    _lora_scaling: float
+    lora_a: Linear
+    lora_b: Linear
 
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
-        self._init_adapters(self, config)
-
-    @staticmethod
-    def _init_adapters(module, config: Any) -> None:
-        """Freeze the base projection and construct its trainable adapters."""
-        for param in nn.Module.parameters(module):
+    def __init__(self, config) -> None:
+        super().__init__(config)  # type: ignore[misc]
+        for param in nn.Module.parameters(self):  # type: ignore[arg-type]
             param.requires_grad_(False)
-        module._lora_scaling = config.alpha / config.rank
-        lora_a_sharding, lora_b_sharding = LoRALinear._adapter_sharding(
+        self._lora_scaling = config.alpha / config.rank
+        lora_a_sharding, lora_b_sharding = self._adapter_sharding(
             config.sharding_config
         )
-        module.lora_a = Linear.Config(
+        self.lora_a = Linear.Config(
             in_features=config.in_features,
             out_features=config.rank,
             bias=False,
@@ -68,7 +51,7 @@ class LoRALinear(Linear):
                 "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
             },
         ).build()
-        module.lora_b = Linear.Config(
+        self.lora_b = Linear.Config(
             in_features=config.rank,
             out_features=config.out_features,
             bias=False,
@@ -77,17 +60,9 @@ class LoRALinear(Linear):
         ).build()
 
     def _linear(self, input: torch.Tensor) -> torch.Tensor:
-        """Apply the base projection and add the LoRA adapter output."""
-        base_out_XO = super()._linear(input)
-        return self._add_adapter_output(self, input, base_out_XO)
-
-    @staticmethod
-    def _add_adapter_output(
-        module, input: torch.Tensor, base_out_XO: torch.Tensor
-    ) -> torch.Tensor:
-        """Add the adapter update to an already-computed base projection."""
-        lora_out_XO = module.lora_b(module.lora_a(input))
-        return base_out_XO + module._lora_scaling * lora_out_XO
+        base_out_XO = super()._linear(input)  # type: ignore[misc]
+        lora_out_XO = self.lora_b(self.lora_a(input))
+        return base_out_XO + self._lora_scaling * lora_out_XO
 
     @staticmethod
     def _adapter_sharding(
@@ -118,36 +93,15 @@ class LoRALinear(Linear):
 
 @functools.cache
 def specialize_lora_linear(parent_cls: type[Module]) -> type[Module]:
-    """Add LoRA local compute without changing a Linear's TP role."""
-    if parent_cls is Linear:
-        return LoRALinear
-
-    if parent_cls in (ColumnParallelLinear, RowParallelLinear):
-        return compose_parallel_linear_cls(LoRALinear, parent_cls)
-
-    # Quantization runs before LoRA and may add fields to the parent config.
-    # Retain that exact implementation while inserting the adapter into its
-    # local compute.
+    """Create a cached LoRA specialization of a linear module class."""
     parent_config_cls = parent_cls.Config
 
-    class SpecializedLoRALinear(parent_cls):  # type: ignore[misc, valid-type]
+    class LoRALinear(_LoRALinearMixin, parent_cls):  # type: ignore[misc, valid-type]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             rank: int
             alpha: float
 
-        def __init__(self, config: Config):
-            parent_cls.__init__(self, config)
-            LoRALinear._init_adapters(self, config)
-
-        def _linear(self, input: torch.Tensor) -> torch.Tensor:
-            base_out_XO = parent_cls._linear(self, input)  # type: ignore[attr-defined]
-            return LoRALinear._add_adapter_output(self, input, base_out_XO)
-
-    SpecializedLoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
-    SpecializedLoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
-    return SpecializedLoRALinear
-
-
-LoRAColumnParallelLinear = compose_parallel_linear_cls(LoRALinear, ColumnParallelLinear)
-LoRARowParallelLinear = compose_parallel_linear_cls(LoRALinear, RowParallelLinear)
+    LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
+    LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
+    return LoRALinear

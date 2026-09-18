@@ -26,7 +26,14 @@ GEMMs, select the asynchronous implementations with a transform:
 
 ```python
 config.parallelism.tensor_parallel_degree = 8
-config = apply_transforms(config, [AsyncTensorParallelTransform()])
+config = apply_transforms(
+    config,
+    [
+        AsyncTensorParallelTransform(
+            enable_sequence_parallel=config.parallelism.enable_sequence_parallel
+        )
+    ],
+)
 ```
 
 Without a TP mesh, the synchronous projection classes behave as ordinary

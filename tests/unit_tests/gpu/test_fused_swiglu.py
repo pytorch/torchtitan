@@ -168,7 +168,9 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
     """
 
     def test_dist_gemm_config_keeps_overlap(self):
-        config = AsyncTensorParallelTransform().transform(_dist_gemm_ffn_config())
+        config = AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
+            _dist_gemm_ffn_config()
+        )
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
         self.assertIsInstance(fused.w13, AsyncColumnParallelLinear)
@@ -176,7 +178,9 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         self.assertIsInstance(fused.activation_fn, FusedSwiGLU)
 
     def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
-        config = AsyncTensorParallelTransform().transform(_dist_gemm_ffn_config())
+        config = AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
+            _dist_gemm_ffn_config()
+        )
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
         with torch.no_grad():
@@ -184,9 +188,9 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
         state_dict = fused.state_dict()
         self.assertEqual(set(state_dict), {"w1.weight", "w2.weight", "w3.weight"})
 
-        reload_config = AsyncTensorParallelTransform().transform(
-            _dist_gemm_ffn_config()
-        )
+        reload_config = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(_dist_gemm_ffn_config())
         reload_config.activation_fn = fused_swiglu(reload_config.activation_fn)
         reloaded = reload_config.build()
         reloaded.load_state_dict(state_dict)

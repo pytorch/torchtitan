@@ -8,12 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    compose_parallel_linear_cls,
-    Linear,
-    RowParallelLinear,
-)
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 
@@ -48,17 +43,8 @@ try:
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             return self._linear(input)
 
-    Float8ColumnParallelLinear = compose_parallel_linear_cls(
-        Float8Linear, ColumnParallelLinear
-    )
-    Float8RowParallelLinear = compose_parallel_linear_cls(
-        Float8Linear, RowParallelLinear
-    )
-
 except ImportError:
     Float8Linear = None
-    Float8ColumnParallelLinear = None
-    Float8RowParallelLinear = None
 
 
 _float8_experts_cache: dict[type, type] = {}

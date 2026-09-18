@@ -85,6 +85,9 @@ class CastLinear(Linear):
         )
 
 
+# TODO: Expose a public API for querying a module boundary's per-axis SPMD
+# types. User-defined parallel modules should not need to access the private
+# ``Module._sharding_config`` and ``spmd_types._per_axis_types`` APIs used here.
 def _tp_type(layout) -> spmd.PerMeshAxisSpmdType:
     """Return the TP-axis type from a boundary layout."""
     tp_type = _per_axis_types(layout).get(MeshAxisName.TP)
@@ -97,10 +100,9 @@ class ColumnParallelLinear(Linear):
 
     This is a ``Linear`` rather than a wrapper around one, so its parameter
     FQNs remain unchanged. The same module handles both tensor-parallel modes.
-    With sequence
-    parallelism, ``Shard(0) -> Replicate`` is an input all-gather. Without
-    sequence parallelism, ``Invariant -> Replicate`` is a forward no-op whose
-    backward performs the required all-reduce.
+    With sequence parallelism, ``Shard(0) -> Replicate`` is an input all-gather.
+    Without sequence parallelism, ``Invariant -> Replicate`` is a forward no-op
+    whose backward performs the required all-reduce.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -128,7 +130,7 @@ class RowParallelLinear(Linear):
     """Reduce the partial output of an independently configured Linear.
 
     This is a ``Linear`` rather than a wrapper around one, so its parameter
-    FQNs remain unchanged. ``Partial -> Shard(0)`` is a reduce-scatter with
+    FQNs remain unchanged. ``Partial -> Shard(0)`` is a reduce-scatter, while
     ``Partial -> Invariant`` is an all-reduce without it. The output layout
     in this module's sharding config selects between the two.
     """
@@ -190,6 +192,8 @@ def compose_parallel_linear_cls(
         class Config(compute_config_cls):  # type: ignore[misc]
             pass
 
+        # Some quantized implementations inherit nn.Linear directly rather
+        # than TorchTitan's Linear, whose methods otherwise win MRO lookup.
         def __init__(self, config: Config):
             compute_cls.__init__(self, config)
 

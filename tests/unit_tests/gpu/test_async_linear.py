@@ -9,8 +9,8 @@
 Three layers, cheapest first. If you are adding a new fused module, this file is
 the template:
 
-1. ``TestAsyncTensorParallelConfig`` -- no devices. Does the model transform
-   select the async configs and preserve their shapes?
+1. ``TestAsyncTensorParallelConfig`` -- no devices. Do synchronous and async
+   projections share communication contracts, including after LoRA conversion?
 2. ``TestAsyncTensorParallelSharding`` -- a 2-rank gloo mesh. Do those contracts
    survive a real ``parallelize``? Still no CUDA: nothing here runs the fused ops.
 3. Numerics for the underlying primitives live in ``test_distributed_linear.py`` (2
@@ -49,11 +49,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_attention_sharding,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    Linear,
-    RowParallelLinear,
-)
+from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
@@ -68,68 +64,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
         return model_registry("debugmodel").model
 
-    def test_default_uses_sync_tp_projections(self):
-        for layer in self._model_config().layers:
-            self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
-            self.assertIsInstance(
-                layer.attention.qkv_linear.wqkv, ColumnParallelLinear.Config
-            )
-            self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
-            self.assertIsInstance(layer.feed_forward.w13, ColumnParallelLinear.Config)
-            self.assertIsInstance(layer.feed_forward.w2, RowParallelLinear.Config)
-
-    def test_transform_selects_async_linears(self):
-        model = transform_model_config_(
-            self._model_config(),
-            [AsyncTensorParallelTransform()],
-        )
-        for layer in model.layers:
-            self.assertIs(type(layer.attention.qkv_linear), QKVLinear.Config)
-            self.assertIsInstance(
-                layer.attention.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
-            )
-            self.assertIsInstance(layer.attention.wo, AsyncRowParallelLinear.Config)
-            self.assertIsInstance(
-                layer.feed_forward.w13, AsyncColumnParallelLinear.Config
-            )
-            self.assertIsInstance(layer.feed_forward.w2, AsyncRowParallelLinear.Config)
-
-    def test_stock_parameter_shapes_survive(self):
-        """Fused modules keep the stock layouts, or checkpoints stop loading."""
-        stock = self._model_config().layers[0].attention
-        async_model = transform_model_config_(
-            self._model_config(),
-            [AsyncTensorParallelTransform()],
-        )
-        fused = async_model.layers[0].attention
-        self.assertEqual(
-            fused.qkv_linear.wqkv.in_features,
-            stock.qkv_linear.wqkv.in_features,
-        )
-        self.assertEqual(
-            fused.qkv_linear.wqkv.out_features,
-            stock.qkv_linear.wqkv.out_features,
-        )
-        self.assertEqual(fused.wo.in_features, stock.wo.in_features)
-        self.assertEqual(fused.wo.out_features, stock.wo.out_features)
-
-    def test_sequence_parallel_disabled_is_rejected(self):
-        """The fused GEMMs *are* the SP collectives, so SP off has nothing to fuse
-        and wo would reduce-scatter where it must all-reduce."""
-        model = transform_model_config_(
-            self._model_config(),
-            [AsyncTensorParallelTransform()],
-        )
-        attn = model.layers[0].attention
-        with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
-            set_gqa_attention_sharding(attn, enable_sp=False)
-
     def test_sharding_setup_declares_common_communication_contracts(self):
         """Async attention and FFN implementations own their collectives."""
         stock_layer = self._model_config().layers[0]
         async_model = transform_model_config_(
             self._model_config(),
-            [AsyncTensorParallelTransform()],
+            [AsyncTensorParallelTransform(enable_sequence_parallel=True)],
         )
         async_layer = async_model.layers[0]
         set_gqa_attention_sharding(stock_layer.attention, enable_sp=True)
@@ -192,18 +132,6 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         )
         self.assertIsNone(layer.feed_forward.sharding_config.in_dst_shardings)
         self.assertIsNone(layer.feed_forward.w13.sharding_config.in_dst_shardings)
-
-    def test_qkv_converter_is_rejected(self):
-        """Async QKV does not support a converter-defined projection."""
-        model = self._model_config()
-        qkv = model.layers[0].attention.qkv_linear
-        qkv.wqkv = LoRATransform(
-            handlers=(LinearLoRAHandler(),),
-            rank=2,
-            alpha=4,
-        ).transform(qkv.wqkv)
-        with self.assertRaisesRegex(ValueError, "converted .*wqkv projections"):
-            transform_model_config_(model, [AsyncTensorParallelTransform()])
 
 
 class TestAsyncTensorParallelSharding(DTensorTestBase):
@@ -380,7 +308,9 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
             w1_param_init=init,
             w2w3_param_init=init,
         )
-        async_config = AsyncTensorParallelTransform().transform(base_async_config)
+        async_config = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(base_async_config)
         dist_gemm = async_config.build().to(dev)
 
         with torch.no_grad():
@@ -449,7 +379,9 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
 
         torch.manual_seed(0)
         native = make().build().to(dev)
-        async_config = AsyncTensorParallelTransform().transform(make())
+        async_config = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(make())
         async_config.activation_fn = fused_swiglu(async_config.activation_fn)
         fused = async_config.build().to(dev)
         self.assertIsInstance(fused, FeedForward)
