@@ -9,6 +9,7 @@ from typing import cast
 
 from torch.distributed.tensor import Shard
 
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import (
