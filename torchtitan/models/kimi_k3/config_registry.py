@@ -6,8 +6,8 @@
 
 from dataclasses import replace
 
-from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer

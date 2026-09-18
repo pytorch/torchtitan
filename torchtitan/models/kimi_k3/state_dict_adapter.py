@@ -8,6 +8,7 @@
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ _UNUSED_HF_LAYER_ZERO_ATTN_RES_KEYS = {
 }
 
 
-def _released_mxfp4_policy(path: str) -> tuple[int, Any]:
+def _released_mxfp4_policy(path: str) -> tuple[int, Callable[[str], bool]]:
     config_path = Path(path) / "config.json"
     if not config_path.is_file():
         raise ValueError(f"Quantized Kimi checkpoint is missing {config_path}.")
