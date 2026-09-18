@@ -33,6 +33,7 @@ applies NUMA binding (``AffinityMode.NODE``) on CUDA hardware at init
 (see ``_maybe_apply_numa_binding`` in torchtitan/trainer.py).
 """
 
+import os
 import operator
 from typing import NamedTuple
 
@@ -607,6 +608,85 @@ def apply_cpu_offload_pass(
 
     gm.graph.lint()
     gm.recompile()
+    # DEBUG (local, env-gated): dump the realized offload set so two trees can
+    # be diffed by node name and size. Remove before committing.
+    if os.environ.get("OFFLOAD_DUMP"):
+        import json as _json
+        _rows = []
+        for _oi in offloadable:
+            _n = _oi.node
+            _v = _n.meta.get("val", None)
+            _sz = 0
+            try:
+                _sz = _v.numel() * _v.element_size()
+            except Exception:
+                pass
+            _rows.append({"name": _n.name,
+                          "target": str(getattr(_n, "target", "")),
+                          "bytes": int(_sz),
+                          "fqn": _n.meta.get("custom", {}).get("module_fqn", "")})
+        # Also record every call_function node carrying a policy tag, with the
+        # eligibility gates, so "ineligible" can be told apart from "eligible
+        # but tagged keep".
+        _all = []
+        _realized = {id(_oi.node) for _oi in offloadable}
+        for _n in gm.graph.nodes:
+            if _n.op != "call_function":
+                continue
+            _v = _n.meta.get("val", None)
+            if not isinstance(_v, torch.Tensor):
+                continue
+            _pol = _n.meta.get("recompute", None)
+            try:
+                _b = _v.numel() * _v.element_size()
+            except Exception:
+                _b = 0
+            if _b < (1 << 20):
+                continue
+            _all.append({
+                "name": _n.name,
+                "target": str(getattr(_n, "target", "")),
+                "bytes": int(_b),
+                "policy": str(_pol),
+                "can_offload": bool(_can_offload_node(_n)),
+                "is_view": bool(_is_view(_n)),
+                "is_coll": bool(_is_collective_or_wait(_n)),
+                "contig": bool(_tensor_is_contiguous(_v)),
+                "realized": id(_n) in _realized,
+            })
+        # For every MUST_CPU_OFFLOAD node, why it was or was not realized:
+        # its users and whether each counts as a backward consumer.
+        _tagged = []
+        for _n in gm.graph.nodes:
+            if _n.meta.get("recompute") is not CheckpointPolicy.MUST_CPU_OFFLOAD:
+                continue
+            _v = _n.meta.get("val", None)
+            try:
+                _b = _v.numel() * _v.element_size()
+            except Exception:
+                _b = 0
+            _du = [u for u in _n.users if _is_backward_node(u)]
+            try:
+                _rv, _vr = _collect_view_replay_info(_n)
+            except Exception:
+                _rv, _vr = [], []
+            _tagged.append({
+                "name": _n.name,
+                "target": str(getattr(_n, "target", "")),
+                "bytes": int(_b),
+                "n_users": len(_n.users),
+                "n_direct_bwd": len(_du),
+                "n_view_redirect": len(_vr),
+                "realized": id(_n) in _realized,
+                "users": [{"name": u.name, "target": str(u.target),
+                           "bwd_meta": bool(u.meta.get("autograd_backward", False)),
+                           "is_bwd_pred": bool(_is_backward_node(u)),
+                           "is_view": bool(_is_view(u))}
+                          for u in list(_n.users)[:6]],
+            })
+        with open(os.environ["OFFLOAD_DUMP"], "w") as _fh:
+            _json.dump({"realized": _rows, "all": _all, "tagged": _tagged}, _fh, indent=1)
+        logger.info("OFFLOAD_DUMP wrote %d rows", len(_rows))
     logger.info(
         f"CPU offload: offloaded {len(offloadable)} tensors "
         f"({total_bytes / 1024 / 1024:.2f} MB), "

@@ -45,7 +45,6 @@ def build_minimal_trainer(
     trainer.loss_fn = CrossEntropyLoss.Config().build()
     trainer.parallel_dims = SimpleNamespace(pp_enabled=False, cp_enabled=False)
     trainer.train_context = get_spmd_context()
-    trainer.fwd_bwd_fn = trainer._forward_backward_body
     trainer.model_config = model_config
     trainer.device = torch.device("cuda")
     trainer.tokenizer = tokenizer
@@ -84,14 +83,15 @@ def build_minimal_trainer(
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-                spmd_backend="partial_dtensor",
+                enable_async_tensor_parallel=False,
+                spmd_backend="default",
             ),
         )
         trainer._fwd_bwd_step_module = None
         trainer._traced_step = None
     else:
         trainer.config = SimpleNamespace(
-            parallelism=SimpleNamespace(spmd_backend="partial_dtensor"),
+            parallelism=SimpleNamespace(spmd_backend="default"),
         )
 
     return trainer

@@ -18,6 +18,7 @@ from torch.utils._pytree import register_constant, register_pytree_node, tree_ma
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
@@ -177,7 +178,8 @@ def accumulate_param_grads_(
 
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
-    return node.meta.get("autograd_backward", False)
+    return node.meta.get("autograd_backward", False) or any(n.meta.get("autograd_backward", False) for n in node.all_input_nodes)
+    #node.meta.get("autograd_backward", False)
 
 
 def _get_module_fqn(node: torch.fx.Node) -> str:
@@ -391,6 +393,19 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     module_to_name = {m: n for n, m in model.named_modules()}
     module_fqns = convert_modules_to_fqns(module_list, module_to_name)
     return module_fqns
+
+
+def apply_cp_to_attention(
+    model: nn.Module,
+    parallel_dims: ParallelDims,
+) -> None:
+    """Wrap each layer's inner attention with CP logic."""
+    attention_modules = [
+        # pyrefly: ignore [missing-attribute]
+        block.attention.inner_attention
+        for block in model.layers.values()
+    ]
+    apply_cp_to_forward(attention_modules, parallel_dims.get_mesh("cp"))
 
 
 def apply_simple_fsdp(
