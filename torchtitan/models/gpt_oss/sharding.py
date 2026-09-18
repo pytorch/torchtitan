@@ -45,7 +45,12 @@ def partial_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
         if output_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    return rowwise_config(output_layout=output_layout)
+    config = rowwise_config(output_layout=output_layout)
+    # The partial-bias matmul must consume the physical input and weight shards.
+    # F.linear also cannot typecheck those varying operands together with a
+    # partial bias. Keep the matmul and explicit reduction in one local region.
+    config.local_spmd = True
+    return config
 
 
 def set_gpt_oss_sharding_config(

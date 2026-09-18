@@ -23,6 +23,11 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_dense_ffn_sharding,
 )
+from torchtitan.models.common.linear import Linear, PartialBiasRowwiseLinear
+from torchtitan.models.common.vision_encoder_sharding import (
+    vision_partial_bias_rowwise_config,
+)
+from torchtitan.models.gpt_oss.sharding import partial_bias_rowwise_config
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
@@ -116,6 +121,67 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     parallel.w2.weight.grad,
                     reference.w2.weight.grad.chunk(self.world_size, 1)[self.rank],
                 )
+
+    @with_comms
+    def test_partial_bias_row_parallel_projection(self):
+        """The local matmul accepts an invariant bias before its TP reduction."""
+        device = self.device_type
+        dim, num_tokens = 64, 16
+
+        for sharding_config in (
+            partial_bias_rowwise_config(output_sp=False),
+            vision_partial_bias_rowwise_config(),
+        ):
+            with self.subTest(sharding_config=sharding_config):
+                reference = (
+                    Linear.Config(
+                        in_features=dim,
+                        out_features=dim,
+                        bias=True,
+                    )
+                    .build()
+                    .to(device)
+                )
+                parallel = (
+                    PartialBiasRowwiseLinear.Config(
+                        in_features=dim,
+                        out_features=dim,
+                        bias=True,
+                        sharding_config=sharding_config,
+                    )
+                    .build()
+                    .to(device)
+                )
+                with torch.no_grad():
+                    assert reference.bias is not None
+                    assert parallel.bias is not None
+                    torch.manual_seed(0)
+                    reference.weight.copy_(torch.randn_like(reference.weight))
+                    reference.bias.copy_(torch.randn_like(reference.bias))
+                    parallel.weight.copy_(reference.weight)
+                    parallel.bias.copy_(reference.bias)
+
+                parallel_dims = ParallelDims(
+                    dp_replicate=1,
+                    dp_shard=1,
+                    cp=1,
+                    tp=self.world_size,
+                    pp=1,
+                    ep=1,
+                    world_size=self.world_size,
+                )
+                with patch("torchtitan.distributed.parallel_dims.device_type", device):
+                    parallel_dims.build_mesh()
+                parallel.parallelize(parallel_dims)
+
+                torch.manual_seed(1)
+                x_TD = torch.randn(num_tokens, dim, device=device)
+                expected = reference(x_TD)
+                x_local_TD = x_TD.chunk(self.world_size, -1)[self.rank].contiguous()
+                with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+                    actual = parallel(x_local_TD)
+
+                torch.testing.assert_close(actual, expected)
 
 
 if __name__ == "__main__":

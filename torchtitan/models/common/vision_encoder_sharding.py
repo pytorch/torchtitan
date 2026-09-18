@@ -152,6 +152,10 @@ def vision_partial_bias_rowwise_config(
         },
         # PartialBiasRowwiseLinear performs the Partial -> Invariant reduction.
         out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
+        # The partial-bias matmul consumes physical input and weight shards.
+        # F.linear also cannot typecheck those varying operands together with a
+        # partial bias, so keep the explicit reduction in the same local region.
+        local_spmd=True,
     )
 
 
