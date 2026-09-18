@@ -105,7 +105,7 @@ def _set_deepseek_v3_layer_sharding(
             "x": attn_x_layout,
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+            "x": replicated_input_layout,
         },
     )
     attention.rope.sharding_config = ShardingConfig(

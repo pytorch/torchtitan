@@ -141,11 +141,11 @@ def _set_mla_sharding(
     attn_x_layout: SpmdType,
     enable_sp: bool,
 ) -> None:
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x_TD": attn_x_layout},
-        in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+        in_dst_shardings={"x_TD": replicated_input_layout},
     )
-    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     replicate_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
@@ -222,7 +222,7 @@ def _set_kda_sharding(
             "dt_bias": parameter_placement,
         },
         in_src_shardings={"x_TD": attn_x_layout},
-        in_dst_shardings={"x_TD": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+        in_dst_shardings={"x_TD": replicated_input_layout},
     )
 
 

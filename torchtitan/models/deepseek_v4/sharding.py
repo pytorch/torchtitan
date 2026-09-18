@@ -120,15 +120,15 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
 
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     attention.sharding_config = ShardingConfig(
         in_src_shardings={
             "x": attn_x_layout,
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+            "x": replicated_input_layout,
         },
     )
-    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
     set_dsa_flex_attention_sharding(attention.inner_attention)
 
