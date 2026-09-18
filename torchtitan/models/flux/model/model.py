@@ -5,10 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
+from torchtitan.config import ParallelismConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
@@ -21,6 +24,12 @@ from torchtitan.models.flux.model.layers import (
     MLPEmbedder,
     SingleStreamBlock,
     timestep_embedding,
+)
+from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
+from torchtitan.models.flux.utils import (
+    create_position_encoding_for_latents,
+    pack_latents,
+    preprocess_data,
 )
 from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols import BaseModel
@@ -165,6 +174,83 @@ class FluxModel(BaseModel):
 
         self.final_layer = config.final_layer_config.build()
 
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Encode a raw image-text batch and prepare flow-matching inputs."""
+        del parallelism, max_num_documents, max_context_length
+        autoencoder = cast(AutoEncoder | None, kwargs["autoencoder"])
+        clip_encoder = cast(FluxEmbedder, kwargs["clip_encoder"])
+        t5_encoder = cast(FluxEmbedder, kwargs["t5_encoder"])
+        dtype = cast(torch.dtype, kwargs["dtype"])
+        batch = dict(input_dict)
+        batch["image"] = batch.pop("labels")
+        batch = preprocess_data(
+            device=batch["image"].device,
+            dtype=dtype,
+            autoencoder=autoencoder,
+            clip_encoder=clip_encoder,
+            t5_encoder=t5_encoder,
+            batch=batch,
+        )
+
+        image_encodings = batch["img_encodings"]
+        clip_encodings = batch["clip_encodings"]
+        t5_encodings = batch["t5_encodings"]
+        batch_size = image_encodings.shape[0]
+
+        with torch.no_grad(), torch.device(image_encodings.device):
+            noise = torch.randn_like(image_encodings)
+            timesteps = torch.rand((batch_size,))
+            sigmas = timesteps.view(-1, 1, 1, 1)
+            latents = (1 - sigmas) * image_encodings + sigmas * noise
+
+            _, _, latent_height, latent_width = latents.shape
+            position_dim = 3
+            latent_pos_enc = create_position_encoding_for_latents(
+                batch_size, latent_height, latent_width, position_dim
+            )
+            text_pos_enc = torch.zeros(batch_size, t5_encodings.shape[1], position_dim)
+            latents = pack_latents(latents)
+            target = pack_latents(noise - image_encodings)
+
+        if parallel_dims.cp_enabled:
+            from torchtitan.distributed.context_parallel import cp_shard
+
+            (
+                latents,
+                latent_pos_enc,
+                t5_encodings,
+                text_pos_enc,
+                target,
+            ), _ = cp_shard(
+                parallel_dims.get_mesh("cp"),
+                (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
+                None,
+                load_balancer_type=None,
+                input_seq_dims=1,
+            )
+
+        return (
+            latents,
+            target,
+            {
+                "img_ids": latent_pos_enc,
+                "txt": t5_encodings,
+                "txt_ids": text_pos_enc,
+                "y": clip_encodings,
+                "timesteps": timesteps,
+                "loss_target": target,
+            },
+        )
+
     def forward(
         self,
         img: Tensor,
@@ -173,7 +259,18 @@ class FluxModel(BaseModel):
         txt_ids: Tensor,
         timesteps: Tensor,
         y: Tensor,
+        loss_target: Tensor | None = None,
     ) -> Tensor:
+        annotate_flux_forward_inputs(
+            latents=img,
+            latent_pos_enc=img_ids,
+            t5_encodings=txt,
+            text_pos_enc=txt_ids,
+            target=loss_target,
+            clip_encodings=y,
+            timesteps=timesteps,
+        )
+
         @spmd.local_map(
             in_types=(
                 spmd.PartitionSpec("dp", "cp", None),

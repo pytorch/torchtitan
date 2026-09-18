@@ -335,7 +335,7 @@ def make_token_dispatcher_config(
     hidden_dim: int,
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
-    cudagraphable: bool = False,
+    cuda_graph_compatible: bool = False,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -352,21 +352,21 @@ def make_token_dispatcher_config(
     - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
-    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/cudagraph knobs --
-    # HybridEP non_blocking_capacity_factor vs DeepEP cudagraphable + num_max_tokens_per_rank.
+    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/CUDA graph knobs --
+    # HybridEP non_blocking_capacity_factor vs DeepEP cuda_graph_compatible + num_max_tokens_per_rank.
     if comm_backend == "deepep":
         # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
-        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
+        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cuda_graph_compatible``
         # selects the static no-host-sync expand layout (set on the generator by the
         # deepep_override). ``num_max_tokens_per_rank`` is the hard per-rank input-token
         # bound. Runtime config derives it from the fixed training shape or inference
-        # scheduler/cudagraph limits before the dispatcher is built.
+        # scheduler/CUDA graph limits before the dispatcher is built.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            cudagraphable=cudagraphable,
+            cuda_graph_compatible=cuda_graph_compatible,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
@@ -398,7 +398,7 @@ def make_routed_experts_config(
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
-    cudagraphable: bool = False,
+    cuda_graph_compatible: bool = False,
 ) -> RoutedExperts.Config:
     """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
     return RoutedExperts.Config(
@@ -415,6 +415,6 @@ def make_routed_experts_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
             hidden_dim=dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            cudagraphable=cudagraphable,
+            cuda_graph_compatible=cuda_graph_compatible,
         ),
     )

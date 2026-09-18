@@ -94,7 +94,7 @@ def parallelize_hf_transformers(
     parallel_dims: ParallelDims,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
@@ -176,7 +176,7 @@ def parallelize_hf_transformers(
     model.parallelize(parallel_dims)
 
     model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
+        compile_config is not None and "model" in compile_config.components
     )
 
     if ac_config is not None:

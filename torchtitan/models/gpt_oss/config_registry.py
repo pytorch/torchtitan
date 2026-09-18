@@ -4,11 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.components.validate import Validator
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
@@ -57,15 +55,9 @@ def _gpt_oss_debugmodel(
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=None,
-        validator=Validator.Config(
-            freq=5,
-            steps=10,
-        ),
+        validator=None,
     )
 
 
@@ -110,7 +102,7 @@ def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
@@ -144,6 +136,6 @@ def gpt_oss_120b(seq_len: int | None = None) -> Trainer.Config:
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )

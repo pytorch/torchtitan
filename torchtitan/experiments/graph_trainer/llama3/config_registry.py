@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
+
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.configs import (
@@ -29,7 +32,7 @@ from . import model_registry
 
 def graph_trainer_llama3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -40,6 +43,33 @@ def graph_trainer_llama3_debugmodel_sdc_replay() -> GraphTrainer.Config:
     config.training.disable_cuda_graphs = True
     config.training.steps = 2
     config.sdc_replayer = SDCReplayer.Config()
+    return config
+
+
+def graph_trainer_llama3_debugmodel_jit_checkpoint_save() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_debugmodel()
+    config.compile.mode = "jit"
+    config.checkpointer = CheckpointManager.Config()
+    config.training.steps = 10
+    return config
+
+
+def graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp2() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_debugmodel_jit_checkpoint_save()
+    config.checkpointer.exclude_from_loading = [
+        "lr_scheduler",
+        "dataloader",
+        "optimizer",
+    ]
+    config.parallelism.tensor_parallel_degree = 2
+    config.training.steps = 20
+    return config
+
+
+def graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp4() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp2()
+    config.parallelism.tensor_parallel_degree = 4
+    config.training.steps = 30
     return config
 
 
@@ -54,7 +84,7 @@ def graph_trainer_llama3_debugmodel_dist_gemm() -> GraphTrainer.Config:
         llama3_debugmodel_dist_gemm(),
         model_registry,
     )
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -68,7 +98,7 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
         ],
     )
     config = to_graph_trainer_config(base, model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -89,7 +119,7 @@ def graph_trainer_llama3_debugmodel_sdpa() -> GraphTrainer.Config:
         attn_backend="sdpa",
     )
     config = to_graph_trainer_config(base, model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -107,19 +137,19 @@ def graph_trainer_llama3_debugmodel_sdpa_eager() -> GraphTrainer.Config:
     """SDPA debug model run eagerly (no graph tracing).
 
     Serves as the eager reference for the AutoParallel SDPA loss-compare test:
-    with ``mode=None`` GraphTrainer.forward_backward_step delegates to the core
-    (eager) Trainer path, so this is a plain eager FSDP+TP run of the same SDPA
+    with ``mode=None`` GraphTrainingEngine delegates to the core eager engine
+    path, so this is a plain eager FSDP+TP run of the same SDPA
     model the AutoParallel test traces. The default FlexInnerAttention backend can't
     fill this role — flex + AutoParallel is unsupported (BlockMask flattening).
     """
     config = graph_trainer_llama3_debugmodel_sdpa()
-    config.compile = GraphTrainerCompileConfig(enable=False, mode=None)
+    config.compile = GraphTrainerCompileConfig(mode=None)
     return config
 
 
 def graph_trainer_llama3_8b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_8b(seq_len=8192), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -143,17 +173,17 @@ def graph_trainer_llama3_8b_mxfp8() -> GraphTrainer.Config:
         ],
     )
     config = to_graph_trainer_config(base, model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
 def graph_trainer_llama3_70b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_70b(seq_len=8192), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
 def graph_trainer_llama3_405b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(llama3_405b(seq_len=8192), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config

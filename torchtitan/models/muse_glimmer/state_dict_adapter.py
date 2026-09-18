@@ -10,7 +10,7 @@ StateDictAdapter for Muse Glimmer (text decoder + vision tower).
 Converts between torchtitan's native Muse Glimmer state dict and the released
 HuggingFace ``MuseGlimmerForConditionalGeneration`` safetensors layout
 (``meta-models/Muse-Glimmer-30B``), so checkpoints can be saved/loaded in HF
-format (``checkpoint.last_save_in_hf`` / ``checkpoint.initial_load_in_hf``) and
+format (``checkpointer.last_save_in_hf`` / ``checkpointer.initial_load_in_hf``) and
 so a HF<->titan parity check is possible. Both the text decoder and the vision
 stack (encoder/adapter/projection) are mapped, matching the VLM convention used
 by ``qwen3_5`` / ``kimi_k2_7``.

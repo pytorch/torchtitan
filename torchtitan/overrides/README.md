@@ -176,7 +176,7 @@ OverrideConfig(imports=[("my_pkg.triton_rope.triton_rope", {"block_size": 256})]
 
 (The RL trainer and generator use this to activate one HybridEP dispatch override
 with opposite `capacity_factor` values — blocking `None` for the trainer, a float
-for the cudagraph-capturing generator — instead of two modules or a hardcoded
+for the CUDA-graph-capturing generator — instead of two modules or a hardcoded
 per-actor branch.)
 
 The factory declares the keyword parameters it accepts (or `**kwargs`); a kwarg
