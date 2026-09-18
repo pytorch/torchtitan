@@ -376,6 +376,14 @@ def _reshape_for_broadcast(
     positions: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Reshape a RoPE cache for broadcasting with query/key tensors."""
+    # torch_npu's ``Index``/``gather`` ops do not support complex64, which
+    # ComplexRoPE relies on. Index the real and imaginary parts as floats
+    # separately and recombine so the reshape works on Ascend NPU too.
+    if rope_cache.is_complex():
+        return torch.complex(
+            _reshape_for_broadcast(rope_cache.real, query_shape, positions),
+            _reshape_for_broadcast(rope_cache.imag, query_shape, positions),
+        )
     # cache_width is `head_dim * 2` for CosSinRoPE, and `head_dim // 2` for ComplexRoPE
     cache_width = rope_cache.shape[-1]
     num_tokens = query_shape[0]
