@@ -126,36 +126,6 @@ def _linear(
     )
 
 
-def _column_parallel_linear(
-    in_features: int,
-    out_features: int,
-    *,
-    bias: bool = False,
-    param_init: dict[str, Callable] | None = None,
-) -> ColumnParallelLinear.Config:
-    return ColumnParallelLinear.Config(
-        in_features=in_features,
-        out_features=out_features,
-        bias=bias,
-        param_init=param_init or _LINEAR_INIT,
-    )
-
-
-def _row_parallel_linear(
-    in_features: int,
-    out_features: int,
-    *,
-    bias: bool = False,
-    param_init: dict[str, Callable] | None = None,
-) -> RowParallelLinear.Config:
-    return RowParallelLinear.Config(
-        in_features=in_features,
-        out_features=out_features,
-        bias=bias,
-        param_init=param_init or _LINEAR_INIT,
-    )
-
-
 def _norm(dim: int, eps: float = 1e-5) -> RMSNorm.Config:
     return RMSNorm.Config(
         normalized_shape=dim,
@@ -203,15 +173,28 @@ def _mla_config(
         v_head_dim=v_head_dim,
         wq_a=_linear(dim, q_lora_rank),
         q_norm=_norm(q_lora_rank),
-        wq_b=_column_parallel_linear(q_lora_rank, num_heads * q_head_dim),
+        wq_b=ColumnParallelLinear.Config(
+            in_features=q_lora_rank,
+            out_features=num_heads * q_head_dim,
+            param_init=_LINEAR_INIT,
+        ),
         wkv_a=_linear(dim, kv_lora_rank + qk_rope_head_dim),
         kv_norm=_norm(kv_lora_rank),
-        wkv_b=_column_parallel_linear(
-            kv_lora_rank,
-            num_heads * (qk_nope_head_dim + v_head_dim),
+        wkv_b=ColumnParallelLinear.Config(
+            in_features=kv_lora_rank,
+            out_features=num_heads * (qk_nope_head_dim + v_head_dim),
+            param_init=_LINEAR_INIT,
         ),
-        gate=_column_parallel_linear(dim, num_heads * v_head_dim),
-        wo=_row_parallel_linear(num_heads * v_head_dim, dim),
+        gate=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=num_heads * v_head_dim,
+            param_init=_LINEAR_INIT,
+        ),
+        wo=RowParallelLinear.Config(
+            in_features=num_heads * v_head_dim,
+            out_features=dim,
+            param_init=_LINEAR_INIT,
+        ),
         inner_attention=inner_attention,
     )
 
@@ -239,16 +222,40 @@ def _kda_config(
         num_heads=num_heads,
         head_dim=head_dim,
         conv_kernel_size=conv_kernel_size,
-        q_proj=_column_parallel_linear(dim, projection_dim),
-        k_proj=_column_parallel_linear(dim, projection_dim),
-        v_proj=_column_parallel_linear(dim, projection_dim),
+        q_proj=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=projection_dim,
+            param_init=_LINEAR_INIT,
+        ),
+        k_proj=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=projection_dim,
+            param_init=_LINEAR_INIT,
+        ),
+        v_proj=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=projection_dim,
+            param_init=_LINEAR_INIT,
+        ),
         q_conv=conv(),
         k_conv=conv(),
         v_conv=conv(),
         forget_a=_linear(dim, head_dim),
-        forget_b=_column_parallel_linear(head_dim, projection_dim),
-        beta=_column_parallel_linear(dim, num_heads),
-        output_gate=_column_parallel_linear(dim, projection_dim),
+        forget_b=ColumnParallelLinear.Config(
+            in_features=head_dim,
+            out_features=projection_dim,
+            param_init=_LINEAR_INIT,
+        ),
+        beta=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=num_heads,
+            param_init=_LINEAR_INIT,
+        ),
+        output_gate=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=projection_dim,
+            param_init=_LINEAR_INIT,
+        ),
         inner_kda=InnerKDA.Config(
             head_dim=head_dim,
             kernel=KDAKernel.Config(),
@@ -258,7 +265,11 @@ def _kda_config(
             eps=1e-5,
             param_init=_NORM_INIT,
         ),
-        output_proj=_row_parallel_linear(projection_dim, dim),
+        output_proj=RowParallelLinear.Config(
+            in_features=projection_dim,
+            out_features=dim,
+            param_init=_LINEAR_INIT,
+        ),
         param_init={
             "A_log": _a_log_init,
             "dt_bias": nn.init.zeros_,

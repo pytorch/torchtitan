@@ -572,7 +572,7 @@ class VLLMModelWrapper(Module):
             if isinstance(module, FeedForward):
                 # FeedForward exposes w1/w3 state-dict keys, but their layout
                 # belongs to the physical w13 Linear child.
-                w13_sharding_config = module.w13._sharding_config
+                w13_sharding_config = getattr(module.w13, "_sharding_config", None)
                 if w13_sharding_config is not None:
                     for (
                         state_name,
@@ -586,7 +586,11 @@ class VLLMModelWrapper(Module):
             if isinstance(module, QKVLinear):
                 # QKVLinear exposes split wq/wk/wv state-dict keys while
                 # the layout is declared on the fused wqkv parameter.
-                wqkv_sharding_config = module.wqkv._sharding_config
+                wqkv_sharding_config = getattr(
+                    module.wqkv,
+                    "_sharding_config",
+                    None,
+                )
                 if wqkv_sharding_config is None:
                     continue
                 for (

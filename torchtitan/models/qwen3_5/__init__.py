@@ -274,16 +274,6 @@ def _qwen35_deltanet_config(
     key_dim = n_key_heads * key_head_dim
     value_dim = n_value_heads * value_head_dim
 
-    def _input_proj(in_f: int, out_f: int, init: dict) -> ColumnParallelLinear.Config:
-        return ColumnParallelLinear.Config(
-            in_features=in_f, out_features=out_f, bias=False, param_init=init
-        )
-
-    def _output_proj(in_f: int, out_f: int, init: dict) -> RowParallelLinear.Config:
-        return RowParallelLinear.Config(
-            in_features=in_f, out_features=out_f, bias=False, param_init=init
-        )
-
     def _conv(channels: int) -> Conv1d.Config:
         # Depthwise causal conv (groups == channels). Causal left-padding is
         # applied in the forward, so padding=0 here.
@@ -300,12 +290,36 @@ def _qwen35_deltanet_config(
         key_head_dim=key_head_dim,
         value_head_dim=value_head_dim,
         conv_kernel_size=conv_kernel_size,
-        in_proj_q=_input_proj(dim, key_dim, _LINEAR_INIT),
-        in_proj_k=_input_proj(dim, key_dim, _LINEAR_INIT),
-        in_proj_v=_input_proj(dim, value_dim, _LINEAR_INIT),
-        in_proj_z=_input_proj(dim, value_dim, _LINEAR_INIT),
-        in_proj_a=_input_proj(dim, n_value_heads, _LINEAR_INIT),
-        in_proj_b=_input_proj(dim, n_value_heads, _LINEAR_INIT),
+        in_proj_q=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=key_dim,
+            param_init=_LINEAR_INIT,
+        ),
+        in_proj_k=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=key_dim,
+            param_init=_LINEAR_INIT,
+        ),
+        in_proj_v=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=value_dim,
+            param_init=_LINEAR_INIT,
+        ),
+        in_proj_z=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=value_dim,
+            param_init=_LINEAR_INIT,
+        ),
+        in_proj_a=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=n_value_heads,
+            param_init=_LINEAR_INIT,
+        ),
+        in_proj_b=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=n_value_heads,
+            param_init=_LINEAR_INIT,
+        ),
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
@@ -317,7 +331,11 @@ def _qwen35_deltanet_config(
             eps=1e-6,
             param_init={"weight": nn.init.ones_},
         ),
-        out_proj=_output_proj(value_dim, dim, _depth_init(layer_id)),
+        out_proj=RowParallelLinear.Config(
+            in_features=value_dim,
+            out_features=dim,
+            param_init=_depth_init(layer_id),
+        ),
         param_init={
             "A_log": _a_log_init,
             "dt_bias": nn.init.ones_,
