@@ -36,7 +36,6 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_spmd,
     token_id_placement,
 )
-from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
@@ -49,6 +48,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_invariant_linear_config,
     vision_partial_bias_rowwise_config,
 )
+from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
 from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP

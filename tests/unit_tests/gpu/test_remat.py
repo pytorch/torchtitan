@@ -19,7 +19,7 @@ from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import GQAttention
-from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
@@ -317,11 +317,6 @@ class TestRematRegions(unittest.TestCase):
 
     def test_feed_forward_variants_use_expected_region_boundaries(self):
         feed_forward_config = _feed_forward_config()
-        sigmoid_config = SigmoidGatedFeedForward.Config(
-            w13=feed_forward_config.w13,
-            w2=feed_forward_config.w2,
-            gate=_linear_config(4, 4),
-        )
 
         def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
             return torch.nn.functional.silu(gate) * up
@@ -340,7 +335,6 @@ class TestRematRegions(unittest.TestCase):
                 fused_async_config.activation_fn
             )
             variants = (
-                (sigmoid_config.build(), ["w13", "w2", "gate"]),
                 (async_config.build(), ["w13", "w2"]),
                 (fused_config.build(), ["w13", "w2"]),
                 (fused_async_config.build(), ["w13", "w2"]),

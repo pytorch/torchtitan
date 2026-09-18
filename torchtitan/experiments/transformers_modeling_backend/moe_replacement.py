@@ -19,6 +19,7 @@ Two-phase replacement:
 import logging
 from dataclasses import replace
 from functools import partial
+from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -44,7 +45,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     rowwise_config,
 )
-from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import (
@@ -54,12 +54,15 @@ from torchtitan.models.common.moe_sharding import (
 from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
 from torchtitan.protocols.sharding import ShardingConfig
 
+if TYPE_CHECKING:
+    from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
+
 
 logger = logging.getLogger(__name__)
 
 
 def _set_sigmoid_gated_shared_experts_sharding_config(
-    shared_experts: SigmoidGatedFeedForward.Config,
+    shared_experts: "SigmoidGatedFeedForward.Config",
     *,
     enable_ep: bool,
     enable_sp: bool,
@@ -176,7 +179,12 @@ def build_and_swap_native_moe(
 
         _, expert_layout = _get_expert_param_info()
         shared_experts = moe_config.shared_experts
-        if isinstance(shared_experts, SigmoidGatedFeedForward.Config):
+        if shared_experts is not None and hasattr(shared_experts, "gate"):
+            # Avoid loading Qwen3.5's optional model dependencies for other HF
+            # architectures handled by this generic experiment.
+            from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
+
+            assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
             set_routed_moe_sharding_config(
                 moe_config,
                 enable_ep=enable_ep,
@@ -635,6 +643,10 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
+            # Import only for the Qwen3.5 topology so unrelated HF models do
+            # not load Qwen3.5's optional model dependencies.
+            from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
+
             shared_experts = SigmoidGatedFeedForward.Config(
                 # Gather once at this FFN boundary because both w13 and the
                 # sigmoid gate consume the same input.

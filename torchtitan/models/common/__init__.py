@@ -31,7 +31,7 @@ from .attention import (
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
-from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
+from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import (
     CastLinear,
     ColumnParallelLinear,
@@ -65,7 +65,6 @@ __all__ = [
     "Decoder",
     "Embedding",
     "FeedForward",
-    "SigmoidGatedFeedForward",
     "FlexInnerAttention",
     "QKVLinear",
     "GELU",

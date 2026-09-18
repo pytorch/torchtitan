@@ -23,7 +23,6 @@ from torchtitan.models.common import (  # noqa: F401
     Linear,
     PartialBiasRowwiseLinear,
     RowParallelLinear,
-    SigmoidGatedFeedForward,
     Softmax,
 )
 from torchtitan.models.common.config_utils import (
@@ -46,6 +45,7 @@ from torchtitan.protocols.model_spec import ModelSpec
 
 from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet, RMSNormGated
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
+from .moe import SigmoidGatedFeedForward
 
 from .parallelize import parallelize_qwen3_5
 from .rope import MRoPE

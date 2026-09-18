@@ -5,19 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Callable
-from unittest import mock
 
-import spmd_types as spmd
 import torch
 import torch.nn.functional as F
-import torchtitan.models.common.feed_forward as feed_forward_module
 
 from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.config_utils import fused_gate_up_param_init
-from torchtitan.models.common.decoder_sharding import dense_sequence_parallel_placement
-from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
+from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.sharding import ShardingConfig
 
 
 def _fill(value: float) -> Callable[[torch.Tensor], None]:
@@ -118,26 +113,3 @@ def test_feed_forward_uses_configured_activation():
     gate_TF, up_TF = gate_up_TF.unflatten(-1, (-1, 2)).unbind(-1)
     expected_TD = feed_forward.w2(activation_fn.build()(gate_TF, up_TF))
     torch.testing.assert_close(feed_forward(x_TD), expected_TD)
-
-
-def test_sigmoid_gated_feed_forward_gathers_shared_input_once():
-    feed_forward = SigmoidGatedFeedForward.Config(
-        w13=Linear.Config(in_features=4, out_features=16),
-        w2=Linear.Config(in_features=8, out_features=4),
-        gate=Linear.Config(in_features=4, out_features=4),
-        sharding_config=ShardingConfig(
-            in_src_shardings={"x": dense_sequence_parallel_placement()}
-        ),
-    ).build()
-    calls = []
-
-    def redistribute(tensor, _group, *, src, dst, **_kwargs):
-        calls.append((src, dst))
-        return tensor
-
-    with mock.patch.object(
-        feed_forward_module, "spmd_mesh_group", return_value=object()
-    ), mock.patch.object(feed_forward_module.spmd, "redistribute", redistribute):
-        feed_forward(torch.randn(3, 4))
-
-    assert calls == [(spmd.S(0), spmd.R)]

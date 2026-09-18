@@ -141,6 +141,26 @@ class VisionAttention(Module):
     def _qkv(
         self, x_TD: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            sharding_config = self._sharding_config
+            assert sharding_config is not None
+            assert sharding_config.in_src_shardings is not None
+            input_layout = sharding_config.in_src_shardings["x"]
+            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
+            assert input_tp_type is not None
+            # q, k, and v share this input, so gather once inside the qkv remat
+            # region instead of gathering independently for each projection.
+            # TODO: Consider replacing the three projections with QKVLinear
+            # backed by ColumnParallelLinear, which would own this boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=input_tp_type,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
         q_THDh = local_head_split(self.wq(x_TD), self.head_dim)
         k_THDh = local_head_split(self.wk(x_TD), self.head_dim)
         v_THDh = local_head_split(self.wv(x_TD), self.head_dim)
@@ -154,24 +174,6 @@ class VisionAttention(Module):
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            sharding_config = self._sharding_config
-            assert sharding_config is not None
-            assert sharding_config.in_src_shardings is not None
-            input_layout = sharding_config.in_src_shardings["x"]
-            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
-            assert input_tp_type is not None
-            # q, k, and v all consume x, so gather once at their common
-            # attention boundary.
-            x = spmd.redistribute(
-                x,
-                tp_group,
-                src=input_tp_type,
-                dst=spmd.R,
-                backward_options={"op_dtype": x.dtype},
-            )
-
         num_tokens = x.shape[0]
 
         # -1 infers the head count locally (= num_heads / TP under tensor
