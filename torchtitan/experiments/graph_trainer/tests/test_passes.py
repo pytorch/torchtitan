@@ -7802,12 +7802,21 @@ class TestEagerChunking(TestCase):
         with self.assertRaisesRegex(TypeError, "layers.0.*dict"):
             model(torch.randn(4, 3))
 
-    def test_transformer_batch_chunking_splits_positions_by_batch(self):
+    def test_transformer_batch_chunking_splits_token_metadata_by_batch(self):
         seen_positions = []
+        seen_padding_masks = []
 
         class Block(torch.nn.Module):
-            def forward(self, x, attention_masks=None, positions=None):
+            def forward(
+                self,
+                x,
+                attention_masks=None,
+                positions=None,
+                *,
+                padding_mask=None,
+            ):
                 seen_positions.append(positions)
+                seen_padding_masks.append(padding_mask)
                 return x
 
         class Model(torch.nn.Module):
@@ -7815,18 +7824,28 @@ class TestEagerChunking(TestCase):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([Block()])
 
-            def forward(self, x, positions):
-                return self.layers[0](x, None, positions)
+            def forward(self, x, positions, padding_mask):
+                return self.layers[0](x, None, positions, padding_mask=padding_mask)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(model, self._config())
         x = torch.randn(4, 4, 2)
         positions = torch.arange(16).view(4, 4)
+        padding_mask = torch.tensor(
+            [
+                [False, False, False, True],
+                [False, False, True, True],
+                [False, False, False, False],
+                [False, True, True, True],
+            ]
+        )
 
-        self.assertEqual(model(x, positions), x)
+        self.assertEqual(model(x, positions, padding_mask), x)
         self.assertEqual([tuple(pos.shape) for pos in seen_positions], [(2, 4), (2, 4)])
         self.assertEqual(seen_positions[0], positions[:2])
         self.assertEqual(seen_positions[1], positions[2:])
+        self.assertEqual(seen_padding_masks[0], padding_mask[:2])
+        self.assertEqual(seen_padding_masks[1], padding_mask[2:])
 
     def test_transformer_batch_chunking_rejects_same_extent_tensor_mask(self):
         class Block(torch.nn.Module):
@@ -7876,6 +7895,44 @@ class TestEagerChunking(TestCase):
 
         self.assertEqual(model(x), x)
         self.assertEqual(seen_shapes, [(4, 3), (4, 3)])
+
+    def test_moe_chunking_splits_padding_mask_with_activation(self):
+        seen_inputs = []
+
+        class Moe(torch.nn.Module):
+            def forward(self, x, *, padding_mask_T=None):
+                seen_inputs.append((x, padding_mask_T))
+                return x.masked_fill(padding_mask_T.unsqueeze(-1), 0)
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.layers[0].moe = Moe()
+
+            def forward(self, x, padding_mask_T):
+                return self.layers[0].moe(x, padding_mask_T=padding_mask_T)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(
+            model,
+            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+        )
+        x = torch.randn(8, 3)
+        padding_mask_T = torch.tensor(
+            [False, True, False, True, True, False, True, False]
+        )
+
+        self.assertEqual(
+            model(x, padding_mask_T),
+            x.masked_fill(padding_mask_T.unsqueeze(-1), 0),
+        )
+        self.assertEqual(
+            [tuple(chunk_x.shape) for chunk_x, _ in seen_inputs],
+            [(4, 3), (4, 3)],
+        )
+        self.assertEqual(seen_inputs[0][1], padding_mask_T[:4])
+        self.assertEqual(seen_inputs[1][1], padding_mask_T[4:])
 
     def test_moe_chunking_rejects_extra_tensor_input(self):
         class Moe(torch.nn.Module):
