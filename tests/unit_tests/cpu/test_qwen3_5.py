@@ -15,6 +15,31 @@ from torchtitan.models.qwen3_5.config_registry import qwen35_0_8b, qwen35_27b
 from torchtitan.models.qwen3_8 import model_registry as qwen3_8_model_registry
 
 
+def test_qwen35_shared_expert_gathers_once_for_w13_and_gate() -> None:
+    from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
+    from torchtitan.models.common.linear import Linear, RowParallelLinear
+    from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
+
+    config = cast(
+        Qwen35Model.Config,
+        model_registry("debugmodel_moe", moe_comm_backend="standard").model,
+    )
+    moe = config.layers[0].moe
+    assert moe is not None
+    shared_experts = moe.shared_experts
+    assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
+
+    assert type(shared_experts.w13) is Linear.Config
+    assert type(shared_experts.gate) is Linear.Config
+    assert isinstance(shared_experts.w2, RowParallelLinear.Config)
+
+    set_qwen35_sharding_config(config, enable_sp=True, enable_ep=True)
+    assert shared_experts.sharding_config is not None
+    assert shared_experts.sharding_config.in_dst_shardings is not None
+    assert shared_experts.w13.sharding_config is not None
+    assert shared_experts.w13.sharding_config.in_src_shardings is not None
+
+
 def test_qwen35_registry_keeps_released_flavors() -> None:
     assert set(qwen3_5_configs) == {
         "debugmodel",

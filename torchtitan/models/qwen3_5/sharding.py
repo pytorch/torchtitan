@@ -54,6 +54,7 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 if TYPE_CHECKING:
+    from torchtitan.models.common import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
     from torchtitan.models.qwen3_5.model import (
         Qwen35Attention,
@@ -203,7 +204,65 @@ def _set_qwen35_layer_sharding(
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
+            configure_shared_experts=False,
         )
+        _set_shared_expert_sharding(
+            # pyrefly: ignore [missing-attribute]
+            layer_cfg.moe.shared_experts,
+            enable_ep=enable_ep,
+            enable_sp=enable_sp,
+        )
+
+
+def _set_shared_expert_sharding(
+    shared_experts: "SigmoidGatedFeedForward.Config | None",
+    *,
+    enable_ep: bool,
+    enable_sp: bool,
+) -> None:
+    """Gather once for Qwen's shared w13 and sigmoid gate."""
+    if shared_experts is None:
+        return
+
+    input_layout = (
+        dense_sequence_parallel_placement()
+        if enable_ep and enable_sp
+        else dense_activation_placement(
+            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
+        )
+    )
+    output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
+    )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    shared_experts.sharding_config = ShardingConfig(
+        in_src_shardings={"x": input_layout},
+        in_dst_shardings={"x": replicated_input_layout},
+        out_src_shardings=output_layout,
+    )
+    shared_experts.w13.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    shared_experts.w2.sharding_config = rowwise_config(output_layout=output_layout)
+    assert shared_experts.w2.sharding_config.state_shardings is not None
+    shared_experts.w2.sharding_config.state_shardings["bias"] = dense_param_placement(
+        tp=spmd.R
+    )
+
+    gate_output_layout = (
+        dense_sequence_parallel_placement() if enable_sp else replicated_input_layout
+    )
+    shared_experts.gate.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R),
+            "bias": dense_param_placement(tp=spmd.R),
+        },
+        in_src_shardings={"input": replicated_input_layout},
+        out_src_shardings=replicated_input_layout,
+        out_dst_shardings=gate_output_layout,
+    )
 
 
 def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:

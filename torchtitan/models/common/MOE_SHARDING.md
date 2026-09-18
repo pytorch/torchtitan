@@ -30,10 +30,19 @@ for all four parallelism configurations (EP on/off × SP on/off).
   `desired_input_layouts`. Output is `Partial`, reduced to `sp_layout`
   at the boundary.
 - **Router gate**: weights `Replicate`, output stays DTensor.
-- **Shared experts** (w13/w2): dense-family TP plan. Colwise for w13,
-  rowwise for w2. Output stays `Partial` — reduction happens once at
-  the MoE boundary.
+- **Shared experts** (w13/w2): dense-family TP plan. The standard w13 is a
+  `ColumnParallelLinear` that owns its input redistribution, and w2 is a
+  `RowParallelLinear` that owns its output reduction. The output stays
+  `Partial` so reduction happens once at the MoE boundary. A model with
+  multiple projections consuming the same input may instead gather once at
+  its shared-expert boundary; Qwen3.5 uses this for w13 and its sigmoid gate.
 - **Routed experts** (`RoutedExperts`): the local SPMD region runs
   dispatch/compute/combine on local tensors while checking its input and
   output layout contracts. The expert-weight `state_shardings` live on its
   `GroupedExperts` child.
+
+When EP is disabled, routed-expert weights may still use expert tensor
+parallelism (ETP): the dense TP axis shards each expert's input/output tensor
+dimensions according to `expert_param_layout`. Enabling or disabling the
+shared-expert projection boundaries does not remove this routed-expert ETP
+path.

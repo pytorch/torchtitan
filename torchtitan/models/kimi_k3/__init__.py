@@ -29,7 +29,6 @@ from torchtitan.models.common import (
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
-    make_shared_expert_ffn_config,
     make_token_dispatcher_config,
 )
 from torchtitan.models.common.moe import (
@@ -141,22 +140,6 @@ def _feed_forward_config(
 ) -> FeedForward.Config:
     return replace(
         make_ffn_config(
-            dim=dim,
-            hidden_dim=hidden_dim,
-            w1_param_init=_LINEAR_INIT,
-            w2w3_param_init=_LINEAR_INIT,
-        ),
-        activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
-    )
-
-
-def _shared_experts_config(
-    *,
-    dim: int,
-    hidden_dim: int,
-) -> FeedForward.Config:
-    return replace(
-        make_shared_expert_ffn_config(
             dim=dim,
             hidden_dim=hidden_dim,
             w1_param_init=_LINEAR_INIT,
@@ -313,7 +296,7 @@ def _latent_moe_config(
         ),
         routed_norm=_norm(latent_dim),
         routed_up=_linear(latent_dim, dim),
-        shared_experts=_shared_experts_config(
+        shared_experts=_feed_forward_config(
             dim=dim,
             hidden_dim=num_shared_experts * expert_hidden_dim,
         ),

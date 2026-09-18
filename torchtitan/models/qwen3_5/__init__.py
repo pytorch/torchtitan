@@ -138,8 +138,8 @@ def _shared_experts_config(
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
     depth_init = _depth_init(layer_id)
     return SigmoidGatedFeedForward.Config(
-        # The gate and w13 share x, so the enclosing shared-expert boundary
-        # performs their input all-gather once.
+        # Qwen gathers once at the enclosing FFN boundary because both w13
+        # and the sigmoid gate consume the same input.
         w13=Linear.Config(
             in_features=dim,
             out_features=2 * hidden_dim,
@@ -273,6 +273,11 @@ def _qwen35_deltanet_config(
     key_dim = n_key_heads * key_head_dim
     value_dim = n_value_heads * value_head_dim
 
+    def _proj(in_f: int, out_f: int, init: dict) -> Linear.Config:
+        return Linear.Config(
+            in_features=in_f, out_features=out_f, bias=False, param_init=init
+        )
+
     def _conv(channels: int) -> Conv1d.Config:
         # Depthwise causal conv (groups == channels). Causal left-padding is
         # applied in the forward, so padding=0 here.
@@ -289,36 +294,12 @@ def _qwen35_deltanet_config(
         key_head_dim=key_head_dim,
         value_head_dim=value_head_dim,
         conv_kernel_size=conv_kernel_size,
-        in_proj_q=Linear.Config(
-            in_features=dim,
-            out_features=key_dim,
-            param_init=_LINEAR_INIT,
-        ),
-        in_proj_k=Linear.Config(
-            in_features=dim,
-            out_features=key_dim,
-            param_init=_LINEAR_INIT,
-        ),
-        in_proj_v=Linear.Config(
-            in_features=dim,
-            out_features=value_dim,
-            param_init=_LINEAR_INIT,
-        ),
-        in_proj_z=Linear.Config(
-            in_features=dim,
-            out_features=value_dim,
-            param_init=_LINEAR_INIT,
-        ),
-        in_proj_a=Linear.Config(
-            in_features=dim,
-            out_features=n_value_heads,
-            param_init=_LINEAR_INIT,
-        ),
-        in_proj_b=Linear.Config(
-            in_features=dim,
-            out_features=n_value_heads,
-            param_init=_LINEAR_INIT,
-        ),
+        in_proj_q=_proj(dim, key_dim, _LINEAR_INIT),
+        in_proj_k=_proj(dim, key_dim, _LINEAR_INIT),
+        in_proj_v=_proj(dim, value_dim, _LINEAR_INIT),
+        in_proj_z=_proj(dim, value_dim, _LINEAR_INIT),
+        in_proj_a=_proj(dim, n_value_heads, _LINEAR_INIT),
+        in_proj_b=_proj(dim, n_value_heads, _LINEAR_INIT),
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),

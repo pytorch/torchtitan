@@ -31,16 +31,25 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
 )
 from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
+    fused_gate_up_param_init,
+    make_ffn_config,
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
-    make_shared_expert_ffn_config,
+)
+from torchtitan.models.common.decoder_sharding import (
+    colwise_config,
+    dense_activation_placement,
+    dense_param_placement,
+    dense_sequence_parallel_placement,
+    rowwise_config,
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +60,54 @@ class _HFBatchedMoE(MoE):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return super().forward(hidden_states.squeeze(0)).unsqueeze(0)
+
+
+def _set_sigmoid_shared_experts_sharding(
+    shared_experts: SigmoidGatedFeedForward.Config,
+    *,
+    enable_ep: bool,
+    enable_sp: bool,
+) -> None:
+    """Gather once for a shared w13 projection and sigmoid gate."""
+    input_layout = (
+        dense_sequence_parallel_placement()
+        if enable_ep and enable_sp
+        else dense_activation_placement(
+            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
+        )
+    )
+    output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
+    )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    shared_experts.sharding_config = ShardingConfig(
+        in_src_shardings={"x": input_layout},
+        in_dst_shardings={"x": replicated_input_layout},
+        out_src_shardings=output_layout,
+    )
+    shared_experts.w13.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    shared_experts.w2.sharding_config = rowwise_config(output_layout=output_layout)
+    assert shared_experts.w2.sharding_config.state_shardings is not None
+    shared_experts.w2.sharding_config.state_shardings["bias"] = dense_param_placement(
+        tp=spmd.R
+    )
+
+    gate_output_layout = (
+        dense_sequence_parallel_placement() if enable_sp else replicated_input_layout
+    )
+    shared_experts.gate.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R),
+            "bias": dense_param_placement(tp=spmd.R),
+        },
+        in_src_shardings={"input": replicated_input_layout},
+        out_src_shardings=replicated_input_layout,
+        out_dst_shardings=gate_output_layout,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -114,12 +171,22 @@ def build_and_swap_native_moe(
             continue
 
         _, expert_layout = _get_expert_param_info()
+        sigmoid_shared_experts = isinstance(
+            moe_config.shared_experts, SigmoidGatedFeedForward.Config
+        )
         set_moe_sharding_config(
             moe_config,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=expert_layout,
+            configure_shared_experts=not sigmoid_shared_experts,
         )
+        if sigmoid_shared_experts:
+            _set_sigmoid_shared_experts_sharding(
+                moe_config.shared_experts,
+                enable_ep=enable_ep,
+                enable_sp=enable_sp,
+            )
         root_sharding = moe_config.sharding_config
         assert root_sharding is not None
         # Only the MoE root sees HF's singleton batch. Its children retain the
@@ -553,7 +620,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
     shared_experts = None
     shared_info = params["shared_expert_info"]
     if shared_info is not None:
-        ffn_config = make_shared_expert_ffn_config(
+        ffn_config = make_ffn_config(
             dim=shared_info["dim"],
             hidden_dim=shared_info["hidden_dim"],
             w1_param_init=_LINEAR_INIT,
@@ -561,7 +628,13 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         )
         if shared_info["has_sigmoid_gate"]:
             shared_experts = SigmoidGatedFeedForward.Config(
-                w13=ffn_config.w13,
+                # Gather once at this FFN boundary because both w13 and the
+                # sigmoid gate consume the same input.
+                w13=Linear.Config(
+                    in_features=shared_info["dim"],
+                    out_features=2 * shared_info["hidden_dim"],
+                    param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
+                ),
                 w2=ffn_config.w2,
                 gate=Linear.Config(
                     in_features=shared_info["dim"],

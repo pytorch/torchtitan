@@ -307,17 +307,17 @@ class TestTensorParallelModules(unittest.TestCase):
             self.assertIsNone(layer.feed_forward.w13.sharding_config)
             self.assertIsNone(layer.feed_forward.w2.sharding_config)
 
-    def test_shared_expert_input_projection_is_parent_owned(self):
-        from torchtitan.models.common.config_utils import make_shared_expert_ffn_config
+    def test_shared_expert_uses_projection_owned_boundaries(self):
+        from torchtitan.models.common.config_utils import make_ffn_config
 
-        shared_experts = make_shared_expert_ffn_config(
+        shared_experts = make_ffn_config(
             dim=8,
             hidden_dim=16,
             w1_param_init={},
             w2w3_param_init={},
         )
 
-        self.assertIs(type(shared_experts.w13), Linear.Config)
+        self.assertIsInstance(shared_experts.w13, ColumnParallelLinear.Config)
         self.assertIsInstance(shared_experts.w2, RowParallelLinear.Config)
 
     def test_async_replaces_parallel_linears_without_parent_knowledge(self):
@@ -357,7 +357,8 @@ class TestTensorParallelModules(unittest.TestCase):
             enable_sp=True,
             expert_param_layout={},
         )
-        self.assertIsNotNone(moe.shared_experts.sharding_config.in_dst_shardings)
+        self.assertIsNone(moe.shared_experts.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(moe.shared_experts.w13.sharding_config.in_src_shardings)
         self.assertIsNone(moe.shared_experts.w13.sharding_config.in_dst_shardings)
         self.assertIsNone(moe.shared_experts.w2.sharding_config.out_dst_shardings)
 
