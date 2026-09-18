@@ -1928,12 +1928,13 @@ def _zeropower_via_newtonschulz(
         for _ in range(ns_steps):
             if quack_symmetric_gemm is None:
                 gram = result @ result.T
-                gram_square = gram @ gram
+                gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
+                result = torch.addmm(result, gram_update, result, beta=a)
             else:
                 gram = quack_symmetric_gemm(result.unsqueeze(0)).squeeze(0)
                 gram_square = quack_symmetric_gemm(gram.unsqueeze(0)).squeeze(0)
-            gram_update = gram.mul(b).add_(gram_square, alpha=c)
-            result = torch.addmm(result, gram_update, result, beta=a)
+                gram_update = gram.mul(b).add_(gram_square, alpha=c)
+                result = torch.addmm(result, gram_update, result, beta=a)
     else:
         original_shape = result.shape
         matrices = result.reshape(-1, *original_shape[-2:])
@@ -1942,13 +1943,13 @@ def _zeropower_via_newtonschulz(
         for _ in range(ns_steps):
             if quack_symmetric_gemm is None:
                 gram = matrices @ matrices.transpose(-2, -1)
-                gram_square = matrices.new_empty(gram.shape)
-                torch.bmm(gram, gram, out=gram_square)
+                gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+                matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
             else:
                 gram = quack_symmetric_gemm(matrices)
                 gram_square = quack_symmetric_gemm(gram)
-            gram_update = gram.mul(b).add_(gram_square, alpha=c)
-            matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
+                gram_update = gram.mul(b).add_(gram_square, alpha=c)
+                matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
         result = matrices.reshape(original_shape)
 
     return result.transpose(-2, -1) if transposed else result
