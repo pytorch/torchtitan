@@ -247,12 +247,14 @@ class MTPDecoder(Decoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
+        del kwargs
         # Function-local import avoids a circular import
         # (context_parallel.api -> models.common -> decoder).
         from torchtitan.distributed.context_parallel.api import (

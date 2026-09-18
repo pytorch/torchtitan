@@ -565,7 +565,6 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         # Verify all expected meshes are created
         self.assertIsNotNone(parallel_dims._single_axis_meshes)
         self.assertIn("pp", parallel_dims._single_axis_meshes)
-        self.assertIn("batch", parallel_dims._single_axis_meshes)
         self.assertIn("loss", parallel_dims._single_axis_meshes)
         self.assertIn("dp_replicate", parallel_dims._single_axis_meshes)
         self.assertIn("dp", parallel_dims._single_axis_meshes)
@@ -578,7 +577,6 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertEqual(parallel_dims._single_axis_meshes["dp"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["dp_shard"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["tp"].size(), 1)
-        self.assertEqual(parallel_dims._single_axis_meshes["batch"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["loss"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["pp"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["cp"].size(), 1)
@@ -809,7 +807,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             # Verify all expected meshes are created
             self.assertIsNotNone(parallel_dims._single_axis_meshes)
             self.assertIn("pp", parallel_dims._single_axis_meshes)
-            self.assertIn("batch", parallel_dims._single_axis_meshes)
             self.assertIn("loss", parallel_dims._single_axis_meshes)
             self.assertIn("dp_replicate", parallel_dims._single_axis_meshes)
             self.assertIn("dp", parallel_dims._single_axis_meshes)
@@ -821,9 +818,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
 
             # Validate 1D mesh sizes match parallelism configuration
             self.assertEqual(parallel_dims._single_axis_meshes["pp"].size(), 1)
-            self.assertEqual(
-                parallel_dims._single_axis_meshes["batch"].size(), 4
-            )  # dp_replicate * dp_shard = 2 * 2
             self.assertEqual(
                 parallel_dims._single_axis_meshes["loss"].size(), 4
             )  # dp_replicate * dp_shard * cp = 2 * 2 * 1
@@ -857,7 +851,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertIsNotNone(parallel_dims.get_mesh("dp_replicate"))
             self.assertIsNotNone(parallel_dims.get_mesh("dp"))
             self.assertIsNotNone(parallel_dims.get_mesh("dp_shard"))
-            self.assertIsNotNone(parallel_dims.get_mesh("batch"))
             self.assertIsNotNone(parallel_dims.get_mesh("loss"))
 
             # Test get_optional_mesh returns None for disabled dimensions (size = 1)
@@ -878,7 +871,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertIn("dp", one_d_meshes)
             self.assertIn("dp_shard", one_d_meshes)
             self.assertIn("tp", one_d_meshes)
-            self.assertIn("batch", one_d_meshes)
             self.assertIn("loss", one_d_meshes)
             # Should not include: pp, cp, ep (all with size = 1)
             self.assertNotIn("pp", one_d_meshes)

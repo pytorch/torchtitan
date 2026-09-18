@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
 from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
@@ -28,7 +29,7 @@ def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
 
     config = llama3_debugmodel_hf_checkpoint_load()
 
-    assert config.checkpoint.initial_load_path == (
+    assert config.checkpointer.initial_load_path == (
         f"{test_output_dir}/hf_checkpoint/step-10/"
     )
 
@@ -188,7 +189,7 @@ def test_fake_pg_incompatible_test_requires_explicit_marker(
 ) -> None:
     config = llama3_debugmodel(seq_len=2048)
     if test_name == "checkpoint":
-        config.checkpoint.enable = True
+        config.checkpointer = CheckpointManager.Config()
     elif test_name == "pipeline_parallel":
         config.parallelism.pipeline_parallel_degree = 2
 

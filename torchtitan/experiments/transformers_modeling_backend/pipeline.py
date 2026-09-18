@@ -296,7 +296,7 @@ def pipeline_hf_transformers(
     *,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     device: torch.device,
