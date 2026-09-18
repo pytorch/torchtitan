@@ -33,7 +33,6 @@ from torch.distributed.pipelining.schedules import (
     _PipelineScheduleRuntime,
     OVERLAP_F_B,
 )
-
 from torchtitan.config import ParallelismConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     BOXED_CODEGEN_META,
@@ -42,10 +41,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
-    split_backward_fsdp_collectives,
-    split_forward_fsdp_collectives,
-)
 from torchtitan.experiments.graph_trainer.graph_pp.graph_multiplex import (
     multiplex_fw_bw_graph,
 )
@@ -57,16 +52,20 @@ from torchtitan.experiments.graph_trainer.graph_pp.split_di_dw import (
     GraphPPDiDwSplit,
     split_di_dw_graph,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+    split_backward_fsdp_collectives,
+    split_forward_fsdp_collectives,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+    GraphPipelineStage,
     GraphPPOverlapGraphs,
     GraphPPStageGraphs,
-    GraphPipelineStage,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     example_inputs_from_placeholders,
     flatten_graph_values,
-    GraphPPValueSpec,
     graph_pp_value_spec,
+    GraphPPValueSpec,
     normalize_graph_pp_microbatch_inputs,
     overlap_fw_bw_sub_actions,
 )
@@ -335,9 +334,7 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
             self.meta.fwd_flat_input_indices,
             strict=True,
         ):
-            if runtime_validate and (
-                flat_index < 0 or flat_index >= len(flat_inputs)
-            ):
+            if runtime_validate and (flat_index < 0 or flat_index >= len(flat_inputs)):
                 raise ValueError(
                     "GraphPP forward placeholder index is out of range: "
                     f"{name} indexes {flat_index}, but runtime has "
@@ -415,9 +412,7 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
                     "GraphPP last stage backward must not receive "
                     "output_grads_from_next."
                 )
-        raw_output_grads_from_next = flatten_graph_values(
-            list(output_grads_from_next)
-        )
+        raw_output_grads_from_next = flatten_graph_values(list(output_grads_from_next))
         # The partitioner names every backward placeholder. At runtime those
         # placeholders are supplied either by forward-saved values or by the
         # output gradients received from the next PP stage.
@@ -531,10 +526,7 @@ class GraphTrainerStageGraphs(GraphPPStageGraphs):
         runtime_validate: bool = False,
     ) -> list[Any]:
         raw_grads = list(unsharded_param_grads)
-        if (
-            runtime_validate
-            and len(raw_grads) != self.meta.num_param_grad_values
-        ):
+        if runtime_validate and len(raw_grads) != self.meta.num_param_grad_values:
             raise ValueError(
                 "GraphPP raw unsharded grad count mismatch: "
                 f"expected {self.meta.num_param_grad_values}, got "
@@ -1302,9 +1294,7 @@ class GraphTrainerStageGraphProvider:
         loss_kwargs: dict[str, Any],
     ) -> dict[tuple[int, int], GraphPPOverlapGraphs]:
         """Build, multiplex, and compile all local GraphPP graphs for one step."""
-        graph_stages = [
-            cast(GraphPipelineStage, stage) for stage in schedule._stages
-        ]
+        graph_stages = [cast(GraphPipelineStage, stage) for stage in schedule._stages]
         maybe_register_blockmask_pytree_node()
         trace_ctx = ctx
         if ctx.arg_mbs is not None or ctx.kwarg_mbs is not None:
@@ -1314,9 +1304,7 @@ class GraphTrainerStageGraphProvider:
             # Use distinct objects for tracing so make_fx does not consume the
             # same closure tensor objects that runtime replay will receive.
             num_microbatches = (
-                len(ctx.arg_mbs)
-                if ctx.arg_mbs is not None
-                else len(ctx.kwarg_mbs)
+                len(ctx.arg_mbs) if ctx.arg_mbs is not None else len(ctx.kwarg_mbs)
             )
             arg_mbs = (
                 ctx.arg_mbs

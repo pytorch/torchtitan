@@ -11,6 +11,7 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.qwen3.config_registry import (
     qwen3_14b,
+    qwen3_32b,
     qwen3_debugmodel,
     qwen3_moe_debug,
 )
@@ -32,5 +33,11 @@ def graph_trainer_qwen3_debugmodel_moe() -> GraphTrainer.Config:
 
 def graph_trainer_qwen3_14b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(qwen3_14b(), model_registry)
+    config.compile = GraphTrainerCompileConfig(enable=True)
+    return config
+
+
+def graph_trainer_qwen3_32b() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(qwen3_32b(), model_registry)
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
