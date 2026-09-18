@@ -25,6 +25,7 @@ from torchtitan.quantization.float8 import (
 )
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
+from torchtitan.quantization.mx_qat.experts import _get_mx_qat_grouped_experts_cls
 from torchtitan.quantization.nvfp4 import NVFP4Linear
 from torchtitan.quantization.utils import module_filter_fn, swap_token_dispatcher
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
@@ -430,6 +431,47 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
         logger.info(
             f"Converted GroupedExperts to use dynamic {self.config.recipe_name} "
             "quantization for grouped_mm ops"
+        )
+        return model_config
+
+
+class MXQATGroupedExpertsConverter(QuantizationConverter):
+    """Apply emulated MXFP4-weight/MXFP8-activation QAT to grouped experts."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QuantizationConverter.Config):
+        weight_block_size: int = 32
+        activation_block_size: int = 32
+
+    def __init__(self, config: Config):
+        self.config = config
+        try:
+            from torchao.prototype.qat import mx_fake_quantize  # noqa: F401
+        except ImportError as error:
+            raise ImportError(
+                "MX QAT grouped experts require a TorchAO build providing "
+                "torchao.prototype.qat.mx_fake_quantize."
+            ) from error
+
+    def convert(self, model_config):
+        for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
+            base_module_cls = type(config)._owner
+            quantized_cls = _get_mx_qat_grouped_experts_cls(base_module_cls)
+            config_cls = quantized_cls.Config  # type: ignore[attr-defined]
+            new_config = config_cls(
+                **{f.name: getattr(config, f.name) for f in fields(config)},
+                weight_block_size=self.config.weight_block_size,
+                activation_block_size=self.config.activation_block_size,
+            )
+            if parent is None:
+                model_config = new_config
+            elif isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
+
+        logger.info(
+            "Converted GroupedExperts to MXFP4-weight/MXFP8-activation QAT"
         )
         return model_config
 

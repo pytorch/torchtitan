@@ -6,11 +6,13 @@
 
 from dataclasses import replace
 
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
+from torchtitan.config.transform import MXQATGroupedExpertsConverter
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
@@ -90,3 +92,22 @@ def kimi_k3_debugmodel(
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def kimi_k3_debugmodel_mx_qat(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    """Kimi-K3 debug recipe with MXFP4-weight/MXFP8-activation expert QAT."""
+    config = kimi_k3_debugmodel(seq_len=seq_len)
+    config.model_spec = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+        converters=[MXQATGroupedExpertsConverter.Config()],
+    )
+    config.checkpointer = CheckpointManager.Config(
+        interval=5,
+        initial_load_in_hf=True,
+        initial_load_in_hf_quantized=True,
+        last_save_model_only=False,
+    )
+    return config
