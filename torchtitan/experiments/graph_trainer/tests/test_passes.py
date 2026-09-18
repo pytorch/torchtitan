@@ -27,6 +27,7 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
@@ -42,10 +43,10 @@ from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
 )
-from torchtitan.experiments.graph_trainer.cudagraph import (
+from torchtitan.experiments.graph_trainer.cuda_graph import (
     insert_kernel_annotations_pass,
-    is_cudagraphable,
-    is_full_cudagraphable,
+    is_cuda_graph_fully_compatible,
+    is_cuda_graph_node_compatible,
 )
 from torchtitan.experiments.graph_trainer.decompositions import (
     apply_decompositions_pass,
@@ -2194,8 +2195,8 @@ class TestApplySACPass(TestCase):
         self.assertIsNot(dup.meta["custom"], fwd_node.meta["custom"])
         self.assertEqual(dup.meta["custom"][_MODULE_FQN], "layers.0.attention_norm")
         # Mutating the dup's annotation must not leak into the original.
-        dup.meta["custom"]["cudagraph_partition"] = "cudagraph_9"
-        self.assertNotIn("cudagraph_partition", fwd_node.meta["custom"])
+        dup.meta["custom"]["cuda_graph_partition"] = "cuda_graph_9"
+        self.assertNotIn("cuda_graph_partition", fwd_node.meta["custom"])
 
 
 class TestFullMemoryPolicy(TestCase):
@@ -2722,17 +2723,23 @@ class TestBucketingPrefetchOrder(FSDPTest):
         )
         global_valid_tokens = torch.tensor(num_tokens, dtype=torch.float, device="cuda")
 
-        # One forward_backward_step triggers _make_fx_forward_backward_step
-        # which traces the model and applies all graph passes.
-        prepared_inputs = trainer._preprocess_accumulation_step_inputs(
-            [{"input": inputs, "positions": positions, "labels": labels}]
-        )
-        trainer.forward_backward_step(
-            prepared_inputs=prepared_inputs,
+        # One accumulation step traces the model and applies all graph passes.
+        trainer.engine.forward_backward_step(
+            accumulation_step_inputs=[
+                [
+                    TokenizedTrainingMicrobatch(
+                        input=inputs,
+                        positions=positions,
+                        labels=labels,
+                        padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                        num_valid_tokens=labels.numel(),
+                    )
+                ]
+            ],
             global_valid_tokens=global_valid_tokens,
         )
 
-        layer_ids = self._get_bucketed_ag_layer_order(trainer._traced_step.gm)
+        layer_ids = self._get_bucketed_ag_layer_order(trainer.engine._traced_step.gm)
         self.assertGreater(len(layer_ids), 0, "No layer all_gather nodes found")
         return layer_ids
 
@@ -3923,7 +3930,6 @@ class TestChunkPasses(TestCase):
                 maybe_apply_ep_overlap_eager_chunking(
                     model,
                     GraphTrainerCompileConfig(
-                        enable=True,
                         ep_overlap=EpOverlapConfig(
                             enabled=True,
                             strategy="eager",
@@ -4227,7 +4233,6 @@ class TestChunkPasses(TestCase):
                 pipeline_parallel_degree=1,
             ),
             compile=GraphTrainerCompileConfig(
-                enable=True,
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     chunk_dim="batch",
@@ -4257,7 +4262,7 @@ class TestChunkPasses(TestCase):
         return [
             pass_name(pass_fn)
             for pass_fn in compile_time_passes(
-                traced_result, config, use_cudagraph=False
+                traced_result, config, use_cuda_graph=False
             )
         ]
 
@@ -4325,7 +4330,7 @@ class TestChunkPasses(TestCase):
                     ValueError,
                     "Graph EP chunking does not support tensor_parallel_degree > 1",
                 ):
-                    compile_time_passes(traced_result, config, use_cudagraph=False)
+                    compile_time_passes(traced_result, config, use_cuda_graph=False)
 
     def test_fsdp_dense_region_scheduler_pass_gating(self):
         def transformer_batch_default(config):
@@ -5528,7 +5533,6 @@ class TestChunkPasses(TestCase):
         maybe_apply_ep_overlap_eager_chunking(
             model,
             GraphTrainerCompileConfig(
-                enable=True,
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     strategy="eager",
@@ -7696,18 +7700,18 @@ class TestEliminateDeadCodePass(TestCase):
         self.assertIn(torch.ops.aten.copy_.default, targets)
 
 
-class TestIsFullCudagraphable(TestCase):
-    """Pure-CPU tests for the per-node cudagraph-safety predicate and the
+class TestIsFullCudaGraphCompatible(TestCase):
+    """Pure-CPU tests for the per-node CUDA-graph-safety predicate and the
     whole-graph gate built on it."""
 
-    def test_clean_graph_is_full_cudagraphable(self):
+    def test_clean_graph_is_cuda_graph_fully_compatible(self):
         g = torch.fx.Graph()
         x = g.placeholder("x")
         relu = g.call_function(torch.ops.aten.relu.default, (x,))
         g.output(relu)
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
-        self.assertTrue(is_cudagraphable(relu))
-        self.assertTrue(is_full_cudagraphable(gm))
+        self.assertTrue(is_cuda_graph_node_compatible(relu))
+        self.assertTrue(is_cuda_graph_fully_compatible(gm))
 
     def test_local_scalar_dense_is_unsafe(self):
         # _local_scalar_dense (.item()/.tolist()) extracts a host scalar a CUDA
@@ -7717,8 +7721,8 @@ class TestIsFullCudagraphable(TestCase):
         s = g.call_function(torch.ops.aten._local_scalar_dense.default, (x,))
         g.output(s)
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
-        self.assertFalse(is_cudagraphable(s))
-        self.assertFalse(is_full_cudagraphable(gm))
+        self.assertFalse(is_cuda_graph_node_compatible(s))
+        self.assertFalse(is_cuda_graph_fully_compatible(gm))
 
 
 class TestEagerChunking(TestCase):
@@ -7729,7 +7733,6 @@ class TestEagerChunking(TestCase):
         module_fqn: str = "layers.*",
     ) -> GraphTrainerCompileConfig:
         return GraphTrainerCompileConfig(
-            enable=True,
             ep_overlap=EpOverlapConfig(
                 enabled=True,
                 strategy="eager",
@@ -7775,7 +7778,7 @@ class TestEagerChunking(TestCase):
         model = Model()
         forward = model.layers[0].forward
         config = self._config()
-        config.enable = False
+        config.ep_overlap.enabled = False
 
         maybe_apply_ep_overlap_eager_chunking(model, config)
 

@@ -129,7 +129,7 @@ class CheckpointManager(BaseCheckpointManager):
             previous 4 components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
             model state dicts between native format and other formats.
-        base_folder (str): The base folder to save the checkpoint. Will be concatenated
+        base_folder (str): The base folder to save the checkpointer. Will be concatenated
             with config.folder
 
     """
@@ -163,10 +163,6 @@ class CheckpointManager(BaseCheckpointManager):
         base_folder: str = "",
     ) -> None:
 
-        self.enable = config.enable
-        if not self.enable:
-            return
-
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
         self._storage = _FilesystemCheckpointStorage()
@@ -197,7 +193,7 @@ class CheckpointManager(BaseCheckpointManager):
         self.sd_adapter = sd_adapter
         if self.last_save_in_hf and self.sd_adapter is None:
             raise ValueError(
-                "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+                "checkpointer.last_save_in_hf is True, but sd_adapter is not provided."
             )
 
         # Async & Distributed Infrastructure
@@ -237,7 +233,8 @@ class CheckpointManager(BaseCheckpointManager):
         )
 
     def __del__(self):
-        self.close()
+        if hasattr(self, "staging_future"):
+            self.close()
 
     def _close(self):
         if (
@@ -267,7 +264,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         Args:
             state_dict (dict): The state dict to save.
-            checkpoint_id (str): Unique identifier (usually a path) for the checkpoint.
+            checkpoint_id (str): Unique identifier (usually a path) for the checkpointer.
             async_mode (AsyncMode): The saving/staging strategy.
             enable_garbage_collection (bool): To trigger a manual GC collect after save.
             to_hf (bool): If True, uses a HuggingFaceStorageWriter and adapts the
@@ -369,7 +366,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         Args:
             states: Live state objects selected for restoration.
-            checkpoint_id: Path or identifier for the source checkpoint.
+            checkpoint_id: Path or identifier for the source checkpointer.
             from_hf: If True, adapts the load process for HuggingFace model
                 definitions and safetensors format.
             from_quantized: Indicates if the source is in a quantized format
@@ -435,7 +432,7 @@ class CheckpointManager(BaseCheckpointManager):
         checkpoint_phase = (
             "saving" if self.async_mode == AsyncMode.DISABLED else "staging"
         )
-        logger.info(f"{checkpoint_phase.capitalize()} the checkpoint.")
+        logger.info(f"{checkpoint_phase.capitalize()} the checkpointer.")
 
         if last_step:
             self._save_last_step(curr_step)

@@ -27,7 +27,7 @@ from . import model_registry
 
 def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -48,13 +48,13 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
         ],
     )
     config = to_graph_trainer_config(base, model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     config.model_spec = model_registry(
         "debugmodel",
         seq_len=config.training.max_context_length,
@@ -68,7 +68,6 @@ def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
     """Test-only FlexInnerAttention baseline that runs through eager pipeline parallelism."""
     config = graph_trainer_deepseek_v3_debugmodel()
     config.compile = GraphTrainerCompileConfig(
-        enable=True,
         components=["loss"],
         mode=None,
     )
@@ -78,7 +77,7 @@ def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_16b(seq_len=4096), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
@@ -95,5 +94,5 @@ def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(deepseek_v3_671b(seq_len=4096), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config.compile = GraphTrainerCompileConfig()
     return config

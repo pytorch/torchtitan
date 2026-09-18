@@ -6,7 +6,6 @@
 
 from dataclasses import replace
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -88,9 +87,6 @@ def kimi_k3_debugmodel(
             dtype="bfloat16",
             disable_cuda_graphs=True,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
