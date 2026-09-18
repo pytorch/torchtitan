@@ -41,6 +41,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
     construct_mandatory_graph_passes,
+    GraphPassRuntimeContext,
 )
 from torchtitan.experiments.graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
@@ -348,6 +349,11 @@ class GraphTrainingEngine(TrainingEngine):
                     self._traced_step,
                     self.config,
                     parallel_dims=self.parallel_dims,
+                    runtime_context=GraphPassRuntimeContext(
+                        module=model,
+                        args=(inputs, labels, global_valid_tokens, extra_kwargs),
+                        train_context=self.train_context,
+                    ),
                 )
             else:
                 passes = construct_mandatory_graph_passes()
