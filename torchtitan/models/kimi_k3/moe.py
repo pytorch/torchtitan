@@ -8,6 +8,7 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 
 from torchtitan.models.common import Linear
@@ -61,6 +62,7 @@ class KimiLatentMoE(MoE):
         padding_mask_T: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
+        x_TD, padding_mask_T = self._prepare_tp_inputs(x_TD, padding_mask_T)
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
             x_TD,
             self.expert_bias_E,
@@ -78,4 +80,11 @@ class KimiLatentMoE(MoE):
         out_TD = self.routed_up(self.routed_norm(routed_TD))
         if self.shared_experts is not None:
             out_TD = out_TD + self.shared_experts(x_TD)
-        return out_TD
+        return self._reduce_tp_output(out_TD)
+
+    def _combined_output_tp_type(
+        self, output_tp_type: spmd.PerMeshAxisSpmdType
+    ) -> spmd.PerMeshAxisSpmdType:
+        # The latent routed path reduces before its nonlinear norm and returns
+        # to the token-sharded layout whenever SP is enabled.
+        return output_tp_type if isinstance(output_tp_type, spmd.Shard) else spmd.P

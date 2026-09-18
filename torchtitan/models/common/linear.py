@@ -265,12 +265,9 @@ class PartialBiasRowwiseLinear(RowParallelLinear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(RowParallelLinear.Config):
-        pass
-
-    def __init__(self, config: Config):
-        if not config.bias:
-            raise ValueError("PartialBiasRowwiseLinear requires bias=True")
-        super().__init__(config)
+        def __post_init__(self) -> None:
+            if not self.bias:
+                raise ValueError("PartialBiasRowwiseLinear requires bias=True")
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         bias = self.bias
