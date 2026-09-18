@@ -23,9 +23,9 @@ import torch.nn as nn
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    compose_parallel_linear_cls,
     Linear,
     RowParallelLinear,
-    compose_parallel_linear_cls,
 )
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig

@@ -28,9 +28,9 @@ from torchao.prototype.mx_formats.kernels import (
 
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    compose_parallel_linear_cls,
     Linear,
     RowParallelLinear,
-    compose_parallel_linear_cls,
 )
 
 from .._fsdp_tensor import _UnshardedFSDPTensor

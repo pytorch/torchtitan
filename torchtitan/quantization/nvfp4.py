@@ -28,10 +28,10 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    compose_parallel_linear_cls,
     get_parallel_linear_cls,
     Linear,
     RowParallelLinear,
-    compose_parallel_linear_cls,
 )
 from torchtitan.protocols.module import Module
 
@@ -257,9 +257,7 @@ try:
     NVFP4ColumnParallelLinear = compose_parallel_linear_cls(
         NVFP4Linear, ColumnParallelLinear
     )
-    NVFP4RowParallelLinear = compose_parallel_linear_cls(
-        NVFP4Linear, RowParallelLinear
-    )
+    NVFP4RowParallelLinear = compose_parallel_linear_cls(NVFP4Linear, RowParallelLinear)
 
 except ImportError:
     NVFP4Linear = None

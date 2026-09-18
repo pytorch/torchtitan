@@ -23,11 +23,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    compose_parallel_linear_cls,
     get_parallel_linear_cls,
     Linear,
     PartialBiasRowwiseLinear,
     RowParallelLinear,
-    compose_parallel_linear_cls,
 )
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig

@@ -10,9 +10,9 @@ import torch
 
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    compose_parallel_linear_cls,
     Linear,
     RowParallelLinear,
-    compose_parallel_linear_cls,
 )
 from torchtitan.protocols.module import Module
 

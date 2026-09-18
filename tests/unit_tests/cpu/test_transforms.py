@@ -343,6 +343,52 @@ class TestTensorParallelModules(unittest.TestCase):
             transformed.shared_experts.w2, AsyncRowParallelLinear.Config
         )
 
+    def test_sigmoid_shared_expert_parent_owns_input_gather(self):
+        from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
+        from torchtitan.models.common.moe_sharding import (
+            set_sigmoid_gated_shared_experts_sharding_config,
+        )
+
+        for enable_ep in (False, True):
+            for enable_sp in (False, True):
+                with self.subTest(enable_ep=enable_ep, enable_sp=enable_sp):
+                    shared_experts = SigmoidGatedFeedForward.Config(
+                        w13=Linear.Config(in_features=8, out_features=32),
+                        w2=RowParallelLinear.Config(in_features=16, out_features=8),
+                        gate=Linear.Config(in_features=8, out_features=1),
+                    )
+                    set_sigmoid_gated_shared_experts_sharding_config(
+                        shared_experts,
+                        enable_ep=enable_ep,
+                        enable_sp=enable_sp,
+                    )
+
+                    assert shared_experts.sharding_config is not None
+                    assert shared_experts.sharding_config.in_dst_shardings is not None
+                    assert shared_experts.w13.sharding_config is not None
+                    assert (
+                        shared_experts.w13.sharding_config.in_src_shardings is not None
+                    )
+                    assert shared_experts.gate.sharding_config is not None
+                    assert (
+                        shared_experts.gate.sharding_config.in_src_shardings is not None
+                    )
+                    assert shared_experts.w2.sharding_config is not None
+
+                    parent_input = shared_experts.sharding_config.in_dst_shardings["x"]
+                    self.assertEqual(
+                        shared_experts.w13.sharding_config.in_src_shardings["input"],
+                        parent_input,
+                    )
+                    self.assertEqual(
+                        shared_experts.gate.sharding_config.in_src_shardings["input"],
+                        parent_input,
+                    )
+                    self.assertEqual(
+                        shared_experts.w2.sharding_config.out_src_shardings,
+                        shared_experts.sharding_config.out_src_shardings,
+                    )
+
     def test_shared_expert_sharding_uses_projection_boundaries(self):
         from torchtitan.models.common.moe_sharding import set_moe_sharding_config
         from torchtitan.models.deepseek_v3 import model_registry

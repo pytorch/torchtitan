@@ -19,9 +19,11 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     token_id_placement,
 )
+from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     get_parallel_linear_cls,
+    Linear,
     RowParallelLinear,
 )
 from torchtitan.protocols.sharding import ShardingConfig
@@ -190,6 +192,63 @@ def set_shared_experts_sharding_config(
     # output, so its rowwise bias remains Replicate.
     w2_config.state_shardings["bias"] = dense_param_placement(tp=spmd.R)
     shared_experts_cfg.w2.sharding_config = w2_config
+
+
+def set_sigmoid_gated_shared_experts_sharding_config(
+    shared_experts: SigmoidGatedFeedForward.Config,
+    *,
+    enable_ep: bool,
+    enable_sp: bool,
+) -> None:
+    """Gather once for a shared w13 projection and sigmoid gate.
+
+    The parent presents replicated tokens to both projections. The gate output
+    is sliced over tokens under SP so it can multiply the communication-complete
+    output of the row-parallel w2 projection.
+    """
+    assert type(shared_experts.w13) is Linear.Config
+    assert type(shared_experts.gate) is Linear.Config
+    assert get_parallel_linear_cls(shared_experts.w2) is RowParallelLinear
+
+    input_layout = (
+        dense_sequence_parallel_placement()
+        if enable_ep and enable_sp
+        else dense_activation_placement(
+            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
+        )
+    )
+    output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
+    )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    shared_experts.sharding_config = ShardingConfig(
+        in_src_shardings={"x": input_layout},
+        in_dst_shardings={"x": replicated_input_layout},
+        out_src_shardings=output_layout,
+    )
+    shared_experts.w13.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    shared_experts.w2.sharding_config = rowwise_config(output_layout=output_layout)
+    assert shared_experts.w2.sharding_config.state_shardings is not None
+    shared_experts.w2.sharding_config.state_shardings["bias"] = dense_param_placement(
+        tp=spmd.R
+    )
+
+    gate_output_layout = (
+        dense_sequence_parallel_placement() if enable_sp else replicated_input_layout
+    )
+    shared_experts.gate.sharding_config = ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.R),
+            "bias": dense_param_placement(tp=spmd.R),
+        },
+        in_src_shardings={"input": replicated_input_layout},
+        out_src_shardings=replicated_input_layout,
+        out_dst_shardings=gate_output_layout,
+    )
 
 
 def _routed_experts_sharding_configs(

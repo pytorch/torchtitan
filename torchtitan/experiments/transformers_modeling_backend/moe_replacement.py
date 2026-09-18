@@ -37,19 +37,14 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
-from torchtitan.models.common.decoder_sharding import (
-    colwise_config,
-    dense_activation_placement,
-    dense_param_placement,
-    dense_sequence_parallel_placement,
-    rowwise_config,
-)
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    set_moe_sharding_config,
+    set_sigmoid_gated_shared_experts_sharding_config,
+)
 from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
-from torchtitan.protocols.sharding import ShardingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -60,54 +55,6 @@ class _HFBatchedMoE(MoE):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return super().forward(hidden_states.squeeze(0)).unsqueeze(0)
-
-
-def _set_sigmoid_shared_experts_sharding(
-    shared_experts: SigmoidGatedFeedForward.Config,
-    *,
-    enable_ep: bool,
-    enable_sp: bool,
-) -> None:
-    """Gather once for a shared w13 projection and sigmoid gate."""
-    input_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(
-            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
-        )
-    )
-    output_layout = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
-    )
-    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    shared_experts.sharding_config = ShardingConfig(
-        in_src_shardings={"x": input_layout},
-        in_dst_shardings={"x": replicated_input_layout},
-        out_src_shardings=output_layout,
-    )
-    shared_experts.w13.sharding_config = colwise_config(
-        input_layout=replicated_input_layout
-    )
-    shared_experts.w2.sharding_config = rowwise_config(output_layout=output_layout)
-    assert shared_experts.w2.sharding_config.state_shardings is not None
-    shared_experts.w2.sharding_config.state_shardings["bias"] = dense_param_placement(
-        tp=spmd.R
-    )
-
-    gate_output_layout = (
-        dense_sequence_parallel_placement() if enable_sp else replicated_input_layout
-    )
-    shared_experts.gate.sharding_config = ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.R),
-            "bias": dense_param_placement(tp=spmd.R),
-        },
-        in_src_shardings={"input": replicated_input_layout},
-        out_src_shardings=replicated_input_layout,
-        out_dst_shardings=gate_output_layout,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -171,8 +118,9 @@ def build_and_swap_native_moe(
             continue
 
         _, expert_layout = _get_expert_param_info()
+        shared_experts = moe_config.shared_experts
         sigmoid_shared_experts = isinstance(
-            moe_config.shared_experts, SigmoidGatedFeedForward.Config
+            shared_experts, SigmoidGatedFeedForward.Config
         )
         set_moe_sharding_config(
             moe_config,
@@ -181,9 +129,9 @@ def build_and_swap_native_moe(
             expert_param_layout=expert_layout,
             configure_shared_experts=not sigmoid_shared_experts,
         )
-        if sigmoid_shared_experts:
-            _set_sigmoid_shared_experts_sharding(
-                moe_config.shared_experts,
+        if isinstance(shared_experts, SigmoidGatedFeedForward.Config):
+            set_sigmoid_gated_shared_experts_sharding_config(
+                shared_experts,
                 enable_ep=enable_ep,
                 enable_sp=enable_sp,
             )

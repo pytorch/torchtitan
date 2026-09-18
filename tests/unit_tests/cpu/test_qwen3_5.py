@@ -15,7 +15,12 @@ from torchtitan.models.qwen3_5.config_registry import qwen35_0_8b, qwen35_27b
 from torchtitan.models.qwen3_8 import model_registry as qwen3_8_model_registry
 
 
-def test_qwen35_shared_expert_gathers_once_for_w13_and_gate() -> None:
+@pytest.mark.parametrize("enable_ep", [False, True])
+@pytest.mark.parametrize("enable_sp", [False, True])
+def test_qwen35_shared_expert_gathers_once_for_w13_and_gate(
+    enable_ep: bool,
+    enable_sp: bool,
+) -> None:
     from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
     from torchtitan.models.common.linear import Linear, RowParallelLinear
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
@@ -33,11 +38,47 @@ def test_qwen35_shared_expert_gathers_once_for_w13_and_gate() -> None:
     assert type(shared_experts.gate) is Linear.Config
     assert isinstance(shared_experts.w2, RowParallelLinear.Config)
 
-    set_qwen35_sharding_config(config, enable_sp=True, enable_ep=True)
+    set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None
     assert shared_experts.sharding_config.in_dst_shardings is not None
     assert shared_experts.w13.sharding_config is not None
     assert shared_experts.w13.sharding_config.in_src_shardings is not None
+    assert shared_experts.gate.sharding_config is not None
+    assert shared_experts.gate.sharding_config.in_src_shardings is not None
+    assert shared_experts.w2.sharding_config is not None
+
+    parent_input = shared_experts.sharding_config.in_dst_shardings["x"]
+    assert shared_experts.w13.sharding_config.in_src_shardings["input"] == parent_input
+    assert shared_experts.gate.sharding_config.in_src_shardings["input"] == parent_input
+    assert (
+        shared_experts.w2.sharding_config.out_src_shardings
+        == shared_experts.sharding_config.out_src_shardings
+    )
+
+
+@pytest.mark.parametrize("enable_sp", [False, True])
+def test_qwen35_attention_output_matches_row_parallel_projection(
+    enable_sp: bool,
+) -> None:
+    from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
+
+    config = cast(Qwen35Model.Config, model_registry("debugmodel").model)
+    set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=False)
+
+    for layer in config.layers:
+        if layer.attention is not None:
+            attention = layer.attention
+            output_projection = attention.wo
+        else:
+            assert layer.delta_net is not None
+            attention = layer.delta_net
+            output_projection = attention.out_proj
+        assert attention.sharding_config is not None
+        assert output_projection.sharding_config is not None
+        assert (
+            attention.sharding_config.out_src_shardings
+            == output_projection.sharding_config.out_src_shardings
+        )
 
 
 def test_qwen35_registry_keeps_released_flavors() -> None:
