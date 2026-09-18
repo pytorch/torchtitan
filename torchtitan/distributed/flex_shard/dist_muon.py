@@ -140,11 +140,6 @@ def _matrix_batch_view_from_compute_layout(
         and (applicable_axis_names is None or axis_name in applicable_axis_names)
     )
     if not block_shards:
-        if compute_layout.num_rows_per_segment is not None:
-            raise ValueError(
-                f"Muon parameter {fqn!r} num_rows_per_segment requires a "
-                "BlockShard compute sharding"
-            )
         return None
 
     if len(storage_shape) != 2:
@@ -167,16 +162,10 @@ def _matrix_batch_view_from_compute_layout(
             f"Muon parameter {fqn!r} must use one BlockShard block size "
             "across mesh axes"
         )
-    num_rows_per_segment = compute_layout.num_rows_per_segment
-    if num_rows_per_segment is not None and sum(num_rows_per_segment) != block_size:
-        raise ValueError(
-            f"Muon parameter {fqn!r} BlockShard block size must equal the sum "
-            f"of num_rows_per_segment {sum(num_rows_per_segment)}; got {block_size}"
-        )
     return _MatrixBatchView.from_storage_shape(
         storage_shape,
-        matrix_rows=block_size,
-        num_rows_per_segment=num_rows_per_segment,
+        matrix_rows=block_shards[0].total_block_size,
+        num_rows_per_segment=block_size if type(block_size) is tuple else None,
     )
 
 
@@ -797,9 +786,9 @@ def _row_intervals_by_mesh_axis_coordinate(
         return ((0, num_rows),) * mesh_axis_size
 
     if type(sharding) is BlockShard:
-        assert sharding.dim == 0 and not num_rows % sharding.block_size
-        num_sharding_units = num_rows // sharding.block_size
-        rows_per_unit = sharding.block_size
+        rows_per_unit = sharding.total_block_size
+        assert sharding.dim == 0 and not num_rows % rows_per_unit
+        num_sharding_units = num_rows // rows_per_unit
     else:
         assert type(sharding) is Shard and sharding.dim == 0
         num_sharding_units = num_rows

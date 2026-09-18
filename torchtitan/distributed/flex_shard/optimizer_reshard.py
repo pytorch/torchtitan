@@ -40,20 +40,37 @@ class BlockShard:
     contiguous partitioning as ``Shard``. A block is never split between
     participants. ``BlockShard`` describes only distribution; it does not
     reshape or reinterpret the tensor.
+
+    ``block_size`` may be a tuple for a block made of contiguous pieces with
+    different lengths, e.g. ``(128, 64)`` for a per-head ``[K_nope; V]`` stack.
+    The block is still ``sum(block_size)`` elements and is never split; the
+    pieces only tell a consumer such as DistMuon where one matrix ends and the
+    next begins inside the block.
     """
 
     dim: int
-    block_size: int
+    block_size: int | tuple[int, ...]
 
     def __post_init__(self) -> None:
         if isinstance(self.dim, bool) or not isinstance(self.dim, int):
             raise ValueError("BlockShard.dim must be an integer")
-        if (
-            isinstance(self.block_size, bool)
-            or not isinstance(self.block_size, int)
-            or self.block_size <= 0
+        pieces = (
+            self.block_size if type(self.block_size) is tuple else (self.block_size,)
+        )
+        if (type(self.block_size) is tuple and len(pieces) < 2) or any(
+            isinstance(piece, bool) or not isinstance(piece, int) or piece <= 0
+            for piece in pieces
         ):
-            raise ValueError("BlockShard.block_size must be a positive integer")
+            raise ValueError(
+                "BlockShard.block_size must be a positive integer or a tuple of "
+                "at least two positive integers"
+            )
+
+    @property
+    def total_block_size(self) -> int:
+        if isinstance(self.block_size, int):
+            return self.block_size
+        return sum(self.block_size)
 
 
 _ComputeSharding = Owned | Replicate | Shard | BlockShard
@@ -166,34 +183,15 @@ class ComputeLayout:
 
             ComputeLayout(
                 shardings_by_mesh_axis={
-                    "dp_shard": BlockShard(dim=0, block_size=5),
-                },
-                num_rows_per_segment=(3, 2),
+                    "dp_shard": BlockShard(dim=0, block_size=(3, 2)),
+                }
             )
-
-    ``num_rows_per_segment`` splits every ``BlockShard`` block into contiguous
-    segments along tensor dimension 0, and Muon treats each segment as one
-    matrix. The block size must equal the sum of the segments. Without it,
-    each block is one matrix.
     """
 
     shardings_by_mesh_axis: Mapping[str, _ComputeSharding]
     shard_order_by_tensor_dim: Mapping[int, tuple[str, ...]] = _DEFAULT_SHARD_ORDER
-    num_rows_per_segment: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
-        if self.num_rows_per_segment is not None and (
-            type(self.num_rows_per_segment) is not tuple
-            or len(self.num_rows_per_segment) < 2
-            or any(
-                isinstance(rows, bool) or not isinstance(rows, int) or rows <= 0
-                for rows in self.num_rows_per_segment
-            )
-        ):
-            raise ValueError(
-                "ComputeLayout.num_rows_per_segment must be a tuple of at least "
-                "two positive integers"
-            )
         shardings_by_mesh_axis = dict(self.shardings_by_mesh_axis)
         if not shardings_by_mesh_axis:
             raise ValueError("ComputeLayout must declare a compute sharding")
