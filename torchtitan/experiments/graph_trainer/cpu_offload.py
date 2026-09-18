@@ -45,11 +45,10 @@ import torch._functorch._activation_offloading.offload_ops  # noqa: F401
 import torch.fx
 from torch.fx import Node
 from torch.utils.checkpoint import CheckpointPolicy
-
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
-    _is_backward_node,
     _NOT_IN_LAYERS,
+    _touches_backward,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,6 +102,8 @@ _VIEW_OPS = frozenset(
         aten.as_strided,
         aten.alias,
         aten.split,
+        aten.unbind,
+        aten.chunk,
         aten.narrow,
         aten.unfold,
         aten.detach,
@@ -145,7 +146,7 @@ def _get_storage_chain(node: Node) -> tuple[set[Node], bool]:
         for user in n.users:
             if user.op != "call_function":
                 continue
-            if _is_backward_node(user):
+            if _touches_backward(user):
                 has_bwd = True
                 continue
             chain_nodes.add(user)
@@ -219,7 +220,7 @@ def _can_offload_node(node: Node) -> bool:
 def _has_recompute_consumer(node: Node) -> bool:
     """Check if any forward user (or transitive view user) is tagged for recomputation."""
     for user in node.users:
-        if user.op != "call_function" or _is_backward_node(user):
+        if user.op != "call_function" or _touches_backward(user):
             continue
         policy = user.meta.get("recompute")
         if policy in (
@@ -256,10 +257,14 @@ def _collect_view_replay_info(
         for user in n.users:
             if user.op != "call_function":
                 continue
-            if _is_backward_node(user):
+            if _touches_backward(user):
                 if in_chain:
                     view_bwd_redirects.append((n, user))
-            elif _is_view(user) and user not in visited_views:
+            elif (
+                _is_view(user) or user.target is operator.getitem
+            ) and user not in visited_views:
+                # getitem unpacks a multi-output view (unbind/split/chunk); it
+                # is part of the alias chain, not a consumer of it.
                 visited_views.add(user)
                 replay_views.append(user)
                 _walk(user, True)
@@ -290,7 +295,7 @@ def _classify_forward_backward(
     for node in gm.graph.nodes:
         if node.op not in ("call_function", "get_attr"):
             continue
-        if _is_backward_node(node):
+        if _touches_backward(node):
             backward_nodes.add(node)
         else:
             forward_nodes.add(node)
@@ -459,7 +464,7 @@ def apply_cpu_offload_pass(
             f"Node {node.name} tagged MUST_CPU_OFFLOAD is a view op; "
             f"view ops should not be tagged for offload"
         )
-        direct_bwd_users = [u for u in node.users if _is_backward_node(u)]
+        direct_bwd_users = [u for u in node.users if _touches_backward(u)]
         replay_views, view_bwd_redirects = _collect_view_replay_info(node)
         all_bwd_users = direct_bwd_users + [u for _, u in view_bwd_redirects]
         if not all_bwd_users:
@@ -665,7 +670,7 @@ def defer_offload_waits(
     last_node = None
 
     for n in gm.graph.nodes:
-        if n.op == "call_function" and _is_backward_node(n):
+        if n.op == "call_function" and _touches_backward(n):
             break
         if n.op != "call_function":
             continue
@@ -726,7 +731,7 @@ def prefetch_reloads(
     current_layer = None
 
     for n in gm.graph.nodes:
-        if n.op != "call_function" or not _is_backward_node(n):
+        if n.op != "call_function" or not _touches_backward(n):
             continue
         if n.target in _AO_OPS:
             continue
@@ -752,7 +757,7 @@ def prefetch_reloads(
         if not (
             node.op == "call_function"
             and node.target == torch.ops.ao.reload.default
-            and _is_backward_node(node)
+            and _touches_backward(node)
         ):
             continue
         layer_id = _get_reload_layer(node)

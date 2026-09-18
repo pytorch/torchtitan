@@ -104,6 +104,12 @@ jobs:
         # Run bitwise deterministic
         pytest torchtitan/experiments/graph_trainer/tests/test_bitwise_deterministic.py -v
 
+        # auto_perf_maxing budget adherence on llama3-8B. Lives here rather than
+        # in the default suite: the budget only binds once activations are large
+        # next to the parameter floor, which needs more memory than the 24 GiB
+        # A10G runners have. Skips itself on smaller cards.
+        NCCL_NVLS_ENABLE=0 pytest torchtitan/experiments/graph_trainer/tests/test_auto_perf_maxing_budget.py -v
+
         # AutoParallel depends on a separately installed package that can break
         # on PyTorch internal API movement. Keep it last so the graph_trainer
         # tests above still produce signal when that dependency is stale.

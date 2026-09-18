@@ -17,10 +17,10 @@ from torch._functorch.partitioners import (
     has_recomputable_rng_ops,
     must_recompute,
 )
-
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_module_fqn,
     _is_backward_node,
+    _touches_backward,
 )
 
 
@@ -80,7 +80,7 @@ def _collect_backward_regions(
 
     for idx in range(start_idx, len(all_nodes)):
         node = all_nodes[idx]
-        if _is_backward_node(node):
+        if _is_backward_node(node) or _touches_backward(node):
             if bwd_start is None:
                 bwd_start = idx
                 needs_remat = False
@@ -272,7 +272,8 @@ def selective_activation_remat_pass(
         stack = [reload_node]
         while stack:
             n = stack.pop()
-            if n in bwd_reload_chain or not _is_backward_node(n):
+            is_backward = _is_backward_node(n) or _touches_backward(n)
+            if n in bwd_reload_chain or not is_backward:
                 continue
             # Skip if n is already in front of ``target``: either previously
             # hoisted before an earlier-or-equal target, or sitting at its
@@ -380,7 +381,7 @@ def selective_activation_remat_pass(
         user
         for fwd_node in recomputed_nodes
         for user in fwd_node.users
-        if _is_backward_node(user)
+        if _is_backward_node(user) or _touches_backward(user)
     }
     for bwd_node in direct_bwd_consumers:
         bwd_node.args = torch.fx.map_arg(bwd_node.args, remat_input)

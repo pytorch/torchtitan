@@ -253,6 +253,30 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             ngpu=8,
             skip_rocm_test=True,
         ),
+        # End-to-end cover for auto_perf_maxing: the solver's own unit tests
+        # exercise pure helpers, so nothing else checks that a solved plan
+        # survives tagging, the offload pass, remat and bucketing and still
+        # runs under FSDP+TP. The budget is left unset on purpose -- it then
+        # resolves from the device, which is the path a user gets by default.
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.memory_policy auto_perf_maxing",
+                    # zero_grad(set_to_none=) keys off this flag, not off
+                    # --compile.disable_passes; without it a full copy of the
+                    # sharded gradients stays resident for the whole step.
+                    "--training.disable_cuda_graphs",
+                    "--parallelism.data_parallel_shard_degree 8",
+                ],
+            ],
+            "aot_fx_trace llama3 FSDP+auto_perf_maxing",
+            "aot_fx_trace_llama3_fsdp_auto_perf_maxing",
+            ngpu=8,
+            skip_rocm_test=True,
+        ),
         OverrideDefinitions(
             [
                 [
