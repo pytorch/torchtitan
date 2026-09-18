@@ -37,7 +37,7 @@ def parallelize_qwen3_5(
     parallel_dims: ParallelDims,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     skip_dp: bool = False,
@@ -53,7 +53,7 @@ def parallelize_qwen3_5(
     the model must fit on GPU or CPU memory.
     """
     model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
+        compile_config is not None and "model" in compile_config.components
     )
 
     if parallel_dims.cp_enabled:
