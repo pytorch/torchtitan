@@ -210,7 +210,13 @@ class SoftCappedLinear(Linear):
         self.output_soft_cap_temp = config.output_soft_cap_temp
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        logits = super().forward(input).float()
+        return self.postprocess_output(self.forward_projection(input))
+
+    def forward_projection(self, input: torch.Tensor) -> torch.Tensor:
+        return super().forward(input)
+
+    def postprocess_output(self, logits: torch.Tensor) -> torch.Tensor:
+        logits = logits.float()
         if self.output_soft_cap_temp is not None:
             logits = self.output_soft_cap_temp * torch.tanh(
                 logits * self.output_multiplier / self.output_soft_cap_temp

@@ -56,9 +56,17 @@ class _LoRALinearMixin:
         ).build()
 
     def forward(self, input_XI: torch.Tensor) -> torch.Tensor:
-        base_out_XO = super().forward(input_XI)  # type: ignore[misc]
+        # Parents with output transforms expose the projection separately so
+        # the adapter update is included before those transforms run.
+        project = getattr(self, "forward_projection", None)
+        if project is None:
+            base_out_XO = super().forward(input_XI)  # type: ignore[misc]
+        else:
+            base_out_XO = project(input_XI)
         lora_out_XO = self.lora_b(self.lora_a(input_XI))
-        return base_out_XO + self._lora_scaling * lora_out_XO
+        output_XO = base_out_XO + self._lora_scaling * lora_out_XO
+        postprocess = getattr(self, "postprocess_output", None)
+        return postprocess(output_XO) if postprocess is not None else output_XO
 
     @staticmethod
     def _adapter_sharding(
