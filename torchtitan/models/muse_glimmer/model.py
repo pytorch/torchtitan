@@ -449,20 +449,22 @@ class MuseGlimmerModel(Decoder):
         return inputs, labels, batch
 
     def _get_vision_features(
-        self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
+        self,
+        pixel_values: torch.Tensor | None,
+        grid_thw: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Encode packed ``pixel_values`` and adapter-project into features.
+        """Encode packed pixels into the normalized LLM-dimension vision bank.
 
-        Mirrors qwen3_5's ``_get_vision_embeds``: runs the owned encoder +
-        adapter and returns ``[T, adapter_dim]``. ``pixel_values`` contains all
-        visual patches packed into one sequence, and ``grid_thw`` describes each
-        visual item's contiguous segment.
+        ``pixel_values`` contains all visual patches packed into one sequence,
+        and ``grid_thw`` describes each visual item's contiguous segment.
         """
         assert self.vision_encoder is not None and self.vision_adapter is not None
-        feats = self.vision_adapter(
+        assert self.vision_projection is not None
+        assert self.perception_emb_norm is not None
+        vision_features_VD = self.vision_adapter(
             self.vision_encoder(pixel_values, grid_thw=grid_thw)
         )
-        return feats
+        return self.perception_emb_norm(self.vision_projection(vision_features_VD))
 
     def _prepare_multimodal_embeds(
         self,
@@ -473,17 +475,22 @@ class MuseGlimmerModel(Decoder):
         vision_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
         """Build and inject image embeddings on the embedding pipeline stage."""
-        if pixel_values is None:
+        if self.vision_encoder is None:
             return h_TD
+
+        vision_bank_VD = self._get_vision_features(pixel_values, grid_thw)
+        if pixel_values is None:
+            empty_vision_dependency = vision_bank_VD.sum()
+            if spmd.is_type_checking():
+                empty_vision_dependency = spmd.mutate_type(
+                    empty_vision_dependency,
+                    src=spmd.V,
+                    dst=spmd.R,
+                )
+            return h_TD + empty_vision_dependency
+
         assert grid_thw is not None
         assert vision_bank_indices_T is not None
-        assert self.vision_projection is not None
-        assert self.perception_emb_norm is not None
-
-        vision_features_VD = self._get_vision_features(pixel_values, grid_thw)
-        vision_bank_VD = self.perception_emb_norm(
-            self.vision_projection(vision_features_VD)
-        )
         return gather_vision_embeds(
             h_TD,
             vision_bank_VD=vision_bank_VD,

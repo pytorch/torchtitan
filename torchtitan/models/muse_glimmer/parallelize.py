@@ -10,6 +10,8 @@
 
 import logging
 
+from torch.distributed.fsdp import FSDPModule
+
 from torchtitan.config import (
     CompileConfig,
     ParallelismConfig,
@@ -127,6 +129,10 @@ def parallelize_muse_glimmer(
         dp_mesh_dims=dp_mesh_dims,
         symm_mem_scope=parallelism.fsdp_symm_mem_scope,
     )
+    if has_vision:
+        for module in (model, model.vision_encoder, model.vision_adapter):
+            assert isinstance(module, FSDPModule)
+            module.set_reduce_scatter_unused_params(True, recurse=False)
 
     logger.info("Applied fully_shard to the model")
 
