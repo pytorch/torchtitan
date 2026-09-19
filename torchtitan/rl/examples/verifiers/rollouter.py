@@ -107,9 +107,7 @@ class VerifiersRollouter(Rollouter):
         )
         """TitanRL estimator applied after Verifiers returns rollout rewards."""
 
-        generation_server: GenerationServer.Config = field(
-            default_factory=GenerationServer.Config
-        )
+        generation_server: GenerationServer.Config
         """Local HTTP bridge from Verifiers to TitanRL generation."""
 
         renderer_multiplex: int = 256

@@ -134,7 +134,7 @@ def build_and_swap_native_moe(
                 expert_param_layout=expert_layout,
             )
             set_sigmoid_gated_feed_forward_sharding_config(
-                shared_experts, enable_sp=enable_sp
+                shared_experts, enable_ep=enable_ep, enable_sp=enable_sp
             )
         else:
             set_moe_sharding_config(
@@ -157,8 +157,8 @@ def build_and_swap_native_moe(
         )
         output_layout = (
             _hf_sequence_parallel_placement()
-            if enable_sp
-            else _hf_activation_placement(tp=spmd.P)
+            if enable_ep and enable_sp
+            else _hf_activation_placement(tp=spmd.P if enable_ep else spmd.R)
         )
         moe_config.sharding_config = replace(
             root_sharding,

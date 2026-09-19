@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import dataclasses
 import io
 import sys
@@ -29,6 +30,26 @@ from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
+
+
+@contextlib.contextmanager
+def cuda_graphs_supported(value: bool):
+    """Pin the CUDA-graph capability predicate at every site that binds it.
+
+    ``config/validation.py`` imports it inside the function it guards, so
+    patching the defining module covers that site; ``trainer.py`` and
+    ``training_engine.py`` bind it at module import. The CUDA-graph gates are
+    inert on any host that cannot capture, so the tests below say which of the
+    two worlds they are asserting about.
+    """
+    with mock.patch(
+        "torchtitan.distributed.cuda_graph.cuda_graphs_supported", return_value=value
+    ), mock.patch(
+        "torchtitan.trainer.cuda_graphs_supported", return_value=value
+    ), mock.patch(
+        "torchtitan.training_engine.cuda_graphs_supported", return_value=value
+    ):
+        yield
 
 
 class TestConfigManager(unittest.TestCase):
@@ -197,46 +218,48 @@ class TestConfigManager(unittest.TestCase):
         assert config.parallelism.pipeline_parallel_schedule == "1F1B"
 
     def test_cuda_graphs_reject_looped_pipeline_schedule(self):
-        config_manager = ConfigManager()
-        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            with pytest.raises((ValueError, SystemExit)) as exc_info:
-                config_manager.parse_args(
-                    [
-                        "--module",
-                        "llama3",
-                        "--config",
-                        "llama3_debugmodel",
-                        "--parallelism.pipeline_parallel_degree",
-                        "2",
-                        "--parallelism.pipeline_parallel_schedule",
-                        "Interleaved1F1B",
-                    ]
-                )
+        with cuda_graphs_supported(True):
+            config_manager = ConfigManager()
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                with pytest.raises((ValueError, SystemExit)) as exc_info:
+                    config_manager.parse_args(
+                        [
+                            "--module",
+                            "llama3",
+                            "--config",
+                            "llama3_debugmodel",
+                            "--parallelism.pipeline_parallel_degree",
+                            "2",
+                            "--parallelism.pipeline_parallel_schedule",
+                            "Interleaved1F1B",
+                        ]
+                    )
 
-        if isinstance(exc_info.value, SystemExit):
-            assert exc_info.value.code == 2
-            error = stderr.getvalue()
-        else:
-            error = str(exc_info.value)
-        assert "do not support looped pipeline schedules" in error
+            if isinstance(exc_info.value, SystemExit):
+                assert exc_info.value.code == 2
+                error = stderr.getvalue()
+            else:
+                error = str(exc_info.value)
+            assert "do not support looped pipeline schedules" in error
 
     def test_cuda_graphs_reject_pipeline_validation(self):
-        config = ConfigManager().parse_args(
-            [
-                "--module",
-                "llama3",
-                "--config",
-                "llama3_debugmodel",
-                "--training.disable_cuda_graphs",
-                "--parallelism.pipeline_parallel_degree",
-                "2",
-            ]
-        )
-        config.training.disable_cuda_graphs = False
-        config.parallelism.pipeline_parallel_schedule = "1F1B"
-        config.validator = Validator.Config()
-        with pytest.raises(ValueError, match="do not support validation"):
-            config.__post_init__()
+        with cuda_graphs_supported(True):
+            config = ConfigManager().parse_args(
+                [
+                    "--module",
+                    "llama3",
+                    "--config",
+                    "llama3_debugmodel",
+                    "--training.disable_cuda_graphs",
+                    "--parallelism.pipeline_parallel_degree",
+                    "2",
+                ]
+            )
+            config.training.disable_cuda_graphs = False
+            config.parallelism.pipeline_parallel_schedule = "1F1B"
+            config.validator = Validator.Config()
+            with pytest.raises(ValueError, match="do not support validation"):
+                config.__post_init__()
 
     def test_cuda_graphs_enabled_by_default(self):
         config = ConfigManager().parse_args(
@@ -245,26 +268,27 @@ class TestConfigManager(unittest.TestCase):
         assert not config.training.disable_cuda_graphs
 
     def test_cuda_graphs_reject_unsupported_expert_parallelism(self):
-        config_manager = ConfigManager()
-        with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
-            with pytest.raises((ValueError, SystemExit)) as exc_info:
-                config_manager.parse_args(
-                    [
-                        "--module",
-                        "deepseek_v3",
-                        "--config",
-                        "deepseek_v3_debugmodel",
-                        "--parallelism.expert_parallel_degree",
-                        "2",
-                    ]
-                )
+        with cuda_graphs_supported(True):
+            config_manager = ConfigManager()
+            with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                with pytest.raises((ValueError, SystemExit)) as exc_info:
+                    config_manager.parse_args(
+                        [
+                            "--module",
+                            "deepseek_v3",
+                            "--config",
+                            "deepseek_v3_debugmodel",
+                            "--parallelism.expert_parallel_degree",
+                            "2",
+                        ]
+                    )
 
-        if isinstance(exc_info.value, SystemExit):
-            assert exc_info.value.code == 2
-            error = stderr.getvalue()
-        else:
-            error = str(exc_info.value)
-        assert "without CPU synchronization" in error
+            if isinstance(exc_info.value, SystemExit):
+                assert exc_info.value.code == 2
+                error = stderr.getvalue()
+            else:
+                error = str(exc_info.value)
+            assert "without CPU synchronization" in error
 
     def test_cuda_graphs_allow_non_blocking_hybridep(self):
         config_manager = ConfigManager()
@@ -355,19 +379,20 @@ class TestConfigManager(unittest.TestCase):
         TrainingEngine.Config.__post_init__(config)
 
     def test_sdc_replay_rejects_multiple_replays_with_cuda_graphs(self):
-        config = ConfigManager().parse_args(
-            [
-                "--module",
-                "llama3",
-                "--config",
-                "llama3_debugmodel",
-                "--debug.deterministic",
-            ]
-        )
-        config.sdc_replayer = SDCReplayer.Config(num_replays=2)
+        with cuda_graphs_supported(True):
+            config = ConfigManager().parse_args(
+                [
+                    "--module",
+                    "llama3",
+                    "--config",
+                    "llama3_debugmodel",
+                    "--debug.deterministic",
+                ]
+            )
+            config.sdc_replayer = SDCReplayer.Config(num_replays=2)
 
-        with pytest.raises(ValueError, match="at most one replay"):
-            TrainingEngine.Config.__post_init__(config)
+            with pytest.raises(ValueError, match="at most one replay"):
+                TrainingEngine.Config.__post_init__(config)
 
     def test_sdc_replay_allows_multiple_replays_without_cuda_graphs(self):
         config = ConfigManager().parse_args(
@@ -411,22 +436,134 @@ class TestConfigManager(unittest.TestCase):
                 TrainingEngine.Config.__post_init__(config)
 
     def test_cuda_graphs_reject_blocking_hybridep(self):
-        from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
-        from torchtitan.models.deepseek_v3.config_registry import (
-            deepseek_v3_debugmodel_hybridep,
+        with cuda_graphs_supported(True):
+            from torchtitan.models.common.token_dispatcher import (
+                HybridEPTokenDispatcher,
+            )
+            from torchtitan.models.deepseek_v3.config_registry import (
+                deepseek_v3_debugmodel_hybridep,
+            )
+
+            config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
+            dispatcher_configs = list(
+                config.model_spec.model.traverse(HybridEPTokenDispatcher.Config)
+            )
+            assert dispatcher_configs
+            for _, dispatcher_config, _, _ in dispatcher_configs:
+                dispatcher_config.non_blocking_capacity_factor = None
+            config.parallelism.expert_parallel_degree = 2
+
+            with pytest.raises(ValueError, match="non_blocking_capacity_factor"):
+                dataclasses.replace(config)
+
+    def test_cuda_graphs_unsupported_allows_looped_pipeline_schedule(self):
+        """Where capture cannot run, the CUDA-graph gates must not fire.
+
+        ROCm always falls back to eager in ``wrap_with_cuda_graph``, so every
+        restriction below describes a constraint that does not exist there.
+        """
+        with cuda_graphs_supported(False):
+            config = ConfigManager().parse_args(
+                [
+                    "--module",
+                    "llama3",
+                    "--config",
+                    "llama3_debugmodel",
+                    "--parallelism.pipeline_parallel_degree",
+                    "2",
+                    "--parallelism.pipeline_parallel_schedule",
+                    "Interleaved1F1B",
+                ]
+            )
+
+        assert config.parallelism.pipeline_parallel_schedule == "Interleaved1F1B"
+        assert not config.training.disable_cuda_graphs
+
+    def test_cuda_graphs_unsupported_allows_pipeline_validation(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--training.disable_cuda_graphs",
+                "--parallelism.pipeline_parallel_degree",
+                "2",
+            ]
         )
+        config.training.disable_cuda_graphs = False
+        config.parallelism.pipeline_parallel_schedule = "1F1B"
+        config.validator = Validator.Config()
+
+        with cuda_graphs_supported(False):
+            config.__post_init__()
+
+    def test_cuda_graphs_unsupported_allows_expert_parallelism(self):
+        with cuda_graphs_supported(False):
+            config = ConfigManager().parse_args(
+                [
+                    "--module",
+                    "deepseek_v3",
+                    "--config",
+                    "deepseek_v3_debugmodel",
+                    "--parallelism.expert_parallel_degree",
+                    "2",
+                ]
+            )
+
+        assert config.parallelism.expert_parallel_degree == 2
+        assert not config.training.disable_cuda_graphs
+
+    def test_cuda_graphs_unsupported_allows_blocking_hybridep(self):
+        from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 
         config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
-        dispatcher_configs = list(
-            config.model_spec.model.traverse(HybridEPTokenDispatcher.Config)
-        )
-        assert dispatcher_configs
-        for _, dispatcher_config, _, _ in dispatcher_configs:
+        for _, dispatcher_config, _, _ in config.model_spec.model.traverse(
+            HybridEPTokenDispatcher.Config
+        ):
             dispatcher_config.non_blocking_capacity_factor = None
         config.parallelism.expert_parallel_degree = 2
 
-        with pytest.raises(ValueError, match="non_blocking_capacity_factor"):
+        with cuda_graphs_supported(False):
             dataclasses.replace(config)
+
+    def test_cuda_graphs_unsupported_allows_multiple_sdc_replays(self):
+        config = ConfigManager().parse_args(
+            [
+                "--module",
+                "llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--debug.deterministic",
+            ]
+        )
+        config.sdc_replayer = SDCReplayer.Config(num_replays=2)
+
+        with cuda_graphs_supported(False):
+            TrainingEngine.Config.__post_init__(config)
+
+    def test_cuda_graphs_reject_varlen_without_max_num_documents(self):
+        from torchtitan.models.llama3.config_registry import (
+            llama3_debugmodel_varlen_attn,
+        )
+
+        config = llama3_debugmodel_varlen_attn()
+        config.dataloader.max_num_documents = None
+
+        with cuda_graphs_supported(True):
+            with pytest.raises(ValueError, match="max_num_documents is unset"):
+                config.__post_init__()
+
+    def test_cuda_graphs_unsupported_allows_varlen_without_max_num_documents(self):
+        from torchtitan.models.llama3.config_registry import (
+            llama3_debugmodel_varlen_attn,
+        )
+
+        config = llama3_debugmodel_varlen_attn()
+        config.dataloader.max_num_documents = None
+
+        with cuda_graphs_supported(False):
+            config.__post_init__()
 
     def test_cli_override_dump_folder(self):
         """CLI args override config defaults for nested fields."""

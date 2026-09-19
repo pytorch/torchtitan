@@ -15,12 +15,9 @@ import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import (
-    _per_axis_types,
     maybe_set_sparse_mesh,
     spmd_local_context,
-    spmd_mesh_group,
     spmd_mesh_size,
     spmd_sparse_mesh,
 )
@@ -82,10 +79,10 @@ class GroupedExperts(Module):
         """Raw expert computation without dispatch/combine.
 
         Shape suffixes here describe logical grouped-mm inputs, not physical
-        sharding. Under EP, E may be a local shard of experts; under TP,
-        expert weights shard hidden dimensions instead; under SP, R may be a
-        local token shard. Keep logical capital suffixes here to avoid encoding
-        a specific parallel layout in these local tensor names.
+        sharding. Under EP, E may be a local shard of experts; without EP,
+        expert weights are replicated across TP. Under SP, R may be a local
+        token shard. Keep logical capital suffixes here to avoid encoding a
+        specific parallel layout in these local tensor names.
         """
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
@@ -695,98 +692,6 @@ class MoE(Module):
         else:
             self.expert_bias_E = None
 
-    def _prepare_tp_inputs(
-        self,
-        x_TD: torch.Tensor,
-        padding_mask_T: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Gather inputs once for all expert branches when EP is disabled."""
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is None or spmd_sparse_mesh() is not None:
-            return x_TD, padding_mask_T
-
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        assert sharding_config.in_src_shardings is not None
-
-        x_layout = sharding_config.in_src_shardings["x_TD"]
-        x_tp_type = _per_axis_types(x_layout).get(MeshAxisName.TP)
-        assert x_tp_type is not None
-        x_TD = spmd.redistribute(
-            x_TD,
-            tp_group,
-            src=x_tp_type,
-            dst=spmd.R,
-            backward_options={"op_dtype": x_TD.dtype},
-        )
-
-        if padding_mask_T is not None:
-            padding_mask_layout = sharding_config.in_src_shardings["padding_mask_T"]
-            padding_mask_tp_type = _per_axis_types(padding_mask_layout).get(
-                MeshAxisName.TP
-            )
-            assert padding_mask_tp_type is not None
-            padding_mask_T = spmd.redistribute(
-                padding_mask_T,
-                tp_group,
-                src=padding_mask_tp_type,
-                dst=spmd.R,
-            )
-        return x_TD, padding_mask_T
-
-    def _reduce_tp_output(self, out_TD: torch.Tensor) -> torch.Tensor:
-        """Reduce the combined expert output to the MoE boundary layout."""
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is None:
-            return out_TD
-
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        output_layout = sharding_config.out_src_shardings
-        assert output_layout is not None and not isinstance(output_layout, tuple)
-        output_tp_type = _per_axis_types(output_layout).get(MeshAxisName.TP)
-        assert output_tp_type is not None
-        combined_output_tp_type = (
-            output_tp_type if isinstance(output_tp_type, spmd.Shard) else spmd.P
-        )
-        if combined_output_tp_type == output_tp_type:
-            return out_TD
-        return spmd.redistribute(
-            out_TD,
-            tp_group,
-            src=combined_output_tp_type,
-            dst=output_tp_type,
-            backward_options={"op_dtype": out_TD.dtype},
-        )
-
-    def _forward_shared_experts(self, x_TD: torch.Tensor) -> torch.Tensor | None:
-        """Prepare the shared input at the MoE boundary, then run the experts."""
-        if self.shared_experts is None:
-            return None
-
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is None:
-            return self.shared_experts(x_TD)
-
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        assert sharding_config.in_src_shardings is not None
-        # Without EP, _prepare_tp_inputs already gathered once for both expert
-        # branches. With EP, only the shared branch needs a TP-replicated input.
-        if spmd_sparse_mesh() is not None:
-            input_layout = sharding_config.in_src_shardings["x_TD"]
-            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
-            assert input_tp_type is not None
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=input_tp_type,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
-
-        return self.shared_experts(x_TD)
-
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -802,16 +707,14 @@ class MoE(Module):
         Returns:
             Output ``(T, D)``.
 
-        Without EP, routed and shared experts consume the same replicated
-        activation, so this boundary gathers it once for both branches. With
-        SP, both branches reduce-scatter before their sum. Without SP, their
-        partial outputs are added before one final all-reduce. With EP, routed
-        experts retain their dispatcher input layout while this boundary
-        prepares the shared input independently. GroupedExperts operates in a
-        local SPMD region.
+        Under TP, the MoE wrapper's ``sharding_config`` (set by
+        ``set_moe_sharding_config``) handles input/output redistribution:
+        input is redistributed from sp_layout to desired_input_layouts;
+        output is redistributed to sp_layout. GroupedExperts operates in a
+        local SPMD region. When EP internally
+        sequence-shards tokens across TP, the caller must provide a TP-divisible
+        token count.
         """
-        x_TD, padding_mask_T = self._prepare_tp_inputs(x_TD, padding_mask_T)
-
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
         (topk_scores_TK, topk_expert_ids_TK, routing_map_TE,) = self.router(
@@ -829,12 +732,13 @@ class MoE(Module):
             num_local_tokens_per_expert_E,
         )
 
-        shared_out_TD = self._forward_shared_experts(x_TD)
+        shared_out_TD = (
+            self.shared_experts(x_TD) if self.shared_experts is not None else None
+        )
 
         if shared_out_TD is not None:
             out_TD = out_TD + shared_out_TD
-
-        return self._reduce_tp_output(out_TD)
+        return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:

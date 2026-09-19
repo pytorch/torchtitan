@@ -255,7 +255,7 @@ def _set_latent_moe_sharding(
             "x_TD": token_shard,
         }
     moe_cfg.routed_down.sharding_config = routed_down
-    token_sharded = enable_ep or enable_sp
+    token_sharded = enable_ep
     routed_norm = norm_config(enable_sp=token_sharded)
     routed_up = _tp_unsharded_weight_config(token_sharded=token_sharded)
     partial = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
@@ -264,17 +264,6 @@ def _set_latent_moe_sharding(
     elif enable_ep:
         routed_experts.out_dst_shardings = token_shard
         routed_up.out_src_shardings = token_shard
-        routed_up.out_dst_shardings = partial
-    else:
-        # The experts' Partial output is reduced at the norm's boundary;
-        # routed_up re-enters Partial so the MoE exit reduces it once.
-        routed_norm.in_src_shardings = {"x": partial}
-        routed_norm.in_dst_shardings = {
-            "x": dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-        }
-        routed_up.out_src_shardings = dense_activation_placement(
-            tp=spmd.I, cp=spmd.S(0)
-        )
         routed_up.out_dst_shardings = partial
     moe_cfg.routed_norm.sharding_config = routed_norm
     moe_cfg.routed_up.sharding_config = routed_up
