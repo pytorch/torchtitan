@@ -14,10 +14,12 @@ import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
+    _per_axis_types,
     annotate_input_spmd_types,
     spmd_local_context,
+    spmd_mesh_group,
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
@@ -114,6 +116,24 @@ class Attention(GQAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            sharding_config = self._sharding_config
+            assert sharding_config is not None
+            assert sharding_config.in_src_shardings is not None
+            input_layout = sharding_config.in_src_shardings["x_TD"]
+            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
+            assert input_tp_type is not None
+            # qkv and the output gate both consume x, so gather once at their
+            # common attention boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=input_tp_type,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
         num_tokens = x_TD.shape[0]
         xq, xk, xv = self.qkv_linear(x_TD)
 

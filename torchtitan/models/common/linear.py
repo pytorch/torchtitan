@@ -22,7 +22,8 @@ import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import _per_axis_types, spmd_mesh_group
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend for the router gate:
@@ -45,6 +46,24 @@ class Linear(nn.Linear, Module):
             bias=config.bias,
         )
 
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Apply local projection compute without outer communication.
+
+        LoRA and quantized subclasses override this method so column- and
+        row-parallel ``forward`` methods continue to own their collectives.
+        Explicit operands let those boundaries adjust an operand's SPMD type
+        before invoking the selected local compute implementation.
+        """
+        return F.linear(input, weight, bias)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return self._linear(input, self.weight, self.bias)
+
 
 class CastLinear(Linear):
     """``Linear`` whose forward matmul runs in ``compute_dtype``.
@@ -63,12 +82,95 @@ class CastLinear(Linear):
         super().__init__(config)
         self.compute_dtype = TORCH_DTYPE_MAP[config.compute_dtype]
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
         # The optimizer updates the weight each step, so training cannot cache
         # the upcast copy. Inference may be able to cache it between syncs.
-        bias = None if self.bias is None else self.bias.to(self.compute_dtype)
+        bias = None if bias is None else bias.to(self.compute_dtype)
         return F.linear(
-            input.to(self.compute_dtype), self.weight.to(self.compute_dtype), bias
+            input.to(self.compute_dtype), weight.to(self.compute_dtype), bias
+        )
+
+
+# TODO: Expose a public API for querying a module boundary's per-axis SPMD
+# types. User-defined parallel modules should not need to access the private
+# ``Module._sharding_config`` and ``spmd_types._per_axis_types`` APIs used here.
+def _tp_type(layout) -> spmd.PerMeshAxisSpmdType:
+    """Return the TP-axis type from a boundary layout."""
+    tp_type = _per_axis_types(layout).get(MeshAxisName.TP)
+    assert tp_type is not None
+    return tp_type
+
+
+class ColumnParallelLinear(Linear):
+    """Prepare an input for a column-parallel Linear.
+
+    This is a ``Linear`` rather than a wrapper around one, so its parameter
+    FQNs remain unchanged. The same module handles both tensor-parallel modes.
+    With sequence parallelism, ``Shard(0) -> Replicate`` is an input all-gather.
+    Without sequence parallelism, ``Invariant -> Replicate`` is a forward no-op
+    whose backward performs the required all-reduce.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            sharding_config = self._sharding_config
+            assert sharding_config is not None
+            assert sharding_config.in_src_shardings is not None
+            input_layout = sharding_config.in_src_shardings["input"]
+            input = spmd.redistribute(
+                input,
+                tp_group,
+                src=_tp_type(input_layout),
+                dst=spmd.R,
+                backward_options={"op_dtype": input.dtype},
+            )
+        return self._linear(input, self.weight, self.bias)
+
+
+class RowParallelLinear(Linear):
+    """Reduce the partial output of an independently configured Linear.
+
+    This is a ``Linear`` rather than a wrapper around one, so its parameter
+    FQNs remain unchanged. ``Partial -> Shard(0)`` is a reduce-scatter, while
+    ``Partial -> Invariant`` is an all-reduce without it. The output layout
+    in this module's sharding config selects between the two.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = self._linear(input, self.weight, self.bias)
+        return self._reduce_output(output)
+
+    def _reduce_output(self, output: torch.Tensor) -> torch.Tensor:
+        # PartialBiasRowwiseLinear also uses this after adding its bias as a
+        # Partial value before the shared output reduction.
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return output
+
+        sharding_config = self._sharding_config
+        assert sharding_config is not None
+        output_layout = sharding_config.out_src_shardings
+        assert output_layout is not None and not isinstance(output_layout, tuple)
+        return spmd.redistribute(
+            output,
+            tp_group,
+            src=spmd.P,
+            dst=_tp_type(output_layout),
+            backward_options={"op_dtype": output.dtype},
         )
 
 
@@ -136,24 +238,26 @@ class RouterGateLinear(Linear):
     class Config(Linear.Config):
         pass
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output_TE = _RouterGateLinearFunction.apply(input, self.weight)
-        if self.bias is not None:
-            output_TE = output_TE + self.bias.float()
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        output_TE = _RouterGateLinearFunction.apply(input, weight)
+        if bias is not None:
+            output_TE = output_TE + bias.float()
         return output_TE
 
 
-class PartialBiasRowwiseLinear(Linear):
-    """Rowwise linear whose invariant bias becomes TP-partial in forward."""
+class PartialBiasRowwiseLinear(RowParallelLinear):
+    """Row-parallel Linear whose invariant bias joins the partial output."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        pass
-
-    def __init__(self, config: Config):
-        if not config.bias:
-            raise ValueError("PartialBiasRowwiseLinear requires bias=True")
-        super().__init__(config)
+    class Config(RowParallelLinear.Config):
+        def __post_init__(self) -> None:
+            if not self.bias:
+                raise ValueError("PartialBiasRowwiseLinear requires bias=True")
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         bias = self.bias
@@ -167,12 +271,35 @@ class PartialBiasRowwiseLinear(Linear):
                 dst=spmd.P,
                 expert_mode=True,
             )
-        return F.linear(input, self.weight, bias)
+        output = self._linear(input, self.weight, bias)
+        return self._reduce_output(output)
+
+
+def get_parallel_linear_cls(
+    config: Linear.Config,
+) -> (
+    type[ColumnParallelLinear]
+    | type[RowParallelLinear]
+    | type[PartialBiasRowwiseLinear]
+    | None
+):
+    """Return the canonical TP boundary class for a linear config."""
+    owner = config._owner
+    if owner is not None and issubclass(owner, PartialBiasRowwiseLinear):
+        return PartialBiasRowwiseLinear
+    if owner is not None and issubclass(owner, ColumnParallelLinear):
+        return ColumnParallelLinear
+    if owner is not None and issubclass(owner, RowParallelLinear):
+        return RowParallelLinear
+    return None
 
 
 __all__ = [
     "CastLinear",
+    "ColumnParallelLinear",
     "Linear",
+    "RowParallelLinear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",
+    "get_parallel_linear_cls",
 ]

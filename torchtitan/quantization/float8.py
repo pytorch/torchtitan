@@ -6,12 +6,17 @@
 
 from dataclasses import dataclass
 
+import torch
+
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 
 try:
-    from torchao.float8.float8_linear import Float8Linear as TorchAOFloat8Linear
+    from torchao.float8.float8_linear import (
+        Float8Linear as TorchAOFloat8Linear,
+        matmul_with_hp_or_float8_args,
+    )
 
     class Float8Linear(TorchAOFloat8Linear, Module):
         """Inherits from Module (not Linear) to satisfy the Module protocol
@@ -34,6 +39,29 @@ try:
                 bias=config.bias,
                 config=config._torchao_config,
             )
+
+        def _linear(
+            self,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            bias: torch.Tensor | None,
+        ) -> torch.Tensor:
+            # This mirrors TorchAOFloat8Linear.forward while accepting explicit
+            # operands so a TP boundary can substitute a partial bias.
+            if torch.is_autocast_enabled():
+                input = input.to(torch.get_autocast_gpu_dtype())
+            output = matmul_with_hp_or_float8_args.apply(
+                input,
+                weight.t(),
+                self.linear_mm_config,
+                self.config,
+            )
+            if bias is not None:
+                output = output + bias.to(output.dtype)
+            return output
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            return self._linear(input, self.weight, self.bias)
 
 except ImportError:
     Float8Linear = None
