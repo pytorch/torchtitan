@@ -27,7 +27,6 @@ from torchtitan.models.kimi_k3.moon_ep_experts import (
 )
 
 
-
 def _find_dispatcher(model):
     for _, mod in model.named_modules():
         if hasattr(mod, "token_dispatcher"):
@@ -78,6 +77,7 @@ def test_moonep_import_guard_names_the_package():
 
 
 # --- the unit, end to end, against a dense reference ---------------------- #
+
 
 def _dims(*, dp_shard, cp=1, tp=1, ep, dp_replicate=False):
     # core keeps the efsdp axis whenever ep > 1 and sizes it dp_shard * cp * tp // ep.

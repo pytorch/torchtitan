@@ -52,9 +52,7 @@ def padded_slot_count(base_slots: int, in_dim: int, out_dim: int) -> int:
 # Routing weights ride along as a second output so their gradient reaches the router.
 class _MoonEPDispatch(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx, buffer, plan_out, x_SH, weights_SK, ids_SK, counts_E
-    ):
+    def forward(ctx, buffer, plan_out, x_SH, weights_SK, ids_SK, counts_E):
         hidden_nvsh, weights_nvs, cu_seqlens, plan = buffer.dispatch(
             x_SH, weights_SK, ids_SK, counts_E, zero_copy=False
         )

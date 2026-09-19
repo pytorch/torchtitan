@@ -48,9 +48,7 @@ class MoonEPTableBackend(Protocol):
 
 class _MoonEPExpertFunction(torch.autograd.Function):
     @staticmethod
-    def forward(
-        ctx, experts, x_RD, w1_l, w2_l, w3_l, offsets, plan
-    ):
+    def forward(ctx, experts, x_RD, w1_l, w2_l, w3_l, offsets, plan):
         experts._refresh_own_rows(w1_l, w2_l, w3_l)
         experts._backend.prefetch(plan, experts._tables)
         with torch.no_grad():
