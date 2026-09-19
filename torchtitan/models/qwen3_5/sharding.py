@@ -330,14 +330,6 @@ def _set_deltanet_sharding(
     head_placement = attention_activation_placement()
     parameter_placement = dense_param_placement(tp=spmd.S(0))
     replicated_placement = dense_param_placement(tp=spmd.R)
-    cu_seqlens_placement = SpmdType(
-        {
-            DP: spmd.V,
-            CP: spmd.R,
-            TP: spmd.R,
-        }
-    )
-
     deltanet_cfg.norm.sharding_config = ShardingConfig(
         state_shardings={"weight": replicated_placement},
         in_src_shardings={
@@ -353,8 +345,7 @@ def _set_deltanet_sharding(
     )
 
     # The inner GDN is the local SPMD boundary for the head-parallel
-    # convolution and recurrence. cu_seqlens_host is keyword-only host metadata
-    # and intentionally remains outside the local SPMD positional placements.
+    # convolution and recurrence. Attention metadata is annotated separately.
     deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(
         in_src_shardings={
             "query_TC": projected_placement,
@@ -367,7 +358,6 @@ def _set_deltanet_sharding(
             "conv_v_weight_C1W": parameter_placement,
             "A_log_H": parameter_placement,
             "dt_bias_H": parameter_placement,
-            "cu_seqlens": cu_seqlens_placement,
         },
         in_dst_shardings={
             "query_TC": projected_placement,
@@ -380,7 +370,6 @@ def _set_deltanet_sharding(
             "conv_v_weight_C1W": parameter_placement,
             "A_log_H": parameter_placement,
             "dt_bias_H": parameter_placement,
-            "cu_seqlens": cu_seqlens_placement,
         },
         out_src_shardings=head_placement,
         out_dst_shardings=head_placement,
