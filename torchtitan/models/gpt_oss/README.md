@@ -5,6 +5,12 @@
 MODULE=gpt_oss CONFIG=gpt_oss_debugmodel ./run_train.sh
 ```
 
+GPT-OSS defaults to FlexAttention because its attention sinks require gradients
+through the attention log-sum-exp (LSE). PyTorch varlen attention does not provide
+those gradients. Explicit `attn_backend="varlen"` remains available for inference,
+but raises an error when gradients through Q or K are needed. Use
+`attn_backend="flex"` for training.
+
 ## Supported Features
 - FSDP/HSDP, TP, EP, CP, PP
 - Grouped matrix multiplication for efficient computation

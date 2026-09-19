@@ -56,7 +56,7 @@ class Attention(BaseAttention):
         qkv_linear: QKVLinear.Config
         wo: Linear.Config  # output projection
         inner_attention: Module.Config = dataclasses.field(
-            default_factory=VarlenInnerAttention.Config
+            default_factory=FlexInnerAttention.Config
         )
         sliding_window_size: int | None = None
         """Per-layer causal sliding-window size"""
@@ -107,6 +107,19 @@ class Attention(BaseAttention):
         q, k, v = self.qkv_linear(x)
 
         q, k = self.rope(q, k, positions)
+
+        # Sink rescaling needs gradients through both the output and the LSE.
+        # varlen exposes LSE as an auxiliary output without its Q/K gradients.
+        if (
+            isinstance(self.inner_attention, VarlenInnerAttention)
+            and torch.is_grad_enabled()
+            and (q.requires_grad or k.requires_grad)
+        ):
+            raise RuntimeError(
+                "GPT-OSS attention sinks require LSE gradients for Q/K training, "
+                "but varlen attention does not provide them. "
+                "Use attn_backend='flex' for training."
+            )
 
         output = self.inner_attention(
             q,

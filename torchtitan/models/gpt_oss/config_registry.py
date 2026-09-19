@@ -22,7 +22,7 @@ from . import model_registry
 
 def _gpt_oss_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-    attn_backend: str = "varlen",
+    attn_backend: str = "flex",
 ) -> Trainer.Config:
     model_spec = model_registry(
         "debugmodel", seq_len=seq_len, attn_backend=attn_backend

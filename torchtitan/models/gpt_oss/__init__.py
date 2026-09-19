@@ -70,7 +70,7 @@ def _make_gptoss_attn_config(
     *,
     dim: int,
     layer_id: int,
-    attn_backend: str = "varlen",
+    attn_backend: str = "flex",
     n_heads: int = 64,
     n_kv_heads: int = 8,
     head_dim: int = 64,
@@ -171,7 +171,7 @@ def _build_gptoss_layers(
     num_experts: int,
     top_k: int,
     load_balance_coeff: float,
-    attn_backend: str = "varlen",
+    attn_backend: str = "flex",
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     rope: RoPE.Config,
@@ -228,7 +228,7 @@ def _build_gptoss_layers(
 
 def _debugmodel(
     moe_comm_backend: str,
-    attn_backend: str = "varlen",
+    attn_backend: str = "flex",
     *,
     seq_len: int,
 ) -> GptOssModel.Config:
@@ -273,7 +273,7 @@ def _debugmodel(
 
 def _20b(
     moe_comm_backend: str,
-    attn_backend: str = "varlen",
+    attn_backend: str = "flex",
     *,
     seq_len: int,
 ) -> GptOssModel.Config:
@@ -318,7 +318,7 @@ def _20b(
 
 def _120b(
     moe_comm_backend: str,
-    attn_backend: str = "varlen",
+    attn_backend: str = "flex",
     *,
     seq_len: int,
 ) -> GptOssModel.Config:
@@ -373,7 +373,7 @@ def model_registry(
     *,
     seq_len: int | None = None,
     moe_comm_backend: str = "standard",
-    attn_backend: str = "varlen",
+    attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
     get_config, max_context_len = gptoss_configs[flavor]
