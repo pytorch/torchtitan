@@ -7,17 +7,12 @@
 import unittest
 from types import SimpleNamespace
 
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.distributed.tensor import Shard
 
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.fsdp import linear_param_shard_placements
 from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
-from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
 
 def _make_config(enable_weight_tying: bool = False) -> Llama3Model.Config:
@@ -50,35 +45,6 @@ class TestLlama3WeightTying(unittest.TestCase):
             model.lm_head.weight,
             "tok_embeddings.weight and output.weight must be the same tensor object",
         )
-        self.assertEqual(
-            model.lm_head.weight.shape,
-            (1, model.config.vocab_size, model.config.dim),
-        )
-
-        tokens = torch.tensor([0, 3, 7])
-        torch.testing.assert_close(
-            model.tok_embeddings(tokens),
-            F.embedding(tokens, model.lm_head.weight[0]),
-        )
-
-    def test_tied_weight_uses_matrix_row_fsdp_sharding(self):
-        model = Llama3Model(_make_config(enable_weight_tying=True))
-        placements = linear_param_shard_placements(model)
-
-        self.assertEqual(placements[model.lm_head.weight], Shard(1))
-
-    def test_hf_adapter_removes_and_restores_tied_projection_axis(self):
-        config = _make_config(enable_weight_tying=True)
-        model = Llama3Model(config)
-        model.init_states()
-        adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
-
-        hf_state_dict = adapter.to_hf(model.state_dict())
-        self.assertEqual(hf_state_dict["model.embed_tokens.weight"].ndim, 2)
-        restored = adapter.from_hf(hf_state_dict)
-
-        self.assertEqual(restored["tok_embeddings.weight"].ndim, 3)
-        self.assertEqual(restored["lm_head.weight"].ndim, 3)
 
     def test_weights_are_independent_when_tying_disabled(self):
         """Without weight tying, tok_embeddings and output have separate weights."""

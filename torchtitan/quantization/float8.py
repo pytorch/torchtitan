@@ -41,19 +41,20 @@ try:
             )
             self.out_features = config.out_features
             self.num_linears = config.num_linears
-            self.weight = torch.nn.Parameter(
-                self.weight.detach().unflatten(
-                    0, (config.num_linears, config.out_features)
-                ),
-                requires_grad=self.weight.requires_grad,
-            )
-            if self.bias is not None:
-                self.bias = torch.nn.Parameter(
-                    self.bias.detach().unflatten(
+            if config.num_linears > 1:
+                self.weight = torch.nn.Parameter(
+                    self.weight.detach().unflatten(
                         0, (config.num_linears, config.out_features)
                     ),
-                    requires_grad=self.bias.requires_grad,
+                    requires_grad=self.weight.requires_grad,
                 )
+                if self.bias is not None:
+                    self.bias = torch.nn.Parameter(
+                        self.bias.detach().unflatten(
+                            0, (config.num_linears, config.out_features)
+                        ),
+                        requires_grad=self.bias.requires_grad,
+                    )
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
             if torch.is_autocast_enabled():

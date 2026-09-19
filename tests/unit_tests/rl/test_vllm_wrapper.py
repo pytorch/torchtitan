@@ -20,7 +20,7 @@ from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
 def test_state_dict_layouts_include_native_feed_forward_weight():
     """Verify the fused dense FFN layout uses its native w13 state-dict key."""
     colwise = dense_param_placement(tp=spmd.S(1))
-    rowwise = dense_param_placement(tp=spmd.S(2))
+    rowwise = dense_param_placement(tp=spmd.S(1))
     config = FeedForward.Config(
         w13=Linear.Config(
             in_features=16,

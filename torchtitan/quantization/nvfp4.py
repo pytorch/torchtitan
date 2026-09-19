@@ -119,9 +119,8 @@ try:
                     sc = instance._sharding_config
                     weight_tp = sc.state_shardings["weight"].local_type.get(TP)
                     rowwise = (
-                        self.num_linears == 1
-                        and isinstance(weight_tp, spmd.Shard)
-                        and weight_tp.dim == 2
+                        isinstance(weight_tp, spmd.Shard)
+                        and weight_tp.dim == instance.weight.ndim - 1
                     )
                     if rowwise:
                         in_layout = dense_activation_placement(
@@ -162,19 +161,20 @@ try:
             )
             self.out_features = config.out_features
             self.num_linears = config.num_linears
-            self.weight = torch.nn.Parameter(
-                self.weight.detach().unflatten(
-                    0, (config.num_linears, config.out_features)
-                ),
-                requires_grad=self.weight.requires_grad,
-            )
-            if self.bias is not None:
-                self.bias = torch.nn.Parameter(
-                    self.bias.detach().unflatten(
+            if config.num_linears > 1:
+                self.weight = torch.nn.Parameter(
+                    self.weight.detach().unflatten(
                         0, (config.num_linears, config.out_features)
                     ),
-                    requires_grad=self.bias.requires_grad,
+                    requires_grad=self.weight.requires_grad,
                 )
+                if self.bias is not None:
+                    self.bias = torch.nn.Parameter(
+                        self.bias.detach().unflatten(
+                            0, (config.num_linears, config.out_features)
+                        ),
+                        requires_grad=self.bias.requires_grad,
+                    )
             # TorchAO created the runtime buffers on the (meta) build device.
             # Re-register them as None so ``_distribute_states`` skips them and
             # ``_init_self_buffers`` materializes them on the real device, per

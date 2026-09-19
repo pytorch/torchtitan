@@ -111,10 +111,10 @@ def vision_colwise_config(
     return ShardingConfig(
         state_shardings={
             "weight": _vision_state_placement(
-                tp=spmd.S(1), include_cp_axis=include_cp_axis
+                tp=spmd.S(0), include_cp_axis=include_cp_axis
             ),
             "bias": _vision_state_placement(
-                tp=spmd.S(1), include_cp_axis=include_cp_axis
+                tp=spmd.S(0), include_cp_axis=include_cp_axis
             ),
         },
         in_src_shardings={
@@ -143,7 +143,7 @@ def vision_partial_bias_rowwise_config(
     return ShardingConfig(
         state_shardings={
             "weight": _vision_state_placement(
-                tp=spmd.S(2), include_cp_axis=include_cp_axis
+                tp=spmd.S(1), include_cp_axis=include_cp_axis
             ),
             "bias": _vision_state_placement(tp=spmd.I, include_cp_axis=include_cp_axis),
         },

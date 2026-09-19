@@ -329,7 +329,11 @@ class TestRematRegions(unittest.TestCase):
             side_effect=silu_and_mul,
         ):
             dist_gemm_config = FeedForward.Config(
-                w13=AsyncColumnParallelLinear.Config(in_features=4, out_features=16),
+                w13=AsyncColumnParallelLinear.Config(
+                    in_features=4,
+                    out_features=8,
+                    num_linears=2,
+                ),
                 w2=AsyncRowParallelLinear.Config(in_features=8, out_features=4),
             )
             fused_config = deepcopy(feed_forward_config)

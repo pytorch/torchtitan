@@ -132,21 +132,10 @@ class StateDictAdapter(BaseStateDictAdapter):
                 )
 
     def _linear_state_dict_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert native stacked Linear parameters to their HF layout."""
+        """Split native fused feed-forward parameters into their HF layout."""
         from torchtitan.models.common.feed_forward import FeedForward
-        from torchtitan.models.common.linear import Linear
 
         result = dict(state_dict)
-        for fqn, config, _parent, _ in self.model_config.traverse(Linear.Config):
-            assert isinstance(config, Linear.Config)
-            if config.num_linears != 1:
-                continue
-            for name, physical_ndim in (("weight", 3), ("bias", 2)):
-                key = f"{fqn}.{name}"
-                value = result.get(key)
-                if value is not None and value.ndim == physical_ndim:
-                    result[key] = value.squeeze(0)
-
         for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
             prefix = f"{fqn}." if fqn else ""
             for name in ("weight", "bias"):
@@ -157,28 +146,13 @@ class StateDictAdapter(BaseStateDictAdapter):
                 result[f"{prefix}w1.{name}"] = gate_up[0]
                 result[f"{prefix}w3.{name}"] = gate_up[1]
 
-        if getattr(self.model_config, "enable_weight_tying", False):
-            value = result.get("tok_embeddings.weight")
-            if value is not None and value.ndim == 3:
-                result["tok_embeddings.weight"] = value.squeeze(0)
         return result
 
     def _linear_state_dict_from_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Convert HF Linear parameters to their native stacked layout."""
+        """Stack HF feed-forward parameters into their native fused layout."""
         from torchtitan.models.common.feed_forward import FeedForward
-        from torchtitan.models.common.linear import Linear
 
         result = dict(state_dict)
-        for fqn, config, _parent, _ in self.model_config.traverse(Linear.Config):
-            assert isinstance(config, Linear.Config)
-            if config.num_linears != 1:
-                continue
-            for name, hf_ndim in (("weight", 2), ("bias", 1)):
-                key = f"{fqn}.{name}"
-                value = result.get(key)
-                if value is not None and value.ndim == hf_ndim:
-                    result[key] = value.unsqueeze(0)
-
         for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
             prefix = f"{fqn}." if fqn else ""
             for name in ("weight", "bias"):
@@ -190,10 +164,6 @@ class StateDictAdapter(BaseStateDictAdapter):
                     [result.pop(gate_key), result.pop(up_key)], dim=0
                 )
 
-        if getattr(self.model_config, "enable_weight_tying", False):
-            value = result.get("tok_embeddings.weight")
-            if value is not None and value.ndim == 2:
-                result["tok_embeddings.weight"] = value.unsqueeze(0)
         return result
 
     def get_hf_storage_reader(

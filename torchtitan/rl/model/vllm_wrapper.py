@@ -40,7 +40,6 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import QKVLinear
-from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -577,13 +576,12 @@ class VLLMModelWrapper(Module):
                 )
                 if wqkv_sharding_config is None:
                     continue
-                for state_name in wqkv_sharding_config.state_shardings:
+                for (
+                    state_name,
+                    layout,
+                ) in wqkv_sharding_config.state_shardings.items():
                     for proj_name in ("wq", "wk", "wv"):
-                        # The physical [1, F, D] wqkv parameter is Shard(1),
-                        # while each exposed [F, D] projection is Shard(0).
-                        layouts[
-                            f"{module_prefix}{proj_name}.{state_name}"
-                        ] = dense_param_placement(tp=spmd.S(0))
+                        layouts[f"{module_prefix}{proj_name}.{state_name}"] = layout
 
             if module_fqn.rsplit(".", 1)[-1] == "vllm_attn":
                 for buffer_name, _ in module.named_buffers(recurse=False):

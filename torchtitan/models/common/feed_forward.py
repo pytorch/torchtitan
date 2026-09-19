@@ -51,6 +51,10 @@ class FeedForward(Module):
 
     def __init__(self, config: Config):
         super().__init__()
+        if config.w13.num_linears != 2:
+            raise ValueError(
+                "FeedForward w13 requires num_linears=2 for gate/up projections"
+            )
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()

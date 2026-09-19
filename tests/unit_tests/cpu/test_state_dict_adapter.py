@@ -23,6 +23,9 @@ from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+from torchtitan.models.qwen3 import qwen3_configs
+from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 
 
 class Llama3StateDictAdapterTest(unittest.TestCase):
@@ -56,6 +59,28 @@ class Llama3StateDictAdapterTest(unittest.TestCase):
         restored = adapter.from_hf(hf_state_dict)
         self.assertEqual(restored.keys(), state_dict.keys())
         torch.testing.assert_close(restored[w13_key], state_dict[w13_key])
+        model.load_state_dict(restored, strict=True)
+
+
+class Qwen3StateDictAdapterTest(unittest.TestCase):
+    def test_hf_roundtrip_preserves_tied_embedding_shape(self) -> None:
+        build_config, max_context_length = qwen3_configs["debugmodel"]
+        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        model = Qwen3Model(config)
+        model.init_states()
+        state_dict = model.state_dict()
+
+        self.assertEqual(state_dict["tok_embeddings.weight"].ndim, 2)
+        self.assertEqual(state_dict["lm_head.weight"].ndim, 2)
+
+        adapter = Qwen3StateDictAdapter(config, hf_assets_path=None)
+        hf_state_dict = adapter.to_hf(state_dict)
+        self.assertEqual(hf_state_dict["model.embed_tokens.weight"].ndim, 2)
+        self.assertNotIn("lm_head.weight", hf_state_dict)
+
+        restored = adapter.from_hf(hf_state_dict)
+        self.assertEqual(restored["tok_embeddings.weight"].ndim, 2)
+        self.assertEqual(restored["lm_head.weight"].ndim, 2)
         model.load_state_dict(restored, strict=True)
 
 
@@ -146,6 +171,7 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                 state_dict = model.state_dict()
                 for index, (key, value) in enumerate(state_dict.items()):
                     if key.endswith("attention.attn_sink.weight"):
+                        self.assertEqual(value.ndim, 2)
                         value.copy_(
                             torch.arange(value.numel()).reshape(value.shape) + index
                         )
@@ -157,9 +183,9 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                     sink_key = f"mtp.{depth}.attn.attn_sink"
                     torch.testing.assert_close(
                         hf_state_dict[sink_key],
-                        state_dict[f"mtp_layers.{depth}.attention.attn_sink.weight"]
-                        .squeeze(0)
-                        .squeeze(-1),
+                        state_dict[
+                            f"mtp_layers.{depth}.attention.attn_sink.weight"
+                        ].squeeze(-1),
                         rtol=0,
                         atol=0,
                     )

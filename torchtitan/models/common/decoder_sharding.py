@@ -124,11 +124,11 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
 
 
 def colwise_config() -> ShardingConfig:
-    """ColwiseParallel: weight matrix rows S(1), output S(-1)."""
+    """ColwiseParallel: weight S(0), output S(-1)."""
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.S(1)),
+            "weight": dense_param_placement(tp=spmd.S(0)),
+            "bias": dense_param_placement(tp=spmd.S(0)),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
     )
@@ -161,7 +161,7 @@ def stacked_colwise_config() -> ShardingConfig:
 
 def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     """
-    RowwiseParallel: weight matrix columns S(2), bias I (no-op if bias absent).
+    RowwiseParallel: weight S(1), bias I (no-op if bias absent).
     Output redistributes to S(1) (reduce-scatter) if SP on, else I (all-reduce).
     """
     out_dst = (
@@ -171,7 +171,7 @@ def rowwise_config(*, output_sp: bool = False) -> ShardingConfig:
     )
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(2)),
+            "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.I),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
@@ -366,11 +366,7 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
     embed_out_src = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     embed_input = token_id_placement()
     config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(
-                tp=spmd.S(1) if config.enable_weight_tying else spmd.S(0)
-            )
-        },
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": embed_input},
         in_dst_shardings={"input": embed_input},
         out_src_shardings=embed_out_src,
@@ -380,7 +376,7 @@ def set_decoder_sharding_config(config, *, enable_sp: bool) -> None:
     config.norm.sharding_config = pre_lm_head_norm_config(enable_sp=enable_sp)
 
     config.lm_head.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
         in_src_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         in_dst_shardings={"input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),

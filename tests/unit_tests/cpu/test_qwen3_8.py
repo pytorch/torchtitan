@@ -137,7 +137,7 @@ def test_text_only_checkpoint_adapter_uses_model_prefix() -> None:
     )
     assert set(converted) == {"tok_embeddings.weight", "lm_head.weight"}
     torch.testing.assert_close(converted["tok_embeddings.weight"], embedding)
-    torch.testing.assert_close(converted["lm_head.weight"], lm_head.unsqueeze(0))
+    torch.testing.assert_close(converted["lm_head.weight"], lm_head)
 
     restored = adapter.to_hf(converted)
     assert set(restored) == {"model.embed_tokens.weight", "lm_head.weight"}

@@ -153,7 +153,7 @@ def _shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
     """
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(2)),
+            "weight": dense_param_placement(tp=spmd.S(1)),
             # Rowwise bias is Replicate; addmm implicitly converts to Partial
             # to match the rowwise matmul output placement.
             "bias": dense_param_placement(tp=spmd.R),

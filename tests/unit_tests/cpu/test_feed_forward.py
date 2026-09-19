@@ -6,6 +6,7 @@
 
 from collections.abc import Callable
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -58,6 +59,16 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
     torch.testing.assert_close(w13_2HD[1], 5 * torch.ones_like(w13_2HD[1]))
 
 
+def test_feed_forward_requires_two_w13_projections():
+    config = FeedForward.Config(
+        w13=Linear.Config(in_features=4, out_features=8),
+        w2=Linear.Config(in_features=8, out_features=4),
+    )
+
+    with pytest.raises(ValueError, match="w13 requires num_linears=2"):
+        config.build()
+
+
 def test_feed_forward_loads_native_checkpoint_and_matches_reference():
     config = FeedForward.Config(
         w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
@@ -68,14 +79,14 @@ def test_feed_forward_loads_native_checkpoint_and_matches_reference():
     w3_HD = torch.randn(8, 4)
     state_dict = {
         "w13.weight": torch.stack((w1_HD, w3_HD)),
-        "w2.weight": torch.randn(1, 4, 8),
+        "w2.weight": torch.randn(4, 8),
     }
     feed_forward.load_state_dict(state_dict)
 
     x_TD = torch.randn(3, 4, requires_grad=True)
     reference_x_TD = x_TD.detach().clone().requires_grad_()
     w1_HD = w1_HD.detach().clone().requires_grad_()
-    w2_DH = state_dict["w2.weight"][0].detach().clone().requires_grad_()
+    w2_DH = state_dict["w2.weight"].detach().clone().requires_grad_()
     w3_HD = w3_HD.detach().clone().requires_grad_()
     expected_TD = F.linear(
         F.silu(F.linear(reference_x_TD, w1_HD)) * F.linear(reference_x_TD, w3_HD),
@@ -91,7 +102,7 @@ def test_feed_forward_loads_native_checkpoint_and_matches_reference():
     w13_grad_2HD = feed_forward.w13.weight.grad
     torch.testing.assert_close(w13_grad_2HD[0], w1_HD.grad)
     torch.testing.assert_close(w13_grad_2HD[1], w3_HD.grad)
-    torch.testing.assert_close(feed_forward.w2.weight.grad[0], w2_DH.grad)
+    torch.testing.assert_close(feed_forward.w2.weight.grad, w2_DH.grad)
 
 
 def test_feed_forward_uses_configured_activation():
@@ -105,7 +116,7 @@ def test_feed_forward_uses_configured_activation():
     feed_forward.load_state_dict(
         {
             "w13.weight": torch.randn(2, 8, 4),
-            "w2.weight": torch.randn(1, 4, 8),
+            "w2.weight": torch.randn(4, 8),
         }
     )
 

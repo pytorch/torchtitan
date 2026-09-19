@@ -179,9 +179,6 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
             .model_spec.model.layers[0]
             .attention
         )
-        local_qkv_out_features = (
-            attn_cfg.qkv_linear.wqkv.out_features // self.world_size
-        )
         set_gqa_attention_sharding(attn_cfg, enable_sp=True)
         attn = attn_cfg.build().to(self.device_type)
         attn.parallelize(parallel_dims)
@@ -190,9 +187,6 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         self.assertIsNone(attn.wo._sharding_config.out_src_shardings)
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
-        self.assertEqual(attn.qkv_linear.wqkv.weight.shape[0], 1)
-        self.assertEqual(attn.qkv_linear.wqkv.weight.shape[1], local_qkv_out_features)
-        self.assertEqual(attn.wo.weight.shape[0], 1)
 
     @with_comms
     def test_w13_tp_shards_the_matrix_row_dimension(self):
@@ -220,7 +214,7 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         )
         self.assertEqual(
             feed_forward.w2.weight.shape,
-            (1, DIM, hidden_dim // self.world_size),
+            (DIM, hidden_dim // self.world_size),
         )
 
 
@@ -266,7 +260,7 @@ class TestDistGEMMQKVNumerics(DTensorTestBase):
         with torch.no_grad():
             stock.wqkv.weight.copy_(torch.randn_like(stock.wqkv.weight))
             fused.wqkv.weight = torch.nn.Parameter(
-                stock.wqkv.weight.chunk(R, 1)[self.rank].contiguous()
+                stock.wqkv.weight.chunk(R, 0)[self.rank].contiguous()
             )
 
         x_TD = torch.randn(
@@ -300,7 +294,7 @@ class TestDistGEMMQKVNumerics(DTensorTestBase):
         )
         torch.testing.assert_close(
             fused.wqkv.weight.grad,
-            stock.wqkv.weight.grad.chunk(R, 1)[self.rank],
+            stock.wqkv.weight.grad.chunk(R, 0)[self.rank],
             atol=2e-2,
             rtol=2e-2,
         )
@@ -367,15 +361,14 @@ class TestDistGEMMFeedForwardNumerics(DTensorTestBase):
                 standard.w13.weight.chunk(R, 1)[self.rank].contiguous()
             )
             dist_gemm.w2.weight = torch.nn.Parameter(
-                standard.w2.weight.chunk(R, 2)[self.rank].contiguous()
+                standard.w2.weight.chunk(R, 1)[self.rank].contiguous()
             )
 
         # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
-        with use_spmd_backend("spmd_types"):
-            with set_current_spmd_mesh(mesh):
-                x_shard = x.chunk(R, 0)[self.rank].contiguous()
-                out_shard = dist_gemm(x_shard)
+        with set_current_spmd_mesh(mesh):
+            x_shard = x.chunk(R, 0)[self.rank].contiguous()
+            out_shard = dist_gemm(x_shard)
 
         # DistGEMM returns this rank's sequence shard of the full result.
         torch.testing.assert_close(
@@ -442,7 +435,7 @@ class TestDistGEMMFusedSwiGLUNumerics(DTensorTestBase):
                 native.w13.weight.chunk(R, 1)[self.rank].contiguous()
             )
             fused.w2.weight = torch.nn.Parameter(
-                native.w2.weight.chunk(R, 2)[self.rank].contiguous()
+                native.w2.weight.chunk(R, 1)[self.rank].contiguous()
             )
 
         mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))

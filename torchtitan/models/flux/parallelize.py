@@ -33,7 +33,6 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
-    linear_param_shard_placements,
     resolve_fsdp_mesh,
 )
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
@@ -105,7 +104,6 @@ def apply_fsdp(
         fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
-    model_param_placements = linear_param_shard_placements(model)
 
     linear_layers = [
         model.img_in,
@@ -114,46 +112,31 @@ def apply_fsdp(
         model.txt_in,
     ]
     for layer in linear_layers:
-        assert isinstance(layer, nn.Module)
-        fully_shard(
-            layer,
-            **fsdp_config,
-            shard_placement_fn=linear_param_shard_placements(layer).get,
-        )
+        # pyrefly: ignore [no-matching-overload]
+        fully_shard(layer, **fsdp_config)
 
     # pyrefly: ignore [not-iterable]
     for block in model.double_blocks:
-        assert isinstance(block, nn.Module)
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             block,
             **fsdp_config,
-            shard_placement_fn=linear_param_shard_placements(block).get,
         )
 
     # pyrefly: ignore [not-iterable]
     for block in model.single_blocks:
-        assert isinstance(block, nn.Module)
+        # pyrefly: ignore [no-matching-overload]
         fully_shard(
             block,
             **fsdp_config,
-            shard_placement_fn=linear_param_shard_placements(block).get,
         )
 
     # apply FSDP to last layer. Set reshard_after_forward=False for last layer to avoid gather right after reshard
-    assert isinstance(model.final_layer, nn.Module)
-    fully_shard(
-        model.final_layer,
-        **fsdp_config,
-        reshard_after_forward=False,
-        shard_placement_fn=linear_param_shard_placements(model.final_layer).get,
-    )
+    # pyrefly: ignore [no-matching-overload]
+    fully_shard(model.final_layer, **fsdp_config, reshard_after_forward=False)
 
     # Wrap all the rest of model
-    fully_shard(
-        model,
-        **fsdp_config,
-        shard_placement_fn=model_param_placements.get,
-    )
+    fully_shard(model, **fsdp_config)
 
     enable_fsdp_symm_mem(model, symm_mem_scope)
 

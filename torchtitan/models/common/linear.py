@@ -31,13 +31,13 @@ from torchtitan.protocols.module import Module
 
 
 class Linear(nn.Linear, Module):
-    """Configurable linear with a leading logical-projection dimension.
+    """Configurable linear that can store multiple stacked projections.
 
-    Parameters use ``[num_linears, out_features, in_features]``. The leading
-    dimension keeps each projection contiguous for blockwise weight
-    quantization. It is flattened without a copy for the GEMM. A single
-    projection retains the standard ``[..., out_features]`` output shape;
-    multiple projections return ``[..., num_linears, out_features]``.
+    A single projection keeps the standard ``[out_features, in_features]``
+    parameter shape. Multiple projections use
+    ``[num_linears, out_features, in_features]``, keeping each projection
+    contiguous for blockwise weight quantization, and return
+    ``[..., num_linears, out_features]``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -55,24 +55,24 @@ class Linear(nn.Linear, Module):
         )
         self.out_features = config.out_features
         self.num_linears = config.num_linears
-        self.weight = nn.Parameter(
-            self.weight.detach().unflatten(
-                0, (config.num_linears, config.out_features)
-            ),
-            requires_grad=self.weight.requires_grad,
-        )
-        if self.bias is not None:
-            self.bias = nn.Parameter(
-                self.bias.detach().unflatten(
+        if config.num_linears > 1:
+            self.weight = nn.Parameter(
+                self.weight.detach().unflatten(
                     0, (config.num_linears, config.out_features)
                 ),
-                requires_grad=self.bias.requires_grad,
+                requires_grad=self.weight.requires_grad,
             )
+            if self.bias is not None:
+                self.bias = nn.Parameter(
+                    self.bias.detach().unflatten(
+                        0, (config.num_linears, config.out_features)
+                    ),
+                    requires_grad=self.bias.requires_grad,
+                )
 
     def reset_parameters(self) -> None:
-        # nn.Linear.__init__ calls this while weight is temporarily 2D;
-        # init_states() calls it after the logical projection axis is restored.
-        # Flattening handles both and keeps fan-in equal to in_features.
+        # Flattening handles both ordinary and stacked projections while
+        # keeping fan-in equal to in_features.
         nn.init.kaiming_uniform_(self.weight.flatten(0, -2), a=math.sqrt(5))
         if self.bias is not None:
             bound = 1 / math.sqrt(self.in_features)

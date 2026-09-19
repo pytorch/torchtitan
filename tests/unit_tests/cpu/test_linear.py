@@ -32,7 +32,7 @@ class TestLinear(unittest.TestCase):
         linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertIsInstance(linear, nn.Linear)
-        self.assertEqual(linear.weight.shape, torch.Size([1, 16, 32]))
+        self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
         self.assertIsNone(linear.bias)
 
     def test_config_build_with_bias(self):
@@ -40,7 +40,7 @@ class TestLinear(unittest.TestCase):
         config = Linear.Config(in_features=32, out_features=16, bias=True)
         linear = config.build()
         self.assertIsNotNone(linear.bias)
-        self.assertEqual(linear.bias.shape, torch.Size([1, 16]))
+        self.assertEqual(linear.bias.shape, torch.Size([16]))
 
     def test_config_build_without_fields_raises(self):
         """Linear.Config() raises TypeError when required features are not provided."""
@@ -101,8 +101,8 @@ class TestLinear(unittest.TestCase):
         cfg2 = Linear.Config(in_features=64, out_features=8)
         l2 = cfg2.build()
         self.assertIsNot(l1, l2)
-        self.assertEqual(l1.weight.shape, torch.Size([1, 16, 32]))
-        self.assertEqual(l2.weight.shape, torch.Size([1, 8, 64]))
+        self.assertEqual(l1.weight.shape, torch.Size([16, 32]))
+        self.assertEqual(l2.weight.shape, torch.Size([8, 64]))
 
     def test_isinstance_checks(self):
         """Linear is instance of nn.Linear, and Module."""
@@ -128,14 +128,14 @@ class TestLinear(unittest.TestCase):
         config = Linear.Config(in_features=32, out_features=16)
         linear = config.build()
         self.assertIsInstance(linear, Linear)
-        self.assertEqual(linear.weight.shape, torch.Size([1, 16, 32]))
+        self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
 
     def test_config_partial_pre_specified(self):
         """Linear.Config with fields specified at construction builds correctly."""
         config = Linear.Config(in_features=32, out_features=16)
         linear = config.build()
         self.assertIsInstance(linear, Linear)
-        self.assertEqual(linear.weight.shape, torch.Size([1, 16, 32]))
+        self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
 
 
 class TestPartialBiasRowwiseLinear(unittest.TestCase):
@@ -155,8 +155,7 @@ class TestPartialBiasRowwiseLinear(unittest.TestCase):
         ).build()
         input = torch.randn(3, 4)
 
-        weight, bias = linear._flatten_weight_and_bias()
-        expected = nn.functional.linear(input, weight, bias)
+        expected = nn.functional.linear(input, linear.weight, linear.bias)
         actual = linear(input)
 
         torch.testing.assert_close(actual, expected)
