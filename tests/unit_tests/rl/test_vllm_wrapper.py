@@ -17,14 +17,15 @@ from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
 
 
-def test_state_dict_layouts_include_split_feed_forward_weights():
-    """Verify fused dense FFN layouts use the exposed w1/w3 state-dict keys."""
-    colwise = dense_param_placement(tp=spmd.S(0))
+def test_state_dict_layouts_include_native_feed_forward_weight():
+    """Verify the fused dense FFN layout uses its native w13 state-dict key."""
+    colwise = dense_param_placement(tp=spmd.S(1))
     rowwise = dense_param_placement(tp=spmd.S(1))
     config = FeedForward.Config(
         w13=Linear.Config(
             in_features=16,
-            out_features=64,
+            out_features=32,
+            num_linears=2,
             sharding_config=ShardingConfig(state_shardings={"weight": colwise}),
         ),
         w2=Linear.Config(
@@ -41,8 +42,9 @@ def test_state_dict_layouts_include_split_feed_forward_weights():
 
     layouts = wrapper.get_state_dict_layouts()
 
-    assert layouts["feed_forward.w1.weight"] is colwise
-    assert layouts["feed_forward.w3.weight"] is colwise
+    assert layouts["feed_forward.w13.weight"] is colwise
+    assert "feed_forward.w1.weight" not in layouts
+    assert "feed_forward.w3.weight" not in layouts
     assert layouts["feed_forward.w2.weight"] is rowwise
 
 

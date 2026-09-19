@@ -402,26 +402,13 @@ converters, not overrides.
 
 ## Checkpoint Compatibility
 
-An override that changes a module's parameter layout changes its checkpoint
-FQNs. By default an override checkpoints whatever real parameters it defines.
-
-**Bridge layout differences with module-level `state_dict` hooks.** A replacement
-module can present its weights in the *stock* layout by registering two hooks:
-
-- `register_state_dict_post_hook` to split/rename its real parameters into the
-  stock FQNs on save, and
-- `register_load_state_dict_pre_hook` to recombine them before the default load,
-  so the real parameter is loaded with normal DTensor/`strict` handling.
-
-The default `FeedForward` uses this approach: it stores `w13.weight` but
-checkpoints `w1.weight` / `w3.weight`, so existing checkpoints and HF adapters
-keep their logical layout. This is the symmetric use of the same hook mechanism
-the activation-checkpoint wrapper uses to strip its
-`_checkpoint_wrapped_module` prefix.
-
-For mappings too complex for module hooks, a model-level `BaseStateDictAdapter`
-(the mechanism used for HF conversion, e.g. `Llama3StateDictAdapter`) remains an
-option; it transforms the flat key->tensor dict from `state_dict()`.
+An override that changes a module's parameter layout changes its native
+checkpoint FQNs. By default an override checkpoints whatever real parameters it
+defines. Keep format-specific layout conversion in a model-level
+`BaseStateDictAdapter` (for example, `Llama3StateDictAdapter` converts native
+`w13.weight` into Hugging Face `gate_proj.weight` and `up_proj.weight`). This
+keeps native DCP checkpoints and per-step RL weight synchronization in the
+model's physical layout without hook-produced copies.
 
 ## Parallelism
 
@@ -437,12 +424,11 @@ One thing worth stating plainly:
 
 - **Fusion under TP.** Fusing weights can interact subtly with tensor
   parallelism -- the fused tensor's row order must admit a correct shard.
-  The default `FeedForward` stores a standard Linear weight `(2*hidden, dim)`
-  with gate/up rows interleaved. Sharding row axis 0 therefore gives each TP
-  rank matching slices of both projections (the Megatron column-parallel
-  layout). The output unflattens to `(hidden, 2)` to recover gate and up. This
-  composes with FSDP and TP through the ordinary `Linear` `ShardingConfig`; no
-  model-specific code.
+  The default `FeedForward` stores a `Linear` weight
+  `(2, hidden, dim)`. Sharding dimension 1 gives each TP rank matching feature
+  slices of the gate and up projections while keeping their rows in separate
+  contiguous slabs. The output retains the same `(2, hidden)` structure. This
+  also keeps block-quantization scales from spanning the two projections.
 
 ## Custom kernels and `torch.compile`
 
