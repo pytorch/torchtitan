@@ -242,6 +242,56 @@ class TestDistMuon(DTensorTestBase):
             second_local_blocks_grad,
         )
 
+    @with_comms
+    def test_owned_native_matrix_batch_reshards_from_rows(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(24, device=device).reshape(2, 4, 3).float()
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), mesh, (Shard(1),))
+        )
+        fqn = "layers.0.feed_forward.w13.weight"
+        optimizer = build_dist_muon(
+            [{"params": [parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": Owned()},
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=(fqn,))],
+            momentum=0.0,
+            nesterov=False,
+        )
+        gradient = value.clone().add_(1)
+        parameter.grad = distribute_tensor(gradient, mesh, (Shard(1),))
+        captured_compute = None
+
+        def capture_compute(_compute_layout, compute):
+            nonlocal captured_compute
+            captured_compute = compute.clone()
+
+        with mock.patch.object(
+            optimizer,
+            "_compute_update",
+            side_effect=capture_compute,
+        ):
+            optimizer.step()
+
+        if self.rank == 0:
+            self.assertIsNotNone(captured_compute)
+            torch.testing.assert_close(
+                captured_compute,
+                gradient,
+                rtol=0,
+                atol=0,
+            )
+        else:
+            self.assertIsNone(captured_compute)
+
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
 class TestDistMuonInitialExpertStorageContract(DTensorTestBase):

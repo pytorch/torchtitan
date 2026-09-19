@@ -12,6 +12,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
+import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from .model import BaseModel
@@ -129,6 +130,41 @@ class StateDictAdapter(BaseStateDictAdapter):
                     f"HF checkpoint conversion assumes {expected_name}; "
                     f"got {type(rope).__qualname__}."
                 )
+
+    def _linear_state_dict_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Split native fused feed-forward parameters into their HF layout."""
+        from torchtitan.models.common.feed_forward import FeedForward
+
+        result = dict(state_dict)
+        for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
+            prefix = f"{fqn}." if fqn else ""
+            for name in ("weight", "bias"):
+                fused_key = f"{prefix}w13.{name}"
+                if fused_key not in result:
+                    continue
+                gate_up = result.pop(fused_key)
+                result[f"{prefix}w1.{name}"] = gate_up[0]
+                result[f"{prefix}w3.{name}"] = gate_up[1]
+
+        return result
+
+    def _linear_state_dict_from_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Stack HF feed-forward parameters into their native fused layout."""
+        from torchtitan.models.common.feed_forward import FeedForward
+
+        result = dict(state_dict)
+        for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
+            prefix = f"{fqn}." if fqn else ""
+            for name in ("weight", "bias"):
+                gate_key = f"{prefix}w1.{name}"
+                up_key = f"{prefix}w3.{name}"
+                if gate_key not in result or up_key not in result:
+                    continue
+                result[f"{prefix}w13.{name}"] = torch.stack(
+                    [result.pop(gate_key), result.pop(up_key)], dim=0
+                )
+
+        return result
 
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False
