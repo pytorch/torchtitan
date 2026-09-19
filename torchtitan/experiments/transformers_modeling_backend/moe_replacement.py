@@ -140,8 +140,8 @@ def build_and_swap_native_moe(
         )
         output_layout = (
             _hf_sequence_parallel_placement()
-            if enable_sp
-            else _hf_activation_placement(tp=spmd.P)
+            if enable_ep and enable_sp
+            else _hf_activation_placement(tp=spmd.P if enable_ep else spmd.R)
         )
         moe_config.sharding_config = replace(
             root_sharding,
@@ -151,13 +151,13 @@ def build_and_swap_native_moe(
             out_dst_shardings=hf_sp_layout,
         )
 
-        # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but
-        # leaves the SigmoidGatedFeedForward gate to model-specific code.
+        # set_moe_sharding_config configures the shared FFN but leaves the
+        # SigmoidGatedFeedForward gate to model-specific code.
         shared = moe_config.shared_experts
         if isinstance(shared, SigmoidGatedFeedForward.Config):
             gate_output_layout = (
                 dense_sequence_parallel_placement()
-                if enable_sp
+                if enable_ep and enable_sp
                 else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
             )
             shared.gate.sharding_config = ShardingConfig(
