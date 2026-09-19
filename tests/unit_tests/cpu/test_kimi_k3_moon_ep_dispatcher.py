@@ -11,11 +11,16 @@ multicast. The comparison against a dense reference runs against the real
 package in ``tests/unit_tests/gpu/test_kimi_k3_moon_ep.py``.
 """
 
-from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.kimi_k3 import model_registry
 from torchtitan.models.kimi_k3.moon_ep_dispatcher import (
     _import_moonep,
@@ -76,31 +81,29 @@ def test_moonep_import_guard_names_the_package():
         _import_moonep()
 
 
-# --- the unit, end to end, against a dense reference ---------------------- #
+class TestMoonEPMeshPrecondition(DTensorTestBase):
+    """The mesh check against real ParallelDims meshes."""
 
+    @property
+    def world_size(self) -> int:
+        return 4
 
-def _dims(*, dp_shard, cp=1, tp=1, ep, dp_replicate=False):
-    # core keeps the efsdp axis whenever ep > 1 and sizes it dp_shard * cp * tp // ep.
-    efsdp = SimpleNamespace(size=lambda: dp_shard * cp * tp // ep)
-    return SimpleNamespace(
-        dp_replicate_enabled=dp_replicate,
-        dp_shard=dp_shard,
-        cp=cp,
-        tp=tp,
-        ep=ep,
-        get_optional_mesh=lambda _name, include_singleton_axes=False: efsdp,
-    )
+    def _dims(self, **kwargs) -> ParallelDims:
+        dims = ParallelDims(pp=1, world_size=self.world_size, **kwargs)
+        dims.build_mesh()
+        return dims
 
-
-def test_moonep_mesh_requires_efsdp_of_one():
-    check_moonep_mesh(_dims(dp_shard=2, ep=2))
-    check_moonep_mesh(_dims(dp_shard=1, cp=2, ep=2))
-    for dims in (
-        _dims(dp_shard=2, cp=2, ep=2),
-        _dims(dp_shard=2, tp=2, ep=2),
-        _dims(dp_shard=4, ep=2),
-    ):
-        with pytest.raises(NotImplementedError, match="efsdp == 1"):
-            check_moonep_mesh(dims)
-    with pytest.raises(NotImplementedError, match="dp_replicate"):
-        check_moonep_mesh(_dims(dp_shard=2, ep=2, dp_replicate=True))
+    @with_comms
+    def test_moonep_mesh_requires_efsdp_of_one(self):
+        with patch(
+            "torchtitan.distributed.parallel_dims.device_type", self.device_type
+        ):
+            check_moonep_mesh(self._dims(dp_replicate=1, dp_shard=4, cp=1, tp=1, ep=4))
+            with self.assertRaisesRegex(NotImplementedError, "efsdp == 1"):
+                check_moonep_mesh(
+                    self._dims(dp_replicate=1, dp_shard=4, cp=1, tp=1, ep=2)
+                )
+            with self.assertRaisesRegex(NotImplementedError, "dp_replicate"):
+                check_moonep_mesh(
+                    self._dims(dp_replicate=2, dp_shard=2, cp=1, tp=1, ep=2)
+                )
