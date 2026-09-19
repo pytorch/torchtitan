@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest import mock
 
@@ -13,8 +13,11 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components import validate as validate_module
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.validate import Validator
 from torchtitan.models.flux import validate as flux_validate_module
+from torchtitan.models.flux.flux_datasets import FluxTrainingMicrobatch
 from torchtitan.models.flux.validate import FluxValidator
 
 
@@ -64,7 +67,7 @@ def _generic_validator(loader):
     validator.dp_rank = 0
     validator.tokenizer = mock.Mock()
     validator.seq_len = 4
-    validator.num_tokens_per_batch = 4
+    validator.num_tokens_per_microbatch = 4
     validator.metrics_processor = SimpleNamespace(
         ntokens_since_last_log=0,
         log_validation=mock.Mock(),
@@ -77,15 +80,16 @@ def _generic_validator(loader):
 
 @pytest.mark.parametrize("raises", [False, True])
 def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
-    # A fresh dict per row: the validator pops num_valid_tokens.
-    def row():
-        return {
-            "input": torch.ones(1, 1),
-            "labels": torch.ones(1, 1, dtype=torch.long),
-            "num_valid_tokens": 1,
-        }
+    def microbatch():
+        return TokenizedTrainingMicrobatch(
+            input=torch.ones(1, 1),
+            labels=torch.ones(1, 1, dtype=torch.long),
+            positions=torch.zeros(1, 1, dtype=torch.long),
+            padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+            num_valid_tokens=1,
+        )
 
-    loader = _ClosableLoader([row(), row()])
+    loader = _ClosableLoader([microbatch(), microbatch()])
     validator = _generic_validator(loader)
     model = _FailingModel() if raises else _EchoModel()
     monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
@@ -119,7 +123,7 @@ def _flux_validator(loader):
     validator.dp_rank = 0
     validator.tokenizer = mock.Mock()
     validator.seq_len = 4
-    validator.num_tokens_per_batch = 4
+    validator.num_tokens_per_microbatch = 4
     validator.metrics_processor = SimpleNamespace(
         ntokens_since_last_log=0,
         log_validation=mock.Mock(),
@@ -138,12 +142,15 @@ def _flux_validator(loader):
 
 @pytest.mark.parametrize("raises", [False, True])
 def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
-    row = {
-        "prompt": "test",
-        "timestep": torch.tensor([0.5]),
-        "labels": torch.zeros(1, 1, 2, 2),
-    }
-    loader = _ClosableLoader([row, row])
+    microbatch = FluxTrainingMicrobatch(
+        prompt=["test"],
+        timestep=torch.tensor([0.5]),
+        labels=torch.zeros(1, 1, 2, 2),
+        t5=torch.zeros(1, 1),
+        clip=torch.zeros(1, 1),
+        num_valid_tokens=4,
+    )
+    loader = _ClosableLoader([microbatch, microbatch])
     validator = _flux_validator(loader)
 
     def preprocess_data(**kwargs):
@@ -179,18 +186,37 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
     labels = torch.zeros(1, 3, 6, 10)
     loader = _ClosableLoader(
         [
-            {
-                "prompt": "test",
-                "timestep": torch.tensor([0.5]),
-                "labels": labels,
-            }
+            FluxTrainingMicrobatch(
+                prompt=["test"],
+                timestep=torch.tensor([0.5]),
+                labels=labels,
+                t5=torch.zeros(1, 1),
+                clip=torch.zeros(1, 1),
+                num_valid_tokens=labels.numel(),
+            )
         ]
     )
     validator = _flux_validator(loader)
     validator.config.save_img_count = 1
     generated = {}
+    validation_context_entries = 0
+    validation_context_active = False
+
+    @contextmanager
+    def validation_context():
+        nonlocal validation_context_active, validation_context_entries
+        assert not validation_context_active
+        validation_context_active = True
+        validation_context_entries += 1
+        try:
+            yield
+        finally:
+            validation_context_active = False
+
+    validator.validation_context = validation_context
 
     def generate_image(**kwargs):
+        assert validation_context_active
         generated.update(kwargs)
         return torch.zeros(3, kwargs["img_height"], kwargs["img_width"])
 
@@ -219,3 +245,33 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
 
     assert generated["img_height"] == 6
     assert generated["img_width"] == 10
+    assert validation_context_entries == 2
+
+
+def test_generic_validator_raises_on_zero_validation_batches(monkeypatch):
+    loader = _ClosableLoader([])
+    validator = _generic_validator(loader)
+    monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+
+    with pytest.raises(ValueError, match="zero batches"):
+        validator.validate([_EchoModel()], step=1)
+
+    assert loader.closed
+
+
+def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
+    microbatch = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.full((1, 1), IGNORE_INDEX, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        num_valid_tokens=0,
+    )
+    loader = _ClosableLoader([microbatch])
+    validator = _generic_validator(loader)
+    monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+
+    with pytest.raises(ValueError, match="zero valid tokens"):
+        validator.validate([_EchoModel()], step=1)
+
+    assert loader.closed

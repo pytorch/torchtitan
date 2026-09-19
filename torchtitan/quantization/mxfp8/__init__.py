@@ -12,16 +12,10 @@ try:
     # The 32x32 swizzled cast kernels are newer than released torchao builds.
     # Keep the package importable for other quantization modes and defer the
     # actionable error to MXFP8LinearConverter construction.
-    from .linear import MXFP8ColumnParallelLinear, MXFP8Linear, MXFP8RowParallelLinear
+    from .linear import MXFP8Linear
 except ImportError as import_error:
-    MXFP8ColumnParallelLinear = None
     MXFP8Linear = None
-    MXFP8RowParallelLinear = None
     _mxfp8_linear_import_error = import_error
 
 
-__all__ = [
-    "MXFP8ColumnParallelLinear",
-    "MXFP8Linear",
-    "MXFP8RowParallelLinear",
-]
+__all__ = ["MXFP8Linear"]

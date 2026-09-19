@@ -49,7 +49,7 @@ def parallelize_flux(
     parallel_dims: ParallelDims,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
@@ -59,7 +59,7 @@ def parallelize_flux(
     model.parallelize(parallel_dims)
     annotate_replicated_parameters(model, parallel_dims)
 
-    if compile_config.enable and "model" in compile_config.components:
+    if compile_config is not None and "model" in compile_config.components:
         apply_compile(model, compile_config)
 
     dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)

@@ -13,8 +13,8 @@ import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
-from torchtitan.components.data.collators import TrainerBatch
 from torchtitan.components.data.loader import BaseDataLoader
+from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable, ParallelismConfig
@@ -75,9 +75,6 @@ class Validator(BaseValidator):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseValidator.Config):
-        enable: bool = False
-        """Enable validation to default run validation after each training loop"""
-
         steps: int = -1
         """
         Number of validation steps. -1 consumes the finite dataset and therefore
@@ -114,7 +111,7 @@ class Validator(BaseValidator):
         validation_context: ValidationContext,
         metrics_processor: MetricsProcessor,
         seq_len: int,
-        num_tokens_per_batch: int,
+        num_tokens_per_microbatch: int,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
         pp_has_last_stage: bool | None = None,
@@ -130,7 +127,7 @@ class Validator(BaseValidator):
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
         self.seq_len = seq_len
-        self.num_tokens_per_batch = num_tokens_per_batch
+        self.num_tokens_per_microbatch = num_tokens_per_microbatch
         self.validation_context = validation_context
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
@@ -166,7 +163,7 @@ class Validator(BaseValidator):
             dp_rank=self.dp_rank,
             tokenizer=self.tokenizer,
             max_context_length=self.seq_len,
-            num_tokens_per_batch=self.num_tokens_per_batch,
+            num_tokens_per_microbatch=self.num_tokens_per_microbatch,
         )
 
         validation_iterator = iter(iterate_and_close_dataloader(validation_dataloader))
@@ -176,18 +173,16 @@ class Validator(BaseValidator):
                 break
 
             try:
-                microbatches = []
+                microbatch_group = []
                 local_valid_tokens = 0
                 for _ in range(num_pp_microbatches):
-                    input_dict = next(validation_iterator)
-                    # Popped so the batch reaching the model holds only its kwargs.
-                    local_valid_tokens += input_dict.pop("num_valid_tokens")
-                    self.metrics_processor.ntokens_since_last_log += input_dict[
-                        "labels"
-                    ].numel()
-                    for k, v in input_dict.items():
-                        input_dict[k] = v.to(device_type)
-                    microbatches.append(input_dict)
+                    microbatch = next(validation_iterator)
+                    local_valid_tokens += microbatch.num_valid_tokens
+                    self.metrics_processor.ntokens_since_last_log += (
+                        microbatch.labels.numel()
+                    )
+                    input_dict = microbatch.to_input_dict(device_type)
+                    microbatch_group.append(input_dict)
             except StopIteration:
                 break
 
@@ -196,9 +191,9 @@ class Validator(BaseValidator):
                 local_valid_tokens, dtype=torch.int64, device=device_type
             )
             if parallel_dims.dp_enabled:
-                batch_mesh = parallel_dims.get_mesh("batch")
+                dp_mesh = parallel_dims.get_mesh("dp")
                 global_valid_tokens = dist_utils.dist_sum_tensor(
-                    local_valid_tokens_tensor, batch_mesh, None
+                    local_valid_tokens_tensor, dp_mesh, None
                 )
             else:
                 global_valid_tokens = local_valid_tokens_tensor
@@ -214,7 +209,7 @@ class Validator(BaseValidator):
                     [] if self.pp_has_last_stage else None
                 )
 
-                for input_dict in microbatches:
+                for input_dict in microbatch_group:
                     inputs, labels, extra_kwargs = cast(
                         BaseModel, model_parts[0]
                     ).preprocess_inputs(
@@ -246,8 +241,8 @@ class Validator(BaseValidator):
                 else:
                     loss_sum = torch.tensor([-1.0], device=device_type)
             else:
-                assert len(microbatches) == 1
-                input_dict = microbatches[0]
+                assert len(microbatch_group) == 1
+                input_dict = microbatch_group[0]
                 inputs, labels, extra_kwargs = cast(
                     BaseModel, model_parts[0]
                 ).preprocess_inputs(
@@ -268,8 +263,22 @@ class Validator(BaseValidator):
             total_global_valid_tokens.add_(global_valid_tokens)
             num_steps += 1
 
-        assert accumulated_loss is not None
+        if accumulated_loss is None:
+            raise ValueError(
+                "Validation ran zero batches on this rank. This happens when the "
+                "validation dataset supplies fewer than num_tokens_per_microbatch "
+                "tokens on this rank, because concat-then-split packing drops "
+                "partially filled batches. Decrease "
+                "training.num_tokens_per_microbatch_per_dp_rank or use a larger "
+                "validation dataset."
+            )
         num_global_valid_tokens = int(total_global_valid_tokens.item())
+        if num_global_valid_tokens == 0:
+            raise ValueError(
+                "Validation ran on zero valid tokens; cannot compute an average "
+                "validation loss. Ensure the validation batches contain unmasked "
+                "labels."
+            )
         if parallel_dims.dp_cp_enabled:
             global_loss_sum = dist_utils.dist_sum(
                 accumulated_loss, parallel_dims.get_optional_mesh("loss")
@@ -287,7 +296,7 @@ class Validator(BaseValidator):
 
 def iterate_and_close_dataloader(
     dataloader: BaseDataLoader,
-) -> Iterator[TrainerBatch]:
+) -> Iterator[TrainingMicrobatch]:
     """Close a temporary dataloader when its consumer stops iterating."""
     try:
         yield from dataloader

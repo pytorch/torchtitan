@@ -18,9 +18,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
     """
     return [
         OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_sdc_replay_cudagraph],
+            configs=[recipes.llama3_debugmodel_sdc_replay_cuda_graph],
             test_descr="SDC replay with CUDA graphs",
-            test_name="sdc_replay_cudagraph",
+            test_name="sdc_replay_cuda_graph",
             ngpu=1,
             skip_rocm_test=True,
         ),

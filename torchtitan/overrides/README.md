@@ -176,7 +176,7 @@ OverrideConfig(imports=[("my_pkg.triton_rope.triton_rope", {"block_size": 256})]
 
 (The RL trainer and generator use this to activate one HybridEP dispatch override
 with opposite `capacity_factor` values — blocking `None` for the trainer, a float
-for the cudagraph-capturing generator — instead of two modules or a hardcoded
+for the CUDA-graph-capturing generator — instead of two modules or a hardcoded
 per-actor branch.)
 
 The factory declares the keyword parameters it accepts (or `**kwargs`); a kwarg
@@ -199,10 +199,6 @@ the override package and defeat the no-touch goal.
 ```bash
 # Replace the torch-native SwiGLU activation with the Triton implementation:
 torchtitan_train --module llama3 --config llama3_8b \
-    --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
-
-# Async tensor-parallel linear subclasses are preserved by the same override:
-torchtitan_train --module llama3 --config llama3_debugmodel_dist_gemm \
     --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
 
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one

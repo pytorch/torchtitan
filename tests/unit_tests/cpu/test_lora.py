@@ -19,10 +19,6 @@ from torchtitan.config.transform import (
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.lora import (
-    LoRAColumnParallelLinear,
-    LoRARowParallelLinear,
-)
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.module import Module
 
@@ -46,10 +42,6 @@ def test_lora_model_builds():
     )
     model = model_spec.model.build()
     model.init_states()
-
-    for layer in model.layers.values():
-        assert isinstance(layer.attention.qkv_linear.wqkv, LoRAColumnParallelLinear)
-        assert isinstance(layer.attention.wo, LoRARowParallelLinear)
 
     lora_params = {
         n for n, p in model.named_parameters() if "lora_a" in n or "lora_b" in n
@@ -200,7 +192,7 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
 
 def test_lora_class_is_reused_for_the_same_parent():
-    """Linear uses the same explicit LoRA class across transformations."""
+    """Dynamic LoRA class creation is cached per parent class."""
     first = LoRATransform(handlers=LINEAR_LORA_HANDLERS, rank=2, alpha=4.0).transform(
         Linear.Config(in_features=4, out_features=3)
     )
