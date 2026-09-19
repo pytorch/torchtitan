@@ -19,7 +19,6 @@ from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
     spmd_local_context,
     spmd_mesh_size,
-    spmd_sparse_mesh,
 )
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
@@ -536,7 +535,8 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
     The counts (Eq. 18) and normalized-score sums (Eq. 19) are sums over the
     folded token dim, hence Partial over the mesh axes that shard it (CP
-    always, plus TP under EP).  They are all-reduced to Invariant before
+    always, plus TP when router tokens are sequence-sharded). They are
+    all-reduced to Invariant before
     the formula, so every rank computes the same per-forward loss.  The
     one-hot counts are non-differentiable: the gradient reaches the router
     only through the normalized-score sums and the top-k score carrier.
@@ -549,13 +549,22 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
     @dataclass(kw_only=True, slots=True)
     class Config(AuxLoss.Config):
-        """Same fields as ``AuxLoss.Config``; this loss adds no knobs.
+        """Configuration for microbatch-wise load balancing.
 
         A distinct Config is required even without new fields: ``Config.build()``
         constructs the class that owns the config (``__init_subclass__`` sets
         ``_owner``), so a router configured with ``AuxLoss.Config`` would
         build a plain ``AuxLoss``, which has no ``forward``.
+
+        ``tp_shards_tokens`` records whether router tokens are sharded across
+        TP and their load-balancing statistics therefore require TP reduction.
         """
+
+        tp_shards_tokens: bool = False
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.tp_shards_tokens = config.tp_shards_tokens
 
     def _reduce_token_partials(
         self, partial_E: torch.Tensor, axes: tuple[str, ...]
@@ -605,15 +614,10 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         """
         # Mark DP local for the counts arithmetic: each DP rank owns an
         # independent token stream, so DP must not be reduced; only the
-        # global axes that shard the stream (CP, TP under EP) are.
+        # global axes that shard the stream (CP and optionally TP) are.
         with spmd_local_context("dp"):
             E = scores_TE.size(-1)
-            # Axes that shard the router output's token dim: CP in every
-            # layout, TP only under EP, which distributes tokens over TP (the
-            # gate computes and emits dense_sequence_parallel_placement
-            # whenever EP is on, and tokens_per_expert_E is TP-Partial for the
-            # same reason).
-            axes = ("cp", "tp") if spmd_sparse_mesh() is not None else ("cp",)
+            axes = ("cp", "tp") if self.tp_shards_tokens else ("cp",)
 
             # Eq. 18: per-expert routing frequency counts_i over the forward's
             # tokens, then f_i = E * counts_i / sum_j counts_j (so
@@ -666,6 +670,7 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        tp_shards_tokens: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -682,6 +687,7 @@ class MoE(Module):
         #       expert_bias_E is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
         self.load_balance_coeff = config.load_balance_coeff
+        self.tp_shards_tokens = config.tp_shards_tokens
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
             self.register_buffer(

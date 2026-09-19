@@ -23,7 +23,11 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import RouterGateLinear
-from torchtitan.models.common.moe import GroupedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    GroupedExperts,
+    MicrobatchWiseLoadBalanceLoss,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.moe_sharding import (
     _moe_sharding_config,
     _router_sharding_config,
@@ -298,9 +302,7 @@ class TestMoE(unittest.TestCase):
                 )
                 self.assertEqual(
                     _per_axis_types(moe_config.in_dst_shardings["padding_mask_T"]),
-                    _per_axis_types(
-                        token_id_placement(enable_sp=enable_sp and enable_ep)
-                    ),
+                    _per_axis_types(token_id_placement(enable_sp=enable_sp)),
                 )
                 self.assertEqual(
                     moe_config.in_src_shardings["x_TD"].partition_spec[0],
@@ -327,7 +329,9 @@ class TestMoE(unittest.TestCase):
                 )
                 self.assertEqual(
                     _per_axis_types(router_config.in_dst_shardings["padding_mask_T"]),
-                    _per_axis_types(token_id_placement(enable_sp=enable_ep)),
+                    _per_axis_types(
+                        token_id_placement(enable_sp=enable_ep or enable_sp)
+                    ),
                 )
 
     def test_moe_block_sequence_shards_padding_mask(self):
@@ -356,12 +360,14 @@ class TestMoE(unittest.TestCase):
             _per_axis_types(token_id_placement(enable_sp=True)),
         )
 
-    def test_moe_without_ep_replicates_routed_experts(self):
+    def test_moe_without_ep_keeps_routed_weights_replicated(self):
         def make_config():
             return SimpleNamespace(
                 sharding_config=None,
+                tp_shards_tokens=False,
                 router=SimpleNamespace(
                     sharding_config=None,
+                    aux_loss=MicrobatchWiseLoadBalanceLoss.Config(coeff=1e-3),
                     gate=SimpleNamespace(sharding_config=None),
                 ),
                 shared_experts=SimpleNamespace(
@@ -393,8 +399,14 @@ class TestMoE(unittest.TestCase):
                 root = moe_config.sharding_config
                 assert root is not None
                 assert root.in_dst_shardings is not None
-                self.assertEqual(tp_type(root.in_dst_shardings["x_TD"]), spmd.R)
-                self.assertEqual(tp_type(root.out_src_shardings), spmd.R)
+                activation_layout = spmd.S(0) if enable_sp else spmd.R
+                count_layout = spmd.P if enable_sp else spmd.R
+                self.assertEqual(
+                    tp_type(root.in_dst_shardings["x_TD"]), activation_layout
+                )
+                self.assertEqual(tp_type(root.out_src_shardings), activation_layout)
+                self.assertEqual(moe_config.tp_shards_tokens, enable_sp)
+                self.assertEqual(moe_config.router.aux_loss.tp_shards_tokens, enable_sp)
 
                 shared = moe_config.shared_experts
                 assert shared.sharding_config.in_dst_shardings is not None
@@ -416,18 +428,32 @@ class TestMoE(unittest.TestCase):
                     tp_type(shared.w2.sharding_config.out_src_shardings), spmd.P
                 )
                 self.assertEqual(
-                    tp_type(shared.w2.sharding_config.out_dst_shardings), spmd.R
+                    tp_type(shared.w2.sharding_config.out_dst_shardings),
+                    activation_layout,
                 )
 
                 routed = moe_config.routed_experts
                 assert routed.sharding_config.in_dst_shardings is not None
-                for layout in routed.sharding_config.in_dst_shardings.values():
-                    self.assertEqual(tp_type(layout), spmd.R)
+                for name in ("x_TD", "topk_scores_TK", "topk_expert_ids_TK"):
+                    self.assertEqual(
+                        tp_type(routed.sharding_config.in_dst_shardings[name]),
+                        activation_layout,
+                    )
                 self.assertEqual(
-                    tp_type(routed.sharding_config.out_src_shardings), spmd.R
+                    tp_type(
+                        routed.sharding_config.in_dst_shardings[
+                            "num_local_tokens_per_expert_E"
+                        ]
+                    ),
+                    count_layout,
                 )
                 self.assertEqual(
-                    tp_type(routed.sharding_config.out_dst_shardings), spmd.R
+                    tp_type(routed.sharding_config.out_src_shardings),
+                    activation_layout,
+                )
+                self.assertEqual(
+                    tp_type(routed.sharding_config.out_dst_shardings),
+                    activation_layout,
                 )
                 for name in expert_param_names:
                     self.assertEqual(

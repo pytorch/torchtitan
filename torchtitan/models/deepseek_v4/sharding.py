@@ -264,7 +264,9 @@ def set_deepseek_v4_layer_sharding(
         router_cfg = layer_cfg.moe.router
         if getattr(router_cfg, "layer_id", 0) < getattr(router_cfg, "n_hash_layers", 0):
             input_ids_src_placement = token_id_placement()
-            input_ids_dst_placement = token_id_placement(enable_sp=enable_ep)
+            input_ids_dst_placement = token_id_placement(
+                enable_sp=enable_ep or enable_sp
+            )
             moe_sharding_config = layer_cfg.moe.sharding_config or ShardingConfig()
             in_src_shardings = moe_sharding_config.in_src_shardings or {}
             in_src_shardings["input_ids_T"] = input_ids_src_placement

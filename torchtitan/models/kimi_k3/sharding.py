@@ -231,7 +231,8 @@ def _set_latent_moe_sharding(
     routed_down = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)}
     )
-    if enable_ep:
+    token_sharded = enable_ep or enable_sp
+    if token_sharded:
         routed_down.in_src_shardings = {
             "input": token_shard
             if enable_sp
@@ -243,7 +244,6 @@ def _set_latent_moe_sharding(
             "x_TD": token_shard,
         }
     moe_cfg.routed_down.sharding_config = routed_down
-    token_sharded = enable_ep
     routed_norm = norm_config(enable_sp=token_sharded)
     routed_up = _tp_unsharded_weight_config(token_sharded=token_sharded)
     partial = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))

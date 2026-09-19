@@ -204,7 +204,6 @@ def _set_qwen35_layer_sharding(
         _set_shared_expert_gate_sharding(
             # pyrefly: ignore [missing-attribute]
             layer_cfg.moe.shared_experts,
-            enable_ep=enable_ep,
             enable_sp=enable_sp,
         )
 
@@ -212,16 +211,15 @@ def _set_qwen35_layer_sharding(
 def _set_shared_expert_gate_sharding(
     shared_experts: "SigmoidGatedFeedForward.Config | None",
     *,
-    enable_ep: bool,
     enable_sp: bool,
 ) -> None:
     """Shard Qwen3.5's shared-expert sigmoid gate.
 
     The common MoE sharding handles the shared FFN (w1/w2/w3) and the
     module-boundary gather that feeds the gate a Replicate ``x``. Here we only
-    add the gate: its weight and local output are Replicate. With EP and SP,
-    the output is sliced into the sequence-sharded layout produced by the
-    shared FFN. Otherwise it remains Replicate.
+    add the gate: its weight and local output are Replicate. With SP, the
+    output is sliced into the sequence-sharded layout produced by the shared
+    FFN. Otherwise it remains Replicate.
     ``getattr`` keeps this a no-op when the MoE has no shared expert (``None``);
     Qwen3.5's shared expert always carries the gate.
     """
@@ -230,7 +228,7 @@ def _set_shared_expert_gate_sharding(
         return
     gate_output_layout = (
         dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
+        if enable_sp
         else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     )
     gate.sharding_config = ShardingConfig(
