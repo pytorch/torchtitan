@@ -5052,6 +5052,41 @@ class TestChunkPasses(TestCase):
                 pair_first_token_exchange=True,
             )
 
+    def test_ep_overlap_strips_inherited_token_exchange_shape_query_metadata(self):
+        gm = self._build_ep_overlap_schedule_gm()
+        launches = [
+            node
+            for node in gm.graph.nodes
+            if node.op == "call_function"
+            and node.target == torch.ops._c10d_functional.all_to_all_single.default
+            and node.meta.get("custom", {}).get(_EP_TOKEN_EXCHANGE) == "dispatch"
+        ]
+        shape_queries = []
+        for launch in launches:
+            # ProxyTensor may emit this query while binding an unbacked
+            # all-to-all output size and copy the active annotate_fn metadata.
+            with gm.graph.inserting_after(launch):
+                shape_query = gm.graph.call_function(
+                    torch.ops.aten.sym_size.int, args=(launch, 0)
+                )
+            shape_query.meta = {
+                key: value.copy() if isinstance(value, dict) else value
+                for key, value in launch.meta.items()
+            }
+            shape_queries.append(shape_query)
+        gm.recompile()
+
+        self.assertEqual(len(shape_queries), 2)
+        for shape_query in shape_queries:
+            self.assertEqual(shape_query.meta["custom"][_EP_TOKEN_EXCHANGE], "dispatch")
+
+        self._schedule_ep_overlap_and_order(gm)
+
+        for shape_query in shape_queries:
+            self.assertNotIn(_EP_TOKEN_EXCHANGE, shape_query.meta["custom"])
+        for launch in launches:
+            self.assertEqual(launch.meta["custom"][_EP_TOKEN_EXCHANGE], "dispatch")
+
     def test_ep_overlap_rejects_mismatched_token_exchange_labels(self):
         gm = self._build_ep_overlap_schedule_gm()
         launch = next(
