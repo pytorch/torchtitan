@@ -22,7 +22,6 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import HybridAttentionMetadata, VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -48,7 +47,6 @@ from torchtitan.models.common.vision_encoder_sharding import (
     set_vision_transformer_block_sharding_config,
     vision_colwise_config,
     vision_invariant_linear_config,
-    vision_rowwise_config,
 )
 from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
 from torchtitan.protocols.sharding import ShardingConfig
@@ -61,6 +59,7 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
     from torchtitan.models.qwen3_5.model import (
         Qwen35Attention,
+        Qwen35AttentionMaskDict,
         Qwen35Model,
         Qwen35TransformerBlock,
     )
@@ -68,20 +67,25 @@ if TYPE_CHECKING:
 
 
 def annotate_deltanet_cu_seqlens(
-    attention_masks: HybridAttentionMetadata,
+    attention_masks: "Qwen35AttentionMaskDict",
 ) -> None:
     """Annotate the nested GatedDeltaNet ``cu_seq_q`` offsets as DP-varying.
 
-    ``cu_seq_q`` sits inside a ``VarlenMetadata`` inside the attention-mask
+    ``cu_seq_q`` sits inside ``GatedDeltaNetMetadata`` in the attention-mask
     dict, so it is unreachable by name through ``input_sharding``; the caller
     invokes this under the dense SPMD mesh.
     """
+    from torchtitan.models.qwen3_5.gdn import GatedDeltaNetMetadata
+
     deltanet_metadata = attention_masks.get("deltanet")
-    if not isinstance(deltanet_metadata, VarlenMetadata):
+    if not isinstance(deltanet_metadata, GatedDeltaNetMetadata):
+        return
+    varlen = deltanet_metadata.varlen
+    if varlen is None:
         return
     spmd.assert_type(
-        deltanet_metadata.cu_seq_q,
-        {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.R},
+        varlen.cu_seq_q,
+        {MeshAxisName.DP: spmd.V, MeshAxisName.CP: spmd.R, MeshAxisName.TP: spmd.R},
     )
 
 
@@ -136,7 +140,10 @@ def set_qwen35_sharding_config(
             out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
             local_spmd=True,
         )
-        _set_vision_encoder_sharding(config.vision_encoder)
+        _set_vision_encoder_sharding(
+            config.vision_encoder,
+            include_cp_axis=True,
+        )
         # The first layer restores the decoder layout after replicated vision scatter.
         first_layer_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     for layer_idx, layer_cfg in enumerate(config.layers):
@@ -257,34 +264,48 @@ def set_sigmoid_gated_feed_forward_sharding_config(
     )
 
 
-def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
+def _set_vision_encoder_sharding(
+    ve_cfg: "Qwen35VisionEncoder.Config",
+    *,
+    include_cp_axis: bool,
+) -> None:
     """Sharding for the vision encoder.
 
     All activations flow without SP in the vision encoder.
     Linear layers are ColwiseParallel/RowwiseParallel for memory savings.
     Norms are Replicate. pos_embed is Replicate via state_shardings.
     """
+    cp_placement = {CP: spmd.R} if include_cp_axis else {}
     ve_cfg.sharding_config = ShardingConfig(
-        state_shardings={"pos_embed": SpmdType({DP: spmd.R, TP: spmd.I})},
-        out_src_shardings=SpmdType({DP: spmd.V, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, TP: spmd.R}),
+        state_shardings={
+            "pos_embed": SpmdType({DP: spmd.R, **cp_placement, TP: spmd.I})
+        },
+        out_src_shardings=SpmdType({DP: spmd.V, **cp_placement, TP: spmd.I}),
+        out_dst_shardings=SpmdType({DP: spmd.V, **cp_placement, TP: spmd.R}),
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
-        state_shardings={"inv_freq": SpmdType({DP: spmd.R, TP: spmd.I})},
-        out_src_shardings=SpmdType({DP: spmd.R, TP: spmd.I}),
+        state_shardings={
+            "inv_freq": SpmdType({DP: spmd.R, **cp_placement, TP: spmd.I})
+        },
+        out_src_shardings=SpmdType({DP: spmd.R, **cp_placement, TP: spmd.I}),
     )
 
-    ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()
+    ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config(
+        include_cp_axis=include_cp_axis
+    )
     set_vision_transformer_block_sharding_config(
         ve_cfg.block,
         rope_cache_dp=spmd.V,
+        include_cp_axis=include_cp_axis,
     )
 
     # Merger sub-modules
     merger = ve_cfg.merger
-    merger.norm.sharding_config = invariant_norm_config()
-    merger.fc1.sharding_config = vision_colwise_config()
-    merger.fc2.sharding_config = vision_rowwise_config()
+    merger.norm.sharding_config = invariant_norm_config(include_cp_axis=include_cp_axis)
+    merger.fc1.sharding_config = vision_colwise_config(include_cp_axis=include_cp_axis)
+    merger.fc2.sharding_config = vision_partial_bias_rowwise_config(
+        include_cp_axis=include_cp_axis
+    )
 
 
 def _set_full_attention_sharding(

@@ -13,11 +13,13 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -31,14 +33,19 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
-    HybridAttentionMetadata,
     VarlenInnerAttention,
+    VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.decoder_sharding import (
+    decoder_input_sharding,
+    token_id_placement,
+)
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
+    build_vision_bank_indices,
+    gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
@@ -51,7 +58,7 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import Module
 
-from .gdn import GatedDeltaNet
+from .gdn import GatedDeltaNet, GatedDeltaNetMetadata
 from .rope import MRoPE
 from .sharding import annotate_deltanet_cu_seqlens, set_qwen35_sharding_config
 from .state_dict_adapter import Qwen35StateDictAdapter
@@ -62,6 +69,10 @@ from .vision_encoder import Qwen35VisionEncoder
 # H = attention heads,
 # K = query/key head dimension, V = value head dimension,
 # R = rotary dimension, P = non-rotary dimension.
+
+Qwen35AttentionMaskDict = dict[
+    str, BlockMask | VarlenMetadata | GatedDeltaNetMetadata | None
+]
 
 
 class OffsetRMSNorm(Module):
@@ -241,7 +252,7 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: HybridAttentionMetadata | None,
+        attention_masks: Qwen35AttentionMaskDict | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -331,6 +342,16 @@ class Qwen35Model(MultimodalModel):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
+            if parallelism.context_parallel_degree > 1:
+                load_balancer = parallelism.context_parallel_load_balancer
+                if load_balancer is not None and not isinstance(
+                    load_balancer, HeadTailCPLoadBalancer.Config
+                ):
+                    raise ValueError(
+                        "Qwen3.5 GatedDeltaNet context parallelism supports only "
+                        "contiguous or headtail token partitions."
+                    )
+
             tp = parallelism.tensor_parallel_degree
             if tp > 1:
                 dn_cfg = next(
@@ -414,13 +435,6 @@ class Qwen35Model(MultimodalModel):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Qwen35Model:
-        if parallel_dims.cp_enabled:
-            raise NotImplementedError(
-                "Context Parallel is not yet supported for Qwen3.5. "
-                "GatedDeltaNet requires full-sequence allgather, and multimodal "
-                "CP needs vision scatter before CP sharding."
-            )
-
         return super().parallelize(
             parallel_dims=parallel_dims,
             training=training,
@@ -462,8 +476,36 @@ class Qwen35Model(MultimodalModel):
 
         input_shardings = {
             **decoder_input_sharding(),
-            **multimodal_input_sharding(),
+            **multimodal_input_sharding(include_cp_axis=parallel_dims.cp_enabled),
         }
+        if parallel_dims.cp_enabled:
+            special_tokens = batch.get("special_tokens")
+            if batch.get("pixel_values") is not None:
+                if (
+                    not isinstance(special_tokens, dict)
+                    or "image_id" not in special_tokens
+                ):
+                    raise ValueError(
+                        "Qwen3.5 image CP requires special_tokens with an "
+                        "'image_id' entry."
+                    )
+                batch["image_vision_bank_indices_T"] = build_vision_bank_indices(
+                    batch["input"], placeholder_id=special_tokens["image_id"]
+                )
+                input_shardings["image_vision_bank_indices_T"] = token_id_placement()
+            if batch.get("pixel_values_videos") is not None:
+                if (
+                    not isinstance(special_tokens, dict)
+                    or "video_id" not in special_tokens
+                ):
+                    raise ValueError(
+                        "Qwen3.5 video CP requires special_tokens with a "
+                        "'video_id' entry."
+                    )
+                batch["video_vision_bank_indices_T"] = build_vision_bank_indices(
+                    batch["input"], placeholder_id=special_tokens["video_id"]
+                )
+                input_shardings["video_vision_bank_indices_T"] = token_id_placement()
 
         # RoPE uses the 3D MRoPE positions when present (multimodal), else the
         # same 2D positions. Collapse both into the single ``positions`` input.
@@ -508,14 +550,14 @@ class Qwen35Model(MultimodalModel):
         labels = batch.pop("labels")
         return inputs, labels, batch
 
-    def get_attention_masks(
+    def get_attention_masks(  # pyrefly: ignore [bad-override]
         self,
         positions: torch.Tensor,
         *,
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> HybridAttentionMetadata:
+    ) -> Qwen35AttentionMaskDict:
         attn_config = self.config.first_attention
 
         # Multimodal padding uses position 0 for every padded token. A real
@@ -559,10 +601,9 @@ class Qwen35Model(MultimodalModel):
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
-        # pyrefly: ignore [bad-return]
         return {
-            "quadratic_attention": quadratic_attention,
-            "deltanet": deltanet_metadata,
+            "quadratic_attention": quadratic_attention,  # pyrefly: ignore [bad-assignment]
+            "deltanet": GatedDeltaNetMetadata(varlen=deltanet_metadata),
         }
 
     def _get_vision_embeds(
@@ -600,6 +641,8 @@ class Qwen35Model(MultimodalModel):
         grid_thw: torch.Tensor | None,
         grid_thw_videos: torch.Tensor | None,
         special_tokens: dict[str, int] | None,
+        image_vision_bank_indices_T: torch.Tensor | None,
+        video_vision_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
         """Embed tokens, run vision encoder, scatter vision into text.
 
@@ -610,6 +653,8 @@ class Qwen35Model(MultimodalModel):
             grid_thw: Grid dimensions for images or None
             grid_thw_videos: Grid dimensions for videos or None
             special_tokens: Special token definitions
+            image_vision_bank_indices_T: Image-bank rows for local CP tokens.
+            video_vision_bank_indices_T: Video-bank rows for local CP tokens.
 
         Returns:
             ``(num_tokens, dim)`` embeddings with vision tokens scattered in.
@@ -638,10 +683,17 @@ class Qwen35Model(MultimodalModel):
         else:
             if special_tokens is None:
                 raise ValueError("special_tokens is required for image inputs")
-            image_positions = get_vision_positions(
-                tokens, num_tokens, special_tokens["image_id"]
-            )
-            if image_positions:
+            if image_vision_bank_indices_T is not None:
+                inputs_embeds = gather_vision_embeds(
+                    inputs_embeds,
+                    vision_bank_VD=vision_embeds,
+                    vision_bank_indices_T=image_vision_bank_indices_T,
+                )
+            else:
+                image_positions = get_vision_positions(
+                    tokens, num_tokens, special_tokens["image_id"]
+                )
+            if image_vision_bank_indices_T is None and image_positions:
                 inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
                     vision_embeds=vision_embeds,
@@ -664,10 +716,17 @@ class Qwen35Model(MultimodalModel):
         else:
             if special_tokens is None:
                 raise ValueError("special_tokens is required for video inputs")
-            video_positions = get_vision_positions(
-                tokens, num_tokens, special_tokens["video_id"]
-            )
-            if video_positions:
+            if video_vision_bank_indices_T is not None:
+                inputs_embeds = gather_vision_embeds(
+                    inputs_embeds,
+                    vision_bank_VD=vision_embeds,
+                    vision_bank_indices_T=video_vision_bank_indices_T,
+                )
+            else:
+                video_positions = get_vision_positions(
+                    tokens, num_tokens, special_tokens["video_id"]
+                )
+            if video_vision_bank_indices_T is None and video_positions:
                 inputs_embeds = scatter_vision_embeds(
                     inputs_embeds,
                     vision_embeds=vision_embeds,
@@ -684,10 +743,12 @@ class Qwen35Model(MultimodalModel):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: HybridAttentionMetadata | None = None,
+        attention_masks: Qwen35AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
+        image_vision_bank_indices_T: torch.Tensor | None = None,
+        video_vision_bank_indices_T: torch.Tensor | None = None,
     ):
         with spmd_local_context("dp"):
             if self.tok_embeddings is not None:
@@ -698,6 +759,8 @@ class Qwen35Model(MultimodalModel):
                     grid_thw=grid_thw,
                     grid_thw_videos=grid_thw_videos,
                     special_tokens=special_tokens,
+                    image_vision_bank_indices_T=image_vision_bank_indices_T,
+                    video_vision_bank_indices_T=video_vision_bank_indices_T,
                 )
             else:
                 x = tokens
