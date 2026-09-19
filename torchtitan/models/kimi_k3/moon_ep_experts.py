@@ -203,15 +203,8 @@ def check_moonep_mesh(parallel_dims) -> None:
             "duplicated-expert grads are reduced by MoonEP, not by the "
             "framework, and the replicate reduction is not wired around that."
         )
-    efsdp = parallel_dims.get_optional_mesh("efsdp")
-    degree = (
-        efsdp.size()
-        if efsdp is not None
-        else parallel_dims.dp_shard
-        * parallel_dims.cp
-        * parallel_dims.tp
-        // parallel_dims.ep
-    )
+    efsdp = parallel_dims.get_optional_mesh("efsdp", include_singleton_axes=True)
+    degree = efsdp.size() if efsdp is not None else 1
     if degree != 1:
         raise NotImplementedError(
             "moe_comm_backend='moonep' needs efsdp == 1, i.e. "

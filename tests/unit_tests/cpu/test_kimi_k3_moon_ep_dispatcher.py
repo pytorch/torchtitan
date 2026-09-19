@@ -211,13 +211,15 @@ def test_moonep_unit_matches_dense_reference_with_duplicated_experts(monkeypatch
 
 
 def _dims(*, dp_shard, cp=1, tp=1, ep, dp_replicate=False):
+    # core keeps the efsdp axis whenever ep > 1 and sizes it dp_shard * cp * tp // ep.
+    efsdp = SimpleNamespace(size=lambda: dp_shard * cp * tp // ep)
     return SimpleNamespace(
         dp_replicate_enabled=dp_replicate,
         dp_shard=dp_shard,
         cp=cp,
         tp=tp,
         ep=ep,
-        get_optional_mesh=lambda _name: None,
+        get_optional_mesh=lambda _name, include_singleton_axes=False: efsdp,
     )
 
 
