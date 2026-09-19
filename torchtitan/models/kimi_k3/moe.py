@@ -61,6 +61,7 @@ class KimiLatentMoE(MoE):
         padding_mask_T: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
+        x_TD, padding_mask_T = self._prepare_tp_inputs(x_TD, padding_mask_T)
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
             x_TD,
             self.expert_bias_E,
@@ -76,6 +77,7 @@ class KimiLatentMoE(MoE):
             num_tokens_per_expert_E,
         )
         out_TD = self.routed_up(self.routed_norm(routed_TD))
-        if self.shared_experts is not None:
-            out_TD = out_TD + self.shared_experts(x_TD)
-        return out_TD
+        shared_out_TD = self._forward_shared_experts(x_TD)
+        if shared_out_TD is not None:
+            out_TD = out_TD + shared_out_TD
+        return self._reduce_tp_output(out_TD)

@@ -10,6 +10,8 @@ import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import _per_axis_types, spmd_mesh_group
 from torchtitan.models.common.attention import BaseAttention, FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -429,6 +431,24 @@ class Attention(BaseAttention):
 
     def forward(self, x, attention_masks=None, positions=None):
         """Apply one DeepSeek V4 attention layer over folded tokens."""
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            sharding_config = self._sharding_config
+            assert sharding_config is not None
+            assert sharding_config.in_src_shardings is not None
+            input_layout = sharding_config.in_src_shardings["x"]
+            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
+            assert input_tp_type is not None
+            # Query, KV, compressor, and indexer branches consume x. Gather
+            # once at their common attention boundary.
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=input_tp_type,
+                dst=spmd.R,
+                backward_options={"op_dtype": x.dtype},
+            )
+
         num_tokens = x.size(0)
         rd = self.rope_head_dim
 

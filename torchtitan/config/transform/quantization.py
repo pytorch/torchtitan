@@ -10,25 +10,48 @@ import logging
 from dataclasses import dataclass, field, fields
 from functools import partial
 from importlib.util import find_spec
-from typing import Literal
+from typing import Any, cast, Literal
 
 import torch
 import torch._inductor.config
 
 from torchtitan.models.common.attention import QKVLinear
-from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.linear import (
+    get_parallel_linear_cls,
+    Linear,
+    RouterGateLinear,
+)
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.protocols.module import Module
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls, Float8Linear
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
 from torchtitan.quantization.nvfp4 import NVFP4Linear
-from torchtitan.quantization.utils import module_filter_fn, swap_token_dispatcher
+from torchtitan.quantization.utils import (
+    module_filter_fn,
+    specialize_quantized_linear,
+    swap_token_dispatcher,
+)
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
 from .converter import ModelConfigConverter
 
 
 logger = logging.getLogger(__name__)
+
+
+def _quantized_linear_config_cls(
+    config: Linear.Config,
+    linear_cls: type[Module],
+) -> type[Any]:
+    """Select a quantized config without changing a projection's TP role."""
+    parallel_cls = get_parallel_linear_cls(config)
+    module_cls = (
+        linear_cls
+        if parallel_cls is None
+        else specialize_quantized_linear(linear_cls, parallel_cls)
+    )
+    return cast(type[Any], module_cls.Config)
 
 
 class QuantizationConverter(ModelConfigConverter):
@@ -154,11 +177,16 @@ class Float8LinearConverter(QuantizationConverter):
                         f"Float8 quantization does not support router gate {fqn!r}; "
                         "exclude it with filter_fqns."
                     )
-                new_config = Float8Linear.Config(
+                config_cls = _quantized_linear_config_cls(
+                    linear_config,
+                    Float8Linear,
+                )
+                new_config = config_cls(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,
                     bias=linear_config.bias,
                     param_init=linear_config.param_init,
+                    sharding_config=linear_config.sharding_config,
                     _torchao_config=self.torchao_config,
                 )
                 if parent is None:
@@ -356,11 +384,16 @@ class MXFP8LinearConverter(QuantizationConverter):
             fqn for fqn in target_fqns if any(selector in fqn for selector in selectors)
         }
         for fqn, config, parent, attr in targets:
-            new_config = MXFP8Linear.Config(
+            config_cls = _quantized_linear_config_cls(
+                config,
+                MXFP8Linear,
+            )
+            new_config = config_cls(
                 in_features=config.in_features,
                 out_features=config.out_features,
                 bias=config.bias,
                 param_init=config.param_init,
+                sharding_config=config.sharding_config,
                 input_activation_format_for_backward=(
                     "mxfp8" if fqn in mxfp8_fqns else "bf16"
                 ),
@@ -484,11 +517,16 @@ class NVFP4LinearConverter(QuantizationConverter):
                         f"NVFP4 quantization does not support router gate {fqn!r}; "
                         "exclude it with fqns."
                     )
-                new_config = NVFP4Linear.Config(
+                config_cls = _quantized_linear_config_cls(
+                    config,
+                    NVFP4Linear,
+                )
+                new_config = config_cls(
                     in_features=config.in_features,
                     out_features=config.out_features,
                     bias=config.bias,
                     param_init=config.param_init,
+                    sharding_config=config.sharding_config,
                 )
                 if parent is None:
                     model_config = new_config
