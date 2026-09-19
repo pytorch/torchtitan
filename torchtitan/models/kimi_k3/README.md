@@ -9,6 +9,7 @@ Install the additional dependencies:
 
 ```bash
 pip install -r .ci/docker/requirements-vlm.txt
+pip install -r scripts/checkpoint_conversion/requirements_kimi_k3.txt
 ```
 
 ## Architecture
@@ -41,20 +42,29 @@ describe the released model.
 | Feature | Notes |
 |---------|-------|
 | FSDP2 / HSDP | Decoder sharded per layer; vision encoder sharded as a separate unit |
+| Tensor and sequence parallelism | Validated with FSDP2/TP2/EP2 in the B200 integration suite |
+| Expert parallelism | Standard PyTorch all-to-all; validated with FSDP2/EP2 |
 
 ## Numerical Parity
 
-The parity script reduces the released Hugging Face configuration to match
-TorchTitan's local `debugmodel` configuration before initializing both models.
+The following manual checks cover the reduced Kimi K3 model:
 
-End-to-end KL divergence against the Hugging Face implementation (multimodal
-inputs): **6.7634e-7**, with **100% top-1 and top-5 match**.
+| Check | Coverage |
+|------|----------|
+| Moonshot BF16 forward parity | Pinned Kimi K3 revision, seed 42, independent multimodal preprocessing, vision features, MoE routes, and final logits over the debug model |
+| KDA forward and backward parity | BF16 fused kernel and eager implementation against an FP64 recurrence at 1, 63, 64, and 65 tokens |
+| Training loss and gradient norm | Ten deterministic FSDP2/EP2 steps checked by `loss_compare.py` in the B200 integration suite |
 
-Vision parity: pixel preprocessing max difference **1.192e-7**; projected vision
-features cosine similarity **1.000000** and max difference **2.730e-3**.
+Run the checks on an SM100 or SM103 system:
 
-Test scripts:
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m scripts.checkpoint_conversion.numerical_tests_kimi_k3
+CUDA_VISIBLE_DEVICES=0 python -m pytest -q tests/unit_tests/gpu/test_kimi_k3.py::TestKimiK3::test_attention_gym_kda_kernel_matches_recurrent_reference
+```
 
-- `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face vs.
-  TorchTitan comparison
-- `tests/unit_tests/gpu/test_kimi_k3.py` -- KDA and FSDP2 correctness
+The Moonshot comparison reduces the released configuration to TorchTitan's
+`debugmodel` dimensions and transfers one initialized state dict into both
+implementations. It pins the upstream code revision and all reference-only
+Python packages and reports preprocessing, vision, routing, and final-logit
+metrics. At full random-initialized depth, small BF16 differences can change
+near-tied MoE routes and compound across layers.

@@ -1,0 +1,3 @@
+fla-core==0.5.2
+tiktoken==0.14.0
+transformers==4.56.2
