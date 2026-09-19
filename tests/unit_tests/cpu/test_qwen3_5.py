@@ -17,11 +17,11 @@ from torchtitan.models.qwen3_8 import model_registry as qwen3_8_model_registry
 
 @pytest.mark.parametrize("enable_ep", [False, True])
 @pytest.mark.parametrize("enable_sp", [False, True])
-def test_qwen35_shared_expert_uses_compute_only_linears(
+def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     enable_ep: bool,
     enable_sp: bool,
 ) -> None:
-    from torchtitan.models.common.linear import Linear
+    from torchtitan.models.common.linear import Linear, RowParallelLinear
     from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
@@ -36,7 +36,7 @@ def test_qwen35_shared_expert_uses_compute_only_linears(
 
     assert type(shared_experts.w13) is Linear.Config
     assert type(shared_experts.gate) is Linear.Config
-    assert type(shared_experts.w2) is Linear.Config
+    assert type(shared_experts.w2) is RowParallelLinear.Config
 
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None

@@ -133,7 +133,9 @@ def build_and_swap_native_moe(
                 enable_sp=enable_sp,
                 expert_param_layout=expert_layout,
             )
-            set_sigmoid_gated_feed_forward_sharding_config(shared_experts)
+            set_sigmoid_gated_feed_forward_sharding_config(
+                shared_experts, enable_sp=enable_sp
+            )
         else:
             set_moe_sharding_config(
                 moe_config,

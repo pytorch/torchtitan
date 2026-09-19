@@ -282,14 +282,14 @@ def make_shared_expert_ffn_config(
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
 ) -> FeedForward.Config:
-    """Build a shared FFN whose enclosing MoE owns TP communication."""
+    """Build a shared FFN with MoE-owned input and row-owned output TP."""
     return FeedForward.Config(
         w13=Linear.Config(
             in_features=dim,
             out_features=2 * hidden_dim,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
-        w2=Linear.Config(
+        w2=RowParallelLinear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=w2w3_param_init,

@@ -210,15 +210,22 @@ def _set_qwen35_layer_sharding(
         )
         if shared_experts is not None:
             assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
-            set_sigmoid_gated_feed_forward_sharding_config(shared_experts)
+            set_sigmoid_gated_feed_forward_sharding_config(
+                shared_experts, enable_sp=enable_sp
+            )
 
 
 def set_sigmoid_gated_feed_forward_sharding_config(
     shared_experts: SigmoidGatedFeedForward.Config,
+    *,
+    enable_sp: bool,
 ) -> None:
-    """Configure compute-only Qwen shared-expert projections."""
-    set_shared_moe_sharding_config(shared_experts)
+    """Configure Qwen shared experts and align their multiplicative gate."""
+    set_shared_moe_sharding_config(shared_experts, enable_sp=enable_sp)
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    gate_output_layout = (
+        dense_sequence_parallel_placement() if enable_sp else replicated_input_layout
+    )
     shared_experts.gate.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),
@@ -226,6 +233,7 @@ def set_sigmoid_gated_feed_forward_sharding_config(
         },
         in_src_shardings={"input": replicated_input_layout},
         out_src_shardings=replicated_input_layout,
+        out_dst_shardings=gate_output_layout,
     )
 
 

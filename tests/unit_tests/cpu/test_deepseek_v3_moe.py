@@ -53,7 +53,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertIsNotNone(shared_experts)
         assert shared_experts is not None
         self.assertIs(type(shared_experts.w13), Linear.Config)
-        self.assertIs(type(shared_experts.w2), Linear.Config)
+        self.assertIs(type(shared_experts.w2), RowParallelLinear.Config)
 
     def test_attention_owns_input_gather_and_wo_owns_output_reduction(self):
         build_config, _ = deepseekv3_configs["debugmodel"]

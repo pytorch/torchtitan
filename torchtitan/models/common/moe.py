@@ -746,7 +746,9 @@ class MoE(Module):
         assert output_layout is not None and not isinstance(output_layout, tuple)
         output_tp_type = _per_axis_types(output_layout).get(MeshAxisName.TP)
         assert output_tp_type is not None
-        combined_output_tp_type = self._combined_output_tp_type(output_tp_type)
+        combined_output_tp_type = (
+            output_tp_type if isinstance(output_tp_type, spmd.Shard) else spmd.P
+        )
         if combined_output_tp_type == output_tp_type:
             return out_TD
         return spmd.redistribute(
@@ -758,7 +760,7 @@ class MoE(Module):
         )
 
     def _forward_shared_experts(self, x_TD: torch.Tensor) -> torch.Tensor | None:
-        """Run shared experts with communication owned by the MoE boundary."""
+        """Prepare the shared input at the MoE boundary, then run the experts."""
         if self.shared_experts is None:
             return None
 
@@ -769,9 +771,6 @@ class MoE(Module):
         sharding_config = self._sharding_config
         assert sharding_config is not None
         assert sharding_config.in_src_shardings is not None
-        output_layout = sharding_config.out_src_shardings
-        assert output_layout is not None and not isinstance(output_layout, tuple)
-
         # Without EP, _prepare_tp_inputs already gathered once for both expert
         # branches. With EP, only the shared branch needs a TP-replicated input.
         if spmd_sparse_mesh() is not None:
@@ -786,27 +785,7 @@ class MoE(Module):
                 backward_options={"op_dtype": x_TD.dtype},
             )
 
-        shared_out_TD = self.shared_experts(x_TD)
-        output_tp_type = _per_axis_types(output_layout).get(MeshAxisName.TP)
-        assert output_tp_type is not None
-        branch_output_tp_type = self._combined_output_tp_type(output_tp_type)
-        if branch_output_tp_type == spmd.P:
-            return shared_out_TD
-        return spmd.redistribute(
-            shared_out_TD,
-            tp_group,
-            src=spmd.P,
-            dst=branch_output_tp_type,
-            backward_options={"op_dtype": shared_out_TD.dtype},
-        )
-
-    def _combined_output_tp_type(
-        self, output_tp_type: spmd.PerMeshAxisSpmdType
-    ) -> spmd.PerMeshAxisSpmdType:
-        """Return the TP type produced before the common MoE output boundary."""
-        if spmd_sparse_mesh() is not None and isinstance(output_tp_type, spmd.Shard):
-            return output_tp_type
-        return spmd.P
+        return self.shared_experts(x_TD)
 
     def forward(
         self,
@@ -824,11 +803,12 @@ class MoE(Module):
             Output ``(T, D)``.
 
         Without EP, routed and shared experts consume the same replicated
-        activation, so this boundary gathers it once for both branches. Their
-        partial outputs are added before one final reduction. With EP, routed
-        experts retain sequence-sharded tokens, while this boundary gathers
-        and reduces the shared branch independently. GroupedExperts operates
-        in a local SPMD region.
+        activation, so this boundary gathers it once for both branches. With
+        SP, both branches reduce-scatter before their sum. Without SP, their
+        partial outputs are added before one final all-reduce. With EP, routed
+        experts retain their dispatcher input layout while this boundary
+        prepares the shared input independently. GroupedExperts operates in a
+        local SPMD region.
         """
         x_TD, padding_mask_T = self._prepare_tp_inputs(x_TD, padding_mask_T)
 
