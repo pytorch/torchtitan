@@ -35,6 +35,7 @@ from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedF
 from .linear import CastLinear, Linear, PartialBiasRowwiseLinear, RouterGateLinear
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .nn_modules import (
+    BatchedLinear,
     Conv1d,
     Conv2d,
     GELU,
@@ -47,6 +48,7 @@ from .nn_modules import (
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "BatchedLinear",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
