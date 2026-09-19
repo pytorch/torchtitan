@@ -14,6 +14,7 @@ import torch.nn as nn
 
 from torchtitan.components import validate as validate_module
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.validate import Validator
 from torchtitan.models.flux import validate as flux_validate_module
 from torchtitan.models.flux.flux_datasets import FluxTrainingMicrobatch
@@ -245,3 +246,32 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
     assert generated["img_height"] == 6
     assert generated["img_width"] == 10
     assert validation_context_entries == 2
+
+
+def test_generic_validator_raises_on_zero_validation_batches(monkeypatch):
+    loader = _ClosableLoader([])
+    validator = _generic_validator(loader)
+    monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+
+    with pytest.raises(ValueError, match="zero batches"):
+        validator.validate([_EchoModel()], step=1)
+
+    assert loader.closed
+
+
+def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
+    microbatch = TokenizedTrainingMicrobatch(
+        input=torch.ones(1, 1),
+        labels=torch.full((1, 1), IGNORE_INDEX, dtype=torch.long),
+        positions=torch.zeros(1, 1, dtype=torch.long),
+        padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+        num_valid_tokens=0,
+    )
+    loader = _ClosableLoader([microbatch])
+    validator = _generic_validator(loader)
+    monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+
+    with pytest.raises(ValueError, match="zero valid tokens"):
+        validator.validate([_EchoModel()], step=1)
+
+    assert loader.closed

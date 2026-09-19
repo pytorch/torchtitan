@@ -40,6 +40,7 @@ from torchtitan.distributed.activation_checkpoint import (
 )
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
+    cuda_graphs_supported,
     run_eager_on_cuda_graph_stream,
     wrap_with_cuda_graph,
 )
@@ -111,6 +112,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
             if (
                 not self.training.disable_cuda_graphs
+                and cuda_graphs_supported()
                 and self.parallelism.pipeline_parallel_degree > 1
             ):
                 pp_schedule_class = (
@@ -154,6 +156,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     )
                 if (
                     not self.training.disable_cuda_graphs
+                    and cuda_graphs_supported()
                     and self.sdc_replayer.num_replays > 1
                 ):
                     raise ValueError(

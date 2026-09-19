@@ -287,6 +287,10 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
     def world_size(self):
         return 8
 
+    @property
+    def device_type(self):
+        return "cpu"
+
     def _build_dims(self, **overrides):
         """ParallelDims on CPU; ``overrides`` replace the default dp2/cp2/tp2."""
         from torchtitan.distributed.parallel_dims import ParallelDims
