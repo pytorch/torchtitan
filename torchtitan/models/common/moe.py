@@ -79,10 +79,10 @@ class GroupedExperts(Module):
         """Raw expert computation without dispatch/combine.
 
         Shape suffixes here describe logical grouped-mm inputs, not physical
-        sharding. Under EP, E may be a local shard of experts; under TP,
-        expert weights shard hidden dimensions instead; under SP, R may be a
-        local token shard. Keep logical capital suffixes here to avoid encoding
-        a specific parallel layout in these local tensor names.
+        sharding. Under EP, E may be a local shard of experts; without EP,
+        expert weights are replicated across TP. Under SP, R may be a local
+        token shard. Keep logical capital suffixes here to avoid encoding a
+        specific parallel layout in these local tensor names.
         """
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:

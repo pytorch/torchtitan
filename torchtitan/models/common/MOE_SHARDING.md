@@ -5,12 +5,11 @@ Config-based sharding for MoE submodules, implemented in
 
 ## Overview
 
-The diagram below shows the DTensor placement flow through the MoE layer
-for all four parallelism configurations (EP on/off × SP on/off).
+The diagram below shows the DTensor placement flow through the MoE layer for
+the two supported expert-parallel configurations (SP on/off). Without EP, the
+routed experts are replicated across the dense TP axis instead of using ETP.
 
 ![MoE Sharding](../../../assets/images/moe_sharding.png)
-
-([Excalidraw source](https://excalidraw.com/#json=2abKr0m2s26fc6lyoF9Qq,MqMzUIoXWYJIfckHNOB7Sw))
 
 ## Configurations
 
@@ -21,19 +20,18 @@ for all four parallelism configurations (EP on/off × SP on/off).
 |--------|-------------------|----------------------|---------------------|------------|
 | EP on, SP on | sparse (EP/EFSDP) | `Shard(0)` on EP | `Shard(1)` → `Shard(1)` | `Partial` → `Shard(1)` |
 | EP on, SP off | sparse (EP/EFSDP) | `Shard(0)` on EP | `Replicate` → `Replicate` | `Partial` → `Replicate` |
-| EP off, SP on | dense (TP) | TP-sharded (colwise/rowwise) | `Shard(1)` → `Replicate` | `Partial` → `Shard(1)` |
-| EP off, SP off | dense (TP) | TP-sharded (colwise/rowwise) | `Replicate` → `Replicate` | `Partial` → `Replicate` |
 
 ## Submodule sharding
 
 - **MoE wrapper**: input/output redistribution between `sp_layout` and
-  `desired_input_layouts`. Output is `Partial`, reduced to `sp_layout`
-  at the boundary.
+  `desired_input_layouts`. With EP, output is sequence-sharded or `Partial`
+  and redistributed to `sp_layout` at the boundary. Without EP, the replicated
+  output is redistributed to `sp_layout`.
 - **Router gate**: weights `Replicate`, output stays DTensor.
-- **Shared experts** (w13/w2): dense-family TP plan. Colwise for w13,
-  rowwise for w2. Output stays `Partial` — reduction happens once at
-  the MoE boundary.
+- **Shared experts** (w13/w2): dense-family TP plan. Colwise for w13 and
+  rowwise for w2. When EP is disabled, the `Partial` output is reduced to
+  `Replicate` before it is added to the replicated routed-expert output.
 - **Routed experts** (`RoutedExperts`): the local SPMD region runs
   dispatch/compute/combine on local tensors while checking its input and
   output layout contracts. The expert-weight `state_shardings` live on its
-  `GroupedExperts` child.
+  `GroupedExperts` child and are replicated across TP when EP is disabled.
