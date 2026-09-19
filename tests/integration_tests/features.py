@@ -215,6 +215,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="CP",
             test_name="cp",
             ngpu=4,
+            # Deadlocks on ROCm under the spmd_types backend when
+            # cp_degree == world_size, see #4064. Remove once that is fixed.
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_hsdp2x2_tp2],
