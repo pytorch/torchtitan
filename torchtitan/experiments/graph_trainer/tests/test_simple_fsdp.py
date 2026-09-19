@@ -13,7 +13,53 @@ import torch.nn as nn
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
+
+
+class TestGraphTrainerQwen3JitActivationCheckpoint(unittest.TestCase):
+    def test_qwen3_jit_full_ac_wraps_layers(self):
+        from torchtitan.config import ParallelismConfig, TrainingConfig
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+        from torchtitan.experiments.graph_trainer.qwen3 import parallelize
+
+        class FakeParallelDims:
+            seq_len_divisor = 1
+            cp_enabled = False
+            tp_enabled = False
+            ep_enabled = False
+
+        class TinyQwen3LikeModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.ModuleList([nn.Linear(2, 2)])
+
+        model = TinyQwen3LikeModel()
+        original_layer = model.layers[0]
+        with (
+            patch.object(parallelize, "annotate_qwen3"),
+            patch.object(
+                parallelize, "apply_simple_fsdp", lambda module, **kwargs: module
+            ),
+            patch.object(parallelize, "apply_compile", lambda module, **kwargs: module),
+            patch.object(parallelize, "maybe_apply_ep_overlap_eager_chunking"),
+        ):
+            result = parallelize.parallelize_qwen3(
+                model,
+                parallel_dims=FakeParallelDims(),
+                training=TrainingConfig(seq_len=1),
+                parallelism=ParallelismConfig(),
+                compile_config=GraphTrainerCompileConfig(mode="jit"),
+                ac_config=FullAC.Config(),
+                dump_folder="dump",
+            )
+
+        self.assertIs(result, model)
+        self.assertIsNot(model.layers[0], original_layer)
+        self.assertTrue(hasattr(model.layers[0], "_checkpoint_wrapped_module"))
+        self.assertIs(model.layers[0]._checkpoint_wrapped_module, original_layer)
 
 
 class TestApplySimpleFSDPSingleRank(unittest.TestCase):
