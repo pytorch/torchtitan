@@ -145,9 +145,9 @@ class ParallelDims:
         The following mesh dimensions will be created:
 
             pp:      Pipeline Parallelism (PP).
-            batch:   Used by data loading to determine the global batch size and which
-                     part of the data each rank should read. This dimension includes both
-                     ``dp_replicate`` and ``dp_shard``.
+            dp:      Logical data parallelism used by data loading, forward/backward,
+                     and data-parallel reductions. This axis folds ``dp_replicate``
+                     and ``dp_shard``.
             loss:    Used by all-reduce when computing the loss. Includes ``dp_replicate``,
                      ``dp_shard``, and ``cp`` degrees, as all of them parallelize the data,
                      essentially require the weight gradients reduction.
@@ -158,10 +158,9 @@ class ParallelDims:
             efsdp:   FSDP in the EP region.
 
         Note: Most dimensions above are created by unflattening the world mesh, except for loss,
-        which is created by flattening the batch and cp dimensions.
+        which is created by flattening the dp and cp axes.
         This API performs the following unflatten operations from the world mesh:
 
-            ["pp", "batch", "cp", "tp"]  # dataloading_mesh
             ["pp", "dp_replicate", "dp_shard", "cp", "tp"]  # storage mesh
             ["pp", "dp", "cp", "tp"]  # fwd/bwd dense mesh
             ["pp", "dp_replicate", "efsdp", "ep"]  # sparse_mesh
@@ -208,12 +207,6 @@ class ParallelDims:
         self._world_mesh = init_device_mesh(
             device_type, (self.world_size,), mesh_dim_names=("world",)
         )
-        dataloading_mesh = unflatten_mesh(
-            self._world_mesh,
-            ("pp", "batch", "cp", "tp"),
-            (self.pp, batch, self.cp, self.tp),
-        )
-        loss_mesh = dataloading_mesh["batch", "cp"]._flatten("loss_mesh")
         # Two mesh views over the same devices:
         #
         # full_dense_mesh_for_fsdp (dp_replicate, dp_shard, cp, tp) is passed to
@@ -231,6 +224,7 @@ class ParallelDims:
             (self.pp, batch, self.cp, self.tp),
         )
         spmd_dense_mesh_for_fwdbwd = full_dense_mesh_for_fwdbwd["dp", "cp", "tp"]
+        loss_mesh = full_dense_mesh_for_fwdbwd["dp", "cp"]._flatten("loss_mesh")
 
         full_sparse_mesh = unflatten_mesh(
             self._world_mesh,
@@ -239,7 +233,6 @@ class ParallelDims:
         )
 
         self._global_meshes = {
-            "dataloading": dataloading_mesh,
             "loss": loss_mesh,
             "dense": full_dense_mesh_for_fsdp,
             "sparse": full_sparse_mesh,
@@ -250,12 +243,11 @@ class ParallelDims:
                 "dp_replicate", "efsdp", "ep"
             ]
         self._single_axis_meshes = {
-            "pp": dataloading_mesh["pp"],
-            "batch": dataloading_mesh["batch"],
+            "pp": full_dense_mesh_for_fwdbwd["pp"],
             "loss": loss_mesh,
             "dp_replicate": full_dense_mesh_for_fsdp["dp_replicate"],
-            "cp": dataloading_mesh["cp"],
-            "tp": dataloading_mesh["tp"],
+            "cp": full_dense_mesh_for_fwdbwd["cp"],
+            "tp": full_dense_mesh_for_fwdbwd["tp"],
             "ep": full_sparse_mesh["ep"],
             "efsdp": full_sparse_mesh["efsdp"],
         }
@@ -275,7 +267,6 @@ class ParallelDims:
         """Validate that created meshes have the expected sizes."""
         expected_sizes = {
             "pp": self.pp,
-            "batch": self.dp_replicate * self.dp_shard,
             "loss": self.dp_replicate * self.dp_shard * self.cp,
             "dp_replicate": self.dp_replicate,
             "cp": self.cp,
@@ -303,7 +294,7 @@ class ParallelDims:
 
         Args:
             dims: Names of the mesh dimension. Valid options include:
-                 'pp', 'batch', 'loss', 'dp_replicate', 'dp', 'dp_shard',
+                 'pp', 'loss', 'dp_replicate', 'dp', 'dp_shard',
                  'cp', 'tp', 'ep', 'efsdp'.
             include_singleton_axes: Include axes with size 1 in the returned
                  submesh. This is used for distributed parameter and buffer
@@ -364,7 +355,7 @@ class ParallelDims:
 
         Args:
             dims: Names of the mesh dimension. Valid options include:
-                 'pp', 'batch', 'loss', 'dp_replicate', 'dp', 'dp_shard',
+                 'pp', 'loss', 'dp_replicate', 'dp', 'dp_shard',
                  'cp', 'tp', 'ep', 'efsdp'.
 
         Returns:
@@ -462,7 +453,7 @@ class ParallelDims:
             ... )
             >>> meshes = parallel_dims.get_all_one_dimensional_meshes()
             >>> print(meshes.keys())
-            dict_keys(['batch', 'loss', 'dp_replicate', 'tp', 'dp', 'dp_shard'])
+            dict_keys(['loss', 'dp_replicate', 'tp', 'dp', 'dp_shard'])
 
         """
         if not self._single_axis_meshes:

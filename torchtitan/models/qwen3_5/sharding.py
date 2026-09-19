@@ -34,12 +34,11 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_spmd,
-    stacked_colwise_config,
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
-    set_moe_core_sharding_config,
+    set_moe_sharding_config,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
@@ -200,70 +199,48 @@ def _set_qwen35_layer_sharding(
 
     if layer_cfg.moe is not None:
         set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
-        set_moe_core_sharding_config(
+        set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
             expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
-        _set_shared_experts_sharding(
+        _set_shared_expert_gate_sharding(
             # pyrefly: ignore [missing-attribute]
             layer_cfg.moe.shared_experts,
-            enable_ep=enable_ep,
             enable_sp=enable_sp,
         )
 
 
-def _set_shared_experts_sharding(
+def _set_shared_expert_gate_sharding(
     shared_experts: "SigmoidGatedFeedForward.Config | None",
     *,
-    enable_ep: bool,
     enable_sp: bool,
 ) -> None:
-    """Shard Qwen3.5's shared-input FFN and sigmoid gate."""
-    if shared_experts is None:
+    """Shard Qwen3.5's shared-expert sigmoid gate.
+
+    The common MoE sharding handles the shared FFN (w1/w2/w3) and the
+    module-boundary gather that feeds the gate a Replicate ``x``. Here we only
+    add the gate: its weight and local output are Replicate. With SP, the output
+    is sliced into the sequence-sharded layout produced by the shared FFN. With
+    SP disabled, it remains Replicate and scales the shared FFN's Partial output.
+    ``getattr`` keeps this a no-op when the MoE has no shared expert (``None``);
+    Qwen3.5's shared expert always carries the gate.
+    """
+    gate = getattr(shared_experts, "gate", None)
+    if gate is None:
         return
-    input_layout = (
-        dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(
-            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
-        )
-    )
-    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    shared_output_layout = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
-    )
-    shared_experts.sharding_config = ShardingConfig(
-        in_src_shardings={"x": input_layout},
-        # The gate and w13 both consume x, so gather once at their parent.
-        in_dst_shardings={"x": replicated_input_layout},
-    )
-    shared_experts.w13.sharding_config = stacked_colwise_config()
-    shared_experts.w2.sharding_config = ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(2)),
-            "bias": dense_param_placement(tp=spmd.R),
-        },
-        in_src_shardings={
-            "input": dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
-        },
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=shared_output_layout,
-    )
     gate_output_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
         else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     )
-    shared_experts.gate.sharding_config = ShardingConfig(
+    gate.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),
             "bias": dense_param_placement(tp=spmd.R),
         },
-        out_src_shardings=replicated_input_layout,
+        out_src_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
         out_dst_shardings=gate_output_layout,
     )
 

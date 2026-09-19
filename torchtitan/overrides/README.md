@@ -176,7 +176,7 @@ OverrideConfig(imports=[("my_pkg.triton_rope.triton_rope", {"block_size": 256})]
 
 (The RL trainer and generator use this to activate one HybridEP dispatch override
 with opposite `capacity_factor` values — blocking `None` for the trainer, a float
-for the cudagraph-capturing generator — instead of two modules or a hardcoded
+for the CUDA-graph-capturing generator — instead of two modules or a hardcoded
 per-actor branch.)
 
 The factory declares the keyword parameters it accepts (or `**kwargs`); a kwarg
@@ -199,10 +199,6 @@ the override package and defeat the no-touch goal.
 ```bash
 # Replace the torch-native SwiGLU activation with the Triton implementation:
 torchtitan_train --module llama3 --config llama3_8b \
-    --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
-
-# Async tensor-parallel linear subclasses are preserved by the same override:
-torchtitan_train --module llama3 --config llama3_debugmodel_dist_gemm \
     --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
 
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one
@@ -406,26 +402,13 @@ converters, not overrides.
 
 ## Checkpoint Compatibility
 
-An override that changes a module's parameter layout changes its checkpoint
-FQNs. By default an override checkpoints whatever real parameters it defines.
-
-**Bridge layout differences with module-level `state_dict` hooks.** A replacement
-module can present its weights in the *stock* layout by registering two hooks:
-
-- `register_state_dict_post_hook` to split/rename its real parameters into the
-  stock FQNs on save, and
-- `register_load_state_dict_pre_hook` to recombine them before the default load,
-  so the real parameter is loaded with normal DTensor/`strict` handling.
-
-The default `FeedForward` uses this approach: it stores `w13.weight` but
-checkpoints `w1.weight` / `w3.weight`, so existing checkpoints and HF adapters
-keep their logical layout. This is the symmetric use of the same hook mechanism
-the activation-checkpoint wrapper uses to strip its
-`_checkpoint_wrapped_module` prefix.
-
-For mappings too complex for module hooks, a model-level `BaseStateDictAdapter`
-(the mechanism used for HF conversion, e.g. `Llama3StateDictAdapter`) remains an
-option; it transforms the flat key->tensor dict from `state_dict()`.
+An override that changes a module's parameter layout changes its native
+checkpoint FQNs. By default an override checkpoints whatever real parameters it
+defines. Keep format-specific layout conversion in a model-level
+`BaseStateDictAdapter` (for example, `Llama3StateDictAdapter` converts native
+`w13.weight` into Hugging Face `gate_proj.weight` and `up_proj.weight`). This
+keeps native DCP checkpoints and per-step RL weight synchronization in the
+model's physical layout without hook-produced copies.
 
 ## Parallelism
 

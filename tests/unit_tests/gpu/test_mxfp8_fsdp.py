@@ -20,8 +20,8 @@ pytest.importorskip("torchao")
 pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
 
 import torchtitan.quantization.mxfp8.tensor as mxfp8_tensor  # noqa: E402
-from torchtitan.distributed.cudagraph import (  # noqa: E402
-    cudagraph_teardown,
+from torchtitan.distributed.cuda_graph import (  # noqa: E402
+    cuda_graph_teardown,
     CUDAGraphWrapper,
 )
 from torchtitan.experiments.graph_trainer.simple_fsdp import (  # noqa: E402
@@ -358,6 +358,7 @@ def _run_cuda_graph_cache_lifecycle(
             (input_MK,),
             static_input_indices=(0,),
             should_check_address=True,
+            num_warmup_iterations=1,
         )
 
         # RAF=false keeps the prepared weights alive, so CUDA-graph warmup,
@@ -391,7 +392,7 @@ def _run_cuda_graph_cache_lifecycle(
         )
     finally:
         mxfp8_tensor._quantize_mxfp8_weight = original_quantize_weight
-        cudagraph_teardown()
+        cuda_graph_teardown()
         dist.destroy_process_group()
 
 

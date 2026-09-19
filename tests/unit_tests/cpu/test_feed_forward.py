@@ -45,18 +45,20 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
 
     assert set(feed_forward._modules) == {"w13", "w2"}
     assert set(feed_forward.state_dict()) == {
-        "w1.weight",
+        "w13.weight",
         "w2.weight",
         "w2.bias",
-        "w3.weight",
     }
+    assert feed_forward.state_dict()["w13.weight"].data_ptr() == (
+        feed_forward.w13.weight.data_ptr()
+    )
 
     w13_2HD = feed_forward.w13.weight
     torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
     torch.testing.assert_close(w13_2HD[1], 5 * torch.ones_like(w13_2HD[1]))
 
 
-def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
+def test_feed_forward_loads_native_checkpoint_and_matches_reference():
     config = FeedForward.Config(
         w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=Linear.Config(in_features=8, out_features=4),
@@ -65,9 +67,8 @@ def test_feed_forward_loads_logical_checkpoint_and_matches_reference():
     w1_HD = torch.randn(8, 4)
     w3_HD = torch.randn(8, 4)
     state_dict = {
-        "w1.weight": w1_HD,
+        "w13.weight": torch.stack((w1_HD, w3_HD)),
         "w2.weight": torch.randn(1, 4, 8),
-        "w3.weight": w3_HD,
     }
     feed_forward.load_state_dict(state_dict)
 
@@ -103,9 +104,8 @@ def test_feed_forward_uses_configured_activation():
     feed_forward = config.build()
     feed_forward.load_state_dict(
         {
-            "w1.weight": torch.randn(8, 4),
+            "w13.weight": torch.randn(2, 8, 4),
             "w2.weight": torch.randn(1, 4, 8),
-            "w3.weight": torch.randn(8, 4),
         }
     )
 

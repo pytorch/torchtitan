@@ -47,7 +47,7 @@ def partial_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
     )
     return ShardingConfig(
         state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(2)),
+            "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.I),
         },
         in_src_shardings={"input": input_layout},

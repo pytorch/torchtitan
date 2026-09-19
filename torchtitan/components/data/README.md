@@ -23,10 +23,10 @@ TorchTitan uses one Grain-based data pipeline for text pretraining, SFT, and ima
     config:  GrainDataLoader.Config
     input:  MapDataset | IterDataset
     does:   convert to iterable if needed -> batch -> collate -> prefetch
-    output: TrainerBatch
+    output: TrainingMicrobatch
 
 5. Trainer:
-    input: TrainerBatch
+    input: TrainingMicrobatch
     does:  model forward and backward
 ```
 
@@ -395,7 +395,7 @@ config.dataloader = GrainDataLoader.Config(
         num_threads=16,
         prefetch_buffer_size=500,
     ),
-    num_prefetch_batches=2,
+    num_prefetch_microbatches=2,
 )
 ```
 
@@ -425,7 +425,7 @@ Each conversion has its own threads and buffer. An all-map mix converts once; a 
 
 `streaming_shuffle_buffer_size` is the number of raw rows retained for approximate shuffling. A larger buffer improves mixing but uses more memory.
 
-`num_prefetch_batches` is the number of complete, collated batches allowed to wait for the trainer:
+`num_prefetch_microbatches` is the number of complete, collated microbatches allowed to wait for the trainer:
 
 ```text
 trainer computes batch 10

@@ -88,7 +88,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     @with_comms
     def test_no_ep_fsdp_gt_num_experts_shards_dim1(self):
         """ep_degree=1, fsdp_size(8) > num_experts(4) → Shard(1)."""
-        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        dp_mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
+        )
         model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
 
         apply_fsdp_to_decoder(
@@ -105,7 +107,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     @with_comms
     def test_no_ep_fsdp_le_num_experts_shards_dim0(self):
         """ep_degree=1, fsdp_size(8) <= num_experts(8) → Shard(0)."""
-        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        dp_mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
+        )
         model = _build_qwen3_moe_model(num_experts=8).to(self.device_type)
 
         apply_fsdp_to_decoder(
@@ -126,7 +130,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         edp_mesh = init_device_mesh(
             self.device_type, (4, 2), mesh_dim_names=("efsdp", "ep")
         )
-        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        dp_mesh = init_device_mesh(
+            self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
+        )
         model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
 
         apply_fsdp_to_decoder(
@@ -141,6 +147,31 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
         self.assertEqual(_get_expert_shard_dim(model), 1)
 
+    @with_comms
+    def test_no_ep_hsdp_ignores_dp_replicate(self):
+        """ep_degree=1 under HSDP: dp_replicate must not count as shard degree.
+
+        The mesh is (dp_replicate=2, dp_shard=4), so FSDP cuts dim 0 of the
+        expert weights 4 ways, and 4 <= num_experts(4) -> Shard(0). Counting
+        dp_replicate gives 2*4=8 > 4 -> Shard(1), which pads dim 0 needlessly
+        and changes the on-disk checkpoint layout.
+        """
+        dp_mesh = init_device_mesh(
+            self.device_type, (2, 4), mesh_dim_names=("dp_replicate", "dp_shard")
+        )
+        model = _build_qwen3_moe_model(num_experts=4).to(self.device_type)
+
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            ep_degree=1,
+        )
+
+        self.assertEqual(_get_expert_shard_dim(model), 0)
+
 
 class TestApplyFsdpStackedWeightSharding(DTensorTestBase):
     """FSDP shards stacked projections on their matrix-row dimension."""
@@ -152,8 +183,10 @@ class TestApplyFsdpStackedWeightSharding(DTensorTestBase):
     @with_comms
     def test_w13_shards_dim_one(self):
         from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
-        model = model_registry("debugmodel").model.build().to(self.device_type)
+        config = model_registry("debugmodel").model
+        model = config.build().to(self.device_type)
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
         apply_fsdp_to_decoder(
             model,
@@ -172,11 +205,31 @@ class TestApplyFsdpStackedWeightSharding(DTensorTestBase):
         }
         self.assertEqual(shard_dims, {1})
         state_dict = model.state_dict()
-        self.assertNotIn("layers.0.feed_forward.w13.weight", state_dict)
         self.assertEqual(
-            state_dict["layers.0.feed_forward.w1.weight"].shape,
-            (768, 256),
+            state_dict["layers.0.feed_forward.w13.weight"].shape,
+            (2, 768, 256),
         )
+
+        adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
+        hf_state_dict = adapter.to_hf(state_dict)
+        gate = hf_state_dict["model.layers.0.mlp.gate_proj.weight"]
+        gate_shard_dims = {
+            placement.dim
+            for placement in gate.placements
+            if isinstance(placement, Shard)
+        }
+        self.assertEqual(gate.shape, (768, 256))
+        self.assertEqual(gate_shard_dims, {0})
+
+        state_dict = adapter.from_hf(hf_state_dict)
+        restored_w13 = state_dict["layers.0.feed_forward.w13.weight"]
+        restored_shard_dims = {
+            placement.dim
+            for placement in restored_w13.placements
+            if isinstance(placement, Shard)
+        }
+        self.assertEqual(restored_w13.shape, (2, 768, 256))
+        self.assertEqual(restored_shard_dims, {1})
         model.load_state_dict(state_dict)
 
     @with_comms
@@ -223,10 +276,7 @@ class TestApplyFsdpStackedWeightSharding(DTensorTestBase):
 
         state_dict = sharded.state_dict()
         self.assertEqual(
-            state_dict["layers.0.feed_forward.w1.weight"].shape, (768, 256)
-        )
-        self.assertEqual(
-            state_dict["layers.0.feed_forward.w3.weight"].shape, (768, 256)
+            state_dict["layers.0.feed_forward.w13.weight"].shape, (2, 768, 256)
         )
         sharded.load_state_dict(state_dict)
 

@@ -362,8 +362,10 @@ class KimiK3Model(Decoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks and annotate K3 multimodal inputs."""
+        del kwargs
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions")
         padding_mask = batch.get("padding_mask", None)

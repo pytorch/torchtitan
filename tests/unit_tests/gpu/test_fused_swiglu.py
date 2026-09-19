@@ -9,18 +9,18 @@
 The override replaces ``FeedForward.activation_fn`` while preserving the module
 and its physical ``w13`` projection. These tests run on CPU unless marked CUDA.
 
-``TestFusedSwiGLUDistGemmComposition`` covers stacking the override on the
-async tensor-parallel transform, which must preserve the TP overlap.
+``TestFusedSwiGLUDistGemmComposition`` covers stacking the override on
+``tp_gemm_backend="dist_gemm"``, which must keep the TP overlap rather than
+silently replacing the overlapping FFN with the plain fused one.
 """
 
 import unittest
 from dataclasses import dataclass
 
 import torch
-from torchtitan.config.transform import AsyncTensorParallelTransform
 
 from torchtitan.models.common.activation import SwiGLU
-from torchtitan.models.common.async_linear import (
+from torchtitan.models.common.dist_gemm import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
@@ -99,13 +99,11 @@ class TestFusedSwiGLU(unittest.TestCase):
         self.assertIsInstance(fused.w13, _ConvertedLinear.Config)
         self.assertIsInstance(fused.build().w13, _ConvertedLinear)
 
-    def test_saves_logical_layout(self):
+    def test_saves_native_layout_without_copy(self):
         fused = _build_fused()
         sd = fused.state_dict()
-        self.assertEqual(set(sd), {"w1.weight", "w2.weight", "w3.weight"})
-        logical_w13 = _logical_w13(fused)
-        self.assertTrue(torch.equal(sd["w1.weight"], logical_w13[0]))
-        self.assertTrue(torch.equal(sd["w3.weight"], logical_w13[1]))
+        self.assertEqual(set(sd), {"w13.weight", "w2.weight"})
+        self.assertEqual(sd["w13.weight"].data_ptr(), fused.w13.weight.data_ptr())
 
     @unittest.skipUnless(torch.cuda.is_available(), "silu_and_mul op is CUDA-only")
     def test_triton_checkpoint_loads_into_native(self):
@@ -162,25 +160,24 @@ class TestFusedSwiGLUDistGemmComposition(unittest.TestCase):
     """
 
     def test_dist_gemm_config_keeps_overlap(self):
-        config = AsyncTensorParallelTransform().transform(_dist_gemm_ffn_config())
+        config = _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
+        self.assertIs(type(fused), FeedForward)
         self.assertIsInstance(fused.w13, AsyncColumnParallelLinear)
         self.assertIsInstance(fused.w2, AsyncRowParallelLinear)
         self.assertIsInstance(fused.activation_fn, FusedSwiGLU)
 
-    def test_overlapping_variant_keeps_w13_checkpoint_layout(self):
-        config = AsyncTensorParallelTransform().transform(_dist_gemm_ffn_config())
+    def test_overlapping_variant_keeps_native_w13_checkpoint_layout(self):
+        config = _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
         config.activation_fn = fused_swiglu(config.activation_fn)
         fused = config.build()
         with torch.no_grad():
             fused.w13.weight.copy_(torch.randn(2, _HIDDEN, _DIM))
         state_dict = fused.state_dict()
-        self.assertEqual(set(state_dict), {"w1.weight", "w2.weight", "w3.weight"})
+        self.assertEqual(set(state_dict), {"w13.weight", "w2.weight"})
 
-        reload_config = AsyncTensorParallelTransform().transform(
-            _dist_gemm_ffn_config()
-        )
+        reload_config = _dist_gemm_ffn_config(tp_gemm_backend="dist_gemm")
         reload_config.activation_fn = fused_swiglu(reload_config.activation_fn)
         reloaded = reload_config.build()
         reloaded.load_state_dict(state_dict)
@@ -209,7 +206,7 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         self.assertIsInstance(ffn.activation_fn, FusedSwiGLU)
 
         sd = model.state_dict()
-        self.assertTrue(any(k.endswith("feed_forward.w1.weight") for k in sd))
+        self.assertTrue(any(k.endswith("feed_forward.w13.weight") for k in sd))
 
         adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
         hf_sd = adapter.to_hf(sd)
@@ -218,8 +215,9 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
 
         orig_w13 = ffn.w13.weight.detach().clone()
         restored = adapter.from_hf(hf_sd)
-        self.assertIn("layers.0.feed_forward.w1.weight", restored)
-        self.assertIn("layers.0.feed_forward.w3.weight", restored)
+        self.assertIn("layers.0.feed_forward.w13.weight", restored)
+        self.assertNotIn("layers.0.feed_forward.w1.weight", restored)
+        self.assertNotIn("layers.0.feed_forward.w3.weight", restored)
         model.load_state_dict(restored, strict=False)
         self.assertTrue(torch.equal(ffn.w13.weight, orig_w13))
 

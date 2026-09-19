@@ -10,7 +10,7 @@ import torch
 import torch_remat as remat
 
 from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
-from torchtitan.models.common.linear import LinearConfig
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend:
@@ -45,8 +45,8 @@ class FeedForward(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        w13: LinearConfig
-        w2: LinearConfig
+        w13: Linear.Config
+        w2: Linear.Config
         activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
 
     def __init__(self, config: Config):
@@ -54,31 +54,6 @@ class FeedForward(Module):
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
-        self.register_state_dict_post_hook(self._split_w13_on_save)
-        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
-
-    @staticmethod
-    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Expose fused parameters under the logical w1/w3 checkpoint keys."""
-        for param_name in ("weight", "bias"):
-            fused_key = f"{prefix}w13.{param_name}"
-            if fused_key not in state_dict:
-                continue
-            gate_up = state_dict.pop(fused_key)
-            state_dict[f"{prefix}w1.{param_name}"] = gate_up[0]
-            state_dict[f"{prefix}w3.{param_name}"] = gate_up[1]
-
-    @staticmethod
-    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
-        """Pack logical w1/w3 checkpoint entries into the fused parameter."""
-        for param_name in ("weight", "bias"):
-            gate_key = f"{prefix}w1.{param_name}"
-            up_key = f"{prefix}w3.{param_name}"
-            if gate_key not in state_dict or up_key not in state_dict:
-                continue
-            state_dict[f"{prefix}w13.{param_name}"] = torch.stack(
-                [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=0
-            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up_T2F = remat.region(
@@ -106,7 +81,7 @@ class SigmoidGatedFeedForward(FeedForward):
 
     @dataclass(kw_only=True, slots=True)
     class Config(FeedForward.Config):
-        gate: LinearConfig
+        gate: Linear.Config
 
     def __init__(self, config: Config):
         super().__init__(config)
