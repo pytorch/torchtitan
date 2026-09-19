@@ -53,8 +53,9 @@ class SimpleModel(nn.Module):
 
 
 class FakeRouter(nn.Module):
-    def __init__(self, tokens):
+    def __init__(self, tokens, *, tp_shards_tokens=False):
         super().__init__()
+        self.tp_shards_tokens = tp_shards_tokens
         self.register_buffer("tokens_per_expert_E", torch.tensor(tokens))
 
 
@@ -62,8 +63,7 @@ class FakeMoE(nn.Module):
     def __init__(self, load_balance_coeff, tokens, *, tp_shards_tokens=False):
         super().__init__()
         self.load_balance_coeff = load_balance_coeff
-        self.tp_shards_tokens = tp_shards_tokens
-        self.router = FakeRouter(tokens)
+        self.router = FakeRouter(tokens, tp_shards_tokens=tp_shards_tokens)
         if load_balance_coeff is not None:
             self.register_buffer("expert_bias_E", torch.zeros(len(tokens)))
         else:

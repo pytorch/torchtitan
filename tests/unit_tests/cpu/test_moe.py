@@ -364,9 +364,9 @@ class TestMoE(unittest.TestCase):
         def make_config():
             return SimpleNamespace(
                 sharding_config=None,
-                tp_shards_tokens=False,
                 router=SimpleNamespace(
                     sharding_config=None,
+                    tp_shards_tokens=False,
                     aux_loss=MicrobatchWiseLoadBalanceLoss.Config(coeff=1e-3),
                     gate=SimpleNamespace(sharding_config=None),
                 ),
@@ -405,7 +405,7 @@ class TestMoE(unittest.TestCase):
                     tp_type(root.in_dst_shardings["x_TD"]), activation_layout
                 )
                 self.assertEqual(tp_type(root.out_src_shardings), activation_layout)
-                self.assertEqual(moe_config.tp_shards_tokens, enable_sp)
+                self.assertEqual(moe_config.router.tp_shards_tokens, enable_sp)
                 self.assertEqual(moe_config.router.aux_loss.tp_shards_tokens, enable_sp)
 
                 shared = moe_config.shared_experts

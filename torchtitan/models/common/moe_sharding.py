@@ -349,7 +349,7 @@ def set_moe_sharding_config(
     # Always set sharding configs regardless of whether TP is enabled.
     # ``resolve_mesh`` filters out disabled axes at runtime.
     tp_shards_tokens = enable_ep or enable_sp
-    moe_cfg.tp_shards_tokens = tp_shards_tokens
+    moe_cfg.router.tp_shards_tokens = tp_shards_tokens
     aux_loss_cfg = moe_cfg.router.aux_loss
     if isinstance(aux_loss_cfg, MicrobatchWiseLoadBalanceLoss.Config):
         aux_loss_cfg.tp_shards_tokens = tp_shards_tokens

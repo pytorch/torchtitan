@@ -74,13 +74,13 @@ T = TypeVar("T", bound=Optimizer)
 
 class _MoERouterLike(Protocol):
     tokens_per_expert_E: torch.Tensor  # noqa: N815
+    tp_shards_tokens: bool
 
 
 class _MoELike(Protocol):
     load_balance_coeff: float | None
     expert_bias_E: torch.Tensor  # noqa: N815
     router: _MoERouterLike
-    tp_shards_tokens: bool
 
 
 class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
@@ -498,7 +498,7 @@ def register_moe_load_balancing_hook(
         tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
 
         first_moe = next(_iter_moe_layers(model_parts))[1]
-        if first_moe.tp_shards_tokens and parallel_dims.tp > 1:
+        if first_moe.router.tp_shards_tokens and parallel_dims.tp > 1:
             torch.distributed.all_reduce(
                 tokens_per_expert_E_by_layer,
                 group=parallel_dims.get_dense_tp_mesh().get_group(),
@@ -561,7 +561,7 @@ def register_moe_quantile_balancing_hook(
         reduction_groups = []
         # Router tokens can be sharded on the dense TP axis through either EP
         # or dense sequence parallelism.
-        if moe_layers[0][0].tp_shards_tokens and parallel_dims.tp > 1:
+        if moe_layers[0][1].tp_shards_tokens and parallel_dims.tp > 1:
             reduction_groups.append(parallel_dims.get_dense_tp_mesh().get_group())
         loss_mesh = parallel_dims.get_optional_mesh("loss")
         if loss_mesh is not None:

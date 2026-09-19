@@ -77,7 +77,7 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
             moe = MoE.__new__(MoE)
             nn.Module.__init__(moe)
             moe.router = router
-            moe.tp_shards_tokens = True
+            router.tp_shards_tokens = True
             moe.register_buffer("expert_bias_E", torch.zeros(4))
             model.add_module(f"moe_{layer_idx}", moe)
             moe_layers.append(moe)

@@ -196,6 +196,7 @@ class TokenChoiceTopKRouter(Module):
         route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0
         aux_loss: AuxLoss.Config | None = None
+        tp_shards_tokens: bool = False
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
@@ -207,6 +208,7 @@ class TokenChoiceTopKRouter(Module):
         self.route_norm = config.route_norm
         self.route_norm_epsilon = config.route_norm_epsilon
         self.route_scale = config.route_scale
+        self.tp_shards_tokens = config.tp_shards_tokens
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
         self._debug_force_load_balance = config._debug_force_load_balance
         # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
@@ -670,7 +672,6 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
-        tp_shards_tokens: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -687,7 +688,6 @@ class MoE(Module):
         #       expert_bias_E is updated outside the model in an optimizer step pre hook
         #       to work with gradient accumulation.
         self.load_balance_coeff = config.load_balance_coeff
-        self.tp_shards_tokens = config.tp_shards_tokens
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
             self.register_buffer(
