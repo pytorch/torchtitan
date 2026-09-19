@@ -17,6 +17,13 @@ class FaultTolerance(TorchFTManager.Config):
     Extends TorchFTManager.Config to also support Streaming DiLoCo
     """
 
+    local_sgd_offload_to_cpu: bool = False
+    """
+    Stage averaged LocalSGD parameters on CPU until the quorum commits.
+    This reduces peak accelerator memory at synchronization time at the cost
+    of host transfers and host memory.
+    """
+
     sync_steps: int = 5
     """
     Number of steps to wait before performing synchronization. This is only used when "semi_sync_method"
