@@ -31,11 +31,7 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3.model import Qwen3Model, Qwen3TransformerBlock
 
 
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
-    "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
-}
+_GROUPED_EXPERTS_PARAM_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
 
 
 def set_qwen3_sharding_config(
@@ -113,5 +109,5 @@ def _set_qwen3_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
+            expert_param_names=_GROUPED_EXPERTS_PARAM_NAMES,
         )

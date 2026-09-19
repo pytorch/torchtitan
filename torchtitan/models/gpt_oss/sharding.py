@@ -28,14 +28,13 @@ if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
 
 
-# Routed-expert layout for ``GptOssGroupedExperts`` (mlp1/mlp2 fused
-# weights + biases): mlp1 colwise, mlp2 rowwise, mlp2_bias replicated.
-_GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "mlp1_weight_EGD": spmd.S(1),
-    "mlp1_bias_EG": spmd.S(1),
-    "mlp2_weight_EDF": spmd.S(2),
-    "mlp2_bias_ED": spmd.R,
-}
+# Routed-expert parameter names for ``GptOssGroupedExperts``.
+_GPT_OSS_EXPERTS_PARAM_NAMES = (
+    "mlp1_weight_EGD",
+    "mlp1_bias_EG",
+    "mlp2_weight_EDF",
+    "mlp2_bias_ED",
+)
 
 
 def partial_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
@@ -127,5 +126,5 @@ def _set_gpt_oss_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
+            expert_param_names=_GPT_OSS_EXPERTS_PARAM_NAMES,
         )

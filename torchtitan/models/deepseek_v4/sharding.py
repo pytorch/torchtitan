@@ -42,11 +42,7 @@ if TYPE_CHECKING:
         DeepSeekV4TransformerBlock,
     )
 
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
-    "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
-}
+_GROUPED_EXPERTS_PARAM_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
 
 _replicate_weight = ShardingConfig(
     state_shardings={"weight": _dense_param_rep},
@@ -263,7 +259,7 @@ def set_deepseek_v4_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
+            expert_param_names=_GROUPED_EXPERTS_PARAM_NAMES,
         )
         router_cfg = layer_cfg.moe.router
         if getattr(router_cfg, "layer_id", 0) < getattr(router_cfg, "n_hash_layers", 0):
