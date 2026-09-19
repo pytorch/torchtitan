@@ -75,7 +75,6 @@ class _MoonEPDispatch(torch.autograd.Function):
             grad_hidden_nvsh = torch.zeros(
                 ctx.shape_nvsh, dtype=torch.bfloat16, device=grad_weights_nvs.device
             )
-        # One combine returns both the hidden and the routing-weight grads.
         grad_x_SH, grad_weights_SK, _ = ctx.buffer.combine(
             plan=ctx.plan,
             hidden_nvsh=grad_hidden_nvsh.to(torch.bfloat16).contiguous(),
