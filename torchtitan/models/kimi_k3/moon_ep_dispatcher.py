@@ -134,9 +134,6 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         num_sms: int = 32
         """SMs MoonEP's kernels may occupy (its default)."""
 
-        token_padding: int = 128
-        """MoonEP's internal alignment (its default)."""
-
     def __init__(self, config: "MoonEPTokenDispatcher.Config") -> None:
         super().__init__(config)
         self.hidden_dim = config.hidden_dim
@@ -144,7 +141,6 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         self.num_prefetch_slots = config.num_prefetch_slots
         self.expert_hidden_dim = config.expert_hidden_dim
         self.num_sms = config.num_sms
-        self.token_padding = config.token_padding
         self._buffer = None
         self._current: tuple[object, torch.Tensor] | None = None
 
@@ -187,7 +183,6 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
             E=self.num_experts,
             num_ep_ranks=ep_size,
             num_sms=self.num_sms,
-            token_padding=self.token_padding,
             B=self.num_prefetch_slots,
             group=self.ep_mesh.get_group(),
         )

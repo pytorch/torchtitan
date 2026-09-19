@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
 
 import torch
 import torch.distributed as dist
@@ -22,28 +21,6 @@ from torchtitan.models.kimi_k3.moon_ep_dispatcher import _import_moonep
 # F = expert hidden, P = this rank's experts (E / ep size), B = prefetch slots.
 
 _PROJECTIONS = ("gate", "up", "down")
-
-
-class MoonEPTableBackend(Protocol):
-    """Allocates this rank's bf16 ``[P + B]`` rows and fp32 grad rows, and moves
-    slot weights in and slot gradients home."""
-
-    def configure(self, *, num_experts: int, num_slots: int, num_sms: int) -> None:
-        ...
-
-    def alloc_expert_rows(self, name: str, in_dim: int, out_dim: int) -> torch.Tensor:
-        ...
-
-    def alloc_grad_rows(
-        self, name: str, in_dim: int, out_dim: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        ...
-
-    def prefetch(self, plan, tables: dict[str, torch.Tensor]) -> None:
-        ...
-
-    def reduce_grad(self, plan, grads: dict[str, torch.Tensor]) -> None:
-        ...
 
 
 class _MoonEPExpertFunction(torch.autograd.Function):
@@ -100,14 +77,14 @@ class MoonEPGroupedExperts(GroupedExperts):
     def __init__(self, config: Config):
         super().__init__(config)
         self._dispatcher = None
-        self._backend: MoonEPTableBackend | None = None
+        self._backend: MoonEPTableBackendNVLink | None = None
         self._tables: dict[str, torch.Tensor] = {}
         self._grads: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         self._row_span: tuple[int, int] = (0, 0)
         self.num_own_experts = 0
         self.num_prefetch_slots = 0
 
-    def attach(self, dispatcher, backend: MoonEPTableBackend, ep_mesh) -> None:
+    def attach(self, dispatcher, backend: MoonEPTableBackendNVLink, ep_mesh) -> None:
         """Bind the dispatcher and the table backend and allocate this rank's rows."""
         rank, size = ep_mesh.get_local_rank(), ep_mesh.size()
         if self.num_experts % size != 0:
