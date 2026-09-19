@@ -7,11 +7,14 @@
 import unittest
 from types import SimpleNamespace
 
+import spmd_types as spmd
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchtitan.distributed.spmd_types import _per_axis_types
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.activation import Sigmoid, SiTUGLU, Softmax, SqrtSoftplus
 from torchtitan.models.common.config_utils import (
     make_moe_config,
@@ -25,6 +28,7 @@ from torchtitan.models.common.moe_sharding import (
     _moe_sharding_config,
     _router_sharding_config,
     set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
 )
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -351,6 +355,87 @@ class TestMoE(unittest.TestCase):
             _per_axis_types(config.in_dst_shardings["padding_mask"]),
             _per_axis_types(token_id_placement(enable_sp=True)),
         )
+
+    def test_moe_without_ep_replicates_routed_experts(self):
+        def make_config():
+            return SimpleNamespace(
+                sharding_config=None,
+                router=SimpleNamespace(
+                    sharding_config=None,
+                    gate=SimpleNamespace(sharding_config=None),
+                ),
+                shared_experts=SimpleNamespace(
+                    sharding_config=None,
+                    w13=SimpleNamespace(sharding_config=None),
+                    w2=SimpleNamespace(sharding_config=None),
+                ),
+                routed_experts=SimpleNamespace(
+                    sharding_config=None,
+                    inner_experts=SimpleNamespace(sharding_config=None),
+                ),
+            )
+
+        expert_param_names = ("w1_EFD", "w2_EDF", "w3_EFD")
+
+        def tp_type(layout):
+            return _per_axis_types(layout)[MeshAxisName.TP]
+
+        for enable_sp in (False, True):
+            with self.subTest(enable_sp=enable_sp):
+                moe_config = make_config()
+                set_moe_sharding_config(
+                    moe_config,
+                    enable_ep=False,
+                    enable_sp=enable_sp,
+                    expert_param_names=expert_param_names,
+                )
+
+                root = moe_config.sharding_config
+                assert root is not None
+                assert root.in_dst_shardings is not None
+                self.assertEqual(tp_type(root.in_dst_shardings["x_TD"]), spmd.R)
+                self.assertEqual(tp_type(root.out_src_shardings), spmd.R)
+
+                shared = moe_config.shared_experts
+                assert shared.sharding_config.in_dst_shardings is not None
+                self.assertEqual(
+                    tp_type(shared.sharding_config.in_dst_shardings["x"]), spmd.R
+                )
+                self.assertEqual(
+                    tp_type(shared.w13.sharding_config.state_shardings["weight"]),
+                    spmd.S(0),
+                )
+                self.assertEqual(
+                    tp_type(shared.w13.sharding_config.out_src_shardings), spmd.S(1)
+                )
+                self.assertEqual(
+                    tp_type(shared.w2.sharding_config.state_shardings["weight"]),
+                    spmd.S(1),
+                )
+                self.assertEqual(
+                    tp_type(shared.w2.sharding_config.out_src_shardings), spmd.P
+                )
+                self.assertEqual(
+                    tp_type(shared.w2.sharding_config.out_dst_shardings), spmd.R
+                )
+
+                routed = moe_config.routed_experts
+                assert routed.sharding_config.in_dst_shardings is not None
+                for layout in routed.sharding_config.in_dst_shardings.values():
+                    self.assertEqual(tp_type(layout), spmd.R)
+                self.assertEqual(
+                    tp_type(routed.sharding_config.out_src_shardings), spmd.R
+                )
+                self.assertEqual(
+                    tp_type(routed.sharding_config.out_dst_shardings), spmd.R
+                )
+                for name in expert_param_names:
+                    self.assertEqual(
+                        tp_type(
+                            routed.inner_experts.sharding_config.state_shardings[name]
+                        ),
+                        spmd.R,
+                    )
 
 
 if __name__ == "__main__":

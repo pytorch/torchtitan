@@ -6,6 +6,8 @@
 
 """Config-based sharding helpers for MoE submodules."""
 
+from collections.abc import Collection
+
 import spmd_types as spmd
 from spmd_types import SpmdType
 
@@ -45,25 +47,6 @@ def expert_param_placement_sparse() -> SpmdType:
             DP_REPLICATE: spmd.R,
             EFSDP: spmd.R,
             EP: spmd.S(0),
-        }
-    )
-
-
-def expert_param_placement_dense(*, tp_placement: spmd.PerMeshAxisSpmdType) -> SpmdType:
-    """Dense-family placement for routed-expert weights (EP disabled, TP > 1).
-
-    Used when expert parallelism is disabled but tensor parallelism shards
-    the experts on the dense TP axis.
-
-    Insertion order matches canonical mesh order. ``tp_placement`` is the
-    placement on the TP axis: ``Shard(1)`` for colwise, ``Shard(2)`` for
-    rowwise, ``Replicate()`` for replicated bias.
-    """
-    return SpmdType(
-        {
-            DP: spmd.R,
-            CP: spmd.R,
-            TP: tp_placement,
         }
     )
 
@@ -181,9 +164,9 @@ def _shared_experts_sharding_configs(
 ) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig]:
     """Configs for shared FeedForward parent and w13/w2 linears."""
     # The parent FeedForward converts its input to Replicate once before w13.
-    # w2 reduces its Partial output to the final MoE boundary layout
-    # used for the routed + shared add: sequence-sharded when SP is enabled and
-    # Partial when SP is disabled.
+    # w2 reduces its Partial output to the final MoE boundary layout used for
+    # the routed + shared add. Without EP, routed experts are replicated, so
+    # the shared expert output is reduced to Replicate before the add.
     input_layout = (
         dense_sequence_parallel_placement()
         if enable_ep and enable_sp
@@ -194,8 +177,10 @@ def _shared_experts_sharding_configs(
     desired_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     desired_output_layout = (
         dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
+        if enable_ep and enable_sp
+        else dense_activation_placement(
+            tp=spmd.P if enable_ep else spmd.R, cp=spmd.S(0)
+        )
     )
     return (
         ShardingConfig(
@@ -211,7 +196,7 @@ def _routed_experts_sharding_configs(
     *,
     enable_ep: bool,
     enable_sp: bool,
-    expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
+    expert_param_names: Collection[str],
 ) -> tuple[ShardingConfig, ShardingConfig]:
     """Configs for RoutedExperts local SPMD and inner expert weight state."""
     if enable_ep:
@@ -221,14 +206,13 @@ def _routed_experts_sharding_configs(
             else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
         )
         state_shardings: dict[str, SpmdType] = {
-            name: expert_param_placement_sparse() for name in expert_param_layout
+            name: expert_param_placement_sparse() for name in expert_param_names
         }
         experts_input_layout = dense_sequence_parallel_placement()
     else:
         pre_experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
         state_shardings = {
-            name: expert_param_placement_dense(tp_placement=placement)
-            for name, placement in expert_param_layout.items()
+            name: dense_param_placement(tp=spmd.R) for name in expert_param_names
         }
         experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
@@ -237,12 +221,14 @@ def _routed_experts_sharding_configs(
     experts_output_layout = (
         dense_sequence_parallel_placement()
         if enable_ep
-        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
+        else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     )
     desired_experts_output_layout = (
         dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
+        if enable_ep and enable_sp
+        else dense_activation_placement(
+            tp=spmd.P if enable_ep else spmd.R, cp=spmd.S(0)
+        )
     )
 
     return (
@@ -288,8 +274,10 @@ def _moe_sharding_config(
     )
     output_layout = (
         dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
+        if enable_ep and enable_sp
+        else dense_activation_placement(
+            tp=spmd.P if enable_ep else spmd.R, cp=spmd.S(0)
+        )
     )
     padding_mask_src_layout = token_id_placement(enable_sp=enable_sp)
     padding_mask_dst_layout = token_id_placement(enable_sp=enable_sp and enable_ep)
@@ -315,39 +303,31 @@ def set_moe_sharding_config(
     *,
     enable_ep: bool,
     enable_sp: bool,
-    expert_param_layout: dict[str, spmd.PerMeshAxisSpmdType],
+    expert_param_names: Collection[str],
 ) -> None:
     """Populate ``sharding_config`` on every MoE submodule.
 
-    Branches dense vs sparse family per Module:
+    Configures sparse expert parallelism when EP is enabled and replicates the
+    routed experts across the dense TP axis otherwise:
 
     - ``moe`` (wrapper): input/output redistribution on ``{TP}``.
       Always set when ``tp_enabled``.
     - ``moe.router``: input and padding-mask redistribution to the router's
       token layout, plus the expert-count buffer placement.
     - ``moe.router.gate``: Replicate weights and output.
-    - ``moe.shared_experts.{w1,w2,w3}``: dense-family TP plan with
-      Partial-flow grad annotations (when ``moe_cfg.shared_experts is not
-      None``).
+    - ``moe.shared_experts.{w13,w2}``: dense-family TP plan (when
+      ``moe_cfg.shared_experts is not None``).
     - ``moe.routed_experts.inner_experts`` (``GroupedExperts``): expert-weight
-      ``state_shardings`` -- sparse ``{EP}`` / dense ``{TP}`` / none. The parent
-      ``routed_experts`` holds the activation shardings and local SPMD region.
-
-    ``expert_param_layout`` maps each routed-expert parameter name to its
-    dense in/out-dim placement (used on the EP-disabled + TP-enabled path):
-    ``Shard(1)`` for colwise, ``Shard(2)`` for rowwise, ``Replicate()`` for
-    replicated bias. The shared ``GroupedExperts`` (qwen3, deepseek_v3)
-    passes ``{"w1_EFD": Shard(1), "w2_EDF": Shard(2), "w3_EFD": Shard(1)}``;
-    ``GptOssGroupedExperts`` passes its mlp1/mlp2 layout.
+      ``state_shardings`` -- sparse ``{EP}`` when EP is enabled and replicated
+      across ``{TP}`` otherwise. The parent ``routed_experts`` holds the
+      activation shardings and local SPMD region.
 
     Args:
         moe_cfg: The ``MoE.Config`` instance to populate.
         enable_ep: Whether expert parallelism is enabled.
         enable_sp: Whether sequence parallelism is enabled (affects the
             wrapper's enter/exit TP layout).
-        expert_param_layout: ``{param_name: tp_placement}`` for the
-            routed experts' weight params (used on the EP-disabled +
-            TP-enabled path).
+        expert_param_names: Routed-expert parameter names.
     """
     # Always set sharding configs regardless of whether TP is enabled.
     # ``resolve_mesh`` filters out disabled axes at runtime.
@@ -377,7 +357,7 @@ def set_moe_sharding_config(
     routed_experts_config, inner_experts_config = _routed_experts_sharding_configs(
         enable_ep=enable_ep,
         enable_sp=enable_sp,
-        expert_param_layout=expert_param_layout,
+        expert_param_names=expert_param_names,
     )
     moe_cfg.routed_experts.sharding_config = routed_experts_config
     moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_config

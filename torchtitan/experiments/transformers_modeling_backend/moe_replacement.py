@@ -124,7 +124,7 @@ def build_and_swap_native_moe(
             moe_config,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=expert_layout,
+            expert_param_names=expert_layout.keys(),
         )
         root_sharding = moe_config.sharding_config
         assert root_sharding is not None
@@ -140,8 +140,8 @@ def build_and_swap_native_moe(
         )
         output_layout = (
             _hf_sequence_parallel_placement()
-            if enable_sp
-            else _hf_activation_placement(tp=spmd.P)
+            if enable_ep and enable_sp
+            else _hf_activation_placement(tp=spmd.P if enable_ep else spmd.R)
         )
         moe_config.sharding_config = replace(
             root_sharding,
@@ -157,7 +157,7 @@ def build_and_swap_native_moe(
         if isinstance(shared, SigmoidGatedFeedForward.Config):
             gate_output_layout = (
                 dense_sequence_parallel_placement()
-                if enable_sp
+                if enable_ep and enable_sp
                 else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
             )
             shared.gate.sharding_config = ShardingConfig(

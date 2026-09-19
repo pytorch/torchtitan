@@ -35,12 +35,8 @@ if TYPE_CHECKING:
     )
 
 
-# Routed-expert layout for the shared ``GroupedExperts`` (w1/w2/w3).
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
-    "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
-}
+# Routed-expert parameter names for the shared ``GroupedExperts``.
+_GROUPED_EXPERTS_PARAM_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
 
 
 def set_deepseek_v3_sharding_config(
@@ -150,7 +146,7 @@ def _set_deepseek_v3_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
+            expert_param_names=_GROUPED_EXPERTS_PARAM_NAMES,
         )
 
 
