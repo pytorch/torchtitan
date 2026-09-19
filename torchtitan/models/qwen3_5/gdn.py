@@ -18,6 +18,7 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
+from attn_gym.linear.context_parallel import ContextParallelRouting
 from attn_gym.linear.gdn.impl.cudnn import ChunkGdnCudnnPacked
 from attn_gym.linear.gdn.ops import _ChunkGDN
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm
@@ -30,16 +31,15 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     InnerAttention,
     local_head_split,
-    VarlenAttentionMetadata,
+    ShortConvAttentionMetadata,
 )
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
 
-# The Attention Gym kernels run on rank-local heads inside local SPMD regions
-# with no collectives. They mix tokens along the sequence, which is only correct
-# because Qwen3.5 rejects context parallelism, so tokens are never sharded
-# within a sequence.
+# The Attention Gym kernels run on rank-local heads inside local SPMD regions.
+# ContextParallelInnerGatedDeltaNet handles cross-rank sequence dependencies
+# before invoking them.
 for _kernel_function in (
     _ShortConv,
     _ConfiguredShortConv,
@@ -48,6 +48,11 @@ for _kernel_function in (
     ChunkGdnCudnnPacked,
 ):
     spmd.register_local_autograd_function(_kernel_function)
+
+
+@dataclass(frozen=True, slots=True)
+class GatedDeltaNetMetadata(ShortConvAttentionMetadata):
+    """Per-batch sequence metadata consumed by Gated DeltaNet."""
 
 
 @spmd.local_map(
@@ -268,6 +273,7 @@ class InnerGatedDeltaNet(InnerAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
+        conv_kernel_size: int
         kernel: GatedDeltaKernel.Config
 
         def build_attention_metadata(
@@ -277,13 +283,16 @@ class InnerGatedDeltaNet(InnerAttention):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> VarlenAttentionMetadata:
+        ) -> GatedDeltaNetMetadata:
             """Build packed-sequence metadata consumed by Gated DeltaNet."""
-            return create_varlen_metadata_for_document(
-                positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
+            return GatedDeltaNetMetadata(
+                varlen=create_varlen_metadata_for_document(
+                    positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                ),
+                num_conv_history_tokens=self.conv_kernel_size - 1,
             )
 
     def __init__(self, config: Config):
@@ -302,61 +311,149 @@ class InnerGatedDeltaNet(InnerAttention):
         conv_v_weight_C1W: torch.Tensor,
         A_log_H: torch.Tensor,
         dt_bias_H: torch.Tensor,
-        cu_seqlens: torch.Tensor,
         *,
         key_head_dim: int,
         value_head_dim: int,
+        attention_metadata: GatedDeltaNetMetadata | None,
     ) -> torch.Tensor:
-        """Run separate Q/K/V convolutions and recurrence on local heads."""
+        varlen = attention_metadata.varlen if attention_metadata is not None else None
+        cu_seqlens = varlen.cu_seq_q if varlen is not None else None
+        if cu_seqlens is None and is_in_batch_invariant_mode():
+            cu_seqlens = torch.tensor(
+                [0, query_TC.shape[0]],
+                dtype=torch.int32,
+                device=query_TC.device,
+            )
+        return self.run_stages(
+            query_TC,
+            key_TC,
+            value_TC,
+            a_TH,
+            b_TH,
+            conv_q_weight_C1W,
+            conv_k_weight_C1W,
+            conv_v_weight_C1W,
+            A_log_H,
+            dt_bias_H,
+            cu_seqlens=cu_seqlens,
+            key_head_dim=key_head_dim,
+            value_head_dim=value_head_dim,
+            routing=None,
+        )
+
+    def run_stages(
+        self,
+        query_TC: torch.Tensor,
+        key_TC: torch.Tensor,
+        value_TC: torch.Tensor,
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor | None,
+        key_head_dim: int,
+        value_head_dim: int,
+        routing: ContextParallelRouting | None,
+    ) -> torch.Tensor:
+        """Run the stages shared by local and context-parallel GDN."""
         num_tokens = query_TC.shape[0]
-        use_varlen_kernels = cu_seqlens.numel() > 2 or is_in_batch_invariant_mode()
-
-        def causal_conv(
-            x_TC: torch.Tensor,
-            weight_C1W: torch.Tensor,
-        ) -> torch.Tensor:
-            if use_varlen_kernels:
-                return _causal_conv1d_varlen(
-                    x_TC,
-                    weight_C1W,
-                    cu_seqlens,
-                )
-
-            x_1CT = F.pad(
-                x_TC.transpose(0, 1).unsqueeze(0),
-                [weight_C1W.shape[-1] - 1, 0],
-            )
-            return (
-                F.silu(
-                    F.conv1d(
-                        x_1CT,
-                        weight_C1W,
-                        None,
-                        groups=weight_C1W.shape[0],
-                    )
-                )
-                .squeeze(0)
-                .transpose(0, 1)
-            )
-
-        xq_THK = causal_conv(query_TC, conv_q_weight_C1W).reshape(
-            num_tokens, -1, key_head_dim
+        use_varlen_kernels = cu_seqlens is not None and (
+            cu_seqlens.numel() > 2 or is_in_batch_invariant_mode()
         )
-        xk_THK = causal_conv(key_TC, conv_k_weight_C1W).reshape(
-            num_tokens, -1, key_head_dim
-        )
-        xv_THV = causal_conv(value_TC, conv_v_weight_C1W).reshape(
-            num_tokens, -1, value_head_dim
-        )
+        convolution_offsets = cu_seqlens if use_varlen_kernels else None
+        xq_THK = self.short_convolution(
+            query_TC,
+            conv_q_weight_C1W,
+            cu_seqlens=convolution_offsets,
+            routing=routing,
+        ).reshape(num_tokens, -1, key_head_dim)
+        xk_THK = self.short_convolution(
+            key_TC,
+            conv_k_weight_C1W,
+            cu_seqlens=convolution_offsets,
+            routing=routing,
+        ).reshape(num_tokens, -1, key_head_dim)
+        xv_THV = self.short_convolution(
+            value_TC,
+            conv_v_weight_C1W,
+            cu_seqlens=convolution_offsets,
+            routing=routing,
+        ).reshape(num_tokens, -1, value_head_dim)
         g_TH = -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
         beta_TH = torch.sigmoid(b_TH)
-        return self.kernel(
+        return self.gdn_core(
             xq_THK,
             xk_THK,
             xv_THV,
             g_TH,
             beta_TH,
             cu_seqlens=cu_seqlens if use_varlen_kernels else None,
+            routing=routing,
+        )
+
+    def short_convolution(
+        self,
+        x_TC: torch.Tensor,
+        weight_C1W: torch.Tensor,
+        initial_state: torch.Tensor | None = None,
+        *,
+        cu_seqlens: torch.Tensor | None,
+        routing: ContextParallelRouting | None,
+    ) -> torch.Tensor:
+        del routing
+        if initial_state is not None:
+            output_1TC = causal_conv1d(
+                x_TC.unsqueeze(0),
+                weight_C1W[:, 0],
+                activation="silu",
+                cu_seqlens=cu_seqlens,
+                initial_state=initial_state,
+            )
+            assert isinstance(output_1TC, torch.Tensor)
+            return output_1TC.squeeze(0)
+        if cu_seqlens is not None:
+            return _causal_conv1d_varlen(x_TC, weight_C1W, cu_seqlens)
+
+        x_1CT = F.pad(
+            x_TC.transpose(0, 1).unsqueeze(0),
+            [weight_C1W.shape[-1] - 1, 0],
+        )
+        return (
+            F.silu(
+                F.conv1d(
+                    x_1CT,
+                    weight_C1W,
+                    None,
+                    groups=weight_C1W.shape[0],
+                )
+            )
+            .squeeze(0)
+            .transpose(0, 1)
+        )
+
+    def gdn_core(
+        self,
+        xq_THK: torch.Tensor,
+        xk_THK: torch.Tensor,
+        xv_THV: torch.Tensor,
+        g_TH: torch.Tensor,
+        beta_TH: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor | None,
+        routing: ContextParallelRouting | None,
+    ) -> torch.Tensor:
+        del routing
+        return self.kernel(
+            xq_THK,
+            xk_THK,
+            xv_THV,
+            g_TH,
+            beta_TH,
+            cu_seqlens=cu_seqlens,
         )
 
 
@@ -366,7 +463,7 @@ class GatedDeltaNet(Module):
     Uses recurrent state + gated delta rule instead of softmax attention.
     No RoPE, different head structure from standard attention. Conv and
     recurrent state are reset at document boundaries whenever document
-    offsets (``VarlenAttentionMetadata``) are provided. With no offsets
+    offsets (``GatedDeltaNetMetadata``) are provided. With no offsets
     (``None``), the packed sequence is processed as a single continuous stream.
     """
 
@@ -418,24 +515,13 @@ class GatedDeltaNet(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: VarlenAttentionMetadata | None = None,
+        attention_metadata: GatedDeltaNetMetadata | None = None,
     ) -> torch.Tensor:
         # All six input projections consume x, so gather it once before
         # entering their separate compute paths.
         x_TD = maybe_gather_tp_input(self, x_TD)
 
         num_tokens = x_TD.shape[0]
-        if attention_metadata is not None:
-            cu_seqlens = attention_metadata.cu_seq_q
-        else:
-            cu_seqlens = torch.arange(
-                0,
-                num_tokens + 1,
-                num_tokens,
-                dtype=torch.int32,
-                device=x_TD.device,
-            )
-
         query_TC = self.in_proj_q(x_TD)
         key_TC = self.in_proj_k(x_TD)
         value_TC = self.in_proj_v(x_TD)
@@ -458,9 +544,9 @@ class GatedDeltaNet(Module):
             self.conv_v.weight,
             self.A_log,
             self.dt_bias,
-            cu_seqlens,
             key_head_dim=self.key_head_dim,
             value_head_dim=self.value_head_dim,
+            attention_metadata=attention_metadata,
         )
         gate_THV = local_head_split(gate_TC, self.value_head_dim)
         # The gated norm reads the inner_attention and in_proj_z projection outputs

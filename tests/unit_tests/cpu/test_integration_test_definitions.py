@@ -198,6 +198,8 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         "dist_moe_eager_fsdp_ep_pp_cudagraph",
         "mxfp8_linear_fsdp",
         "nvfp4_linear_fsdp",
+        "qwen3_5_mm_allgather_kv_cp",
+        "qwen3_5_mm_ulysses_cp",
     }
     assert "kimi_k3_mm" not in {test.test_name for test in build_model_tests_list()}
 
