@@ -23,6 +23,7 @@ from .attention import (  # noqa: F401
     local_head_split,
     QKVLinear,
     ScaledDotProductInnerAttention,
+    ShortConvAttentionMetadata,
     SlidingWindowFlexInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
@@ -30,7 +31,7 @@ from .attention import (  # noqa: F401
 from .kda import KDAAttentionMetadata
 
 AttentionMetadata = (
-    FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata
+    FlexAttentionMetadata | VarlenAttentionMetadata | ShortConvAttentionMetadata
 )
 AttentionMetadataMap = Mapping[type[InnerAttention], AttentionMetadata]
 
@@ -39,4 +40,5 @@ __all__ = [
     "AttentionMetadata",
     "AttentionMetadataMap",
     "KDAAttentionMetadata",
+    "ShortConvAttentionMetadata",
 ]

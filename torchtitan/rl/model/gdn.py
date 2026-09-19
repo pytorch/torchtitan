@@ -361,13 +361,13 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         conv_v_weight_C1W: torch.Tensor,
         A_log_H: torch.Tensor,
         dt_bias_H: torch.Tensor,
-        cu_seqlens: torch.Tensor,
         *,
         key_head_dim: int,
         value_head_dim: int,
-        use_varlen_kernels: bool = False,
+        attention_metadata: object | None,
     ) -> torch.Tensor:
         """Run the flattened vLLM cache operation on rank-local tensors."""
+        del attention_metadata
         assert key_head_dim == self.head_k_dim
         assert value_head_dim == self.head_v_dim
         mixed_qkv_TC = torch.cat([query_TC, key_TC, value_TC], dim=-1)
