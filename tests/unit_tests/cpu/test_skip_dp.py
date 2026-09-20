@@ -24,6 +24,9 @@ _PARALLELIZE_FNS = [
     ("torchtitan/models/kimi_k2_7/parallelize.py", "parallelize_kimi_k2_5"),
     ("torchtitan/models/kimi_k3/parallelize.py", "parallelize_kimi_k3"),
     ("torchtitan/models/qwen3/parallelize.py", "parallelize_qwen3"),
+    ("torchtitan/models/qwen3_5/parallelize.py", "parallelize_qwen3_5"),
+    ("torchtitan/models/gpt_oss/parallelize.py", "parallelize_gptoss"),
+    ("torchtitan/models/muse_glimmer/parallelize.py", "parallelize_muse_glimmer"),
 ]
 
 
