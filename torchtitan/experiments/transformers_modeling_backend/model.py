@@ -21,6 +21,7 @@ from torch.nn.attention.flex_attention import and_masks
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
+from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 from torchtitan.config import ParallelismConfig
@@ -1043,6 +1044,30 @@ class HFTransformerModel(BaseModel):
                 if hasattr(module, "bias") and module.bias is not None:
                     module.bias.data.zero_()
 
+            elif "RotaryEmbedding" in module.__class__.__name__ and hasattr(
+                module, "original_inv_freq"
+            ):
+                # HF computes the rotary buffers in __init__, so meta init +
+                # to_empty() leaves them as uninitialized memory. Transformers
+                # recomputes them in its own _init_weights, but this patch
+                # replaces all of that method, so its branch is reproduced here.
+                # The guard is the same one Transformers uses, so the layer-typed
+                # rotary modules handled by model-specific _init_weights
+                # overrides are also skipped here.
+                # ROPE_INIT_FUNCTIONS has no "default" entry; the default is a
+                # method on the rotary class instead.
+                rope_init_fn = (
+                    module.compute_default_rope_parameters
+                    if module.rope_type == "default"
+                    else ROPE_INIT_FUNCTIONS[module.rope_type]
+                )
+                inv_freq, _ = rope_init_fn(module.config, module.inv_freq.device)
+                module.inv_freq.copy_(inv_freq)
+                # dynamic/longrope re-register inv_freq from this unmodified copy,
+                # so leaving it uninitialized corrupts inv_freq a few forwards
+                # later.
+                module.original_inv_freq.copy_(inv_freq)
+
         decoder_layer_cls.__init__ = _decoder_layer_init_patched
         PreTrainedModel._init_weights = _init_weights_patched
         PreTrainedModel._initialize_weights = _initialize_weights_patched
@@ -1362,22 +1387,9 @@ class HFTransformerModel(BaseModel):
             else:
                 logger.info("Skipping nn.Identity module during weight initialization.")
 
+        # Rotary inv_freq buffers are populated by the RotaryEmbedding branch of
+        # _init_weights, which selective_init reaches like any other submodule.
         self.model.apply(selective_init)
-
-        # HF rotary embeddings compute their `inv_freq` buffer in __init__, not in
-        # `_init_weights`. With meta-device init + `to_empty()`, that buffer is
-        # left uninitialized (zeros), which silently disables RoPE (no positional
-        # information -> near-random outputs). Recompute it from each rotary
-        # module's `rope_init_fn` so positions work after materialization.
-        for module in self.model.modules():
-            rope_init_fn = getattr(module, "rope_init_fn", None)
-            if rope_init_fn is not None and hasattr(module, "inv_freq"):
-                device = module.inv_freq.device
-                inv_freq, attention_scaling = rope_init_fn(module.config, device)
-                module.inv_freq.copy_(
-                    inv_freq.to(device=device, dtype=module.inv_freq.dtype)
-                )
-                module.attention_scaling = attention_scaling
 
         # TODO(3outeille): For pipeline parallel, only tie weights if both input and output embeddings are on the same device
         # Maybe better way of handling this?
