@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
 from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
@@ -28,7 +29,7 @@ def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
 
     config = llama3_debugmodel_hf_checkpoint_load()
 
-    assert config.checkpoint.initial_load_path == (
+    assert config.checkpointer.initial_load_path == (
         f"{test_output_dir}/hf_checkpoint/step-10/"
     )
 
@@ -128,12 +129,10 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
 
 def test_b200_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in build_b200_tests_list()} == {
-        "kimi_k3_mm_fsdp",
+        "kimi_k3_mm",
         "mxfp8_linear_fsdp",
     }
-    assert "kimi_k3_mm_fsdp" not in {
-        test.test_name for test in build_model_tests_list()
-    }
+    assert "kimi_k3_mm" not in {test.test_name for test in build_model_tests_list()}
 
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:
@@ -190,7 +189,7 @@ def test_fake_pg_incompatible_test_requires_explicit_marker(
 ) -> None:
     config = llama3_debugmodel(seq_len=2048)
     if test_name == "checkpoint":
-        config.checkpoint.enable = True
+        config.checkpointer = CheckpointManager.Config()
     elif test_name == "pipeline_parallel":
         config.parallelism.pipeline_parallel_degree = 2
 

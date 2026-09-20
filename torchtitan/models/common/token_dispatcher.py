@@ -764,10 +764,10 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     class Config(BaseEPTokenDispatcher.Config):
         # Select the dispatch layout. False (default, also forced under autograd): compact,
         # host-synced, backward-able path for training. True: static, no-host-sync expand
-        # layout so the MoE forward is cudagraph-capturable -- inference only (covers BOTH
+        # layout so the MoE forward is CUDA-graph-capturable -- inference only (covers BOTH
         # prefill and decode, since both run under no_grad), no backward. The deepep
         # primitives gate on grad context, so a True spec falls back to compact in training.
-        cudagraphable: bool = False
+        cuda_graph_compatible: bool = False
         # Hard per-rank input-token bound used to preallocate the communication buffer.
         # Runtime configuration must fill it before dispatcher construction.
         num_max_tokens_per_rank: int | None = None
@@ -787,7 +787,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             )
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden_dim = config.hidden_dim
-        self.cudagraphable = config.cudagraphable
+        self.cuda_graph_compatible = config.cuda_graph_compatible
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -834,7 +834,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_experts,
             self.num_experts,
             num_tokens_per_rank=x_TD.shape[0],
-            cudagraphable=self.cudagraphable,
+            cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
         metadata = EPDispatchMetadata(state=state)

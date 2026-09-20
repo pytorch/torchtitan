@@ -408,9 +408,9 @@ class MMSamplePackingConfig:
         dataset = grain.experimental.FirstFitPackIterDataset(
             dataset,
             length_struct={
-                "input_ids": context.num_tokens_per_batch,
-                "labels": context.num_tokens_per_batch,
-                "positions": context.num_tokens_per_batch,
+                "input_ids": context.num_tokens_per_microbatch,
+                "labels": context.num_tokens_per_microbatch,
+                "positions": context.num_tokens_per_microbatch,
             },
             padding_struct={
                 # pyrefly: ignore [missing-attribute]

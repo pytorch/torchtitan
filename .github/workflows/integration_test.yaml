@@ -9,19 +9,18 @@ on:
         type: string
         default: cuda
       execution_mode:
-        description: "Process-group mode for reusable workflow calls"
+        description: >-
+          Select the jobs for a reusable workflow call: fake_pg runs the 1-GPU
+          simulated process-group suite, while real_pg runs the 8-GPU real
+          process-group suite. Direct workflow events ignore this input.
         required: false
         type: string
         default: fake_pg
   push:
     branches: [ main ]
     tags:
-      - ciflow/8gpu/*
-    paths-ignore:
-      - 'torchtitan/experiments/**'
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [ main ]
+      - ciflow/fake-pg/*
+      - ciflow/real-pg/*
     paths-ignore:
       - 'torchtitan/experiments/**'
   schedule:
@@ -52,9 +51,13 @@ permissions:
   contents: read
 
 jobs:
+  # Run Fake PG when CIFlow pushes a ciflow/fake-pg tag for a ready PR.
+  # Tag pushes are independent of the PR base, so stacked PRs are covered.
+  # Reusable calls also run this job when execution_mode is fake_pg.
   set-matrix-fake-pg:
     if: >-
-      (github.event_name == 'pull_request' ||
+      ((github.event_name == 'push' &&
+        startsWith(github.ref, 'refs/tags/ciflow/fake-pg/')) ||
        (github.event_name == 'workflow_call' && inputs.execution_mode == 'fake_pg')) &&
       (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
     uses: ./.github/workflows/set-matrix.yaml
@@ -62,9 +65,19 @@ jobs:
       runner-cuda: linux.g5.4xlarge.nvidia.gpu
       gpu-arch: ${{ inputs.gpu-arch || 'cuda' }}
 
+  # A ciflow/fake-pg tag also runs tests marked real_pg_required so every
+  # eligible PR gets both tiers, including PRs whose base is another stack PR.
+  # Main pushes, opt-in ciflow/real-pg tags, schedules, manual runs, and Real PG
+  # reusable calls run the full Real PG suite.
   set-matrix-real-pg:
     if: >-
-      (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') &&
+      ((github.event_name == 'push' &&
+        (github.ref == 'refs/heads/main' ||
+         startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') ||
+         startsWith(github.ref, 'refs/tags/ciflow/real-pg/'))) ||
+       github.event_name == 'schedule' ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'workflow_call' && inputs.execution_mode == 'real_pg')) &&
       (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
     uses: ./.github/workflows/set-matrix.yaml
     with:
@@ -73,7 +86,7 @@ jobs:
   integration-fake-pg:
     name: 1 GPU Integration (Fake PG)
     needs: set-matrix-fake-pg
-    if: ${{ (github.event_name == 'pull_request' || (github.event_name == 'workflow_call' && inputs.execution_mode == 'fake_pg')) && needs.set-matrix-fake-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-fake-pg.outputs.matrix).include[0] != null }}
+    if: ${{ needs.set-matrix-fake-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-fake-pg.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
@@ -103,8 +116,13 @@ jobs:
           "${TORCH_SPEC}" torchvision --index-url ${{ matrix.index-url }}
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
 
+        GPU_ARCH="a10g"
         if [[ "${{ matrix.gpu-arch-type }}" == "rocm" ]]; then
-          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          GPU_ARCH="mi350x"
+          HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
+            export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
+          fi
         fi
 
         sudo mkdir -p "$RUNNER_ARTIFACT_DIR"
@@ -127,6 +145,7 @@ jobs:
         fi
         python -m tests.integration_tests.run_tests \
           --gpu_arch_type ${{ matrix.gpu-arch-type }} \
+          --gpu_arch "$GPU_ARCH" \
           --test_suite features,models --execution_mode fake_pg --ngpu 1 \
           $EXPORT_ARG $TEST_NAME_ARG \
           "$RUNNER_ARTIFACT_DIR"
@@ -136,7 +155,7 @@ jobs:
           "$RUNNER_ARTIFACT_DIR/flux"
 
   integration-real-pg:
-    name: 8 GPU Integration (Real PG - ${{ github.event_name == 'pull_request' && 'required subset' || 'full suite' }} - ${{ matrix.test_suite }})
+    name: 8 GPU Integration (Real PG - ${{ startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') && 'required subset' || 'full suite' }} - ${{ matrix.test_suite }})
     needs: set-matrix-real-pg
     if: ${{ (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
@@ -170,8 +189,13 @@ jobs:
           "${TORCH_SPEC}" torchvision --index-url ${{ matrix.runner_config['index-url'] }}
         USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.runner_config['index-url'] }}
 
+        GPU_ARCH="a10g"
         if [[ "${{ matrix.runner_config['gpu-arch-type'] }}" == "rocm" ]]; then
-          export HIPBLASLT_TENSILE_LIBPATH="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          GPU_ARCH="mi350x"
+          HIPBLASLT_LIB_DIR="$(python -c 'import os, torch; print(os.path.join(os.path.dirname(torch.__file__), "lib", "hipblaslt", "library"))')"
+          if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
+            export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
+          fi
         fi
 
         sudo mkdir -p "$RUNNER_ARTIFACT_DIR"
@@ -192,12 +216,16 @@ jobs:
         if [[ "${{ inputs.test_name || 'all' }}" != "all" ]]; then
           TEST_NAME_ARG="--test_name=${{ inputs.test_name }}"
         fi
+        # A ciflow/fake-pg tag runs only tests that cannot use Fake PG.
+        # Main pushes, ciflow/real-pg tags, schedules, manual runs, and Real PG
+        # workflow calls leave the scope empty and run the full Real PG suite.
         TEST_SCOPE_ARG=""
-        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+        if [[ "$GITHUB_REF" == refs/tags/ciflow/fake-pg/* ]]; then
           TEST_SCOPE_ARG="--test_scope=real_pg_required"
         fi
         python -m tests.integration_tests.run_tests \
           --gpu_arch_type ${{ matrix.runner_config['gpu-arch-type'] }} \
+          --gpu_arch "$GPU_ARCH" \
           --test_suite ${{ matrix.test_suite }} --execution_mode real_pg --ngpu 8 \
           $EXPORT_ARG $TEST_NAME_ARG $TEST_SCOPE_ARG \
           "$RUNNER_ARTIFACT_DIR"

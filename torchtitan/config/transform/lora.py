@@ -5,115 +5,21 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import math
 from dataclasses import dataclass, fields
+from typing import Any, cast, ClassVar, Protocol
 
-import spmd_types as spmd
-
-import torch
-import torch.nn as nn
-
-from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.lora import specialize_lora_linear
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import ShardingConfig
 
-from .converter import ModelConfigConverter
+from .base import ModelConfigTransform
+from .context_parallel import ContextParallelTransform
 
 
 logger = logging.getLogger(__name__)
 
 
-def _lora_adapter_sharding(
-    base_sharding: ShardingConfig | None,
-) -> tuple[ShardingConfig | None, ShardingConfig | None]:
-    """Derive LoRA adapter sharding from the base linear's TP sharding.
-
-    For colwise base linears, ``lora_a`` is TP-replicated and ``lora_b``
-    mirrors the base output-dim shard.
-
-    For rowwise base linears, ``lora_a`` mirrors the base input-dim shard and
-    ``lora_b`` is TP-replicated, producing the same partial-output shape as the
-    base linear.
-    """
-    base_weight_sharding = (
-        base_sharding.state_shardings.get("weight") if base_sharding else None
-    )
-    if base_weight_sharding is None:
-        return None, None
-
-    replicated_weight = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-    )
-    if base_weight_sharding == dense_param_placement(tp=spmd.S(0)):
-        lora_b_sharding = ShardingConfig(
-            state_shardings={"weight": base_weight_sharding},
-        )
-        return replicated_weight, lora_b_sharding
-    else:
-        assert base_weight_sharding == dense_param_placement(tp=spmd.S(1))
-        lora_a_sharding = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
-        )
-        return lora_a_sharding, replicated_weight
-
-
-_lora_class_cache: dict[type, type] = {}
 _frozen_config_class_cache: dict[type, type] = {}
-
-
-def _get_lora_cls(parent_cls: type) -> type:
-    """Get or create a LoRA subclass for *parent_cls* (e.g. Linear, Float8Linear).
-
-    The returned class has a proper ``Config`` that extends the parent's Config
-    with ``rank`` and ``alpha``.  Adapters are built in ``__init__`` from the
-    base config's dimensions and sharding.
-    """
-    if parent_cls in _lora_class_cache:
-        return _lora_class_cache[parent_cls]
-
-    parent_config_cls = parent_cls.Config  # pyrefly: ignore [missing-attribute]
-
-    class LoRALinear(parent_cls):  # type: ignore[valid-type, misc]
-        @dataclass(kw_only=True, slots=True)
-        class Config(parent_config_cls):  # type: ignore[misc]
-            rank: int
-            alpha: float
-
-        def __init__(self, config: Config) -> None:
-            super().__init__(config)
-            for param in nn.Module.parameters(self):
-                param.requires_grad_(False)
-            self._lora_scaling = config.alpha / config.rank
-            lora_a_sharding, lora_b_sharding = _lora_adapter_sharding(
-                config.sharding_config
-            )
-            self.lora_a = Linear.Config(
-                in_features=config.in_features,
-                out_features=config.rank,
-                bias=False,
-                sharding_config=lora_a_sharding,
-                param_init={
-                    "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
-                },
-            ).build()
-            self.lora_b = Linear.Config(
-                in_features=config.rank,
-                out_features=config.out_features,
-                bias=False,
-                sharding_config=lora_b_sharding,
-                param_init={"weight": nn.init.zeros_},
-            ).build()
-
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
-            base_out = super().forward(input)
-            lora_out = self.lora_b(self.lora_a(input))
-            return base_out + self._lora_scaling * lora_out
-
-    LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
-    LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
-    _lora_class_cache[parent_cls] = LoRALinear
-    return LoRALinear
 
 
 def _get_frozen_config_cls(
@@ -142,40 +48,93 @@ def _make_frozen_config(cfg: Module.Config) -> Module.Config:
     return frozen_cls(**{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init})
 
 
-class LoRAConverter(ModelConfigConverter):
+class _LoRAHandler(Protocol):
+    @property
+    def config_type(self) -> type[Module.Config]:
+        ...
+
+    def make_config(
+        self,
+        cfg: Module.Config,
+        *,
+        rank: int,
+        alpha: float,
+    ) -> Module.Config:
+        ...
+
+
+class LinearLoRAHandler:
+    """Convert ``Linear.Config`` instances to LoRA-enabled configs."""
+
+    config_type = Linear.Config
+
+    def make_config(
+        self,
+        cfg: Module.Config,
+        *,
+        rank: int,
+        alpha: float,
+    ) -> Module.Config:
+        assert cfg._owner is not None
+        lora_cls = specialize_lora_linear(cast(type[Module], cfg._owner))
+        lora_config_cls = cast(Any, lora_cls.Config)
+        return lora_config_cls(
+            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
+            rank=rank,
+            alpha=alpha,
+        )
+
+
+@dataclass(kw_only=True, slots=True)
+class LoRATransform(ModelConfigTransform):
     """Apply LoRA adapters to supported projection layers in a model.
 
-    The base converter supports ``Linear.Config``. Subclasses may extend
-    ``_supports_lora`` and ``_make_lora_config`` for other projection types.
-    Non-target modules are replaced with dynamic frozen config subclasses that
-    freeze direct parameters at build time.
+    ``handlers`` defines the projection config types supported by this
+    transform. Include ``LinearLoRAHandler`` to adapt ``Linear.Config``
+    instances. Non-target modules are replaced with dynamic frozen config
+    subclasses that freeze direct parameters at build time.
 
     When ``target_modules`` is None (default), every supported projection is
     converted. When specified, only configs whose FQN's last segment matches
     one of the entries are converted (e.g. ``["wq", "wv"]``).
+
+    This transform conflicts with itself because every application freezes all
+    non-target configs. Applying multiple LoRA transforms would make freezing
+    and adapter configuration depend on their order.
     """
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelConfigConverter.Config):
-        rank: int = 8
-        """Rank of the LoRA matrices."""
+    run_after: ClassVar[tuple[type[ModelConfigTransform], ...]] = (
+        ContextParallelTransform,
+    )
 
-        alpha: float = 16.0
-        """Scaling factor. Output is scaled by alpha/rank."""
+    handlers: tuple[_LoRAHandler, ...]
+    """Handlers for the projection config types that support LoRA."""
 
-        target_modules: list[str] | None = None
-        """Module names to apply LoRA to (matched against the last segment of the FQN).
-        None means all supported projection layers. An empty list means no layers."""
+    rank: int = 8
+    """Rank of the LoRA matrices."""
 
-    def __init__(self, config: Config, **kwargs):
-        if config.rank <= 0:
-            raise ValueError(f"LoRA rank must be positive, got {config.rank}")
-        self.config = config
-        self.rank = config.rank
-        self.alpha = config.alpha
-        self.target_modules = (
-            set(config.target_modules) if config.target_modules is not None else None
-        )
+    alpha: float = 16.0
+    """Scaling factor. Output is scaled by alpha/rank."""
+
+    target_modules: list[str] | None = None
+    """Module names to adapt, matched against the last FQN segment.
+
+    ``None`` means all supported projection layers. An empty list means no
+    layers.
+    """
+
+    def __post_init__(self) -> None:
+        for index, handler in enumerate(self.handlers):
+            for earlier in self.handlers[:index]:
+                if issubclass(handler.config_type, earlier.config_type):
+                    raise ValueError(
+                        f"{type(handler).__qualname__} for "
+                        f"{handler.config_type.__qualname__} is shadowed by earlier "
+                        f"handler {type(earlier).__qualname__} for "
+                        f"{earlier.config_type.__qualname__}."
+                    )
+        if self.rank <= 0:
+            raise ValueError(f"LoRA rank must be positive, got {self.rank}")
         if self.target_modules is None:
             logger.info(
                 f"LoRA training active with rank={self.rank}, alpha={self.alpha} "
@@ -187,50 +146,47 @@ class LoRAConverter(ModelConfigConverter):
                 f"target_modules={sorted(self.target_modules)}"
             )
 
-    def _supports_lora(self, cfg: Module.Config) -> bool:
-        """Return whether this converter can adapt ``cfg`` with LoRA.
-
-        Subclasses may extend this hook for projection types that do not
-        inherit from ``Linear.Config``.
-        """
-        return isinstance(cfg, Linear.Config)
-
-    def _make_lora_config(self, cfg: Module.Config) -> Module.Config:
-        """Create an adapter config for a supported projection."""
-        assert cfg._owner is not None
-        lora_cls = _get_lora_cls(cfg._owner)
-        return lora_cls.Config(  # pyrefly: ignore [missing-attribute]
-            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
-            rank=self.rank,
-            alpha=self.alpha,
-        )
-
-    def convert(self, model_config: Module.Config) -> Module.Config:
+    def transform(self, model: Module.Config) -> Module.Config:
         """Walk the module config tree from leaves to root.
 
         Target projection modules get their config replaced with an adapter
         config. All other module configs become frozen config subclasses so
         LoRA training updates only adapter parameters.
         """
-        converted_root = model_config
+        transformed_root = model
         matched = set()
-        configs = list(model_config.traverse(Module.Config, recurse=True))
+        configs = list(model.traverse(Module.Config, recurse=True))
+        target_module_names = (
+            set(self.target_modules) if self.target_modules is not None else None
+        )
 
         for fqn, cfg, parent, attr in reversed(configs):
-            assert isinstance(cfg, Module.Config)
             last_segment = fqn.rsplit(".", 1)[-1]
-            is_target = self._supports_lora(cfg) and (
-                self.target_modules is None or last_segment in self.target_modules
+            handler = next(
+                (
+                    handler
+                    for handler in self.handlers
+                    if isinstance(cfg, handler.config_type)
+                ),
+                None,
+            )
+            is_target = handler is not None and (
+                target_module_names is None or last_segment in target_module_names
             )
 
             if is_target:
-                new_cfg = self._make_lora_config(cfg)
+                assert handler is not None
+                new_cfg = handler.make_config(
+                    cfg,
+                    rank=self.rank,
+                    alpha=self.alpha,
+                )
                 matched.add(last_segment)
             else:
                 new_cfg = _make_frozen_config(cfg)
 
             if parent is None:
-                converted_root = new_cfg
+                transformed_root = new_cfg
             elif isinstance(parent, list):
                 assert isinstance(attr, int)
                 parent[attr] = new_cfg
@@ -238,10 +194,13 @@ class LoRAConverter(ModelConfigConverter):
                 assert isinstance(attr, str)
                 setattr(parent, attr, new_cfg)
 
-        unmatched = (self.target_modules or set()) - matched
+        unmatched = (target_module_names or set()) - matched
         if unmatched:
             logger.warning(
                 f"LoRA target_modules {sorted(unmatched)} did not match any "
-                f"Linear.Config in the model config tree."
+                f"supported projection config in the model config tree."
             )
-        return converted_root
+        return transformed_root
+
+
+LoRATransform.conflicts_with = (LoRATransform,)

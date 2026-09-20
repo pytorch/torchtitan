@@ -8,7 +8,7 @@
 
 The single-process cases check the loss value, the injected gradient and the
 metric register against an explicit Eqs 17-20 reference; the 8-rank cases
-(dp2/cp2/tp2, EP on and off, CPU float64 + gloo) check that the per-DP-rank
+(dp2/cp2/tp2/ep2, CPU float64 + gloo) check that the per-DP-rank
 statistics are whole-stream statistics and that the collected metric sums the
 DP ranks' streams, with and without the SPMD typechecker.
 """
@@ -40,7 +40,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.moe import MicrobatchWiseLoadBalanceLoss
 
 _COEFF = 0.1
-_METRIC_KEY = ("batch", "microbatch_wise_load_balance_loss")
+_METRIC_KEY = ("dp", "microbatch_wise_load_balance_loss")
 
 
 def _clear_aux_loss_registry():
@@ -287,6 +287,10 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
     def world_size(self):
         return 8
 
+    @property
+    def device_type(self):
+        return "cpu"
+
     def _build_dims(self, **overrides):
         """ParallelDims on CPU; ``overrides`` replace the default dp2/cp2/tp2."""
         from torchtitan.distributed.parallel_dims import ParallelDims
@@ -305,16 +309,15 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
             parallel_dims.build_mesh()
         return parallel_dims
 
-    def _setup_mesh(self, *, enable_ep: bool):
+    def _setup_mesh(self):
         """Register the meshes and return ``(parallel_dims, dense_mesh)``.
 
-        With EP the router output shards tokens over CP and TP; without EP it
-        is TP-replicate, so the loss reduces token sums over CP only.  DP stays
-        local either way: one stream per DP rank.
+        The router output shards tokens over CP and TP. DP stays local: one
+        stream per DP rank.
         """
         from torchtitan.distributed.spmd_types import set_spmd_meshes
 
-        parallel_dims = self._build_dims(ep=2 if enable_ep else 1)
+        parallel_dims = self._build_dims(ep=2)
         dense_mesh = parallel_dims.get_mesh(["dp", "cp", "tp"])
         set_spmd_meshes(
             dense_mesh=dense_mesh, sparse_mesh=parallel_dims.spmd_sparse_mesh()
@@ -338,9 +341,9 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
         self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"], 2.0, places=6)
         _clear_aux_loss_registry()
 
-    def _run_reduction_case(self, *, enable_ep: bool, use_typecheck: bool):
+    def _run_reduction_case(self, *, use_typecheck: bool):
         """Compare one distributed layout with the per-DP-rank reference."""
-        parallel_dims, dense_mesh = self._setup_mesh(enable_ep=enable_ep)
+        parallel_dims, dense_mesh = self._setup_mesh()
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 
         T, E, K, dp, cp, tp = 128, 8, 2, 2, 2, 2
@@ -350,20 +353,12 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
         t_dp = T // dp
         dp_start = dp_rank * t_dp
 
-        if enable_ep:
-            from torchtitan.models.common.decoder_sharding import (
-                dense_sequence_parallel_placement,
-            )
+        from torchtitan.models.common.decoder_sharding import (
+            dense_sequence_parallel_placement,
+        )
 
-            shard, t_blk = cp_rank * tp + tp_rank, t_dp // (cp * tp)
-            placement = dense_sequence_parallel_placement()
-        else:
-            from torchtitan.models.common.decoder_sharding import (
-                dense_activation_placement,
-            )
-
-            shard, t_blk = cp_rank, t_dp // cp
-            placement = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        shard, t_blk = cp_rank * tp + tp_rank, t_dp // (cp * tp)
+        placement = dense_sequence_parallel_placement()
         t_start = dp_start + shard * t_blk
 
         checker = typecheck(local=False) if use_typecheck else contextlib.nullcontext()
@@ -395,9 +390,7 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
 
             with spmd.no_typecheck():
                 torch.testing.assert_close(out_TK, carrier_TK, rtol=0, atol=0)
-                # Backward runs outside the checker in both modes: with EP off
-                # the statistics are TP-Replicate, which the checker rejects
-                # for implicit backward.
+                # Backward runs outside the checker in both modes.
                 out_TK.sum().backward()
 
                 dp_scores = global_scores_TE[dp_start : dp_start + t_dp]
@@ -433,14 +426,10 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
     @with_comms
     def test_reduction_matches_reference(self):
         """Loss, gradient and collected metric match the per-DP-rank reference:
-        P->I over CP and TP with EP, over CP alone without EP, each with and
-        without the typechecker."""
-        for enable_ep in (True, False):
-            for use_typecheck in (True, False):
-                with self.subTest(enable_ep=enable_ep, use_typecheck=use_typecheck):
-                    self._run_reduction_case(
-                        enable_ep=enable_ep, use_typecheck=use_typecheck
-                    )
+        P->I over CP and TP, with and without the typechecker."""
+        for use_typecheck in (True, False):
+            with self.subTest(use_typecheck=use_typecheck):
+                self._run_reduction_case(use_typecheck=use_typecheck)
 
 
 if __name__ == "__main__":

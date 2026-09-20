@@ -18,7 +18,7 @@
 
 
 ## Latest News
-- [2026/08] [TitanRL](torchtitan/experiments/rl) is a hackable RL stack for scaling and debugging. It reuses TorchTitan model definitions and kernels across training and vLLM generation and supports batch-invariant mode.
+- [2026/08] [TitanRL](torchtitan/rl) is a hackable RL stack for scaling and debugging. It reuses TorchTitan model definitions and kernels across training and vLLM generation and supports batch-invariant mode.
 - [2025/11] AMD released an [optimized fork](https://github.com/AMD-AGI/torchtitan-amd/tree/main) of `torchtitan` for AMD GPUs.
 - [2025/10] We released `torchtitan` [v0.2.0](https://github.com/pytorch/torchtitan/releases).
 - [2025/10] SkyPilot now supports `torchtitan`! See the tutorial [here](https://docs.skypilot.co/en/latest/examples/training/torchtitan.html).
@@ -54,6 +54,7 @@ We look forward to your contributions!
 | --- | --- | --- |
 | CPU | - | [![CPU Unit Test](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu.yaml?query=branch%3Amain) |
 | NVIDIA GPU | [![Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test.yaml?query=branch%3Amain) [![H100 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_h100.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_h100.yaml?query=branch%3Amain) [![B200 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_b200.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_b200.yaml?query=branch%3Amain) | [![GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu.yaml?query=branch%3Amain) |
+| AMD GPU (ROCm) | [![Integration Tests (ROCm)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rocm.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rocm.yaml?query=branch%3Amain) | - |
 
 ## Llama 3.1 training
 
@@ -87,7 +88,7 @@ We look forward to your contributions!
     - download tokenizers and other Hugging Face assets (`scripts/download_hf_assets.py`)
     - convert checkpoints between Hugging Face and DCP formats (`scripts/checkpoint_conversion/`)
     - compare training losses across commits or configs (`scripts/loss_compare.py`)
-    - run vLLM inference with TorchTitan models (`torchtitan/experiments/rl/generate.py`)
+    - run vLLM inference with TorchTitan models (`torchtitan/rl/generate.py`)
 
 We report [performance](benchmarks/llama3_h100_202412_torchtitan.md) on up to 512 GPUs, and verify [loss converging](docs/converging.md) correctness of various techniques.
 

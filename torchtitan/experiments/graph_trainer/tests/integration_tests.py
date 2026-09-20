@@ -89,7 +89,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode jit",
-                    "--checkpoint.enable",
+                    "",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
                     "--training.num_tokens_per_microbatch_per_dp_rank 2048",
@@ -102,7 +102,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode jit",
                     "--training.steps 20",
-                    "--checkpoint.enable",
+                    "",
                     "--parallelism.pipeline_parallel_degree 2",
                     "--parallelism.num_pp_microbatches 8",
                     "--training.num_tokens_per_microbatch_per_dp_rank 2048",
@@ -164,45 +164,20 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             disabled=_JIT_DISABLED,
         ),
         OverrideDefinitions(
-            [
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode jit",
-                    "--checkpoint.enable",
-                    "--training.steps 10",
-                ],
-                # Save at [dp:4] and load at [dp:2, tp:2]. Note that the dataloader should be
-                # excluded during loading to avoid errors caused by mismatched dp_degree.
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode jit",
-                    "--checkpoint.enable",
-                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
-                    "--parallelism.tensor_parallel_degree 2",
-                    "--training.steps 20",
-                ],
-                # load at [tp:4].
-                [
-                    "--module graph_trainer.llama3",
-                    "--config graph_trainer_llama3_debugmodel",
-                    "--compile.mode jit",
-                    "--checkpoint.enable",
-                    "--checkpoint.exclude_from_loading lr_scheduler,dataloader,optimizer",
-                    "--parallelism.tensor_parallel_degree 4",
-                    "--training.steps 30",
-                ],
+            configs=[
+                llama3_recipes.graph_trainer_llama3_debugmodel_jit_checkpoint_save,
+                llama3_recipes.graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp2,
+                llama3_recipes.graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp4,
             ],
-            "JIT Optional checkpoint",
-            "jit_optional_checkpoint",
+            test_descr="JIT Optional checkpoint",
+            test_name="jit_optional_checkpoint",
             ngpu=4,
             disabled=_JIT_DISABLED,
         ),
         # === aot_fx_trace mode tests ===
-        # Note: aot_fx_trace applies cudagraph by default, so skip_rocm_test=True.
+        # Note: aot_fx_trace applies CUDA graph by default, so skip_rocm_test=True.
         #
-        # Disable cudagraph: replaying coalesced FSDP collectives with CP fails
+        # Disable cuda_graph: replaying coalesced FSDP collectives with CP fails
         # with "CUDA error: invalid argument".
         OverrideDefinitions(
             [
@@ -210,7 +185,7 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
-                    "--compile.disable_passes cudagraph_pass",
+                    "--compile.disable_passes cuda_graph_pass",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
@@ -388,7 +363,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         # === aot_fx_trace mode tests ===
         # Note: standard DSv3 MoE load-balancing introduces CUDA-to-CPU
         # transfers incompatible with CUDA graph capture, so this fused test
-        # explicitly disables the cudagraph pass.
+        # explicitly disables the CUDA graph pass.
         #
         # TODO: Re-enable FSDP bucketing when its stable topological sort
         # supports the fused MLA Q kernel's mutating custom-op boundary.
@@ -400,15 +375,16 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--compile.mode aot_fx_trace",
                     "--compile.disable_passes "
                     "joint_transformer_block_bucketing_reordering_pass,"
-                    "cudagraph_pass",
+                    "cuda_graph_pass",
                     "--override.imports torchtitan.overrides.fused_mla.fused_mla,"
                     "torchtitan.overrides.fused_swiglu.fused_swiglu",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace deepseek_v3 fused MLA+SwiGLU FSDP+TP",
-            "aot_fx_trace_deepseek_v3_fused_mla_swiglu_fsdp_tp",
+            "aot_fx_trace deepseek_v3 fused MLA+SwiGLU FSDP+TP+EP",
+            "aot_fx_trace_deepseek_v3_fused_mla_swiglu_fsdp_tp_ep",
             ngpu=4,
         ),
         # TODO: Re-enable after fixing the separate CP+EP mixed Tensor/DTensor
@@ -590,7 +566,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
 def _build_qwen3_tests() -> list[OverrideDefinitions]:
     """Qwen3-based integration tests (dense + MoE)."""
     return [
-        # Disable cudagraph: replaying coalesced FSDP collectives with CP fails
+        # Disable cuda_graph: replaying coalesced FSDP collectives with CP fails
         # with "CUDA error: invalid argument".
         OverrideDefinitions(
             [
@@ -598,7 +574,7 @@ def _build_qwen3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.qwen3",
                     "--config graph_trainer_qwen3_debugmodel",
                     "--compile.mode aot_fx_trace",
-                    "--compile.disable_passes cudagraph_pass",
+                    "--compile.disable_passes cuda_graph_pass",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",

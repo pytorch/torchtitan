@@ -18,9 +18,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
     """
     return [
         OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_sdc_replay_cudagraph],
+            configs=[recipes.llama3_debugmodel_sdc_replay_cuda_graph],
             test_descr="SDC replay with CUDA graphs",
-            test_name="sdc_replay_cudagraph",
+            test_name="sdc_replay_cuda_graph",
             ngpu=1,
             skip_rocm_test=True,
         ),
@@ -323,7 +323,15 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="SFT ChatDataset integration and numerics test",
             test_name="sft",
             ngpu=2,
-            golden_numerics_path=("tests/assets/losses/{execution_mode}/sft_a10g.txt"),
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/sft.txt"
+            ),
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_sft_multiturn],
+            test_descr="Multi-turn SFT with renderer-provided loss masks",
+            test_name="sft_multiturn",
+            ngpu=2,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_seed_checkpoint],

@@ -301,6 +301,7 @@ class ParallelismConfig:
     expert_parallel_degree: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+    For MoE models, this must be at least tensor_parallel_degree.
 
     Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
     (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.
@@ -311,9 +312,6 @@ class ParallelismConfig:
 
 @dataclass(kw_only=True, slots=True)
 class CompileConfig:
-    enable: bool = False
-    """Whether to apply torch.compile"""
-
     enable_async_tensor_parallel: bool = False
     """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
 
@@ -330,13 +328,8 @@ class CompileConfig:
                 f"Unknown compile.components entries {unknown}; "
                 f"allowed values are {sorted(allowed)}"
             )
-        if self.enable_async_tensor_parallel and not (
-            self.enable and "model" in self.components
-        ):
-            raise ValueError(
-                "Async TP requires 'model' in --compile.components and "
-                "--compile.enable"
-            )
+        if self.enable_async_tensor_parallel and "model" not in self.components:
+            raise ValueError("Async TP requires 'model' in --compile.components.")
 
 
 @dataclass(kw_only=True, slots=True)

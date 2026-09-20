@@ -27,9 +27,8 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_gemm import (
-    AllGatherFusedQKVLinear,
-    DistGEMMFeedForward,
-    RowParallelLinear,
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
@@ -238,18 +237,18 @@ def make_gqa_config(
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
     rope = dataclasses.replace(rope) if rope is not None else None
 
-    # The backend picks the classes; everything below builds the same shapes into
-    # whichever was chosen.
-    qkv_cls, wo_cls = QKVLinear, Linear
+    # The backend picks the projection classes; QKVLinear continues to own the
+    # fused output split for both implementations.
+    qkv_projection_cls, wo_cls = Linear, Linear
     if tp_gemm_backend == "dist_gemm":
-        qkv_cls = AllGatherFusedQKVLinear
-        wo_cls = RowParallelLinear
+        qkv_projection_cls = AsyncColumnParallelLinear
+        wo_cls = AsyncRowParallelLinear
 
-    qkv = qkv_cls.Config(
+    qkv = QKVLinear.Config(
         head_dim=per_head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv,
-        wqkv=Linear.Config(
+        wqkv=qkv_projection_cls.Config(
             in_features=dim,
             out_features=(n_heads + 2 * n_kv) * per_head_dim,
             param_init=fused_qkv_param_init(
@@ -292,14 +291,17 @@ def make_ffn_config(
     folding them in: one all-gather feeds w13, and w2 reduce-scatters. See
     make_gqa_config.
     """
-    ffn_cls = DistGEMMFeedForward if tp_gemm_backend == "dist_gemm" else FeedForward
-    return ffn_cls.Config(
-        w13=Linear.Config(
+    w13_cls, w2_cls = Linear, Linear
+    if tp_gemm_backend == "dist_gemm":
+        w13_cls = AsyncColumnParallelLinear
+        w2_cls = AsyncRowParallelLinear
+    return FeedForward.Config(
+        w13=w13_cls.Config(
             in_features=dim,
             out_features=2 * hidden_dim,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
-        w2=Linear.Config(
+        w2=w2_cls.Config(
             in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init
         ),
     )
@@ -366,7 +368,7 @@ def make_token_dispatcher_config(
     hidden_dim: int,
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
-    cudagraphable: bool = False,
+    cuda_graph_compatible: bool = False,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -383,21 +385,21 @@ def make_token_dispatcher_config(
     - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
-    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/cudagraph knobs --
-    # HybridEP non_blocking_capacity_factor vs DeepEP cudagraphable + num_max_tokens_per_rank.
+    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/CUDA graph knobs --
+    # HybridEP non_blocking_capacity_factor vs DeepEP cuda_graph_compatible + num_max_tokens_per_rank.
     if comm_backend == "deepep":
         # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
-        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
+        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cuda_graph_compatible``
         # selects the static no-host-sync expand layout (set on the generator by the
         # deepep_override). ``num_max_tokens_per_rank`` is the hard per-rank input-token
         # bound. Runtime config derives it from the fixed training shape or inference
-        # scheduler/cudagraph limits before the dispatcher is built.
+        # scheduler/CUDA graph limits before the dispatcher is built.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            cudagraphable=cudagraphable,
+            cuda_graph_compatible=cuda_graph_compatible,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
@@ -429,7 +431,7 @@ def make_routed_experts_config(
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
-    cudagraphable: bool = False,
+    cuda_graph_compatible: bool = False,
 ) -> RoutedExperts.Config:
     """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
     return RoutedExperts.Config(
@@ -446,6 +448,6 @@ def make_routed_experts_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
             hidden_dim=dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            cudagraphable=cudagraphable,
+            cuda_graph_compatible=cuda_graph_compatible,
         ),
     )

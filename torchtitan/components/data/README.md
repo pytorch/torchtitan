@@ -23,10 +23,10 @@ TorchTitan uses one Grain-based data pipeline for text pretraining, SFT, and ima
     config:  GrainDataLoader.Config
     input:  MapDataset | IterDataset
     does:   convert to iterable if needed -> batch -> collate -> prefetch
-    output: TrainerBatch
+    output: TrainingMicrobatch
 
 5. Trainer:
-    input: TrainerBatch
+    input: TrainingMicrobatch
     does:  model forward and backward
 ```
 
@@ -213,14 +213,39 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-`ChatProcessor` applies the tokenizer's chat template to a single-turn
+Without a renderer, `ChatProcessor` applies the tokenizer's chat template to a single-turn
 `[user, assistant]` pair, creates next-token input and label pairs, and sets
 prompt labels to `IGNORE_INDEX`. It locates the prompt/response boundary by
 rendering the prompt with `add_generation_prompt=True` and requiring that to be
 an exact token prefix of the full render, raising a `ValueError` when it is not.
 Templates that rewrite earlier turns, or turn separators that only merge in
-context, break that assumption; multi-turn support needs per-turn spans that do
-not rely on prefix rendering.
+context, break that assumption.
+
+For multi-turn conversations, select the model's renderer explicitly:
+
+```python
+from renderers import Qwen3RendererConfig
+
+from torchtitan.components.renderer import from_renderers
+
+processor = ChatProcessor.Config(
+    messages_fn=lambda row: row["messages"],
+    renderer=from_renderers(Qwen3RendererConfig()),
+)
+```
+
+The renderer uses TorchTitan's loaded tokenizer and returns tokens with a loss
+mask in one pass. The mask supervises model-generated tokens, including turn
+terminators, and excludes prompt tokens and template scaffolding. Conversations
+must end with an assistant message. Each conversation is one sample; packing
+resets positions between conversations, not between turns. Samples exceeding
+`max_context_length` are dropped whole.
+
+Formatting and reasoning retention follow the selected renderer. For example,
+Qwen3 omits reasoning from assistant turns before the last user query. Those
+omitted tokens receive no loss. To train on each turn's reasoning, prepare
+separate conversation prefixes in the source dataset. `thinking_retention`
+controls the renderer's rollout bridging, not the full renders used here.
 
 # Mixing datasets
 
@@ -370,7 +395,7 @@ config.dataloader = GrainDataLoader.Config(
         num_threads=16,
         prefetch_buffer_size=500,
     ),
-    num_prefetch_batches=2,
+    num_prefetch_microbatches=2,
 )
 ```
 
@@ -400,7 +425,7 @@ Each conversion has its own threads and buffer. An all-map mix converts once; a 
 
 `streaming_shuffle_buffer_size` is the number of raw rows retained for approximate shuffling. A larger buffer improves mixing but uses more memory.
 
-`num_prefetch_batches` is the number of complete, collated batches allowed to wait for the trainer:
+`num_prefetch_microbatches` is the number of complete, collated microbatches allowed to wait for the trainer:
 
 ```text
 trainer computes batch 10

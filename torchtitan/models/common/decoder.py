@@ -175,9 +175,14 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
+            moe_configs = list(self.traverse(MoE.Config))
             ep = parallelism.expert_parallel_degree
-            for moe_fqn, moe, _, _ in self.traverse(MoE.Config):
-                assert isinstance(moe, MoE.Config)
+            if moe_configs and ep < tp:
+                raise ValueError(
+                    f"MoE models require expert_parallel_degree ({ep}) to be "
+                    f"greater than or equal to tensor_parallel_degree ({tp})."
+                )
+            for moe_fqn, moe, _, _ in moe_configs:
                 if moe.num_experts % ep != 0:
                     raise ValueError(
                         f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
@@ -307,12 +312,14 @@ class Decoder(BaseModel):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
     ]:
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
+        del kwargs
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions", None)
         padding_mask = batch.get("padding_mask", None)

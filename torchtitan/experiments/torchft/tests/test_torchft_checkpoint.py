@@ -15,14 +15,17 @@ from types import SimpleNamespace
 from unittest import mock
 
 import torch
+import torch.distributed as dist
 import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
+from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.utils.data import DataLoader
 
 from torchtitan.components.checkpointer import CheckpointManager
 
 from torchtitan.components.optimizer import LRSchedulersContainer, ParamGroupConfig
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
+from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 
 
@@ -131,7 +134,6 @@ class TestFTCheckpointManager(unittest.TestCase):
         Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
         config = TorchFTCheckpointManager.Config(
-            enable=True,
             async_mode="async",
             folder=self.test_folder,
             interval=1,
@@ -171,7 +173,6 @@ class TestFTCheckpointManager(unittest.TestCase):
 
     def _manager(self, participating_rank: int) -> TorchFTCheckpointManager:
         config = TorchFTCheckpointManager.Config(
-            enable=True,
             async_mode="disabled",
             folder=self.test_folder,
             interval=1,
@@ -251,15 +252,6 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.assertEqual([False], ft_grad_enabled)
         manager.close()
 
-    def test_disabled_load_does_not_restore_ft_checkpoint(self):
-        manager = TorchFTCheckpointManager.__new__(TorchFTCheckpointManager)
-        manager.enable = False
-
-        with mock.patch.object(manager, "_ft_load") as ft_load:
-            self.assertFalse(manager.load())
-
-        ft_load.assert_not_called()
-
     def _build_replica(self, replica_id):
         model = nn.Linear(1, 1, bias=False)
         ft_manager = DummyFTManager(replica_id=replica_id)
@@ -284,7 +276,6 @@ class TestFTCheckpointManager(unittest.TestCase):
         )
         checkpoint = TorchFTCheckpointManager(
             TorchFTCheckpointManager.Config(
-                enable=True,
                 folder=os.path.join(self.test_folder, str(replica_id)),
                 keep_latest_k=0,
                 initial_load_model_only=False,
@@ -378,6 +369,58 @@ class TestFTCheckpointManager(unittest.TestCase):
 
         torch.testing.assert_close(
             joining.model.weight, healthy.model.weight, rtol=0, atol=0
+        )
+
+
+class _FSDPModuleWithParamGroups(FSDPModule, nn.Module):
+    """Use the real FSDP hook setter with only its parameter-group state."""
+
+    def __new__(cls, *args, **kwargs):
+        # FSDPModule.__new__ normally reconstructs the original unwrapped class.
+        return object.__new__(cls)
+
+    def __init__(self, param_groups):
+        super().__init__()
+        self.fsdp_state = SimpleNamespace(_fsdp_param_groups=param_groups)
+
+    def _get_fsdp_state(self):
+        return self.fsdp_state
+
+
+class TestFTManager(unittest.TestCase):
+    def test_multi_group_fsdp_installs_cross_replica_hook_on_every_group(self):
+        dense_group = SimpleNamespace(_all_reduce_hook=None)
+        expert_group = SimpleNamespace(_all_reduce_hook=None)
+        model = nn.Sequential(_FSDPModuleWithParamGroups([dense_group, expert_group]))
+        ft_manager = TorchFTManager(TorchFTManager.Config(enable=False))
+        ft_manager._manager = mock.sentinel.manager
+        ft_manager.use_async_quorum = True
+        ft_manager.replicate_pg = mock.sentinel.replicate_pg
+        dense_gradient = torch.tensor([1.0, 2.0])
+        expert_gradient = torch.tensor([3.0, 4.0])
+
+        ft_manager.maybe_set_all_reduce_hook([model])
+
+        self.assertIsNotNone(dense_group._all_reduce_hook)
+        self.assertIsNotNone(expert_group._all_reduce_hook)
+        with mock.patch.object(dist, "all_reduce") as all_reduce:
+            dense_group._all_reduce_hook(dense_gradient)
+            expert_group._all_reduce_hook(expert_gradient)
+
+        self.assertEqual(
+            all_reduce.call_args_list,
+            [
+                mock.call(
+                    dense_gradient,
+                    group=mock.sentinel.replicate_pg,
+                    op=dist.ReduceOp.AVG,
+                ),
+                mock.call(
+                    expert_gradient,
+                    group=mock.sentinel.replicate_pg,
+                    op=dist.ReduceOp.AVG,
+                ),
+            ],
         )
 
 

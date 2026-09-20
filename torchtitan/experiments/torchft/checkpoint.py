@@ -112,9 +112,6 @@ class TorchFTCheckpointManager(CheckpointManager):
                 "multiple times, which can result in overfitting."
             )
 
-        if not self.enable:
-            return
-
         if self.ft_manager:
             optimizers.init_cache_state_dict()
 

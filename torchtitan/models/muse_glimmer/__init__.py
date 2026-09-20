@@ -11,7 +11,10 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.config.transform import ModelConfigConverter, validate_converter_order
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
 
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
@@ -545,7 +548,7 @@ def model_registry(
         )
     config = get_config(attn_backend=attn_backend, seq_len=context_len)
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for c in converters:
             c.build().convert(config)
     return ModelSpec(
