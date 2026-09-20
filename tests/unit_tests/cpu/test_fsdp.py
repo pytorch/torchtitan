@@ -8,9 +8,14 @@ from unittest import mock
 
 import pytest
 import torch.nn as nn
+from torch.distributed.tensor import Shard
 
 from torchtitan.config import FSDPSymmMemScope
-from torchtitan.distributed.fsdp import enable_fsdp_symm_mem
+from torchtitan.distributed.fsdp import (
+    _linear_param_shard_placements,
+    enable_fsdp_symm_mem,
+)
+from torchtitan.models.common.linear import Linear
 
 
 class _FSDPModule(nn.Module):
@@ -25,6 +30,28 @@ class _FSDPModule(nn.Module):
 
     def set_symm_mem_for_comm(self) -> None:
         self.symm_mem_enabled = True
+
+
+def test_stacked_linear_shard_placements_use_num_linears() -> None:
+    module = nn.Module()
+    stacked = Linear.Config(
+        in_features=4,
+        out_features=3,
+        num_linears=2,
+        bias=True,
+    ).build()
+    shape_only = nn.Linear(4, 6, bias=False)
+    shape_only.weight = nn.Parameter(shape_only.weight.unflatten(0, (2, 3)))
+    module.add_module("stacked", stacked)
+    module.add_module("shape_only", shape_only)
+
+    placements = _linear_param_shard_placements(module)
+
+    assert stacked.bias is not None
+    assert placements == {
+        stacked.weight: Shard(1),
+        stacked.bias: Shard(1),
+    }
 
 
 @pytest.mark.parametrize(
