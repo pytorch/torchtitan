@@ -18,47 +18,6 @@ from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.protocols.module import Module
 
 
-class ScaleBiasForward(torch.autograd.Function):
-    """
-    Custom autograd function that scales bias in forward pass but not in backward.
-
-    For tensor parallel MoE, we need to scale the bias by 1/tp_degree in forward
-    to cancel the extra reduction effect, but keep the gradient unchanged in backward.
-    """
-
-    @staticmethod
-    # pyrefly: ignore [bad-override]
-    def forward(ctx, bias, tp_degree, dtype):
-        ctx.tp_degree = tp_degree
-        if tp_degree > 1:
-            bias = bias / tp_degree
-        return bias.to(dtype)
-
-    @staticmethod
-    def spmd_typecheck(out, *, bias):
-        """
-        Typecheck for bias scaling, already interleaved to num tokens shape.
-        If EP enabled, V on all axes. If disabled, TP axis: R->V.
-        Technically R->P, but easier to mix in local region as V.
-        TODO(pianpwk): .to() dtype casts in LocalTokenDispatcher don't propagate Partial;
-        we would like a spmd_types API where callers are conscious of numerics loss.
-        """
-        enable_ep = spmd_mesh_size("ep") > 1
-        if enable_ep:
-            in_type = out_type = spmd.V
-        else:
-            in_type = {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R}
-            out_type = {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V}
-        spmd.assert_type(bias, in_type)
-        spmd.assert_type(out, out_type)
-
-    @staticmethod
-    # pyrefly: ignore [bad-override]
-    def backward(ctx, grad_output):
-        # Don't scale the gradient - pass it through as-is
-        return grad_output, None, None
-
-
 def swiglu(x, alpha: float = 1.702, limit: float = 7.0):
     x_glu, x_linear = x[..., ::2], x[..., 1::2]
     # Clamp the input values
@@ -99,13 +58,11 @@ class GptOssGroupedExperts(GroupedExperts):
         """Raw expert computation without dispatch/combine.
 
         Shape suffixes here describe logical grouped-mm inputs, not physical
-        sharding. Under EP, E may be a local shard of experts; under TP,
-        expert weights shard hidden dimensions instead; under SP, R may be a
-        local token shard. Keep logical capital suffixes here to avoid encoding
-        a specific parallel layout in these local tensor names.
+        sharding. Under EP, E may be a local shard of experts; without EP,
+        expert weights are replicated across TP. Under SP, R may be a local
+        token shard. Keep logical capital suffixes here to avoid encoding a
+        specific parallel layout in these local tensor names.
         """
-        tp_degree = spmd_mesh_size("tp")
-
         if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
             spmd.mutate_type(
                 num_tokens_per_expert_E,
@@ -148,7 +105,6 @@ class GptOssGroupedExperts(GroupedExperts):
         h_RF = swiglu(h_RG, limit=self.swiglu_limit)
         h_RD = self._grouped_mm(A=h_RF, weight_EOI=self.mlp2_weight_EDF, offs=offsets_E)
 
-        # Apply custom autograd function to scale bias in forward but not in backward
         b2 = torch.cat(
             [
                 self.mlp2_bias_ED,
@@ -158,7 +114,7 @@ class GptOssGroupedExperts(GroupedExperts):
         b2_RD = b2.repeat_interleave(
             num_tokens_per_expert_long, dim=0, output_size=x_RD.shape[0]
         )
-        b2_RD = ScaleBiasForward.apply(b2_RD, tp_degree, h_RD.dtype)
+        b2_RD = b2_RD.to(h_RD.dtype)
         return h_RD + b2_RD
 
 

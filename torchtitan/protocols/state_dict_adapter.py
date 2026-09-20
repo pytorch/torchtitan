@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 import json
 
 import logging
@@ -13,11 +14,42 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from torch.distributed.checkpoint import HuggingFaceStorageReader
+from torch.distributed.tensor import DTensor, Replicate
 
 from .model import BaseModel
 
 
 logger = logging.getLogger(__name__)
+
+
+def dtensor_safe(fn):
+    """Run a row-reshaping permute that is invalid on a tensor sharded along the
+    permuted (row) dim.
+
+    In the live save/load path ``to_hf`` / ``from_hf`` receive DTensors that
+    FSDP shards along dim 0 (the q/k output rows). The head-splitting
+    ``view(n_heads, ...)`` cannot unflatten an unevenly-sharded dim and raises
+    ``Cannot unflatten unevenly sharded tensor``. Redistribute to Replicate,
+    permute the full local tensor, then restore the original placements. Plain
+    (non-DTensor) tensors take the fast path unchanged.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self, w, *args, **kwargs):
+        if isinstance(w, DTensor):
+            placements = w.placements
+            mesh = w.device_mesh
+            replicated = w.redistribute(
+                device_mesh=mesh, placements=[Replicate()] * mesh.ndim
+            )
+            local = fn(self, replicated.to_local(), *args, **kwargs)
+            out = DTensor.from_local(
+                local, mesh, [Replicate()] * mesh.ndim, run_check=False
+            )
+            return out.redistribute(device_mesh=mesh, placements=placements)
+        return fn(self, w, *args, **kwargs)
+
+    return wrapper
 
 
 class BaseStateDictAdapter(ABC):

@@ -19,7 +19,6 @@ from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
     spmd_local_context,
     spmd_mesh_size,
-    spmd_sparse_mesh,
 )
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
@@ -79,10 +78,9 @@ class GroupedExperts(Module):
         """Raw expert computation without dispatch/combine.
 
         Shape suffixes here describe logical grouped-mm inputs, not physical
-        sharding. Under EP, E may be a local shard of experts; under TP,
-        expert weights shard hidden dimensions instead; under SP, R may be a
-        local token shard. Keep logical capital suffixes here to avoid encoding
-        a specific parallel layout in these local tensor names.
+        sharding. Under EP, E may be a local shard of experts; under SP, R may
+        be a local token shard. Keep logical capital suffixes here to avoid
+        encoding a specific parallel layout in these local tensor names.
         """
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
@@ -613,7 +611,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # gate computes and emits dense_sequence_parallel_placement
             # whenever EP is on, and tokens_per_expert_E is TP-Partial for the
             # same reason).
-            axes = ("cp", "tp") if spmd_sparse_mesh() is not None else ("cp",)
+            axes = ("cp", "tp")
 
             # Eq. 18: per-expert routing frequency counts_i over the forward's
             # tokens, then f_i = E * counts_i / sum_j counts_j (so
