@@ -201,7 +201,7 @@ def _linear_config(in_features: int, out_features: int) -> Linear.Config:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w13=_linear_config(4, 16),
+        w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=_linear_config(8, 4),
     )
 
@@ -329,7 +329,11 @@ class TestRematRegions(unittest.TestCase):
             side_effect=silu_and_mul,
         ):
             dist_gemm_config = FeedForward.Config(
-                w13=AsyncColumnParallelLinear.Config(in_features=4, out_features=16),
+                w13=AsyncColumnParallelLinear.Config(
+                    in_features=4,
+                    out_features=8,
+                    num_linears=2,
+                ),
                 w2=AsyncRowParallelLinear.Config(in_features=8, out_features=4),
             )
             fused_config = deepcopy(feed_forward_config)

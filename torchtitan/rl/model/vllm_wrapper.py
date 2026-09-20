@@ -40,7 +40,6 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import QKVLinear
-from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -566,20 +565,6 @@ class VLLMModelWrapper(Module):
                 if w13_layout is not None:
                     for state_name in ("w1_EFD", "w3_EFD"):
                         layouts[f"{module_prefix}{state_name}"] = w13_layout
-
-            if isinstance(module, FeedForward):
-                # FeedForward exposes w1/w3 state-dict keys, but their layout
-                # belongs to the physical w13 Linear child.
-                w13_sharding_config = getattr(module.w13, "_sharding_config", None)
-                if w13_sharding_config is not None:
-                    for (
-                        state_name,
-                        layout,
-                    ) in w13_sharding_config.state_shardings.items():
-                        for projection_name in ("w1", "w3"):
-                            layouts[
-                                f"{module_prefix}{projection_name}.{state_name}"
-                            ] = layout
 
             if isinstance(module, QKVLinear):
                 # QKVLinear exposes split wq/wk/wv state-dict keys while

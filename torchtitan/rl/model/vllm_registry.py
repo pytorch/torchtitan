@@ -102,7 +102,7 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
 
     if ffn is not None:
         # Unused: only v1/metrics/perf.py reads it (off by default).
-        hf["intermediate_size"] = ffn.w13.out_features // 2
+        hf["intermediate_size"] = ffn.w13.out_features
 
     if moe is not None:
         # Presence required: >0 toggles MoE/EP branches.
