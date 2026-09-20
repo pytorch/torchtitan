@@ -476,6 +476,45 @@ def test_float8_grouped_experts_dcp_round_trip_needs_no_safe_globals(tmp_path):
         torch.testing.assert_close(target_parameter, source_parameter)
 
 
+@pytest.mark.filterwarnings("ignore:torch.distributed is disabled")
+def test_mxfp8_linear_dcp_round_trip_needs_no_safe_globals(tmp_path):
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    from torch.distributed.checkpoint import FileSystemReader
+    from torch.distributed.checkpoint.metadata import TensorStorageMetadata
+
+    config = MXFP8Linear.Config(
+        in_features=128,
+        out_features=128,
+        bias=False,
+    )
+    source = config.build()
+    target = config.build()
+
+    with torch.no_grad():
+        source.weight._tensor.copy_(
+            torch.arange(source.weight.numel()).reshape(source.weight.shape)
+        )
+        target.weight._tensor.zero_()
+
+    saved_safe_globals = torch.serialization.get_safe_globals()
+    try:
+        torch.serialization.clear_safe_globals()
+        dcp.save(source.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+        metadata = FileSystemReader(tmp_path).read_metadata()
+        assert isinstance(metadata.state_dict_metadata["weight"], TensorStorageMetadata)
+        dcp.load(target.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+    finally:
+        torch.serialization.clear_safe_globals()
+        torch.serialization.add_safe_globals(saved_safe_globals)
+
+    assert torch.equal(
+        target.weight._tensor.view(torch.uint8),
+        source.weight._tensor.view(torch.uint8),
+    )
+
+
 def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
     pytest.importorskip("torchao")
     if MXFP8Linear is None:
