@@ -248,31 +248,33 @@ class DistMuon(Optimizer):
     def _validate_groups(self) -> None:
         if len(self.param_groups) != 1:
             raise ValueError("DistMuon requires exactly one parameter group")
-        group = self.param_groups[0]
-        ns_steps = group["ns_steps"]
-        coefficients = group["ns_coefficients"]
-        if (
-            group.get("fused")
-            or group.get("foreach")
-            or any(
-                not 0 <= group[name]
-                for name in ("lr", "weight_decay", "momentum", "eps")
-            )
-            or not isinstance(ns_steps, int)
-            or not 0 <= ns_steps < 100
-            or len(coefficients) != 3
-            or not all(isinstance(value, (int, float)) for value in coefficients)
-            or group["adjust_lr_fn"]
-            not in (None, "original", "match_rms_adamw", "spectral_unclamped")
-        ):
-            raise ValueError("unsupported DistMuon group 0")
+        for group_index, group in enumerate(self.param_groups):
+            ns_steps = group["ns_steps"]
+            coefficients = group["ns_coefficients"]
+            if (
+                group.get("fused")
+                or group.get("foreach")
+                or any(
+                    not 0 <= group[name]
+                    for name in ("lr", "weight_decay", "momentum", "eps")
+                )
+                or not isinstance(ns_steps, int)
+                or not 0 <= ns_steps < 100
+                or len(coefficients) != 3
+                or not all(isinstance(value, (int, float)) for value in coefficients)
+                or group["adjust_lr_fn"]
+                not in (None, "original", "match_rms_adamw", "spectral_unclamped")
+            ):
+                raise ValueError(f"unsupported DistMuon group {group_index}")
 
     def _validate_parameter_storage(self) -> torch.device:
         local_devices = set()
-        for param in self.param_groups[0]["params"]:
-            if not isinstance(param, DTensor):
-                raise TypeError("DistMuon requires DTensor parameters")
-            local_devices.add(param.to_local().device)
+        for group in self.param_groups:
+            for param in group["params"]:
+                if not isinstance(param, DTensor):
+                    raise TypeError("DistMuon requires DTensor parameters")
+                local_device = param.to_local().device
+                local_devices.add(local_device)
         if len(local_devices) != 1:
             raise ValueError("DistMuon requires one device per process")
         return local_devices.pop()
@@ -556,7 +558,7 @@ class DistMuon(Optimizer):
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
         group = self.param_groups[0]
-        _compute_muon_update(
+        _compute_muon_direction(
             compute,
             matrix_views=self._matrix_views_by_fqn[compute_layout.fqn],
             ns_coefficients=group["ns_coefficients"],
@@ -1831,17 +1833,17 @@ def _prepare_muon_input(
     return out
 
 
-def _compute_muon_update(
-    compute: Tensor,
+def _compute_muon_direction(
+    prepared: Tensor,
     *,
     matrix_views: Sequence[_MatrixBatchView],
     ns_coefficients: tuple[float, float, float],
     ns_steps: int,
     eps: float,
 ) -> Tensor:
-    """Compute Muon's independent matrix directions through explicit views."""
+    """Compute Muon's approximate orthogonal update direction."""
     for view in matrix_views:
-        matrices = view.view_as_matrix_batch(compute)
+        matrices = view.view_as_matrix_batch(prepared)
         matrices.copy_(
             _zeropower_via_newtonschulz(
                 matrices,
@@ -1850,7 +1852,7 @@ def _compute_muon_update(
                 eps=eps,
             )
         )
-    return compute
+    return prepared
 
 
 def _apply_muon_update(
