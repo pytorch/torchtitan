@@ -166,7 +166,26 @@ class TestDistMuon(DTensorTestBase):
             ):
                 parameter.grad = grad.clone()
 
-            current_optimizer.step()
+            layouts = {
+                layout.fqn: layout
+                for layout in current_optimizer._parameter_compute_layouts
+            }
+            compute_update = current_optimizer._compute_update
+
+            def check_compute_views(compute_layout, compute):
+                self.assertIs(compute_layout, layouts[compute_layout.fqn])
+                if compute_layout.param is current_redistributed:
+                    (view,) = current_optimizer._matrix_views_by_fqn[compute_layout.fqn]
+                    torch.testing.assert_close(
+                        view.view_as_matrix_batch(compute), compute, rtol=0, atol=0
+                    )
+                    self.assertEqual(compute.shape, redistributed_value.shape)
+                compute_update(compute_layout, compute)
+
+            with mock.patch.object(
+                current_optimizer, "_compute_update", side_effect=check_compute_views
+            ):
+                current_optimizer.step()
             reference_optimizer.step()
 
             rank = mesh.get_local_rank()
@@ -311,6 +330,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
                 make_optimizer(parameter, default_order)
 
         optimizer = make_optimizer(parameter, expected_shard_order)
+        (layout,) = optimizer._parameter_compute_layouts
         grad = (
             torch.arange(value.numel(), device=device)
             .reshape_as(value)
@@ -348,10 +368,14 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         )
         captured_compute = None
 
-        def capture_compute(_compute_layout, compute):
+        def capture_compute(compute_layout, compute):
             nonlocal captured_compute
+            self.assertIs(compute_layout, layout)
             captured_compute = compute.clone()
-            compute.mul_(0.5).add_(0.25)
+            (view,) = optimizer._matrix_views_by_fqn[compute_layout.fqn]
+            matrix_batch = view.view_as_matrix_batch(compute)
+            self.assertEqual(matrix_batch.shape, compute.shape)
+            matrix_batch.mul_(0.5).add_(0.25)
 
         with mock.patch.object(
             optimizer,
@@ -370,6 +394,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
             )
         else:
             self.assertIsNone(captured_compute)
+            self.assertEqual(optimizer._matrix_views_by_fqn[layout.fqn], ())
 
         torch.testing.assert_close(
             parameter.full_tensor(),
@@ -401,6 +426,21 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         )
         compute_ready_layout = compute_ready_optimizer._parameter_compute_layouts[0]
         self.assertTrue(compute_ready_layout.storage_is_compute_ready)
+        if compute_ready_local.numel():
+            (view,) = compute_ready_optimizer._matrix_views_by_fqn[
+                compute_ready_layout.fqn
+            ]
+            torch.testing.assert_close(
+                view.view_as_matrix_batch(compute_ready_local),
+                compute_ready_local,
+                rtol=0,
+                atol=0,
+            )
+        else:
+            self.assertEqual(
+                compute_ready_optimizer._matrix_views_by_fqn[compute_ready_layout.fqn],
+                (),
+            )
 
 
 if __name__ == "__main__":
