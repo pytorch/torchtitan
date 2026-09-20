@@ -512,11 +512,12 @@ class GQAttention(BaseAttention):
 
         # Apply rotary embeddings
         if self.use_rope:
+            rope_positions = None if self.attn_backend == "sdpa" else positions
             if self.rope_backend == "cos_sin":
-                xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, positions)
+                xq, xk = apply_rotary_emb_cos_sin(xq, xk, rope_cache, rope_positions)
             else:
                 xq, xk = apply_rotary_emb_complex(
-                    xq, xk, freqs_cis=rope_cache, positions=positions
+                    xq, xk, freqs_cis=rope_cache, positions=rope_positions
                 )
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
