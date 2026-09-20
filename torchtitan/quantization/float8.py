@@ -76,11 +76,6 @@ try:
         def reset_parameters(self) -> None:
             Linear.reset_parameters(self)
 
-        def _init_param(self, name: str, param: torch.Tensor) -> None:
-            if self.num_linears == 1:
-                param = param.flatten(0, -2) if name == "weight" else param.flatten()
-            Module._init_param(self, name, param)
-
 except ImportError:
     Float8Linear = None
 

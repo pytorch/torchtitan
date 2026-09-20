@@ -26,6 +26,35 @@ from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.models.qwen3 import qwen3_configs
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
+from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+
+
+class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
+    def test_stacked_helpers_support_nonleading_projection_dim(self) -> None:
+        fused = torch.randn(3, 5, 2, 7)
+        state_dict = {"experts.w13": fused}
+        logical_keys = ("experts.w1", "experts.w3")
+
+        StateDictAdapter._split_stacked_linear(
+            state_dict,
+            fused_key="experts.w13",
+            logical_keys=logical_keys,
+            dim=2,
+        )
+
+        self.assertNotIn("experts.w13", state_dict)
+        torch.testing.assert_close(state_dict["experts.w1"], fused[:, :, 0, :])
+        torch.testing.assert_close(state_dict["experts.w3"], fused[:, :, 1, :])
+
+        StateDictAdapter._stack_logical_linears(
+            state_dict,
+            fused_key="experts.w13",
+            logical_keys=logical_keys,
+            dim=2,
+        )
+
+        self.assertEqual(set(state_dict), {"experts.w13"})
+        torch.testing.assert_close(state_dict["experts.w13"], fused)
 
 
 class Llama3StateDictAdapterTest(unittest.TestCase):

@@ -78,12 +78,6 @@ class Linear(nn.Linear, Module):
             bound = 1 / math.sqrt(self.in_features)
             nn.init.uniform_(self.bias, -bound, bound)
 
-    def _init_param(self, name: str, param: torch.Tensor) -> None:
-        """Initialize a single projection through its standard parameter view."""
-        if self.num_linears == 1:
-            param = param.flatten(0, -2) if name == "weight" else param.flatten()
-        Module._init_param(self, name, param)
-
     def _flatten_weight_and_bias(
         self,
         *,

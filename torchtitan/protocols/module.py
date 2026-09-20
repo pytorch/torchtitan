@@ -190,11 +190,8 @@ class Module(nn.Module, Configurable):
                 "Set param_init on the Config or define reset_parameters."
             )
 
-    def _init_param(self, name: str, param: torch.Tensor) -> None:
-        """Initialize a parameter or a view of it via ``_param_init``.
-
-        Projection modules may pass a logical view of a physical parameter so
-        each logical projection keeps its standard initializer semantics.
+    def _init_param(self, name: str, param: nn.Parameter) -> None:
+        """Initialize a single parameter via dict lookup in ``_param_init``.
 
         Raises ``ValueError`` if ``_param_init`` is None or the name is missing.
         """
