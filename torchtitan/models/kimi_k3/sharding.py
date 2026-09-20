@@ -50,12 +50,6 @@ if TYPE_CHECKING:
 DP = MeshAxisName.DP
 TP = MeshAxisName.TP
 
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
-    "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
-}
-
 
 def set_kimi_k3_sharding_config(
     config: "KimiK3Model.Config",
@@ -227,7 +221,6 @@ def _set_latent_moe_sharding(
         moe_cfg,
         enable_ep=enable_ep,
         enable_sp=enable_sp,
-        expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
     )
     token_shard = dense_sequence_parallel_placement()
     routed_experts = moe_cfg.routed_experts.sharding_config
