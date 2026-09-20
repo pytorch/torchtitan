@@ -78,10 +78,9 @@ class GroupedExperts(Module):
         """Raw expert computation without dispatch/combine.
 
         Shape suffixes here describe logical grouped-mm inputs, not physical
-        sharding. Under EP, E may be a local shard of experts; without EP,
-        expert weights are replicated across TP. Under SP, R may be a local
-        token shard. Keep logical capital suffixes here to avoid encoding a
-        specific parallel layout in these local tensor names.
+        sharding. Under EP, E may be a local shard of experts; under SP, R may
+        be a local token shard. Keep logical capital suffixes here to avoid
+        encoding a specific parallel layout in these local tensor names.
         """
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
@@ -196,7 +195,6 @@ class TokenChoiceTopKRouter(Module):
         route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0
         aux_loss: AuxLoss.Config | None = None
-        tp_shards_tokens: bool = False
         _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
@@ -208,7 +206,6 @@ class TokenChoiceTopKRouter(Module):
         self.route_norm = config.route_norm
         self.route_norm_epsilon = config.route_norm_epsilon
         self.route_scale = config.route_scale
-        self.tp_shards_tokens = config.tp_shards_tokens
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
         self._debug_force_load_balance = config._debug_force_load_balance
         # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
@@ -537,8 +534,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
     The counts (Eq. 18) and normalized-score sums (Eq. 19) are sums over the
     folded token dim, hence Partial over the mesh axes that shard it (CP
-    always, plus TP when router tokens are sequence-sharded). They are
-    all-reduced to Invariant before
+    always, plus TP under EP).  They are all-reduced to Invariant before
     the formula, so every rank computes the same per-forward loss.  The
     one-hot counts are non-differentiable: the gradient reaches the router
     only through the normalized-score sums and the top-k score carrier.
@@ -551,22 +547,13 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
     @dataclass(kw_only=True, slots=True)
     class Config(AuxLoss.Config):
-        """Configuration for microbatch-wise load balancing.
+        """Same fields as ``AuxLoss.Config``; this loss adds no knobs.
 
         A distinct Config is required even without new fields: ``Config.build()``
         constructs the class that owns the config (``__init_subclass__`` sets
         ``_owner``), so a router configured with ``AuxLoss.Config`` would
         build a plain ``AuxLoss``, which has no ``forward``.
-
-        ``tp_shards_tokens`` records whether router tokens are sharded across
-        TP and their load-balancing statistics therefore require TP reduction.
         """
-
-        tp_shards_tokens: bool = False
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.tp_shards_tokens = config.tp_shards_tokens
 
     def _reduce_token_partials(
         self, partial_E: torch.Tensor, axes: tuple[str, ...]
@@ -616,10 +603,15 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         """
         # Mark DP local for the counts arithmetic: each DP rank owns an
         # independent token stream, so DP must not be reduced; only the
-        # global axes that shard the stream (CP and optionally TP) are.
+        # global axes that shard the stream (CP, TP under EP) are.
         with spmd_local_context("dp"):
             E = scores_TE.size(-1)
-            axes = ("cp", "tp") if self.tp_shards_tokens else ("cp",)
+            # Axes that shard the router output's token dim: CP in every
+            # layout, TP only under EP, which distributes tokens over TP (the
+            # gate computes and emits dense_sequence_parallel_placement
+            # whenever EP is on, and tokens_per_expert_E is TP-Partial for the
+            # same reason).
+            axes = ("cp", "tp")
 
             # Eq. 18: per-expert routing frequency counts_i over the forward's
             # tokens, then f_i = E * counts_i / sum_j counts_j (so

@@ -301,6 +301,7 @@ class ParallelismConfig:
     expert_parallel_degree: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+    For MoE models, this must be at least tensor_parallel_degree.
 
     Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
     (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.

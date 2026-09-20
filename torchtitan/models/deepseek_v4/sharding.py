@@ -42,8 +42,6 @@ if TYPE_CHECKING:
         DeepSeekV4TransformerBlock,
     )
 
-_GROUPED_EXPERTS_PARAM_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
-
 _replicate_weight = ShardingConfig(
     state_shardings={"weight": _dense_param_rep},
 )
@@ -259,14 +257,11 @@ def set_deepseek_v4_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_names=_GROUPED_EXPERTS_PARAM_NAMES,
         )
         router_cfg = layer_cfg.moe.router
         if getattr(router_cfg, "layer_id", 0) < getattr(router_cfg, "n_hash_layers", 0):
             input_ids_src_placement = token_id_placement()
-            input_ids_dst_placement = token_id_placement(
-                enable_sp=enable_ep or enable_sp
-            )
+            input_ids_dst_placement = token_id_placement(enable_sp=enable_ep)
             moe_sharding_config = layer_cfg.moe.sharding_config or ShardingConfig()
             in_src_shardings = moe_sharding_config.in_src_shardings or {}
             in_src_shardings["input_ids_T"] = input_ids_src_placement

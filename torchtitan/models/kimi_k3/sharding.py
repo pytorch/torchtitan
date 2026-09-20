@@ -50,9 +50,6 @@ if TYPE_CHECKING:
 DP = MeshAxisName.DP
 TP = MeshAxisName.TP
 
-_GROUPED_EXPERTS_PARAM_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
-
-
 def set_kimi_k3_sharding_config(
     config: "KimiK3Model.Config",
     *,
@@ -223,7 +220,6 @@ def _set_latent_moe_sharding(
         moe_cfg,
         enable_ep=enable_ep,
         enable_sp=enable_sp,
-        expert_param_names=_GROUPED_EXPERTS_PARAM_NAMES,
     )
     token_shard = dense_sequence_parallel_placement()
     routed_experts = moe_cfg.routed_experts.sharding_config
@@ -231,8 +227,7 @@ def _set_latent_moe_sharding(
     routed_down = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)}
     )
-    token_sharded = enable_ep or enable_sp
-    if token_sharded:
+    if enable_ep:
         routed_down.in_src_shardings = {
             "input": token_shard
             if enable_sp
@@ -244,6 +239,7 @@ def _set_latent_moe_sharding(
             "x_TD": token_shard,
         }
     moe_cfg.routed_down.sharding_config = routed_down
+    token_sharded = enable_ep
     routed_norm = norm_config(enable_sp=token_sharded)
     routed_up = _tp_unsharded_weight_config(token_sharded=token_sharded)
     partial = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))

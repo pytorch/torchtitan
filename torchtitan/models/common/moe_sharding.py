@@ -6,8 +6,6 @@
 
 """Config-based sharding helpers for MoE submodules."""
 
-from collections.abc import Collection
-
 import spmd_types as spmd
 from spmd_types import SpmdType
 
@@ -19,7 +17,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     token_id_placement,
 )
-from torchtitan.models.common.moe import MicrobatchWiseLoadBalanceLoss
 from torchtitan.protocols.sharding import ShardingConfig
 
 
@@ -29,6 +26,8 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 EP = MeshAxisName.EP
 EFSDP = MeshAxisName.EFSDP
+
+_GROUPED_EXPERT_PARAM_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
 
 
 def expert_param_placement_sparse() -> SpmdType:
@@ -52,20 +51,19 @@ def expert_param_placement_sparse() -> SpmdType:
     )
 
 
-def _tokens_per_expert_placement(
-    *, enable_ep: bool, enable_sp: bool = False
-) -> SpmdType:
+def _tokens_per_expert_placement(*, enable_ep: bool) -> SpmdType:
     """Placement for the ``tokens_per_expert_E`` buffer.
 
     Each DP/CP rank processes different data and accumulates partial token
-    counts, so DP/CP axes are ``Partial``. TP is ``Partial`` whenever the
-    router tokens are sharded across TP, through either EP or dense SP.
+    counts, so DP/CP axes are ``Partial``. TP is ``Partial`` when EP is
+    enabled (MoE reuses the mesh axis named TP for sequence-token sharding, so
+    each rank sees different tokens).
     """
     return SpmdType(
         {
             DP: spmd.P,
             CP: spmd.P,
-            TP: spmd.P if enable_ep or enable_sp else spmd.R,
+            TP: spmd.P if enable_ep else spmd.R,
         }
     )
 
@@ -74,13 +72,9 @@ def _router_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConf
     """Router input redistribution and expert-count buffer placement.
 
     The padding mask follows ``x_TD`` at the MoE and Router boundaries. Under
-    EP, the Router sequence-shards both inputs before routing, even when dense
-    SP is disabled.
+    EP, the Router then sequence-shards both inputs before routing.
 
-    EP off, SP off: input Replicate, gate computes on all tokens, output stays
-                    Replicate.
-    EP off, SP on: input Shard(0) on tokens, gate computes on the local shard,
-                   and the output remains Shard(0).
+    EP off: input Replicate, gate computes on all tokens, output stays Replicate.
     EP on: input Shard(0) on tokens, gate computes on the local shard, and the
            output remains Shard(0).
     """
@@ -91,20 +85,15 @@ def _router_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConf
             else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
         )
         desired_input_layout = dense_sequence_parallel_placement()
-    elif enable_sp:
-        input_layout = dense_sequence_parallel_placement()
-        desired_input_layout = dense_sequence_parallel_placement()
     else:
         input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
         desired_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
-    padding_mask_layout = token_id_placement(enable_sp=enable_sp)
-    desired_padding_mask_layout = token_id_placement(enable_sp=enable_ep or enable_sp)
+    padding_mask_layout = token_id_placement(enable_sp=enable_sp and enable_ep)
+    desired_padding_mask_layout = token_id_placement(enable_sp=enable_ep)
     return ShardingConfig(
         state_shardings={
-            "tokens_per_expert_E": _tokens_per_expert_placement(
-                enable_ep=enable_ep, enable_sp=enable_sp
-            ),
+            "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
         },
         in_src_shardings={
             "x_TD": input_layout,
@@ -174,11 +163,12 @@ def _shared_experts_sharding_configs(
 ) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig]:
     """Configs for shared FeedForward parent and w13/w2 linears."""
     # The parent FeedForward converts its input to Replicate once before w13.
-    # w2 reduces its Partial output to the final MoE boundary layout used for
-    # the routed + shared add.
+    # w2 reduces its Partial output to the final MoE boundary layout
+    # used for the routed + shared add: sequence-sharded when SP is enabled and
+    # Partial when SP is disabled.
     input_layout = (
         dense_sequence_parallel_placement()
-        if enable_sp
+        if enable_ep and enable_sp
         else dense_activation_placement(
             tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
         )
@@ -205,8 +195,7 @@ def _routed_experts_sharding_configs(
     *,
     enable_ep: bool,
     enable_sp: bool,
-    expert_param_names: Collection[str],
-) -> tuple[ShardingConfig, ShardingConfig]:
+) -> tuple[ShardingConfig, ShardingConfig | None]:
     """Configs for RoutedExperts local SPMD and inner expert weight state."""
     if enable_ep:
         pre_experts_input_layout = (
@@ -215,27 +204,21 @@ def _routed_experts_sharding_configs(
             else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
         )
         state_shardings: dict[str, SpmdType] = {
-            name: expert_param_placement_sparse() for name in expert_param_names
+            name: expert_param_placement_sparse()
+            for name in _GROUPED_EXPERT_PARAM_NAMES
         }
         experts_input_layout = dense_sequence_parallel_placement()
+        inner_experts_sharding_config = ShardingConfig(state_shardings=state_shardings)
     else:
-        pre_experts_input_layout = (
-            dense_sequence_parallel_placement()
-            if enable_sp
-            else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        )
-        state_shardings = {
-            name: dense_param_placement(tp=spmd.R) for name in expert_param_names
-        }
-        experts_input_layout = pre_experts_input_layout
+        pre_experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        inner_experts_sharding_config = None
 
-    tokens_per_expert_layout = _tokens_per_expert_placement(
-        enable_ep=enable_ep, enable_sp=enable_sp
-    )
+    tokens_per_expert_layout = _tokens_per_expert_placement(enable_ep=enable_ep)
 
     experts_output_layout = (
         dense_sequence_parallel_placement()
-        if enable_ep or enable_sp
+        if enable_ep
         else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     )
     desired_experts_output_layout = (
@@ -264,7 +247,7 @@ def _routed_experts_sharding_configs(
             out_dst_shardings=desired_experts_output_layout,
             local_spmd=True,
         ),
-        ShardingConfig(state_shardings=state_shardings),
+        inner_experts_sharding_config,
     )
 
 
@@ -285,9 +268,7 @@ def _moe_sharding_config(
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     desired_input_layout = (
-        sp_layout
-        if enable_ep or enable_sp
-        else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        sp_layout if enable_ep else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     )
     output_layout = (
         dense_sequence_parallel_placement()
@@ -297,7 +278,7 @@ def _moe_sharding_config(
         )
     )
     padding_mask_src_layout = token_id_placement(enable_sp=enable_sp)
-    padding_mask_dst_layout = token_id_placement(enable_sp=enable_sp)
+    padding_mask_dst_layout = token_id_placement(enable_sp=enable_sp and enable_ep)
     return ShardingConfig(
         state_shardings={
             "expert_bias_E": dense_param_placement(tp=spmd.R),
@@ -320,40 +301,31 @@ def set_moe_sharding_config(
     *,
     enable_ep: bool,
     enable_sp: bool,
-    expert_param_names: Collection[str],
 ) -> None:
     """Populate ``sharding_config`` on every MoE submodule.
 
-    Configures sparse expert parallelism when EP is enabled and replicates the
-    routed experts across the dense TP axis otherwise:
+    Configures sparse expert parallelism when EP is enabled and leaves routed
+    experts unsharded otherwise:
 
     - ``moe`` (wrapper): input/output redistribution on ``{TP}``.
-      Always set when ``tp_enabled``.
     - ``moe.router``: input and padding-mask redistribution to the router's
       token layout, plus the expert-count buffer placement.
     - ``moe.router.gate``: Replicate weights and output.
     - ``moe.shared_experts.{w13,w2}``: dense-family TP plan (when
       ``moe_cfg.shared_experts is not None``).
     - ``moe.routed_experts.inner_experts`` (``GroupedExperts``): expert-weight
-      ``state_shardings`` -- sparse ``{EP}`` when EP is enabled and replicated
-      across ``{TP}`` otherwise. The parent ``routed_experts`` holds the
-      activation shardings and local SPMD region.
+      ``state_shardings`` -- sparse ``{EP}`` when EP is enabled and unsharded
+      otherwise. The parent ``routed_experts`` holds the activation shardings
+      and local SPMD region.
 
     Args:
         moe_cfg: The ``MoE.Config`` instance to populate.
         enable_ep: Whether expert parallelism is enabled.
         enable_sp: Whether sequence parallelism is enabled (affects the
             wrapper's enter/exit TP layout).
-        expert_param_names: Routed-expert parameter names.
     """
     # Always set sharding configs regardless of whether TP is enabled.
     # ``resolve_mesh`` filters out disabled axes at runtime.
-    tp_shards_tokens = enable_ep or enable_sp
-    moe_cfg.router.tp_shards_tokens = tp_shards_tokens
-    aux_loss_cfg = moe_cfg.router.aux_loss
-    if isinstance(aux_loss_cfg, MicrobatchWiseLoadBalanceLoss.Config):
-        aux_loss_cfg.tp_shards_tokens = tp_shards_tokens
-
     moe_cfg.sharding_config = _moe_sharding_config(
         enable_ep=enable_ep,
         enable_sp=enable_sp,
@@ -377,13 +349,15 @@ def set_moe_sharding_config(
         shared.w2.sharding_config = w2_config
 
     # RoutedExperts local SPMD region: activation in/out, no params.
-    routed_experts_config, inner_experts_config = _routed_experts_sharding_configs(
+    (
+        routed_experts_sharding_config,
+        inner_experts_sharding_config,
+    ) = _routed_experts_sharding_configs(
         enable_ep=enable_ep,
         enable_sp=enable_sp,
-        expert_param_names=expert_param_names,
     )
-    moe_cfg.routed_experts.sharding_config = routed_experts_config
-    moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_config
+    moe_cfg.routed_experts.sharding_config = routed_experts_sharding_config
+    moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_sharding_config
 
 
 def set_moe_block_padding_mask_sharding(block_cfg, *, enable_sp: bool) -> None:

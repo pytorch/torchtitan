@@ -35,10 +35,6 @@ if TYPE_CHECKING:
     )
 
 
-# Routed-expert parameter names for the shared ``GroupedExperts``.
-_GROUPED_EXPERTS_PARAM_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
-
-
 def set_deepseek_v3_sharding_config(
     config: "DeepSeekV3Model.Config",
     *,
@@ -146,7 +142,6 @@ def _set_deepseek_v3_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_names=_GROUPED_EXPERTS_PARAM_NAMES,
         )
 
 

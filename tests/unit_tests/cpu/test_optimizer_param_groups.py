@@ -53,17 +53,16 @@ class SimpleModel(nn.Module):
 
 
 class FakeRouter(nn.Module):
-    def __init__(self, tokens, *, tp_shards_tokens=False):
+    def __init__(self, tokens):
         super().__init__()
-        self.tp_shards_tokens = tp_shards_tokens
         self.register_buffer("tokens_per_expert_E", torch.tensor(tokens))
 
 
 class FakeMoE(nn.Module):
-    def __init__(self, load_balance_coeff, tokens, *, tp_shards_tokens=False):
+    def __init__(self, load_balance_coeff, tokens):
         super().__init__()
         self.load_balance_coeff = load_balance_coeff
-        self.router = FakeRouter(tokens, tp_shards_tokens=tp_shards_tokens)
+        self.router = FakeRouter(tokens)
         if load_balance_coeff is not None:
             self.register_buffer("expert_bias_E", torch.zeros(len(tokens)))
         else:
@@ -71,36 +70,20 @@ class FakeMoE(nn.Module):
 
 
 class FakeMoEBlock(nn.Module):
-    def __init__(self, load_balance_coeff, tokens, *, tp_shards_tokens=False):
+    def __init__(self, load_balance_coeff, tokens):
         super().__init__()
         self.moe_enabled = True
-        self.moe = FakeMoE(
-            load_balance_coeff, tokens, tp_shards_tokens=tp_shards_tokens
-        )
+        self.moe = FakeMoE(load_balance_coeff, tokens)
 
 
 class FakeMoEModel(nn.Module):
-    def __init__(
-        self,
-        load_balance_coeffs=(0.1, 0.2),
-        mtp_load_balance_coeff=None,
-        *,
-        tp_shards_tokens=False,
-    ):
+    def __init__(self, load_balance_coeffs=(0.1, 0.2), mtp_load_balance_coeff=None):
         super().__init__()
         self.weight = nn.Parameter(torch.tensor([1.0]))
         self.layers = nn.ModuleDict(
             {
-                "0": FakeMoEBlock(
-                    load_balance_coeffs[0],
-                    [10, 0],
-                    tp_shards_tokens=tp_shards_tokens,
-                ),
-                "1": FakeMoEBlock(
-                    load_balance_coeffs[1],
-                    [0, 10],
-                    tp_shards_tokens=tp_shards_tokens,
-                ),
+                "0": FakeMoEBlock(load_balance_coeffs[0], [10, 0]),
+                "1": FakeMoEBlock(load_balance_coeffs[1], [0, 10]),
             }
         )
         self.mtp_layers = nn.ModuleList()
@@ -110,17 +93,13 @@ class FakeMoEModel(nn.Module):
 
 class FakeParallelDims:
     ep_enabled = False
+    tp = 1
 
-    def __init__(self, *, loss_mesh=None, tp=1, dense_tp_mesh=None):
+    def __init__(self, *, loss_mesh=None):
         self.loss_mesh = loss_mesh
-        self.tp = tp
-        self.dense_tp_mesh = dense_tp_mesh
 
     def get_optional_mesh(self, name):
         return self.loss_mesh if name == "loss" else None
-
-    def get_dense_tp_mesh(self):
-        return self.dense_tp_mesh
 
 
 # Default AdamW param group for catch-all
@@ -325,33 +304,6 @@ class TestParamGroupConfig(unittest.TestCase):
             model.layers["1"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
-
-    def test_moe_load_balancing_reduces_tp_sharded_token_counts(self):
-        model = FakeMoEModel(tp_shards_tokens=True)
-        config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
-                ),
-            ],
-        )
-        container = config.build(model_parts=[model])
-        dense_tp_mesh = Mock()
-        dense_tp_mesh.get_group.return_value = "tp_group"
-        register_moe_load_balancing_hook(
-            container,
-            [model],
-            FakeParallelDims(tp=2, dense_tp_mesh=dense_tp_mesh),
-        )
-
-        with patch("torch.distributed.all_reduce") as all_reduce:
-            container.step()
-
-        all_reduce.assert_called_once()
-        self.assertEqual(all_reduce.call_args.kwargs["group"], "tp_group")
 
     def test_moe_load_balancing_rejects_inconsistent_coeffs(self):
         model = FakeMoEModel(load_balance_coeffs=(None, 0.2))
