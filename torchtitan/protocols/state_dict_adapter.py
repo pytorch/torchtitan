@@ -131,8 +131,15 @@ class StateDictAdapter(BaseStateDictAdapter):
                     f"got {type(rope).__qualname__}."
                 )
 
-    def _linear_state_dict_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Split native fused feed-forward parameters into their HF layout."""
+    def _native_fused_linear_state_dict_to_hf(
+        self, state_dict: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Convert native fused linear parameters to logical HF-facing keys.
+
+        This pass currently handles the stacked gate/up projection in
+        ``FeedForward``. Model-specific adapters subsequently rename the
+        logical keys to their corresponding HF keys.
+        """
         from torchtitan.models.common.feed_forward import FeedForward
 
         result = dict(state_dict)
@@ -148,8 +155,10 @@ class StateDictAdapter(BaseStateDictAdapter):
 
         return result
 
-    def _linear_state_dict_from_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        """Stack HF feed-forward parameters into their native fused layout."""
+    def _native_fused_linear_state_dict_from_hf(
+        self, state_dict: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Convert logical HF-facing keys to native fused linear parameters."""
         from torchtitan.models.common.feed_forward import FeedForward
 
         result = dict(state_dict)

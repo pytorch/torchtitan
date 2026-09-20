@@ -85,7 +85,7 @@ class KimiK25StateDictAdapter(DeepSeekV3StateDictAdapter):
                     if not key.endswith("rotary_emb.inv_freq")
                 }
             )
-            return self._linear_state_dict_from_hf(state_dict)
+            return self._native_fused_linear_state_dict_from_hf(state_dict)
 
         lm_hf: dict[str, Any] = {}
         vision: dict[str, Any] = {}
@@ -163,10 +163,10 @@ class KimiK25StateDictAdapter(DeepSeekV3StateDictAdapter):
         # DeepSeekV3 handles the LM keys (incl. RoPE validation + experts).
         state_dict = super().from_hf(lm_hf)
         state_dict.update(vision)
-        return self._linear_state_dict_from_hf(state_dict)
+        return self._native_fused_linear_state_dict_from_hf(state_dict)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        state_dict = self._linear_state_dict_to_hf(state_dict)
+        state_dict = self._native_fused_linear_state_dict_to_hf(state_dict)
         if self.vision_encoder is None:
             return super().to_hf(state_dict)
 
