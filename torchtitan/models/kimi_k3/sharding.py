@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 DP = MeshAxisName.DP
 TP = MeshAxisName.TP
 
+
 def set_kimi_k3_sharding_config(
     config: "KimiK3Model.Config",
     *,
