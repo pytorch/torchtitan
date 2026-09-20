@@ -93,9 +93,10 @@ class Validator(BaseValidator):
 
         def __post_init__(self):
             BaseValidator.Config.__post_init__(self)
-            assert (
-                self.steps > 0 or self.steps == -1
-            ), "validation steps must be positive or -1"
+            if not (self.steps > 0 or self.steps == -1):
+                raise ValueError(
+                    f"validation steps must be positive or -1, got {self.steps}"
+                )
 
     # TODO: improve the constructor signature
     def __init__(
