@@ -5,33 +5,37 @@ Config-based sharding for MoE submodules, implemented in
 
 ## Overview
 
-The diagram below shows the DTensor placement flow through the MoE layer for
-the two supported expert-parallel configurations (SP on/off). Without EP, the
-routed experts are replicated across the dense TP axis instead of using ETP.
+The diagram below shows the MoE layer's SPMD layout flow using `spmd_types` for
+the two supported expert-parallel configurations (SP on/off). For MoE models,
+`expert_parallel_degree` must be at least `tensor_parallel_degree`.
 
 ![MoE Sharding](../../../assets/images/moe_sharding.png)
 
+[Excalidraw source](https://excalidraw.com/#json=fZ1o2BuwXSVIGQhXM5gbr,KHKKckUbQXm68uiS3i_L7w)
+
 ## Configurations
 
-"MoE input src -> dst" shows the input redistribution at the MoE boundary.
+"MoE input src → dst" shows the input redistribution at the MoE boundary.
+"Routed input src → dst" shows the redistribution before routed-expert
+dispatch and computation.
 "Routed expert weights" describes the routed expert weight placement.
 
-| Config | Routed expert mesh | Routed expert weights | MoE input src -> dst | MoE output |
-|--------|-------------------|----------------------|---------------------|------------|
-| EP on, SP on | sparse (EP/EFSDP) | `Shard(0)` on EP | `Shard(1)` -> `Shard(1)` | `Partial` -> `Shard(1)` |
-| EP on, SP off | sparse (EP/EFSDP) | `Shard(0)` on EP | `Replicate` -> `Replicate` | `Partial` -> `Replicate` |
+| Config | Routed expert mesh | Routed expert weights | MoE input src → dst | Routed input src → dst | MoE output |
+|--------|-------------------|----------------------|---------------------|------------------------|------------|
+| EP on, SP on | sparse (EP/EFSDP) | `Shard(0)` on EP | `Shard(0)` → `Shard(0)` | `Shard(0)` → `Shard(0)` | `Partial` → `Shard(0)` |
+| EP on, SP off | sparse (EP/EFSDP) | `Shard(0)` on EP | `Replicate` → `Replicate` | `Replicate` → `Shard(0)` | `Partial` → `Replicate` |
 
 ## Submodule sharding
 
 - **MoE wrapper**: input/output redistribution between `sp_layout` and
   `desired_input_layouts`. With EP, output is sequence-sharded or `Partial`
-  and redistributed to `sp_layout` at the boundary. Without EP, the replicated
-  output is redistributed to `sp_layout`.
+  and redistributed to `sp_layout` at the boundary. Without EP, TP/SP are
+  disabled and routed-expert activations remain replicated.
 - **Router gate**: weights `Replicate`, output stays DTensor.
-- **Shared experts** (w13/w2): dense-family TP plan. Colwise for w13 and
-  rowwise for w2. When EP is disabled, the `Partial` output is reduced to
-  `Replicate` before it is added to the replicated routed-expert output.
+- **Shared experts** (w13/w2): dense-family TP plan. `ColumnParallelLinear`
+  gathers the w13 input, and `RowParallelLinear` reduces the w2 output to the
+  routed-expert output layout before the two paths are added.
 - **Routed experts** (`RoutedExperts`): the local SPMD region runs
   dispatch/compute/combine on local tensors while checking its input and
   output layout contracts. The expert-weight `state_shardings` live on its
-  `GroupedExperts` child and are replicated across TP when EP is disabled.
+  `GroupedExperts` child and are unsharded when EP and dense TP are disabled.

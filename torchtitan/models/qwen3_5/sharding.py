@@ -40,7 +40,6 @@ from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
     set_routed_moe_sharding_config,
-    set_shared_moe_sharding_config,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
@@ -108,13 +107,6 @@ def _conv_weight_sharding() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
     )
-
-
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
-    "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
-}
 
 
 def set_qwen35_sharding_config(
@@ -206,7 +198,6 @@ def _set_qwen35_layer_sharding(
             moe_cfg,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
         if shared_experts is not None:
             assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
@@ -221,16 +212,31 @@ def set_sigmoid_gated_feed_forward_sharding_config(
     enable_ep: bool,
     enable_sp: bool,
 ) -> None:
-    """Configure Qwen shared experts and align their multiplicative gate."""
-    set_shared_moe_sharding_config(
-        shared_experts, enable_ep=enable_ep, enable_sp=enable_sp
-    )
-    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    gate_output_layout = (
+    """Gather once for Qwen's shared FFN and its multiplicative gate."""
+    input_layout = (
         dense_sequence_parallel_placement()
         if enable_ep and enable_sp
-        else replicated_input_layout
+        else dense_activation_placement(
+            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
+        )
     )
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    output_layout = (
+        dense_sequence_parallel_placement()
+        if enable_ep and enable_sp
+        else dense_activation_placement(
+            tp=spmd.P if enable_ep else spmd.R, cp=spmd.S(0)
+        )
+    )
+    shared_experts.sharding_config = ShardingConfig(
+        in_src_shardings={"x": input_layout},
+        in_dst_shardings={"x": replicated_input_layout},
+        out_src_shardings=output_layout,
+    )
+    shared_experts.w13.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
+    shared_experts.w2.sharding_config = rowwise_config(output_layout=output_layout)
     shared_experts.gate.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),
@@ -238,7 +244,11 @@ def set_sigmoid_gated_feed_forward_sharding_config(
         },
         in_src_shardings={"input": replicated_input_layout},
         out_src_shardings=replicated_input_layout,
-        out_dst_shardings=gate_output_layout,
+        out_dst_shardings=(
+            dense_sequence_parallel_placement()
+            if enable_ep and enable_sp
+            else replicated_input_layout
+        ),
     )
 
 

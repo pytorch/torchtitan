@@ -108,6 +108,12 @@ def build_and_swap_native_moe(
             each MoE-enabled layer (from ``prepare_native_moe_configs``).
         parallel_dims: Parallel dimensions for EP/TP mesh resolution.
     """
+    if parallel_dims.ep < parallel_dims.tp:
+        raise ValueError(
+            f"MoE models require expert_parallel_degree ({parallel_dims.ep}) to be "
+            "greater than or equal to tensor_parallel_degree "
+            f"({parallel_dims.tp})."
+        )
     enable_ep = parallel_dims.ep_enabled
     enable_sp = parallel_dims.tp_enabled
 
@@ -116,7 +122,6 @@ def build_and_swap_native_moe(
         if moe_config is None:
             continue
 
-        _, expert_layout = _get_expert_param_info()
         shared_experts = moe_config.shared_experts
         if shared_experts is not None and hasattr(shared_experts, "gate"):
             # Avoid loading Qwen3.5's optional model dependencies for other HF
@@ -131,7 +136,6 @@ def build_and_swap_native_moe(
                 moe_config,
                 enable_ep=enable_ep,
                 enable_sp=enable_sp,
-                expert_param_layout=expert_layout,
             )
             set_sigmoid_gated_feed_forward_sharding_config(
                 shared_experts, enable_ep=enable_ep, enable_sp=enable_sp
@@ -141,7 +145,6 @@ def build_and_swap_native_moe(
                 moe_config,
                 enable_ep=enable_ep,
                 enable_sp=enable_sp,
-                expert_param_layout=expert_layout,
             )
         root_sharding = moe_config.sharding_config
         assert root_sharding is not None
@@ -157,8 +160,8 @@ def build_and_swap_native_moe(
         )
         output_layout = (
             _hf_sequence_parallel_placement()
-            if enable_ep and enable_sp
-            else _hf_activation_placement(tp=spmd.P if enable_ep else spmd.R)
+            if enable_sp
+            else _hf_activation_placement(tp=spmd.P)
         )
         moe_config.sharding_config = replace(
             root_sharding,

@@ -175,8 +175,14 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
+            moe_configs = list(self.traverse(MoE.Config))
             ep = parallelism.expert_parallel_degree
-            for moe_fqn, moe, _, _ in self.traverse(MoE.Config):
+            if moe_configs and ep < tp:
+                raise ValueError(
+                    f"MoE models require expert_parallel_degree ({ep}) to be "
+                    f"greater than or equal to tensor_parallel_degree ({tp})."
+                )
+            for moe_fqn, moe, _, _ in moe_configs:
                 if moe.num_experts % ep != 0:
                     raise ValueError(
                         f"{moe_fqn}.num_experts ({moe.num_experts}) must be "

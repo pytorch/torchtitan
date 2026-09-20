@@ -63,7 +63,7 @@ def specialize_quantized_linear(
     """Compose quantized local compute with a synchronous TP boundary."""
     quantized_config_cls = quantized_cls.Config
 
-    class QuantizedParallelLinear(  # type: ignore[misc, valid-type]  # pyrefly: ignore [invalid-inheritance]
+    class QuantizedParallelLinear(
         _QuantizedLinearMixin,
         parallel_cls,  # pyrefly: ignore [invalid-inheritance]
         quantized_cls,

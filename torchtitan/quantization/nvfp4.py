@@ -251,7 +251,11 @@ try:
             )
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return self._linear(input, self.weight, self.bias)
+            return self._linear(
+                input,
+                cast(torch.Tensor, self.weight),
+                cast(torch.Tensor | None, self.bias),
+            )
 
 except ImportError:
     NVFP4Linear = None

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -61,7 +62,11 @@ try:
             return output
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return self._linear(input, self.weight, self.bias)
+            return self._linear(
+                input,
+                cast(torch.Tensor, self.weight),
+                cast(torch.Tensor | None, self.bias),
+            )
 
 except ImportError:
     Float8Linear = None

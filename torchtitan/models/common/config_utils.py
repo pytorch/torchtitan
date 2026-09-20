@@ -28,7 +28,6 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    Linear,
     RouterGateLinear,
     RowParallelLinear,
 )
@@ -282,9 +281,9 @@ def make_shared_expert_ffn_config(
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
 ) -> FeedForward.Config:
-    """Build a shared FFN with MoE-owned input and row-owned output TP."""
+    """Build a shared FFN whose projections own their TP collectives."""
     return FeedForward.Config(
-        w13=Linear.Config(
+        w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=2 * hidden_dim,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
