@@ -10,7 +10,10 @@ from unittest.mock import MagicMock
 import torch
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.flex_shard.dist_muon import DistMuon
+from torchtitan.distributed.flex_shard.dist_muon import (
+    _matrix_batch_views_from_shape,
+    DistMuon,
+)
 
 
 class TestDistMuonStorageValidation(unittest.TestCase):
@@ -37,6 +40,31 @@ class TestDistMuonStorageValidation(unittest.TestCase):
         ]
         validated_device = optimizer._validate_parameter_storage()
         self.assertEqual(validated_device, torch.device("cpu"))
+
+    def test_uniform_matrix_batches_preserve_storage_aliases(self):
+        backing = torch.arange(72).view(24, 3)
+        compute = backing[4:10]
+        expected_matrices = torch.stack((compute[:2], compute[2:4], compute[4:6]))
+        (view,) = _matrix_batch_views_from_shape(compute.shape, matrix_rows=2)
+        matrices = view.view_as_matrix_batch(compute)
+        torch.testing.assert_close(matrices, expected_matrices)
+
+        expected_backing = backing.clone()
+        expected_backing[6:8].fill_(-1)
+        matrices[1].fill_(-1)
+        torch.testing.assert_close(backing, expected_backing)
+
+    def test_matrix_batch_view_cannot_escape_supplied_tensor(self):
+        backing = torch.arange(24).view(8, 3)
+        (view,) = _matrix_batch_views_from_shape(torch.Size((6, 3)), matrix_rows=2)
+        with self.assertRaises(RuntimeError):
+            view.view_as_matrix_batch(backing[2:6])
+
+    def test_matrix_batch_view_rejects_noncontiguous_input(self):
+        compute = torch.arange(24).view(4, 6)[:, ::2]
+        (view,) = _matrix_batch_views_from_shape(compute.shape, matrix_rows=2)
+        with self.assertRaisesRegex(RuntimeError, "contiguous"):
+            view.view_as_matrix_batch(compute)
 
 
 if __name__ == "__main__":
