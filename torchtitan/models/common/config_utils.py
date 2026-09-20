@@ -55,12 +55,11 @@ DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
 
 
 def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
-    """Build an initializer for an interleaved 2D gate/up linear weight."""
+    """Build an initializer for a stacked gate/up linear weight."""
 
     def _init(t: torch.Tensor) -> None:
-        gate_up = t.unflatten(0, (-1, 2))
-        gate_init(gate_up[:, 0])
-        up_init(gate_up[:, 1])
+        gate_init(t[0])
+        up_init(t[1])
 
     return _init
 
@@ -130,7 +129,7 @@ def fused_qkv_param_init(
     ``R = heads_per_kv + 2``. This preserves logical initialization order and
     matches the packing used when loading separate checkpoint tensors.
 
-    Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) param --
+    Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) matrix --
     e.g. a ``Shard(0)`` DTensor for the colwise wqkv. ``t.new_empty(...)``
     returns ``Replicate`` DTensors, so each ``base_init`` runs on the full tensor
     and draws the same values on every rank (the weights do not depend on the
@@ -298,7 +297,8 @@ def make_ffn_config(
     return FeedForward.Config(
         w13=w13_cls.Config(
             in_features=dim,
-            out_features=2 * hidden_dim,
+            out_features=hidden_dim,
+            num_linears=2,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
         w2=w2_cls.Config(

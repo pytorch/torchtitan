@@ -14,7 +14,9 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.qwen3.model import Qwen3Model
 
 
@@ -169,6 +171,162 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         self.assertEqual(_get_expert_shard_dim(model), 0)
+
+
+class TestLinearStackingDistributed(DTensorTestBase):
+    """Distributed coverage for stacked FFNs and ordinary linear weights."""
+
+    @property
+    def world_size(self):
+        return 4
+
+    @with_comms
+    def test_w13_shards_dim_one(self):
+        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
+
+        config = model_registry("debugmodel").model
+        model = config.build().to(self.device_type)
+        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+        )
+
+        w13 = model.layers["0"].feed_forward.w13
+        self.assertIsInstance(w13, Linear)
+        shard_dims = {
+            placement.dim
+            for placement in w13.weight.placements
+            if isinstance(placement, Shard)
+        }
+        self.assertEqual(shard_dims, {1})
+        state_dict = model.state_dict()
+        self.assertEqual(
+            state_dict["layers.0.feed_forward.w13.weight"].shape,
+            (2, 768, 256),
+        )
+
+        adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
+        hf_state_dict = adapter.to_hf(state_dict)
+        gate = hf_state_dict["model.layers.0.mlp.gate_proj.weight"]
+        gate_shard_dims = {
+            placement.dim
+            for placement in gate.placements
+            if isinstance(placement, Shard)
+        }
+        self.assertEqual(gate.shape, (768, 256))
+        self.assertEqual(gate_shard_dims, {0})
+
+        state_dict = adapter.from_hf(hf_state_dict)
+        restored_w13 = state_dict["layers.0.feed_forward.w13.weight"]
+        restored_shard_dims = {
+            placement.dim
+            for placement in restored_w13.placements
+            if isinstance(placement, Shard)
+        }
+        self.assertEqual(restored_w13.shape, (2, 768, 256))
+        self.assertEqual(restored_shard_dims, {1})
+        model.load_state_dict(state_dict)
+
+    @with_comms
+    def test_tp_fsdp_initializes_gate_and_up_separately(self):
+        from torchtitan.models.common.config_utils import fused_gate_up_param_init
+        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3.sharding import set_llama3_sharding_config
+
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=2,
+            cp=1,
+            tp=2,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+        )
+        parallel_dims.build_mesh()
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+
+        sharded_config = model_registry("debugmodel").model
+        sharded_config.layers[0].feed_forward.w13.param_init = fused_gate_up_param_init(
+            {"weight": lambda tensor: torch.nn.init.constant_(tensor, 1)},
+            {"weight": lambda tensor: torch.nn.init.constant_(tensor, 3)},
+        )
+        set_llama3_sharding_config(sharded_config, enable_sp=True)
+        with torch.device("meta"):
+            sharded = sharded_config.build()
+        sharded.parallelize(parallel_dims)
+        apply_fsdp_to_decoder(
+            sharded,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+            dp_mesh_dims=dp_mesh_dims,
+        )
+        sharded.to_empty(device=self.device_type)
+        sharded.layers["0"].feed_forward.w13.init_states()
+
+        actual_w13 = sharded.layers["0"].feed_forward.w13.weight.full_tensor()
+        torch.testing.assert_close(actual_w13[0], torch.ones_like(actual_w13[0]))
+        torch.testing.assert_close(actual_w13[1], 3 * torch.ones_like(actual_w13[1]))
+
+        state_dict = sharded.state_dict()
+        self.assertEqual(
+            state_dict["layers.0.feed_forward.w13.weight"].shape, (2, 768, 256)
+        )
+        sharded.load_state_dict(state_dict)
+
+    @with_comms
+    def test_deepseek_v4_tp_keeps_attention_sink_two_dimensional(self):
+        from torchtitan.models.deepseek_v4 import model_registry
+        from torchtitan.models.deepseek_v4.sharding import (
+            set_deepseek_v4_sharding_config,
+        )
+
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=2,
+            cp=1,
+            tp=2,
+            pp=1,
+            ep=2,
+            world_size=self.world_size,
+        )
+        parallel_dims.build_mesh()
+        config = model_registry("debugmodel").model
+        set_deepseek_v4_sharding_config(config, enable_sp=True, enable_ep=True)
+        model = config.build().to(self.device_type)
+
+        model.parallelize(parallel_dims)
+
+        self.assertEqual(model.layers["0"].attention.attn_sink.weight.ndim, 2)
+
+    @with_comms
+    def test_qwen3_tied_hf_state_dict_loads_after_fsdp(self):
+        from torchtitan.models.qwen3 import model_registry
+        from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
+
+        config = model_registry("debugmodel").model
+        model = config.build().to(self.device_type)
+        model.init_states()
+        dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
+        apply_fsdp_to_decoder(
+            model,
+            dp_mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            pp_enabled=False,
+        )
+
+        adapter = Qwen3StateDictAdapter(config, hf_assets_path=None)
+        state_dict = adapter.from_hf(adapter.to_hf(model.state_dict()))
+        self.assertEqual(state_dict["tok_embeddings.weight"].ndim, 2)
+        self.assertEqual(state_dict["lm_head.weight"].ndim, 2)
+        model.load_state_dict(state_dict)
 
 
 if __name__ == "__main__":

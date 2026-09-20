@@ -167,6 +167,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         return False
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        state_dict = self._native_fused_linears_to_hf(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
         delegated_state_dict = {}
@@ -229,4 +230,4 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
         if delegated_hf_state_dict:
             state_dict.update(super().from_hf(delegated_hf_state_dict))
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)

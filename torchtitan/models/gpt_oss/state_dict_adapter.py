@@ -84,6 +84,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         Warning: Conversion does not support saving to mxfp4 quantization format.
                  One can save into unquantized hf checkpoints with last_save_in_hf = true.
         """
+        state_dict = self._native_fused_linears_to_hf(state_dict)
 
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
@@ -155,4 +156,4 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 else torch.zeros(moe_config.num_experts, dtype=torch.float32)
             )
 
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)
