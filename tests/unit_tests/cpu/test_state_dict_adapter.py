@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.components.checkpointer.base import ModelWrapper
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
@@ -321,3 +322,71 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
                 torch.testing.assert_close(
                     roundtrip_state_dict[key], value, rtol=0, atol=0
                 )
+
+
+class Llama3StateDictAdapterTest(unittest.TestCase):
+    """Regression tests for the q/k permute's handling of DTensor inputs.
+
+    ``_permute``/``_reverse_permute`` do a head-splitting ``view()`` on the
+    q/k projection weights. In the live save/load path those weights are
+    DTensors that FSDP shards along dim 0, the exact dim the view unflattens,
+    and an FSDP degree that does not evenly divide the head count makes the
+    unflatten invalid on the (still-sharded) DTensor directly.
+    """
+
+    def test_permute_does_not_raise_when_fsdp_degree_exceeds_head_count(self) -> None:
+        # llama3 debugmodel has 16 attention heads; sharding a (256, 256) q/k
+        # weight over a 32-rank mesh reproduces the production failure (e.g.
+        # llama3-8B's 8 KV heads break the same way above an 8-way FSDP
+        # degree). A "fake" process group is enough here: no real collectives
+        # run, but the DTensor op dispatch that raised
+        # "Cannot unflatten unevenly sharded tensor" still executes.
+        world_size = 32
+        dist.init_process_group(
+            "fake", store=FakeStore(), rank=0, world_size=world_size
+        )
+        self.addCleanup(dist.destroy_process_group)
+        mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp",))
+
+        build_config, max_context_length = llama3_configs["debugmodel"]
+        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
+
+        full = torch.arange(256 * 256, dtype=torch.float32).reshape(256, 256)
+        local_shard = full[: 256 // world_size].clone()
+        sharded_weight = DTensor.from_local(
+            local_shard, mesh, (Shard(0),), run_check=False
+        )
+
+        hf_state_dict = adapter.to_hf(
+            {"layers.0.attention.qkv_linear.wq.weight": sharded_weight}
+        )
+        out = hf_state_dict["model.layers.0.self_attn.q_proj.weight"]
+        self.assertIsInstance(out, DTensor)
+        self.assertEqual(out.shape, torch.Size((256, 256)))
+
+    def test_permute_roundtrip_preserves_dtensor_values_and_placement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            dist.init_process_group(
+                "gloo",
+                init_method=f"file://{directory}/rendezvous",
+                rank=0,
+                world_size=1,
+            )
+            try:
+                mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("dp",))
+                build_config, max_context_length = llama3_configs["debugmodel"]
+                config = build_config(attn_backend="flex", seq_len=max_context_length)
+                adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
+
+                full = torch.arange(256 * 256, dtype=torch.float32).reshape(256, 256)
+                weight = DTensor.from_local(full, mesh, (Shard(0),), run_check=False)
+                key = "layers.0.attention.qkv_linear.wq.weight"
+
+                restored = adapter.from_hf(adapter.to_hf({key: weight}))
+                out = restored[key]
+                self.assertIsInstance(out, DTensor)
+                self.assertEqual(out.placements, weight.placements)
+                torch.testing.assert_close(out.to_local(), full, rtol=0, atol=0)
+            finally:
+                dist.destroy_process_group()
