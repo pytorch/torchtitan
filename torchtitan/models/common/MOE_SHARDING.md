@@ -5,11 +5,13 @@ Config-based sharding for MoE submodules, implemented in
 
 ## Overview
 
-The diagram below shows the DTensor placement flow through the MoE layer for
+The diagram below shows the MoE layer's SPMD layout flow using `spmd_types` for
 the two supported expert-parallel configurations (SP on/off). Without EP, the
 routed experts are replicated across the dense TP axis instead of using ETP.
 
 ![MoE Sharding](../../../assets/images/moe_sharding.png)
+
+[Excalidraw source](https://excalidraw.com/#json=kHCMMpLUWf7B4Nx0ZndD5,IVYsWt7pnseQuK8wCsWWHw)
 
 ## Configurations
 
