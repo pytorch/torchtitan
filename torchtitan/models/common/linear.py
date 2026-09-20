@@ -8,11 +8,12 @@
 
 ``Linear`` uses diamond inheritance (``nn.Linear`` + ``Module``) so that:
 - The module hierarchy stays flat (no extra wrapper layer).
-- All ``nn.Linear`` logic (forward, state_dict, etc.) is reused as-is.
+- Standard ``nn.Linear`` parameter and state-dict behavior is retained.
 - The ``Module`` protocol is satisfied and ``build()`` is inherited
   from ``Configurable.Config``.
 """
 
+import math
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -30,20 +31,77 @@ from torchtitan.protocols.module import Module
 
 
 class Linear(nn.Linear, Module):
-    """Configurable nn.Linear."""
+    """Configurable linear that can store multiple stacked projections.
+
+    A single projection keeps the standard ``[out_features, in_features]``
+    parameter shape. Multiple projections use
+    ``[num_linears, out_features, in_features]``, keeping each projection
+    contiguous for blockwise weight quantization, and return
+    ``[..., num_linears, out_features]``.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         in_features: int
         out_features: int
+        num_linears: int = 1
         bias: bool = False
 
     def __init__(self, config: Config):
         super().__init__(
             config.in_features,
-            config.out_features,
+            config.num_linears * config.out_features,
             bias=config.bias,
         )
+        self.out_features = config.out_features
+        self.num_linears = config.num_linears
+        if config.num_linears > 1:
+            self.weight = nn.Parameter(
+                self.weight.detach().unflatten(
+                    0, (config.num_linears, config.out_features)
+                ),
+                requires_grad=self.weight.requires_grad,
+            )
+            if self.bias is not None:
+                self.bias = nn.Parameter(
+                    self.bias.detach().unflatten(
+                        0, (config.num_linears, config.out_features)
+                    ),
+                    requires_grad=self.bias.requires_grad,
+                )
+
+    def reset_parameters(self) -> None:
+        # Flattening handles both ordinary and stacked projections while
+        # keeping fan-in equal to in_features.
+        nn.init.kaiming_uniform_(self.weight.flatten(0, -2), a=math.sqrt(5))
+        if self.bias is not None:
+            bound = 1 / math.sqrt(self.in_features)
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def _flatten_weight_and_bias(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Flatten stacked parameters for one linear operation."""
+        weight = self.weight.flatten(0, -2)
+        bias = None if self.bias is None else self.bias.flatten()
+        return weight, bias
+
+    def _unflatten_output(self, output: torch.Tensor) -> torch.Tensor:
+        """Restore the logical stacked output dimensions after a linear operation."""
+        if self.num_linears == 1:
+            return output
+        return output.unflatten(-1, self.weight.shape[:-1])
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        weight, bias = self._flatten_weight_and_bias()
+        output = F.linear(input, weight, bias)
+        return self._unflatten_output(output)
+
+    def extra_repr(self) -> str:
+        result = nn.Linear.extra_repr(self)
+        if self.num_linears > 1:
+            result += f", num_linears={self.num_linears}"
+        return result
 
 
 class CastLinear(Linear):
@@ -66,10 +124,13 @@ class CastLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # The optimizer updates the weight each step, so training cannot cache
         # the upcast copy. Inference may be able to cache it between syncs.
-        bias = None if self.bias is None else self.bias.to(self.compute_dtype)
-        return F.linear(
-            input.to(self.compute_dtype), self.weight.to(self.compute_dtype), bias
+        weight, bias = self._flatten_weight_and_bias()
+        output = F.linear(
+            input.to(self.compute_dtype),
+            weight.to(self.compute_dtype),
+            None if bias is None else bias.to(self.compute_dtype),
         )
+        return self._unflatten_output(output)
 
 
 @spmd.register_local_autograd_function
@@ -137,10 +198,11 @@ class RouterGateLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output_TE = _RouterGateLinearFunction.apply(input, self.weight)
-        if self.bias is not None:
-            output_TE = output_TE + self.bias.float()
-        return output_TE
+        weight, bias = self._flatten_weight_and_bias()
+        output_TE = _RouterGateLinearFunction.apply(input, weight)
+        if bias is not None:
+            output_TE = output_TE + bias.float()
+        return self._unflatten_output(output_TE)
 
 
 class PartialBiasRowwiseLinear(Linear):
@@ -156,7 +218,7 @@ class PartialBiasRowwiseLinear(Linear):
         super().__init__(config)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        bias = self.bias
+        weight, bias = self._flatten_weight_and_bias()
         assert bias is not None
         tp_group = spmd_mesh_group("tp")
         if tp_group is not None:
@@ -167,7 +229,8 @@ class PartialBiasRowwiseLinear(Linear):
                 dst=spmd.P,
                 expert_mode=True,
             )
-        return F.linear(input, self.weight, bias)
+        output = F.linear(input, weight, bias)
+        return self._unflatten_output(output)
 
 
 __all__ = [
