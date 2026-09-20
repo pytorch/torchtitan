@@ -10,7 +10,7 @@ import torch
 
 from torchtitan.distributed.flex_shard.dist_muon import (
     _apply_muon_update,
-    _compute_muon_update,
+    _compute_muon_direction,
     _MatrixBatchView,
 )
 
@@ -35,7 +35,7 @@ class TestMuonMath(unittest.TestCase):
             matrix.grad = matrix_gradient.clone()
 
         compute = gradient.clone()
-        _compute_muon_update(
+        _compute_muon_direction(
             compute,
             matrix_views=(
                 _MatrixBatchView(
