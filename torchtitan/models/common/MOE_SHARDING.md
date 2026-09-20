@@ -16,12 +16,14 @@ the two supported expert-parallel configurations (SP on/off). For MoE models,
 ## Configurations
 
 "MoE input src → dst" shows the input redistribution at the MoE boundary.
+"Routed input src → dst" shows the redistribution before routed-expert
+dispatch and computation.
 "Routed expert weights" describes the routed expert weight placement.
 
-| Config | Routed expert mesh | Routed expert weights | MoE input src → dst | MoE output |
-|--------|-------------------|----------------------|---------------------|------------|
-| EP on, SP on | sparse (EP/EFSDP) | `Shard(0)` on EP | `Shard(1)` → `Shard(1)` | `Partial` → `Shard(1)` |
-| EP on, SP off | sparse (EP/EFSDP) | `Shard(0)` on EP | `Replicate` → `Replicate` | `Partial` → `Replicate` |
+| Config | Routed expert mesh | Routed expert weights | MoE input src → dst | Routed input src → dst | MoE output |
+|--------|-------------------|----------------------|---------------------|------------------------|------------|
+| EP on, SP on | sparse (EP/EFSDP) | `Shard(0)` on EP | `Shard(0)` → `Shard(0)` | `Shard(0)` → `Shard(0)` | `Partial` → `Shard(0)` |
+| EP on, SP off | sparse (EP/EFSDP) | `Shard(0)` on EP | `Replicate` → `Replicate` | `Replicate` → `Shard(0)` | `Partial` → `Replicate` |
 
 ## Submodule sharding
 
