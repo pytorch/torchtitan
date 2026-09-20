@@ -50,12 +50,6 @@ if TYPE_CHECKING:
 DP = MeshAxisName.DP
 TP = MeshAxisName.TP
 
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
-    "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
-}
-
 
 def set_kimi_k3_sharding_config(
     config: "KimiK3Model.Config",
@@ -227,7 +221,6 @@ def _set_latent_moe_sharding(
         moe_cfg,
         enable_ep=enable_ep,
         enable_sp=enable_sp,
-        expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
     )
     token_shard = dense_sequence_parallel_placement()
     routed_experts = moe_cfg.routed_experts.sharding_config
@@ -247,24 +240,13 @@ def _set_latent_moe_sharding(
             "x_TD": token_shard,
         }
     moe_cfg.routed_down.sharding_config = routed_down
-    token_sharded = enable_ep or enable_sp
+    token_sharded = enable_ep
     routed_norm = norm_config(enable_sp=token_sharded)
     routed_up = _tp_unsharded_weight_config(token_sharded=token_sharded)
     partial = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     if enable_ep and not enable_sp:
         routed_experts.out_dst_shardings = token_shard
         routed_up.out_src_shardings = token_shard
-        routed_up.out_dst_shardings = partial
-    elif not enable_sp:
-        # The experts' Partial output is reduced at the norm's boundary;
-        # routed_up re-enters Partial so the MoE exit reduces it once.
-        routed_norm.in_src_shardings = {"x": partial}
-        routed_norm.in_dst_shardings = {
-            "x": dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-        }
-        routed_up.out_src_shardings = dense_activation_placement(
-            tp=spmd.I, cp=spmd.S(0)
-        )
         routed_up.out_dst_shardings = partial
     moe_cfg.routed_norm.sharding_config = routed_norm
     moe_cfg.routed_up.sharding_config = routed_up

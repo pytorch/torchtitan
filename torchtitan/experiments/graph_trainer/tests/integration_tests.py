@@ -380,10 +380,11 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "torchtitan.overrides.fused_swiglu.fused_swiglu",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
                 ],
             ],
-            "aot_fx_trace deepseek_v3 fused MLA+SwiGLU FSDP+TP",
-            "aot_fx_trace_deepseek_v3_fused_mla_swiglu_fsdp_tp",
+            "aot_fx_trace deepseek_v3 fused MLA+SwiGLU FSDP+TP+EP",
+            "aot_fx_trace_deepseek_v3_fused_mla_swiglu_fsdp_tp_ep",
             ngpu=4,
         ),
         # TODO: Re-enable after fixing the separate CP+EP mixed Tensor/DTensor

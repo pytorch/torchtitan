@@ -16,10 +16,13 @@ from torchtitan.models.qwen3 import model_registry
 
 class TestExpertParallelConfigValidation(unittest.TestCase):
     @staticmethod
-    def _config(ep: int):
+    def _config(ep: int, tp: int = 1):
         model_config = model_registry("debugmodel_moe").model
         runtime_config = SimpleNamespace(
-            parallelism=ParallelismConfig(expert_parallel_degree=ep)
+            parallelism=ParallelismConfig(
+                expert_parallel_degree=ep,
+                tensor_parallel_degree=tp,
+            )
         )
         return model_config, runtime_config
 
@@ -38,6 +41,39 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             r"layers\.1\.moe\.num_experts \(63\).*expert_parallel_degree \(8\)",
         ):
             model_config.update_from_config(config=runtime_config)
+
+    def test_tensor_parallel_requires_expert_parallel(self):
+        model_config, runtime_config = self._config(ep=1, tp=2)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"expert_parallel_degree \(1\).*tensor_parallel_degree \(2\)",
+        ):
+            model_config.update_from_config(config=runtime_config)
+
+        self.assertEqual(runtime_config.parallelism.expert_parallel_degree, 1)
+
+    def test_tensor_parallel_preserves_explicit_expert_parallel(self):
+        model_config, runtime_config = self._config(ep=4, tp=2)
+        model_config.update_from_config(config=runtime_config)
+
+        self.assertEqual(runtime_config.parallelism.expert_parallel_degree, 4)
+
+    def test_moe_without_tensor_parallel_preserves_sequence_parallel_config(self):
+        model_config, runtime_config = self._config(ep=1, tp=1)
+        model_config.update_from_config(config=runtime_config)
+
+        self.assertTrue(runtime_config.parallelism.enable_sequence_parallel)
+
+    def test_dense_tensor_parallel_does_not_require_expert_parallel(self):
+        model_config = model_registry("debugmodel").model
+        runtime_config = SimpleNamespace(
+            parallelism=ParallelismConfig(tensor_parallel_degree=2)
+        )
+        model_config.update_from_config(config=runtime_config)
+
+        self.assertEqual(runtime_config.parallelism.expert_parallel_degree, 1)
+        self.assertTrue(runtime_config.parallelism.enable_sequence_parallel)
 
 
 class TestPermute(unittest.TestCase):
