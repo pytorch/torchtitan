@@ -127,6 +127,7 @@ class Validator(BaseValidator):
         self.dl_config = replace(config.dataloader, repeat=config.steps != -1)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
+        check_steps_compatible_with_dp(config.steps, dp_world_size=self.dp_world_size)
         self.seq_len = seq_len
         self.num_tokens_per_microbatch = num_tokens_per_microbatch
         self.validation_context = validation_context
@@ -293,6 +294,17 @@ class Validator(BaseValidator):
         # Set model back to train mode
         for model in model_parts:
             model.train()
+
+
+def check_steps_compatible_with_dp(steps: int, *, dp_world_size: int) -> None:
+    """Raise if validation.steps=-1 is used with data-parallel degree > 1."""
+    if steps == -1 and dp_world_size > 1:
+        raise ValueError(
+            "validation.steps=-1 consumes the finite dataset and requires "
+            "an effective data-parallel degree of 1, got "
+            f"{dp_world_size}. Set validation.steps to a positive count "
+            "or run with data-parallel degree 1."
+        )
 
 
 def iterate_and_close_dataloader(

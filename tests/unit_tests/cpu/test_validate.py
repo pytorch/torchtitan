@@ -15,7 +15,7 @@ import torch.nn as nn
 from torchtitan.components import validate as validate_module
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.validate import Validator
+from torchtitan.components.validate import check_steps_compatible_with_dp, Validator
 from torchtitan.models.flux import validate as flux_validate_module
 from torchtitan.models.flux.flux_datasets import FluxTrainingMicrobatch
 from torchtitan.models.flux.validate import FluxValidator
@@ -275,3 +275,13 @@ def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
         validator.validate([_EchoModel()], step=1)
 
     assert loader.closed
+
+
+def test_check_steps_incompatible_with_dp():
+    with pytest.raises(ValueError, match="validation.steps=-1"):
+        check_steps_compatible_with_dp(-1, dp_world_size=2)
+
+
+def test_check_steps_compatible_with_dp():
+    check_steps_compatible_with_dp(-1, dp_world_size=1)
+    check_steps_compatible_with_dp(10, dp_world_size=8)
