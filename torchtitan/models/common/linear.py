@@ -80,17 +80,9 @@ class Linear(nn.Linear, Module):
 
     def _flatten_weight_and_bias(
         self,
-        *,
-        weight: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Flatten stacked parameters for one linear operation.
-
-        Tensor-subclass consumers may pass a weight they have already read so
-        a parameterization is not evaluated a second time.
-        """
-        if weight is None:
-            weight = self.weight
-        weight = weight.flatten(0, -2)
+        """Flatten stacked parameters for one linear operation."""
+        weight = self.weight.flatten(0, -2)
         bias = None if self.bias is None else self.bias.flatten()
         return weight, bias
 

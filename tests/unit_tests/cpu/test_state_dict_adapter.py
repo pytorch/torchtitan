@@ -58,7 +58,7 @@ class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
         torch.testing.assert_close(state_dict["experts.w13"], fused)
 
 
-class Llama3StateDictAdapterTest(unittest.TestCase):
+class Llama3FusedLinearStateDictAdapterTest(unittest.TestCase):
     def test_hf_roundtrip_converts_native_fused_feed_forward(self) -> None:
         build_config, max_context_length = llama3_configs["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
@@ -324,7 +324,7 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
                 )
 
 
-class Llama3StateDictAdapterTest(unittest.TestCase):
+class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
     """Regression tests for the q/k permute's handling of DTensor inputs.
 
     ``_permute``/``_reverse_permute`` do a head-splitting ``view()`` on the
