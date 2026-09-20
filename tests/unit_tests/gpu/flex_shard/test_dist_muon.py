@@ -14,6 +14,7 @@ import torch
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
+from torch.testing._internal.common_utils import wrapDeterministicFlagAPITest
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -39,6 +40,103 @@ from torchtitan.distributed.flex_shard.dist_muon import (
 pytestmark = pytest.mark.multi_gpu
 
 
+@wrapDeterministicFlagAPITest
+def _assert_native_batch_row_redistribution(
+    test_case: DTensorTestBase, *, shape: tuple[int, int, int], atol: float = 0
+) -> None:
+    torch.manual_seed(42)
+    torch.use_deterministic_algorithms(True)
+    mesh = init_device_mesh(
+        test_case.device_type,
+        (test_case.world_size,),
+        mesh_dim_names=("dp_shard",),
+    )
+    device = torch.device(test_case.device_type, test_case.rank)
+    value = torch.randn(shape, device=device)
+    inputs = torch.randn(shape[-1], 11, device=device)
+    target = torch.randn(shape[0], shape[1], 11, device=device)
+    fqn = "layers.0.feed_forward.w13.weight"
+    parameters = []
+    optimizers = []
+    for compute_sharding in (Owned(), Shard(0)):
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), mesh, (Shard(1),))
+        )
+        optimizer = build_dist_muon(
+            [{"params": [parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": compute_sharding},
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=(fqn,))],
+            lr=0.03,
+            weight_decay=0.2,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=5,
+        )
+        parameters.append(parameter)
+        optimizers.append(optimizer)
+
+    sharded_optimizer = optimizers[1]
+    compute_layout = sharded_optimizer._parameter_compute_layouts[0]
+    test_case.assertIsNone(compute_layout.compute_view)
+    test_case.assertEqual(compute_layout.global_compute_shape, torch.Size(shape))
+    bucket_plan = sharded_optimizer._bucket_plans[0]
+    compute_partition = bucket_plan.redistribution_plans[0].compute_partition(
+        bucket_plan.group.local_participant
+    )
+    num_local_matrices, _ = Shard.local_shard_size_and_offset(
+        shape[0], test_case.world_size, test_case.rank
+    )
+    # Compute ranks receive complete matrices, including an empty batch when
+    # there are fewer matrices than ranks. Storage keeps shards of every matrix.
+    test_case.assertEqual(
+        compute_partition.tensor_shape, (num_local_matrices, *shape[1:])
+    )
+    test_case.assertEqual(parameters[1].to_local().shape[0], shape[0])
+
+    for _ in range(10):
+        losses = []
+        gradients = []
+        grad_norms = []
+        for parameter, optimizer in zip(parameters, optimizers, strict=True):
+            optimizer.zero_grad(set_to_none=True)
+            loss = (parameter.full_tensor() @ inputs - target).square().mean()
+            loss.backward()
+            losses.append(loss.detach())
+            gradients.append(parameter.grad.full_tensor())
+            grad_norms.append(gradients[-1].norm())
+
+        torch.testing.assert_close(losses[1], losses[0], rtol=0, atol=atol)
+        torch.testing.assert_close(grad_norms[1], grad_norms[0], rtol=0, atol=atol)
+        torch.testing.assert_close(
+            gradients[1],
+            gradients[0],
+            rtol=0,
+            atol=atol,
+        )
+        for optimizer in optimizers:
+            optimizer.step()
+
+        # The inverse redistribution must return the update to the original
+        # uneven row shards, while persistent momentum stays in storage layout.
+        torch.testing.assert_close(
+            parameters[1].full_tensor(), parameters[0].full_tensor(), rtol=0, atol=atol
+        )
+        owned_momentum = optimizers[0].state[parameters[0]]["momentum_buffer"]
+        sharded_momentum = optimizers[1].state[parameters[1]]["momentum_buffer"]
+        torch.testing.assert_close(
+            sharded_momentum.full_tensor(),
+            owned_momentum.full_tensor(),
+            rtol=0,
+            atol=atol,
+        )
+        test_case.assertEqual(parameters[1].placements, (Shard(1),))
+        test_case.assertEqual(sharded_momentum.placements, (Shard(1),))
+
+
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDistMuon(DTensorTestBase):
     @property
@@ -48,6 +146,16 @@ class TestDistMuon(DTensorTestBase):
     @property
     def device_type(self):
         return "cuda"
+
+    @with_comms
+    def test_native_batch_shard0_matches_owned(self):
+        _assert_native_batch_row_redistribution(self, shape=(2, 7, 5))
+
+    @with_comms
+    def test_native_batch_shard0_matches_owned_with_uneven_batches(self):
+        # Changing the BF16 GEMM batch size can change reduction order. On H100,
+        # this case differs by one FP32 ULP after ten steps.
+        _assert_native_batch_row_redistribution(self, shape=(3, 5, 7), atol=1e-6)
 
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(self):
@@ -291,6 +399,21 @@ class TestDistMuon(DTensorTestBase):
             )
         else:
             self.assertIsNone(captured_compute)
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistMuonEmptyComputeParticipants(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_native_batch_shard0_matches_owned_with_empty_compute(self):
+        _assert_native_batch_row_redistribution(self, shape=(2, 7, 5))
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
