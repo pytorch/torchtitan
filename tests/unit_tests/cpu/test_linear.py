@@ -22,6 +22,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.spmd_types import (
+    register_module_forward_spmd_types,
     set_current_module_forward_spmd_types,
     set_current_spmd_mesh,
 )
@@ -185,8 +186,8 @@ class TestPartialBiasRowwiseLinear(unittest.TestCase):
         torch.testing.assert_close(actual, expected)
 
 
-class TestTensorParallelLinearContext(unittest.TestCase):
-    def test_collective_types_follow_module_spmd_context(self):
+class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
+    def test_collective_types_follow_module_forward_types(self):
         input = torch.randn(3, 4)
         tp_group = object()
 
@@ -204,12 +205,13 @@ class TestTensorParallelLinearContext(unittest.TestCase):
                     in_features=4,
                     out_features=2,
                 ).build()
+                context_id = register_module_forward_spmd_types(
+                    input_types={"input": SpmdType({"tp": expected_src})},
+                    output_type=SpmdType({"tp": expected_dst}),
+                )
 
                 with (
-                    set_current_module_forward_spmd_types(
-                        input_types={"input": SpmdType({"tp": expected_src})},
-                        output_type=SpmdType({"tp": expected_dst}),
-                    ),
+                    set_current_module_forward_spmd_types(context_id),
                     patch.object(
                         linear_module,
                         "spmd_mesh_group",
@@ -268,13 +270,14 @@ class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):
         )
         linear.weight = nn.Parameter(weight_dtensor.to_local())
         linear.bias = nn.Parameter(bias.detach().clone())
+        context_id = register_module_forward_spmd_types(
+            input_types=None,
+            output_type=SpmdType({"tp": spmd.I}),
+        )
 
         with (
             set_current_spmd_mesh(mesh),
-            set_current_module_forward_spmd_types(
-                input_types=None,
-                output_type=SpmdType({"tp": spmd.I}),
-            ),
+            set_current_module_forward_spmd_types(context_id),
         ):
             linear._parameters["bias"] = spmd.assert_type(
                 linear.bias, {tp_group: spmd.I}

@@ -19,6 +19,7 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.spmd_types import (
     current_module_forward_input_spmd_type,
     current_module_forward_output_spmd_type,
+    register_module_forward_spmd_types,
     set_current_module_forward_spmd_types,
 )
 from torchtitan.distributed.utils import init_distributed
@@ -87,21 +88,19 @@ def test_dist_sum_tensor_waits_for_distributed_result():
 
 
 def test_module_spmd_context_exposes_forward_types() -> None:
-    outer_input = SpmdType({"tp": spmd.S(0)})
-    outer_output = SpmdType({"tp": spmd.S(0)})
-    inner_input = SpmdType({"tp": spmd.I})
-    inner_output = SpmdType({"tp": spmd.P})
+    outer_context_id = register_module_forward_spmd_types(
+        input_types={"x": SpmdType({"tp": spmd.S(0)})},
+        output_type=SpmdType({"tp": spmd.S(0)}),
+    )
+    inner_context_id = register_module_forward_spmd_types(
+        input_types={"input": SpmdType({"tp": spmd.I})},
+        output_type=SpmdType({"tp": spmd.P}),
+    )
 
-    with set_current_module_forward_spmd_types(
-        input_types={"x": outer_input},
-        output_type=outer_output,
-    ):
+    with set_current_module_forward_spmd_types(outer_context_id):
         assert current_module_forward_input_spmd_type("x", "tp") == spmd.S(0)
         assert current_module_forward_output_spmd_type("tp") == spmd.S(0)
-        with set_current_module_forward_spmd_types(
-            input_types={"input": inner_input},
-            output_type=inner_output,
-        ):
+        with set_current_module_forward_spmd_types(inner_context_id):
             assert current_module_forward_input_spmd_type("input", "tp") == spmd.I
             assert current_module_forward_output_spmd_type("tp") == spmd.P
         assert current_module_forward_input_spmd_type("x", "tp") == spmd.S(0)

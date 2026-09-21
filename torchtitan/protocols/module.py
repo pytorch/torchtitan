@@ -24,6 +24,7 @@ from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     _per_axis_types,
     current_spmd_mesh,
+    register_module_forward_spmd_types,
     set_current_module_forward_spmd_types,
     set_current_spmd_mesh,
     spmd_axes,
@@ -291,14 +292,15 @@ class Module(nn.Module, Configurable):
             **(sharding_config.in_src_shardings or {}),
             **(sharding_config.in_dst_shardings or {}),
         }
+        forward_spmd_context_id = register_module_forward_spmd_types(
+            input_types=forward_input_types or None,
+            output_type=sharding_config.out_src_shardings,
+        )
 
         def forward_with_redistribution(*args, **kwargs):
             assert sharding_config is not None
             args, kwargs = self._redistribute_inputs(args, kwargs)
-            with set_current_module_forward_spmd_types(
-                input_types=forward_input_types or None,
-                output_type=sharding_config.out_src_shardings,
-            ):
+            with set_current_module_forward_spmd_types(forward_spmd_context_id):
                 outputs = fn(*args, **kwargs)
             return self._redistribute_outputs(outputs)
 
