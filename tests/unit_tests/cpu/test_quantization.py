@@ -71,6 +71,43 @@ def test_float8_converter_rejects_router_gate():
         converter.convert(_router_config_for_quantization(16))
 
 
+def test_float8_converter_preserves_recipe_when_emulating(monkeypatch):
+    pytest.importorskip("torchao")
+    if Float8Linear is None:
+        pytest.skip("torchao Float8Linear kernels are unavailable")
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    converter = Float8LinearConverter(
+        Float8LinearConverter.Config(
+            recipe_name="rowwise_with_gw_hp",
+            emulate=True,
+        )
+    )
+
+    converted = converter.convert(
+        Linear.Config(in_features=128, out_features=128, bias=False)
+    )
+
+    assert isinstance(converted, Float8Linear.Config)
+    assert converted.recipe_name == "rowwise_with_gw_hp"
+    assert converted.emulate
+
+
+def test_float8_auto_filter_uses_config_dimensions(monkeypatch):
+    pytest.importorskip("torchao")
+    if Float8Linear is None:
+        pytest.skip("torchao Float8Linear kernels are unavailable")
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    converter = Float8LinearConverter(
+        Float8LinearConverter.Config(filter_fqns=["auto_filter_small_kn"])
+    )
+
+    large = converter.convert(Linear.Config(in_features=4096, out_features=4096))
+    small = converter.convert(Linear.Config(in_features=1024, out_features=4096))
+
+    assert isinstance(large, Float8Linear.Config)
+    assert type(small) is Linear.Config
+
+
 def test_mxfp8_converter_rejects_router_gate(monkeypatch):
     pytest.importorskip("torchao")
     if MXFP8Linear is None:

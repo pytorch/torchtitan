@@ -5,11 +5,19 @@ gradients to NVFP4 through TorchAO's training prototype. The model weights and
 distributed collectives remain in bf16. This reduces memory use and can improve
 throughput on NVIDIA Blackwell GPUs.
 
+TorchTitan owns the dense `NVFP4Linear` module, autograd function, stochastic
+rounding state, and FSDP weight-cache lifecycle. TorchAO supplies the low-level
+RHT, quantization, scale-layout, and NVFP4 kernels. FSDP creates the packed `W`
+and `W.T` operands after its BF16 all-gather and releases the gathered BF16
+weight. With `reshard_after_forward=False`, the packed operands are reused
+across pipeline microbatches; with `reshard_after_forward=True`, FSDP frees and
+refills them according to its normal parameter lifecycle.
+
 > [!WARNING]
 > NVFP4 training is experimental. It depends on a TorchAO prototype and has no
-> backward-compatibility guarantees. NVFP4 training is not guarded by CI; the
-> results below are evidence from a small set of 200M-token training runs, not
-> broad numerical or performance validation.
+> backward-compatibility guarantees. CI coverage is limited to a small B200
+> FSDP smoke test; the results below are evidence from a small set of 200M-token
+> training runs, not broad numerical or performance validation.
 
 ### Requirements
 
@@ -125,7 +133,7 @@ The Llama results and instructions use the container's current upstream builds:
 ### Known Limitations
 
 - NVFP4 is a TorchAO prototype and is experimental.
-- There is no NVFP4 end-to-end GPU training coverage in CI.
+- End-to-end CI coverage is limited to a debug-model B200 FSDP test.
 - It supports SM100 or later only.
 - NVFP4 quantizes GEMMs only; tensor-parallel all-gather and reduce-scatter remain in bf16.
 - The 200M-token results are limited to the documented Llama 3 8B and Qwen3 8B C4 configurations. Validate convergence and performance for each new model, parallelism, and hardware configuration.

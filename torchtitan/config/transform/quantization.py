@@ -89,26 +89,6 @@ class Float8LinearConverter(QuantizationConverter):
                 "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
             )
 
-        try:
-            from torchao.float8 import Float8LinearConfig as TorchAOFloat8LinearConfig
-        except ImportError as e:
-            raise ImportError(
-                "torchao is not installed. Please install it to use float8 linear layers."
-            ) from e
-
-        if not hasattr(TorchAOFloat8LinearConfig, "from_recipe_name"):
-            logger.warning(
-                "Failed to use Float8 with recipe lookup because the torchao version "
-                "is too old, please install torchao v0.9.0 or later and try again",
-            )
-            self.enabled = False
-            return
-
-        self.torchao_config = TorchAOFloat8LinearConfig.from_recipe_name(
-            cfg.recipe_name
-        )
-        if cfg.emulate:
-            self.torchao_config = TorchAOFloat8LinearConfig(emulate=True)
         logger.info(f"Float8 training active with recipe {cfg.recipe_name}")
 
         # short-term solution for https://github.com/pytorch/pytorch/issues/150859
@@ -120,23 +100,27 @@ class Float8LinearConverter(QuantizationConverter):
         clean_fqns = [f for f in filter_fqns if f != "auto_filter_small_kn"]
         use_auto_filter = "auto_filter_small_kn" in filter_fqns
         if use_auto_filter:
-            try:
-                from torchao.float8 import _auto_filter_for_recipe
+            if cfg.recipe_name == "rowwise_with_gw_hp":
+                raise ValueError(
+                    "auto_filter_small_kn does not support the "
+                    "rowwise_with_gw_hp Float8 recipe."
+                )
+            logger.info(
+                "Using Float8 dimension thresholds to avoid converting linear "
+                "layers too small to benefit from rowwise Float8 training."
+            )
 
-                logger.info(
-                    "Using _auto_filter_for_recipe to avoid converting linear layers "
-                    "with dims too small to benefit from float8 training. "
-                    "See torchtitan/quantization/float8.md for more info."
-                )
-                self.filter_fn = _auto_filter_for_recipe(
-                    cfg.recipe_name, filter_fqns=clean_fqns
-                )
-            except ImportError:
-                logger.warning(
-                    "Using default module_filter_fn for float8 model conversion. "
-                    "To use _auto_filter_for_recipe, please install torchao nightly build."
-                )
-                self.filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
+            def auto_filter_fn(config: Linear.Config, fqn: str) -> bool:
+                if not module_filter_fn(config, fqn, clean_fqns):
+                    return False
+                total_out_features = config.num_linears * config.out_features
+                if total_out_features <= 2048 or config.in_features <= 1024:
+                    return False
+                if total_out_features <= 4096 and config.in_features <= 2048:
+                    return False
+                return True
+
+            self.filter_fn = auto_filter_fn
         else:
             self.filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
 
@@ -160,7 +144,8 @@ class Float8LinearConverter(QuantizationConverter):
                     num_linears=linear_config.num_linears,
                     bias=linear_config.bias,
                     param_init=linear_config.param_init,
-                    _torchao_config=self.torchao_config,
+                    recipe_name=self.config.recipe_name,
+                    emulate=self.config.emulate,
                 )
                 if parent is None:
                     model_config = new_config
