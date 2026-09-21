@@ -22,6 +22,7 @@ from torchtitan.config import ConfigManager
 from torchtitan.config.transform import (
     Float8LinearConverter,
     MXFP8LinearConverter,
+    NVFP4GroupedExpertsConverter,
     NVFP4LinearConverter,
 )
 from torchtitan.models.common.activation import Sigmoid
@@ -30,11 +31,13 @@ from torchtitan.models.common.config_utils import make_router_config
 from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.moe import GroupedExperts, RoutedExperts
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
 from torchtitan.quantization import Float8Linear, MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
+from torchtitan.quantization.nvfp4 import _get_nvfp4_grouped_experts_cls
 from torchtitan.quantization.utils import has_quantization
 
 
@@ -406,12 +409,29 @@ def test_quantized_grouped_experts():
     assert hasattr(mxfp8_cls.Config, "swiglu_limit")
     assert hasattr(float8_cls.Config, "swiglu_limit")
 
+    if NVFP4Linear is None:
+        pytest.skip("torchao NVFP4 training prototype not available")
+    nvfp4_cls = _get_nvfp4_grouped_experts_cls(GroupedExperts)
+    assert nvfp4_cls.Config._owner is nvfp4_cls
+    assert issubclass(nvfp4_cls, GroupedExperts)
+    assert nvfp4_cls._grouped_mm is not GroupedExperts._grouped_mm
+    assert _get_nvfp4_grouped_experts_cls(GroupedExperts) is nvfp4_cls
+
+    nvfp4_gptoss_cls = _get_nvfp4_grouped_experts_cls(GptOssGroupedExperts)
+    assert nvfp4_gptoss_cls.Config._owner is nvfp4_gptoss_cls
+    assert issubclass(nvfp4_gptoss_cls, GptOssGroupedExperts)
+    assert hasattr(nvfp4_gptoss_cls.Config, "swiglu_limit")
+
 
 @pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
 @pytest.mark.parametrize(
     "make_quantized_cls",
-    [_get_mxfp8_grouped_experts_cls, _get_float8_grouped_experts_cls],
-    ids=["mxfp8", "float8"],
+    [
+        _get_mxfp8_grouped_experts_cls,
+        _get_float8_grouped_experts_cls,
+        _get_nvfp4_grouped_experts_cls,
+    ],
+    ids=["mxfp8", "float8", "nvfp4"],
 )
 def test_grouped_mm_overrides_keep_the_seam_signature(make_quantized_cls, parent_cls):
     """Every ``_grouped_mm`` override must accept the base class's keywords.
@@ -428,6 +448,266 @@ def test_grouped_mm_overrides_keep_the_seam_signature(make_quantized_cls, parent
     assert list(override.parameters) == list(base.parameters)
     for name, parameter in base.parameters.items():
         assert override.parameters[name].kind == parameter.kind
+
+
+def test_nvfp4_grouped_experts_forwards_stored_weight_and_logical_offsets(
+    monkeypatch,
+):
+    NVFP4Linear = _nvfp4_linear_cls()
+    import torchtitan.quantization.nvfp4 as nvfp4_mod
+
+    forwarded = {}
+
+    def grouped_mm_stub(A, weight_EOI, sign_vector, sr_seed, **kwargs):
+        forwarded.update(
+            A=A,
+            weight_EOI=weight_EOI,
+            sign_vector=sign_vector,
+            sr_seed=sr_seed,
+            **kwargs,
+        )
+        return A
+
+    monkeypatch.setattr(
+        nvfp4_mod, "_to_nvfp4_rht_rs_then_scaled_grouped_mm", grouped_mm_stub
+    )
+    nvfp4_cls = _get_nvfp4_grouped_experts_cls(GroupedExperts)
+
+    class RuntimeState:
+        rht_sign_vector = (1,) * 16
+        _sr_seed = torch.zeros(1, dtype=torch.int64)
+
+    A = torch.empty(384, 128)
+    weight_EOI = torch.empty(2, 128, 128)
+    offs = torch.tensor([128, 256], dtype=torch.int32)
+    result = nvfp4_cls._grouped_mm(
+        RuntimeState(), A=A, weight_EOI=weight_EOI, offs=offs
+    )
+
+    assert NVFP4Linear is not None
+    assert result is A
+    assert forwarded["weight_EOI"] is weight_EOI
+    assert forwarded["offs"] is offs
+    assert forwarded["pad_token_groups_for_grouped_mm"] is False
+    assert offs[-1] < A.shape[0]
+
+
+def test_nvfp4_grouped_experts_runtime_buffers_are_non_persistent():
+    _nvfp4_linear_cls()
+    nvfp4_cls = _get_nvfp4_grouped_experts_cls(GroupedExperts)
+    module = nvfp4_cls.Config(dim=128, hidden_dim=128, num_experts=2).build()
+
+    module._init_self_buffers(buffer_device=torch.device("cpu"))
+
+    assert tuple(int(v) for v in module._rht_sign_vector) == (
+        1,
+        1,
+        1,
+        -1,
+        1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        1,
+        -1,
+        -1,
+    )
+    assert module._sr_seed.dtype == torch.int64
+    assert not any(name.startswith("_sr_seed") for name in module.state_dict())
+    assert not any(name.startswith("_rht_sign_vector") for name in module.state_dict())
+
+
+def test_has_quantization_recognizes_nvfp4_grouped_experts():
+    _nvfp4_linear_cls()
+    nvfp4_cls = _get_nvfp4_grouped_experts_cls(GroupedExperts)
+    config = nvfp4_cls.Config(dim=128, hidden_dim=128, num_experts=2)
+
+    assert has_quantization(config)
+
+
+def test_nvfp4_grouped_experts_converter_public_config_defaults():
+    config = NVFP4GroupedExpertsConverter.Config()
+
+    assert config.fqns == []
+    assert config.pad_multiple == 128
+    assert not config.model_compile_enabled
+    assert NVFP4GroupedExpertsConverter.Config(pad_multiple=256).pad_multiple == 256
+
+
+@pytest.mark.parametrize("pad_multiple", [0, -128, 32, 64, 192])
+def test_nvfp4_grouped_experts_rejects_invalid_pad_multiple(pad_multiple):
+    with pytest.raises(ValueError, match="positive multiple of 128"):
+        NVFP4GroupedExpertsConverter.Config(pad_multiple=pad_multiple)
+
+
+@pytest.mark.parametrize(
+    "dim,hidden_dim",
+    [(127, 128), (128, 127), (2880, 128), (128, 2880)],
+)
+def test_nvfp4_grouped_experts_rejects_unaligned_feature_dimensions(
+    monkeypatch, dim, hidden_dim
+):
+    _nvfp4_linear_cls()
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    model_config = RoutedExperts.Config(
+        inner_experts=GroupedExperts.Config(
+            dim=dim,
+            hidden_dim=hidden_dim,
+            num_experts=2,
+        ),
+        token_dispatcher=AllToAllTokenDispatcher.Config(num_experts=2, top_k=1),
+    )
+    original_dispatcher = model_config.token_dispatcher
+    converter = NVFP4GroupedExpertsConverter(
+        NVFP4GroupedExpertsConverter.Config(model_compile_enabled=True)
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"dim={dim} and hidden_dim={hidden_dim}",
+    ):
+        converter.convert(model_config)
+
+    assert model_config.token_dispatcher is original_dispatcher
+    assert type(model_config.inner_experts) is GroupedExperts.Config
+
+
+@pytest.mark.parametrize(
+    "recipe,num_layers,num_dense_layers,query_projections,dispatcher_type",
+    [
+        (
+            "deepseek_v3_debugmodel_nvfp4",
+            6,
+            1,
+            ("wq",),
+            "torchao",
+        ),
+        (
+            "deepseek_v3_16b_nvfp4",
+            27,
+            1,
+            ("wq",),
+            "hybridep",
+        ),
+        (
+            "deepseek_v3_671b_nvfp4_mixed",
+            61,
+            3,
+            ("wq_a", "wq_b"),
+            "hybridep",
+        ),
+    ],
+)
+def test_deepseek_v3_nvfp4_recipes_select_exact_modules(
+    monkeypatch,
+    recipe,
+    num_layers,
+    num_dense_layers,
+    query_projections,
+    dispatcher_type,
+):
+    _nvfp4_linear_cls()
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    import torchtitan.models.deepseek_v3.config_registry as config_registry
+    from torchtitan.models.common.token_dispatcher import (
+        HybridEPTokenDispatcher,
+        TorchAOTokenDispatcher,
+    )
+
+    config = getattr(config_registry, recipe)(seq_len=1024)
+    assert config.model_spec is not None
+    assert config.model_spec.max_context_length == 1024
+    assert config.compile is not None
+    assert config.compile.components == ["model", "loss"]
+    model_config = config.model_spec.model
+
+    nvfp4_fqns = {
+        fqn
+        for fqn, linear_config, _parent, _attr in model_config.traverse(Linear.Config)
+        if isinstance(linear_config, NVFP4Linear.Config)
+    }
+    expected_nvfp4_fqns = {
+        f"layers.{layer}.feed_forward.{projection}"
+        for layer in range(num_dense_layers)
+        for projection in ("w13", "w2")
+    } | {
+        f"layers.{layer}.moe.shared_experts.{projection}"
+        for layer in range(num_dense_layers, num_layers)
+        for projection in ("w13", "w2")
+    }
+    if recipe == "deepseek_v3_16b_nvfp4":
+        expected_nvfp4_fqns = {
+            f"layers.{layer}.moe.shared_experts.{projection}"
+            for layer in range(1, num_layers)
+            for projection in ("w13", "w2")
+        }
+    assert nvfp4_fqns == expected_nvfp4_fqns
+
+    mxfp8_fqns = {
+        fqn
+        for fqn, linear_config, _parent, _attr in model_config.traverse(Linear.Config)
+        if isinstance(linear_config, MXFP8Linear.Config)
+    }
+    assert mxfp8_fqns == {
+        f"layers.{layer}.attention.{projection}"
+        for layer in range(num_layers)
+        for projection in (*query_projections, "wo")
+    }
+
+    nvfp4_experts_cls = _get_nvfp4_grouped_experts_cls(GroupedExperts)
+    grouped_fqns = set()
+    for fqn, experts_config, parent, _attr in model_config.traverse(
+        GroupedExperts.Config
+    ):
+        assert isinstance(experts_config, nvfp4_experts_cls.Config)
+        grouped_fqns.add(fqn)
+        if dispatcher_type == "torchao":
+            assert isinstance(parent.token_dispatcher, TorchAOTokenDispatcher.Config)
+        else:
+            assert isinstance(parent.token_dispatcher, HybridEPTokenDispatcher.Config)
+        assert parent.token_dispatcher.pad_multiple == 128
+    assert grouped_fqns == {
+        f"layers.{layer}.moe.routed_experts.inner_experts"
+        for layer in range(num_dense_layers, num_layers)
+    }
+    assert has_quantization(model_config)
+
+    if recipe == "deepseek_v3_16b_nvfp4":
+        assert config.lr_scheduler.warmup_steps == 200
+        assert model_config.layers[0].feed_forward is not None
+        assert all(
+            not isinstance(linear_config, NVFP4Linear.Config)
+            for _fqn, linear_config, _parent, _attr in model_config.layers[
+                0
+            ].feed_forward.traverse(Linear.Config)
+        )
+    if dispatcher_type == "hybridep":
+        expected_capacity = 0.1875 if num_layers == 27 else 0.03125
+        assert all(
+            parent.token_dispatcher.non_blocking_capacity_factor == expected_capacity
+            for _fqn, _config, parent, _attr in model_config.traverse(
+                GroupedExperts.Config
+            )
+        )
+        assert config.training.disable_cuda_graphs == (
+            recipe == "deepseek_v3_671b_nvfp4_mixed"
+        )
+
+
+def test_dropped_deepseek_v3_nvfp4_recipes_and_flavor_are_absent():
+    import torchtitan.models.deepseek_v3 as deepseek_v3
+    import torchtitan.models.deepseek_v3.config_registry as config_registry
+
+    assert not hasattr(config_registry, "deepseek_v3_16b_nvfp4_f0l5")
+    assert not hasattr(config_registry, "deepseek_v3_671b_12_layers_nvfp4_mixed")
+    assert "671B_12_layers" not in deepseek_v3.deepseekv3_configs
 
 
 @pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
@@ -474,6 +754,45 @@ def test_float8_grouped_experts_dcp_round_trip_needs_no_safe_globals(tmp_path):
         source.parameters(), target.parameters(), strict=True
     ):
         torch.testing.assert_close(target_parameter, source_parameter)
+
+
+@pytest.mark.filterwarnings("ignore:torch.distributed is disabled")
+def test_mxfp8_linear_dcp_round_trip_needs_no_safe_globals(tmp_path):
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    from torch.distributed.checkpoint import FileSystemReader
+    from torch.distributed.checkpoint.metadata import TensorStorageMetadata
+
+    config = MXFP8Linear.Config(
+        in_features=128,
+        out_features=128,
+        bias=False,
+    )
+    source = config.build()
+    target = config.build()
+
+    with torch.no_grad():
+        source.weight._tensor.copy_(
+            torch.arange(source.weight.numel()).reshape(source.weight.shape)
+        )
+        target.weight._tensor.zero_()
+
+    saved_safe_globals = torch.serialization.get_safe_globals()
+    try:
+        torch.serialization.clear_safe_globals()
+        dcp.save(source.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+        metadata = FileSystemReader(tmp_path).read_metadata()
+        assert isinstance(metadata.state_dict_metadata["weight"], TensorStorageMetadata)
+        dcp.load(target.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+    finally:
+        torch.serialization.clear_safe_globals()
+        torch.serialization.add_safe_globals(saved_safe_globals)
+
+    assert torch.equal(
+        target.weight._tensor.view(torch.uint8),
+        source.weight._tensor.view(torch.uint8),
+    )
 
 
 def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():

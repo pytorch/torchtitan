@@ -296,6 +296,11 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         del metadata, outer_size, outer_stride
         return cls(inner_tensors["_tensor"])
 
+    def __get_tensor_shard__(self, index: Any) -> torch.Tensor:
+        """Return the high-precision shard that DCP should persist and restore."""
+        del index
+        return self._tensor
+
     @classmethod
     # pyrefly: ignore [bad-param-name-override]
     def __torch_dispatch__(cls, func, types, args, kwargs=None):

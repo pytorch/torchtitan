@@ -18,6 +18,7 @@ from .quantization import (
     Float8LinearConverter,
     MXFP8GroupedExpertsConverter,
     MXFP8LinearConverter,
+    NVFP4GroupedExpertsConverter,
     NVFP4LinearConverter,
     QuantizationConverter,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "Float8LinearConverter",
     "MXFP8GroupedExpertsConverter",
     "MXFP8LinearConverter",
+    "NVFP4GroupedExpertsConverter",
     "NVFP4LinearConverter",
     "QuantizationConverter",
     "validate_converter_compatibility",

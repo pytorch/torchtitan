@@ -21,7 +21,7 @@ from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls, Float8Linear
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
-from torchtitan.quantization.nvfp4 import NVFP4Linear
+from torchtitan.quantization.nvfp4 import _get_nvfp4_grouped_experts_cls, NVFP4Linear
 from torchtitan.quantization.utils import module_filter_fn, swap_token_dispatcher
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
@@ -501,4 +501,78 @@ class NVFP4LinearConverter(QuantizationConverter):
                     setattr(parent, attr, new_config)
 
         logger.info("Converted Linear layers to NVFP4Linear")
+        return model_config
+
+
+class NVFP4GroupedExpertsConverter(QuantizationConverter):
+    """Apply NVFP4 quantization to MoE expert grouped GEMMs."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QuantizationConverter.Config):
+        fqns: list[str] = field(default_factory=list)
+        """FQN substrings selecting grouped experts. Empty selects all."""
+
+        pad_multiple: int = 128
+        """Per-expert token-group alignment required by NVFP4 grouped GEMMs."""
+
+        def __post_init__(self) -> None:
+            if self.pad_multiple <= 0 or self.pad_multiple % 128:
+                raise ValueError(
+                    "NVFP4 grouped experts require pad_multiple to be a positive "
+                    f"multiple of 128; got {self.pad_multiple}."
+                )
+
+    def __init__(self, config: Config):
+        self.config = config
+
+        if NVFP4Linear is None:
+            raise ImportError(
+                "torchao is not installed or does not provide the NVFP4 training "
+                "prototype. Install a torchao build with "
+                "torchao.prototype.moe_training.nvfp4_training."
+            )
+
+        if not has_cuda_capability(10, 0):
+            raise ValueError("NVFP4 is only supported on SM100 or later architectures")
+
+        if not self.config.model_compile_enabled:
+            logger.warning(
+                "torch.compile enablement is required for highest performance "
+                "of NVFP4 dynamic quantization."
+            )
+
+    def convert(self, model_config):
+        fqns = self.config.fqns
+        targets = [
+            entry
+            for entry in model_config.traverse(GroupedExperts.Config)
+            if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
+        ]
+        for fqn, config, _parent, _attr in targets:
+            if config.dim % 128 or config.hidden_dim % 128:
+                raise ValueError(
+                    "NVFP4 grouped experts require dim and hidden_dim divisible "
+                    f"by 128; got {fqn!r} with dim={config.dim} and "
+                    f"hidden_dim={config.hidden_dim}."
+                )
+
+        for _fqn, config, parent, attr in targets:
+            swap_token_dispatcher(parent, self.config.pad_multiple)
+            base_module_cls = type(config)._owner
+            quantized_cls = _get_nvfp4_grouped_experts_cls(base_module_cls)
+            config_cls = quantized_cls.Config  # type: ignore[attr-defined]
+            new_config = config_cls(
+                **{f.name: getattr(config, f.name) for f in fields(config)},
+            )
+            if parent is None:
+                model_config = new_config
+            elif isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
+
+        logger.info(
+            "Converted GroupedExperts to use dynamic NVFP4 quantization for "
+            "grouped_mm ops"
+        )
         return model_config

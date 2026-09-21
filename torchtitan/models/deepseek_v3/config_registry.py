@@ -4,15 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import cast
+
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
     MXFP8GroupedExpertsConverter,
     MXFP8LinearConverter,
+    NVFP4GroupedExpertsConverter,
+    NVFP4LinearConverter,
 )
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
@@ -22,9 +27,21 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
 from . import model_registry
+from .model import DeepSeekV3Model
+
+
+_NVFP4_FFN_SUBMODULES = ("feed_forward.", "moe.shared_experts.")
+_NVFP4_FFN_SUBMODULES_NO_DENSE = ("moe.shared_experts.",)
+
+
+def _nvfp4_ffn_linear_fqns(
+    layer_fqns: list[str], submodules: tuple[str, ...]
+) -> list[str]:
+    return [f"{layer}{submodule}" for layer in layer_fqns for submodule in submodules]
 
 
 def deepseek_v3_mxfp8_linear_converter_config(
@@ -129,6 +146,35 @@ def deepseek_v3_debugmodel_mxfp8(
     return config
 
 
+def deepseek_v3_debugmodel_nvfp4(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
+    config.compile = CompileConfig(components=["model", "loss"])
+    assert config.model_spec is not None
+    model_config = cast(DeepSeekV3Model.Config, config.model_spec.model)
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction=0.0)
+    config.model_spec = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+        converters=[
+            NVFP4LinearConverter.Config(
+                model_compile_enabled=True,
+                fqns=_nvfp4_ffn_linear_fqns(layer_fqns, _NVFP4_FFN_SUBMODULES),
+            ),
+            NVFP4GroupedExpertsConverter.Config(
+                model_compile_enabled=True,
+                fqns=layer_fqns,
+            ),
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=True,
+                fqns=["attention.wq", "attention.wo"],
+            ),
+        ],
+    )
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
@@ -190,6 +236,40 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
+def deepseek_v3_16b_nvfp4(
+    bf16_tail_fraction: float = 0.0, *, seq_len: int | None = None
+) -> Trainer.Config:
+    config = deepseek_v3_16b(seq_len=seq_len)
+    config.compile = CompileConfig(components=["model", "loss"])
+    config.lr_scheduler.warmup_steps = 200
+    config.training.disable_cuda_graphs = False
+    assert config.model_spec is not None
+    model_config = cast(DeepSeekV3Model.Config, config.model_spec.model)
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
+    config.model_spec = model_registry(
+        "16B",
+        seq_len=seq_len,
+        attn_backend="flex",
+        moe_comm_backend="hybridep",
+        non_blocking_capacity_factor=0.1875,
+        converters=[
+            NVFP4LinearConverter.Config(
+                model_compile_enabled=True,
+                fqns=_nvfp4_ffn_linear_fqns(layer_fqns, _NVFP4_FFN_SUBMODULES_NO_DENSE),
+            ),
+            NVFP4GroupedExpertsConverter.Config(
+                model_compile_enabled=True,
+                fqns=layer_fqns,
+            ),
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=True,
+                fqns=["attention.wq", "attention.wo"],
+            ),
+        ],
+    )
+    return config
+
+
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry(
         "671B",
@@ -228,6 +308,36 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         activation_checkpoint=SelectiveAC.Config(),
         compile=CompileConfig(components=["loss"]),
     )
+
+
+def deepseek_v3_671b_nvfp4_mixed(seq_len: int | None = None) -> Trainer.Config:
+    config = deepseek_v3_671b(seq_len=seq_len)
+    config.compile = CompileConfig(components=["model", "loss"])
+    assert config.model_spec is not None
+    model_config = cast(DeepSeekV3Model.Config, config.model_spec.model)
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction=0.0)
+    config.model_spec = model_registry(
+        "671B",
+        seq_len=seq_len,
+        attn_backend="flex",
+        moe_comm_backend="hybridep",
+        non_blocking_capacity_factor=0.03125,
+        converters=[
+            NVFP4LinearConverter.Config(
+                model_compile_enabled=True,
+                fqns=_nvfp4_ffn_linear_fqns(layer_fqns, _NVFP4_FFN_SUBMODULES),
+            ),
+            NVFP4GroupedExpertsConverter.Config(
+                model_compile_enabled=True,
+                fqns=layer_fqns,
+            ),
+            MXFP8LinearConverter.Config(
+                model_compile_enabled=True,
+                fqns=["attention.wq", "attention.wo"],
+            ),
+        ],
+    )
+    return config
 
 
 def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
