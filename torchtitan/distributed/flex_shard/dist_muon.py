@@ -134,6 +134,17 @@ def _initialize_dist_muon(
     frozen because optimizer state and collectives depend on them.
     """
     _validate_compute_sharding_configuration(compute_sharding_by_fqn)
+
+    for param_group in optimizer.param_groups:
+        group_params = tuple(param_group["params"])
+        raw_param_names = param_group.get("param_names")
+        param_names = () if raw_param_names is None else tuple(raw_param_names)
+        if raw_param_names is None or len(group_params) != len(param_names):
+            raise ValueError("params and param_names must be aligned")
+        for param, fqn in zip(group_params, param_names, strict=True):
+            if fqn not in compute_sharding_by_fqn:
+                raise ValueError(f"missing compute sharding for Muon parameter {fqn!r}")
+
     tensor_device = optimizer._validate_parameter_storage()
     compute_layouts = optimizer._build_parameter_compute_layouts(
         compute_sharding_by_fqn
@@ -285,17 +296,11 @@ class DistMuon(Optimizer):
     ) -> tuple[_ParameterComputeLayout, ...]:
         group = self.param_groups[0]
         params = group["params"]
-        raw_param_names = group.get("param_names")
-        names = () if raw_param_names is None else tuple(raw_param_names)
-        if raw_param_names is None or len(params) != len(names):
-            raise ValueError("params and param_names must be aligned")
-        group["param_names"] = names
+        names = group["param_names"]
         seen_names = set()
         seen_params = set()
         compute_layouts = []
         for fqn, param in zip(names, params, strict=True):
-            if fqn not in compute_sharding_by_fqn:
-                raise ValueError(f"missing compute sharding for Muon parameter {fqn!r}")
             if fqn in seen_names or id(param) in seen_params:
                 raise ValueError(f"duplicate Muon parameter {fqn!r}")
             seen_names.add(fqn)
