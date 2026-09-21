@@ -176,7 +176,7 @@ class AsyncLoopConfig(Configurable.Config):
     finished group. Maximum policy age is unbounded.
 
     Set to `n >= 1` to limit consumption to `n * P` group ids from the oldest
-    group in the buffer. For `P >= 2`, maximum policy age is bounded by
+    group in the buffer. Maximum policy age is bounded by
     `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
     ``torchtitan/rl/docs/windowed_fifo.md``."""
 
@@ -220,8 +220,7 @@ class AsyncLoopConfig(Configurable.Config):
         """Return the worst case consume-time offpolicy bound, or None without a window.
 
         For active buffer size `B`, window size `W`, and prompts per train step
-        `P`, the bound is `(B + W - 2) // P`. This equals
-        `S + window_batches` for `P >= 2`.
+        `P`, the bound is `(B + W - 2) // P`, which is `S + window_batches`.
         """
         if self.window_size is None:
             return None

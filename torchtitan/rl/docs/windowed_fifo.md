@@ -98,4 +98,4 @@ Each train step consumes `P` groups, so the maximum age of `g` at consumption is
 max_offpolicy_steps = (B + W - 2) // P
 ```
 
-Substituting `B = (S + 1) * P` and `W = window_batches * P` gives `max_offpolicy_steps = S + window_batches` for `P >= 2`. Windowed FIFO therefore increases the worst-case offpoliciness by `window_batches` steps. Without a window there is no bound.
+Substituting `B = (S + 1) * P` and `W = window_batches * P` gives `max_offpolicy_steps = S + window_batches`. Windowed FIFO therefore increases the worst-case offpoliciness by `window_batches` steps. Without a window there is no bound.
