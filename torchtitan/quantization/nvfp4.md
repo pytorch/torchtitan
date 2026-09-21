@@ -115,6 +115,77 @@ GiB (30%) less peak reserved memory. It was 3% slower than MXFP8 while using
 
 *Qwen3 8B random-initialization training loss through 200M tokens at global batch size 64.*
 
+### DeepSeek-V3 671B MLPerf-Task Evidence
+
+The following runs trained DeepSeek-V3 671B on 64 GB300 GPUs against the
+MLCommons DeepSeek-V3 benchmark task, which measures **how many training steps a
+recipe needs to bring validation cross-entropy below 3.60** starting from the
+published BF16 checkpoint. The step count is the figure of merit; the loss value
+is only the stopping condition. All three arms are identical in every field
+except the converters.
+
+| Arm | Steps to 3.60 | TFLOP/s per GPU | Tokens/sec per GPU | Peak Reserved Memory |
+| --- | ---: | ---: | ---: | ---: |
+| MXFP8 attention | 42 | 734.83 | 2,614 | 226.08 GiB (81.73%) |
+| BF16 (control) | 43 | 618.06 | 2,198 | 227.26 GiB (82.16%) |
+| NVFP4 F0L0 + MXFP8 attention | 46 | 825.10 | 2,935 | 220.02 GiB (79.54%) |
+
+NVFP4 delivered 33% more throughput than the BF16 control while using 7.24 GiB
+less peak reserved memory, and reached the target in 46 steps against the
+control's 43 — a 7.0% step penalty. Combining both axes, NVFP4 reaches the
+target in roughly 0.75 of the control's wall clock, so the step penalty does not
+cancel the throughput gain. MXFP8 crossed one step *before* the control; with
+one seed per arm that difference is inside single-seed noise and should be read
+as no measurable convergence cost rather than an improvement.
+
+TFLOP/s figures are medians over every training step of every round, reported as
+medians rather than means because the first step of each round pays compilation
+and autotuning. MFU is not reported for the quantized arms: TorchTitan prints
+`mfu: N/A` for them, since the metrics component has no peak-FLOPS denominator
+for those formats.
+
+![DeepSeek-V3 671B NVFP4, MXFP8, and BF16 validation loss curves](../../assets/images/dsv3_671b_mlperf_nvfp4_vs_mxfp8_vs_bf16.png)
+
+*DeepSeek-V3 671B validation cross-entropy to the 3.60 target. The inset shows
+the crossing detail; stars mark the first step at or below the target.*
+
+#### Configuration
+
+- 16 nodes x 4 GB300 GPUs = 64 GPUs. Expert parallel degree 32, pipeline
+  parallel 1, tensor parallel 1, context parallel 1,
+  `data_parallel_shard_degree -1`.
+- MoE communication backend `hybridep` at
+  `non_blocking_capacity_factor 0.0375`, attention backend `flex`, full
+  activation checkpointing, `--compile.components model,loss`, CUDA graph
+  capture disabled.
+- Local batch size 8, sequence length 4096, global batch size 15360 sequences
+  via gradient accumulation 30 — 62.9M tokens per step.
+- Learning rate 2.324e-5, warmup 4 steps, `decay_ratio 0.0`, real routing
+  (`force_load_balance: false`). The capacity factor is 0.0375 rather than the
+  exact fit 0.03125: real routing exceeds balanced demand, and an exact fit
+  would make the NVFP4 arm drop more tokens than the other two, confounding
+  precision with token-drop rate.
+- Training on the single C4 `en/3.0.1` partition the reference pins in code,
+  Megatron-preprocessed and pre-tokenized with the Llama 3.1 8B tokenizer:
+  45,608,611 sequences / 20,994,193,570 tokens, consumed in a single pass with
+  no re-reads. Validation on the reference's own holdout file over its first
+  1024 packed sequences in original order. All arms start from the published
+  MLCommons BF16 checkpoint loaded in HuggingFace format.
+- MXFP8 arm: `MXFP8LinearConverter(fqns=["attention.wq", "attention.wo"])`,
+  which by substring match covers `wq_a`, `wq_b`, and `wo`; `wkv_a`, `wkv_b`,
+  and the dot-product attention stay BF16. NVFP4 arm: `NVFP4LinearConverter` on
+  the FFN fqns plus `NVFP4GroupedExpertsConverter` on all 61 layers' routed
+  experts — F0L0, no BF16 tail — with MXFP8 on the same 1D attention path.
+
+> [!NOTE]
+> These runs use one seed per arm, so a one- or two-step difference between arms
+> is inside the noise a single seed can produce. TorchTitan restarts position
+> IDs at every document boundary, giving document-aware attention, while the
+> MLCommons reference runs with `reset_position_ids=False` and attends across
+> document joins inside a packed sample. That difference is identical across all
+> three arms here, so the relative ordering holds, but absolute step counts are
+> not directly comparable to the reference's published numbers.
+
 ### Versioned Environment
 
 The Llama results and instructions use the container's current upstream builds:
@@ -129,3 +200,4 @@ The Llama results and instructions use the container's current upstream builds:
 - It supports SM100 or later only.
 - NVFP4 quantizes GEMMs only; tensor-parallel all-gather and reduce-scatter remain in bf16.
 - The 200M-token results are limited to the documented Llama 3 8B and Qwen3 8B C4 configurations. Validate convergence and performance for each new model, parallelism, and hardware configuration.
+- The DeepSeek-V3 671B results are a single seed per arm on one hardware and parallelism configuration.
