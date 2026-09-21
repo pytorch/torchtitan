@@ -13,6 +13,10 @@ import torch.nn as nn
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.spmd_types import (
+    current_module_input_spmd_type,
+    current_module_output_spmd_type,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 from torchtitan.protocols.sharding import ShardingConfig
@@ -400,6 +404,45 @@ class TestModuleRedistribution(unittest.TestCase):
             r"WeightModule\.weight.*tensor dimension 0.*mesh axis ep with size 2",
         ):
             module.parallelize(parallel_dims)
+
+    def test_parallelized_forward_exposes_module_boundary_types(self):
+        input_type = SpmdType({MeshAxisName.TP: spmd.S(0)})
+        output_type = SpmdType({MeshAxisName.TP: spmd.P})
+
+        class BoundaryTypeModule(Module):
+            def __init__(self):
+                super().__init__()
+                self._sharding_config = ShardingConfig(
+                    in_src_shardings={"x": input_type},
+                    out_src_shardings=output_type,
+                )
+
+            def forward(self, x):
+                self.input_tp_type = current_module_input_spmd_type(
+                    "x", MeshAxisName.TP
+                )
+                self.output_tp_type = current_module_output_spmd_type(MeshAxisName.TP)
+                return x
+
+        module = BoundaryTypeModule()
+        module.parallelize(
+            ParallelDims(
+                dp_replicate=1,
+                dp_shard=1,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=1,
+                world_size=1,
+            )
+        )
+        x = torch.randn(2, 3)
+
+        self.assertIs(module(x), x)
+        self.assertEqual(module.input_tp_type, spmd.S(0))
+        self.assertEqual(module.output_tp_type, spmd.P)
+        with self.assertRaisesRegex(AssertionError, "No module SPMD type context"):
+            current_module_input_spmd_type("x", MeshAxisName.TP)
 
 
 class TestVerifyModuleProtocol(unittest.TestCase):
