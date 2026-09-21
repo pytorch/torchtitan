@@ -595,7 +595,8 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
                 # gate consume the same input.
                 w13=Linear.Config(
                     in_features=shared_info["dim"],
-                    out_features=2 * shared_info["hidden_dim"],
+                    out_features=shared_info["hidden_dim"],
+                    num_linears=2,
                     param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
                 ),
                 w2=ffn_config.w2,

@@ -123,7 +123,9 @@ def test_quantization_preserves_partial_bias_row_parallel_linear(monkeypatch):
 @pytest.mark.parametrize("parallel_cls", [ColumnParallelLinear, RowParallelLinear])
 def test_quantized_linear_specialization_preserves_compute_and_tp_role(parallel_cls):
     specialized = specialize_quantized_linear(_ScaledLinear, parallel_cls)
-    config = specialized.Config(in_features=4, out_features=2, scale=3.0)
+    config = specialized.Config(
+        in_features=4, out_features=2, num_linears=2, scale=3.0
+    )
     linear = config.build()
 
     assert specialized is specialize_quantized_linear(_ScaledLinear, parallel_cls)
@@ -132,7 +134,9 @@ def test_quantized_linear_specialization_preserves_compute_and_tp_role(parallel_
     assert issubclass(specialized.Config, _ScaledLinear.Config)
 
     input = torch.randn(3, 4)
-    expected = 3.0 * torch.nn.functional.linear(input, linear.weight, linear.bias)
+    expected = 3.0 * torch.nn.functional.linear(
+        input, linear.weight.flatten(0, -2), linear.bias
+    ).unflatten(-1, linear.weight.shape[:-1])
     torch.testing.assert_close(linear(input), expected)
 
 
@@ -673,6 +677,18 @@ def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
             out_features=128,
             input_activation_format_for_backward="missing",
         )
+    with pytest.raises(ValueError, match="out_features divisible by 32"):
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=127,
+            num_linears=2,
+        )
+
+    local_stacked_weight = _LinearShardedTensorWithMXFP8Compute(
+        torch.empty(3, 16, 128, dtype=torch.bfloat16)
+    )
+    with pytest.raises(ValueError, match="local matrix out_features divisible by 32"):
+        local_stacked_weight._build_operands(local_stacked_weight._tensor)
 
     for sharding_config in (
         colwise_config(input_layout=dense_sequence_parallel_placement()),
@@ -749,7 +765,7 @@ def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
     )
     converted = converter.convert(
         FeedForward.Config(
-            w13=Linear.Config(in_features=128, out_features=256),
+            w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
             w2=Linear.Config(in_features=128, out_features=128),
         )
     )
@@ -769,7 +785,7 @@ def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
         )
     )
     model_config = FeedForward.Config(
-        w13=Linear.Config(in_features=128, out_features=256),
+        w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
         w2=Linear.Config(in_features=128, out_features=128),
     )
 
@@ -839,7 +855,6 @@ def test_builtin_mxfp8_configs_assign_input_activation_format_for_backward(
         fqn: config.input_activation_format_for_backward
         for fqn, config, _parent, _attr in model_config.traverse(MXFP8Linear.Config)
     }
-
     assert assignments
     assert "bf16" in assignments.values()
     assert "mxfp8" in assignments.values()

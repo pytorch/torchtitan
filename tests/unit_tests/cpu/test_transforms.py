@@ -341,6 +341,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         config.w13 = _ConvertedLinear.Config(
             in_features=config.w13.in_features,
             out_features=config.w13.out_features,
+            num_linears=config.w13.num_linears,
             param_init=config.w13.param_init,
         )
 

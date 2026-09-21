@@ -36,10 +36,29 @@ try:
             TorchAOFloat8Linear.__init__(
                 self,
                 config.in_features,
-                config.out_features,
+                config.num_linears * config.out_features,
                 bias=config.bias,
                 config=config._torchao_config,
             )
+            self.out_features = config.out_features
+            self.num_linears = config.num_linears
+            if config.num_linears > 1:
+                self.weight = torch.nn.Parameter(
+                    self.weight.detach().unflatten(
+                        0, (config.num_linears, config.out_features)
+                    ),
+                    requires_grad=self.weight.requires_grad,
+                )
+                if self.bias is not None:
+                    self.bias = torch.nn.Parameter(
+                        self.bias.detach().unflatten(
+                            0, (config.num_linears, config.out_features)
+                        ),
+                        requires_grad=self.bias.requires_grad,
+                    )
+
+        def reset_parameters(self) -> None:
+            Linear.reset_parameters(self)
 
         def _linear(
             self,
@@ -62,11 +81,13 @@ try:
             return output
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return self._linear(
-                input,
-                cast(torch.Tensor, self.weight),
-                cast(torch.Tensor | None, self.bias),
-            )
+            weight = cast(torch.Tensor, self.weight).flatten(0, -2)
+            bias = cast(torch.Tensor | None, self.bias)
+            bias = None if bias is None else bias.flatten()
+            output = self._linear(input, weight, bias)
+            if self.num_linears == 1:
+                return output
+            return output.unflatten(-1, self.weight.shape[:-1])
 
 except ImportError:
     Float8Linear = None

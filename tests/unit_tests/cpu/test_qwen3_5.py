@@ -35,6 +35,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
 
     assert type(shared_experts.w13) is Linear.Config
+    assert shared_experts.w13.num_linears == 2
     assert type(shared_experts.gate) is Linear.Config
     assert type(shared_experts.w2) is RowParallelLinear.Config
 

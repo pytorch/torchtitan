@@ -31,6 +31,7 @@ class _LoRALinearMixin:
     """Add a LoRA update to a Linear's local computation."""
 
     _lora_scaling: float
+    num_linears: int
     lora_a: Linear
     lora_b: Linear
 
@@ -39,9 +40,28 @@ class _LoRALinearMixin:
         for param in nn.Module.parameters(self):  # type: ignore[arg-type]
             param.requires_grad_(False)
         self._lora_scaling = config.alpha / config.rank
-        lora_a_sharding, lora_b_sharding = self._adapter_sharding(
-            config.sharding_config
-        )
+        if config.num_linears > 1:
+            # A stacked base projection shares one A matrix across its logical
+            # linears and stacks their B matrices along the same output axis as
+            # the base weight. The adapters inherit only parameter sharding;
+            # the base projection remains responsible for TP collectives.
+            replicated_weight = ShardingConfig(
+                state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+            )
+            lora_a_sharding = (
+                replicated_weight if config.sharding_config is not None else None
+            )
+            lora_b_sharding = (
+                ShardingConfig(
+                    state_shardings=dict(config.sharding_config.state_shardings),
+                )
+                if config.sharding_config is not None
+                else None
+            )
+        else:
+            lora_a_sharding, lora_b_sharding = self._adapter_sharding(
+                config.sharding_config
+            )
         self.lora_a = Linear.Config(
             in_features=config.in_features,
             out_features=config.rank,
@@ -54,6 +74,7 @@ class _LoRALinearMixin:
         self.lora_b = Linear.Config(
             in_features=config.rank,
             out_features=config.out_features,
+            num_linears=config.num_linears,
             bias=False,
             sharding_config=lora_b_sharding,
             param_init={"weight": nn.init.zeros_},
@@ -67,6 +88,8 @@ class _LoRALinearMixin:
     ) -> torch.Tensor:
         base_out_XO = super()._linear(input, weight, bias)  # type: ignore[misc]
         lora_out_XO = self.lora_b(self.lora_a(input))
+        if self.num_linears > 1:
+            lora_out_XO = lora_out_XO.flatten(-2)
         return base_out_XO + self._lora_scaling * lora_out_XO
 
     @staticmethod

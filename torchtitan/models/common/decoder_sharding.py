@@ -130,6 +130,28 @@ def colwise_config(*, input_layout: SpmdType) -> ShardingConfig:
     )
 
 
+def stacked_colwise_config(*, input_layout: SpmdType) -> ShardingConfig:
+    """Shard each ``[F, D]`` matrix in a ``[N, F, D]`` weight over ``F``.
+
+    The input is ``[T, D]`` and the output is ``[T, N, F]``. DP and CP shard
+    tokens while TP shards the per-matrix output features.
+    """
+    weight_NFD_layout = dense_param_placement(tp=spmd.S(1))
+    bias_NF_layout = dense_param_placement(tp=spmd.S(1))
+    output_TNF_layout = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        partition_spec=spmd.PartitionSpec((DP, CP), None, TP),
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": weight_NFD_layout,
+            "bias": bias_NF_layout,
+        },
+        in_src_shardings={"input": input_layout},
+        out_src_shardings=output_TNF_layout,
+    )
+
+
 def rowwise_config(
     *,
     output_layout: SpmdType,
@@ -261,13 +283,13 @@ def set_dense_ffn_sharding(
     the layout that the layer's attention block emits so the FFN's input wrap is
     a no-op redistribute when placements already agree.
     """
-    w13 = feed_forward_cfg.w13
-
     feed_forward_cfg.sharding_config = ShardingConfig(
         in_src_shardings={"x": attn_x_layout},
         out_src_shardings=attn_x_layout,
     )
-    w13.sharding_config = colwise_config(input_layout=attn_x_layout)
+    feed_forward_cfg.w13.sharding_config = stacked_colwise_config(
+        input_layout=attn_x_layout
+    )
     feed_forward_cfg.w2.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
 

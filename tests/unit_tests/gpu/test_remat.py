@@ -203,7 +203,7 @@ def _linear_config(in_features: int, out_features: int) -> Linear.Config:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w13=ColumnParallelLinear.Config(in_features=4, out_features=16),
+        w13=ColumnParallelLinear.Config(in_features=4, out_features=8, num_linears=2),
         w2=RowParallelLinear.Config(in_features=8, out_features=4),
     )
 

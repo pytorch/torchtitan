@@ -355,6 +355,7 @@ class TestMoE(unittest.TestCase):
 
         self.assertIs(type(config.w13), ColumnParallelLinear.Config)
         self.assertIs(type(config.w2), RowParallelLinear.Config)
+        self.assertEqual(config.w13.num_linears, 2)
 
     def test_expert_branch_layouts_before_moe_boundary(self):
         for enable_ep, enable_sp, expected in (
@@ -455,10 +456,10 @@ class TestMoE(unittest.TestCase):
         assert shared.sharding_config.in_src_shardings is not None
         self.assertEqual(tp_type(shared.sharding_config.in_src_shardings["x"]), spmd.R)
         self.assertEqual(
-            tp_type(shared.w13.sharding_config.state_shardings["weight"]), spmd.S(0)
+            tp_type(shared.w13.sharding_config.state_shardings["weight"]), spmd.S(1)
         )
         self.assertEqual(
-            tp_type(shared.w13.sharding_config.out_src_shardings), spmd.S(1)
+            tp_type(shared.w13.sharding_config.out_src_shardings), spmd.S(2)
         )
         self.assertEqual(
             tp_type(shared.w2.sharding_config.state_shardings["weight"]), spmd.S(1)

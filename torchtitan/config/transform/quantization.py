@@ -184,6 +184,7 @@ class Float8LinearConverter(QuantizationConverter):
                 new_config = config_cls(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,
+                    num_linears=linear_config.num_linears,
                     bias=linear_config.bias,
                     param_init=linear_config.param_init,
                     sharding_config=linear_config.sharding_config,
@@ -391,6 +392,7 @@ class MXFP8LinearConverter(QuantizationConverter):
             new_config = config_cls(
                 in_features=config.in_features,
                 out_features=config.out_features,
+                num_linears=config.num_linears,
                 bias=config.bias,
                 param_init=config.param_init,
                 sharding_config=config.sharding_config,
@@ -524,6 +526,7 @@ class NVFP4LinearConverter(QuantizationConverter):
                 new_config = config_cls(
                     in_features=config.in_features,
                     out_features=config.out_features,
+                    num_linears=config.num_linears,
                     bias=config.bias,
                     param_init=config.param_init,
                     sharding_config=config.sharding_config,

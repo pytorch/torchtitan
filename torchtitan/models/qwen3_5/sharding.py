@@ -34,6 +34,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_spmd,
+    stacked_colwise_config,
     token_id_placement,
 )
 from torchtitan.models.common.moe import MoE
@@ -233,7 +234,7 @@ def set_sigmoid_gated_feed_forward_sharding_config(
         in_dst_shardings={"x": replicated_input_layout},
         out_src_shardings=output_layout,
     )
-    shared_experts.w13.sharding_config = colwise_config(
+    shared_experts.w13.sharding_config = stacked_colwise_config(
         input_layout=replicated_input_layout
     )
     shared_experts.w2.sharding_config = rowwise_config(output_layout=output_layout)

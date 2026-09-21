@@ -185,6 +185,35 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         self.assertIsNone(attn.wo._sharding_config.out_dst_shardings)
         self.assertIn("weight", attn.wo._sharding_config.state_shardings)
 
+    @with_comms
+    def test_w13_tp_shards_the_matrix_row_dimension(self):
+        from torchtitan.models.common.config_utils import make_ffn_config
+
+        hidden_dim = 128
+        init = {"weight": torch.nn.init.zeros_}
+        ffn_config = make_ffn_config(
+            dim=DIM,
+            hidden_dim=hidden_dim,
+            w1_param_init=init,
+            w2w3_param_init=init,
+        )
+        set_dense_ffn_sharding(
+            ffn_config,
+            attn_x_layout=dense_sequence_parallel_placement(),
+            enable_sp=True,
+        )
+        feed_forward = ffn_config.build().to(self.device_type)
+        feed_forward.parallelize(self._parallel_dims())
+
+        self.assertEqual(
+            feed_forward.w13.weight.shape,
+            (2, hidden_dim // self.world_size, DIM),
+        )
+        self.assertEqual(
+            feed_forward.w2.weight.shape,
+            (DIM, hidden_dim // self.world_size),
+        )
+
 
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
@@ -325,7 +354,7 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
         # Shard the dist-GEMM module's weights: w13 colwise, w2 rowwise.
         with torch.no_grad():
             dist_gemm.w13.weight = torch.nn.Parameter(
-                standard.w13.weight.chunk(R, 0)[self.rank].contiguous()
+                standard.w13.weight.chunk(R, 1)[self.rank].contiguous()
             )
             dist_gemm.w2.weight = torch.nn.Parameter(
                 standard.w2.weight.chunk(R, 1)[self.rank].contiguous()
@@ -396,11 +425,11 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
         x = torch.randn(num_tokens, dim, device=dev)
         ref = native(x)
 
-        # w13.weight is (2 * hidden/R, dim), with this rank's interleaved
-        # colwise slice of both halves.
+        # w13.weight is (2, hidden/R, dim), with this rank's colwise slice of
+        # both projections.
         with torch.no_grad():
             fused.w13.weight = torch.nn.Parameter(
-                native.w13.weight.chunk(R, 0)[self.rank].contiguous()
+                native.w13.weight.chunk(R, 1)[self.rank].contiguous()
             )
             fused.w2.weight = torch.nn.Parameter(
                 native.w2.weight.chunk(R, 1)[self.rank].contiguous()
