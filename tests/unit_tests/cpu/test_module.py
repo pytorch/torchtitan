@@ -13,6 +13,10 @@ import torch.nn as nn
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.spmd_types import (
+    current_module_forward_input_spmd_type,
+    current_module_forward_output_spmd_type,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 from torchtitan.protocols.sharding import ShardingConfig
@@ -400,6 +404,53 @@ class TestModuleRedistribution(unittest.TestCase):
             r"WeightModule\.weight.*tensor dimension 0.*mesh axis ep with size 2",
         ):
             module.parallelize(parallel_dims)
+
+    def test_parallelized_forward_exposes_effective_spmd_types(self):
+        input_src_type = SpmdType({MeshAxisName.TP: spmd.S(0)})
+        input_dst_type = SpmdType({MeshAxisName.TP: spmd.R})
+        output_src_type = SpmdType({MeshAxisName.TP: spmd.P})
+        output_dst_type = SpmdType({MeshAxisName.TP: spmd.I})
+
+        class BoundaryTypeModule(Module):
+            def __init__(self):
+                super().__init__()
+                self._sharding_config = ShardingConfig(
+                    in_src_shardings={"x": input_src_type},
+                    in_dst_shardings={"x": input_dst_type},
+                    out_src_shardings=output_src_type,
+                    out_dst_shardings=output_dst_type,
+                )
+
+            def forward(self, x):
+                self.input_tp_type = current_module_forward_input_spmd_type(
+                    "x", MeshAxisName.TP
+                )
+                self.output_tp_type = current_module_forward_output_spmd_type(
+                    MeshAxisName.TP
+                )
+                return x
+
+        module = BoundaryTypeModule()
+        module.parallelize(
+            ParallelDims(
+                dp_replicate=1,
+                dp_shard=1,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=1,
+                world_size=1,
+            )
+        )
+        x = torch.randn(2, 3)
+
+        self.assertIs(module(x), x)
+        self.assertEqual(module.input_tp_type, spmd.R)
+        self.assertEqual(module.output_tp_type, spmd.P)
+        with self.assertRaisesRegex(
+            AssertionError, "No module forward SPMD type context"
+        ):
+            current_module_forward_input_spmd_type("x", MeshAxisName.TP)
 
 
 class TestVerifyModuleProtocol(unittest.TestCase):
