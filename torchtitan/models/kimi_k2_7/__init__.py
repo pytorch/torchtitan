@@ -20,6 +20,7 @@ from torchtitan.config.transform import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     ComplexRoPE,
     Embedding,
     Linear,
@@ -161,7 +162,12 @@ def _vision_encoder_config(
             proj=_partial_bias_rowwise_linear(dim, dim),
         ),
         mlp=VisionMLP.Config(
-            fc1=_vl_linear(dim, ffn_dim),
+            fc1=ColumnParallelLinear.Config(
+                in_features=dim,
+                out_features=ffn_dim,
+                bias=True,
+                param_init=_LINEAR_INIT,
+            ),
             fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
         ),
     )
@@ -187,7 +193,12 @@ def _vision_encoder_config(
             vt_hidden_size=dim,
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
-            linear_1=_vl_linear(merged_dim, merged_dim),
+            linear_1=ColumnParallelLinear.Config(
+                in_features=merged_dim,
+                out_features=merged_dim,
+                bias=True,
+                param_init=_LINEAR_INIT,
+            ),
             linear_2=_partial_bias_rowwise_linear(merged_dim, text_hidden_size),
         ),
     )

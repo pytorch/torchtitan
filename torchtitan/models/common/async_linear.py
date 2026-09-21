@@ -4,24 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Model components that fold the TP collectives into their GEMMs.
-
-:class:`AsyncColumnParallelLinear` and :class:`AsyncRowParallelLinear` are drop-in
-replacements for stock linear projections. They move the TP collective into
-the GEMM through the autograd Functions colocated in this module.
-``AsyncRowParallelLinear`` serves both attention's ``wo`` and the FFN's ``w2``;
-``AsyncColumnParallelLinear`` serves both attention's ``wqkv`` and the FFN's
-``w13``. Nothing about the primitives is attention-specific, and MoE
-projections could use the same pair.
-
-Selected by passing ``tp_gemm_backend="dist_gemm"`` to ``make_gqa_config`` or
-``make_ffn_config`` (see ``config_utils.py``), which also drops the boundary
-all-gather these modules take over.
-
-The operations assume they are the only symmetric-memory operation in
-flight on their process group. Each operation uses barriers, but concurrent
-operations on separate streams would still alias the shared workspace.
-"""
+"""Async tensor-parallel projection modules and their functional kernels."""
 
 from __future__ import annotations
 
@@ -34,13 +17,10 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 
 
 logger = logging.getLogger(__name__)
-
-# Shape suffix legend:
-#   T = token dimensions, F = feed-forward hidden dimension
 
 
 _WARNED_NO_TP = False
@@ -98,19 +78,19 @@ class AsyncAllGatherLinear(torch.autograd.Function):
         x_shard_m: torch.Tensor,
         w_shard_n: torch.Tensor,
         bias_shard_n: torch.Tensor | None,
-        group_name: str,
+        group: dist.ProcessGroup,
     ) -> None:
         """SPMD type: x S(0)@TP, w S(0)@TP -> y S(1)@TP."""
-        spmd.assert_type(x_shard_m, {group_name: spmd.S(0)})
+        spmd.assert_type(x_shard_m, {group: spmd.S(0)})
         # Torch stores weight as [N, K], so column-parallel output-feature
         # sharding is dimension 0 of the stored weight.
-        spmd.assert_type(w_shard_n, {group_name: spmd.S(0)})
+        spmd.assert_type(w_shard_n, {group: spmd.S(0)})
         if bias_shard_n is not None:
-            spmd.assert_type(bias_shard_n, {group_name: spmd.S(0)})
+            spmd.assert_type(bias_shard_n, {group: spmd.S(0)})
         spmd.assert_local_type_like(
             result,
             x_shard_m,
-            {group_name: spmd.S(1)},  # pyrefly: ignore [bad-argument-type]
+            {group: spmd.S(1)},  # pyrefly: ignore [bad-argument-type]
         )
 
     @staticmethod
@@ -197,19 +177,19 @@ class AsyncLinearReduceScatter(torch.autograd.Function):
         x_shard_k: torch.Tensor,
         w_shard_k: torch.Tensor,
         bias: torch.Tensor | None,
-        group_name: str,
+        group: dist.ProcessGroup,
     ) -> None:
         """SPMD type: x S(1)@TP, w S(1)@TP, bias R@TP -> y S(0)@TP."""
-        spmd.assert_type(x_shard_k, {group_name: spmd.S(1)})
+        spmd.assert_type(x_shard_k, {group: spmd.S(1)})
         # Torch stores weight as [N, K], so row-parallel input-feature sharding
         # is dimension 1 of the stored weight.
-        spmd.assert_type(w_shard_k, {group_name: spmd.S(1)})
+        spmd.assert_type(w_shard_k, {group: spmd.S(1)})
         if bias is not None:
-            spmd.assert_type(bias, {group_name: spmd.R})
+            spmd.assert_type(bias, {group: spmd.R})
         spmd.assert_local_type_like(
             result,
             x_shard_k,
-            {group_name: spmd.S(0)},  # pyrefly: ignore [bad-argument-type]
+            {group: spmd.S(0)},  # pyrefly: ignore [bad-argument-type]
         )
 
     @staticmethod
@@ -273,20 +253,13 @@ class AsyncLinearReduceScatter(torch.autograd.Function):
 
 
 def _warn_once_no_tp_overlap() -> None:
-    """Say so when the dist-GEMM modules were selected but TP is not on.
-
-    Otherwise the fallback is indistinguishable from the feature working: the run
-    succeeds, the loss looks fine, and nothing ran fused. The preconditions cover
-    the wrong-backend and SP-disabled cases with hard errors, but TP=1 has to stay
-    runnable, so it warns instead.
-    """
+    """Warn when async TP was selected but no multi-rank TP group is active."""
     global _WARNED_NO_TP
     if not _WARNED_NO_TP:
         _WARNED_NO_TP = True
         logger.warning(
-            "tp_gemm_backend='dist_gemm' selected but tensor parallelism is not "
-            "active; running the standard projection path without collective "
-            "overlap."
+            "Async tensor parallelism was selected but tensor parallelism is not "
+            "active; running the synchronous linear implementation."
         )
 
 
@@ -295,8 +268,8 @@ def _tp_group_from_context() -> dist.ProcessGroup | None:
 
     Resolved per forward rather than captured at parallelize time. The mesh
     context is only entered inside the trainer's ``train_context``, so it is
-    unavailable during ``__init__`` and ``parallelize`` -- and reading it here
-    means these modules need no ``parallelize`` override and hold no group state.
+    unavailable during ``__init__`` and ``parallelize``. Resolving it here keeps
+    process-group state out of the modules.
 
     None means "run the stock projection": either no mesh context or TP is degree
     1, in which case there is no collective to fuse.
@@ -308,31 +281,18 @@ def _tp_group_from_context() -> dist.ProcessGroup | None:
     return tp_group if tp_group.size() > 1 else None
 
 
-def validate_dist_gemm_preconditions(*, enable_sp: bool) -> None:
-    """Reject configurations the fused modules cannot serve.
-
-    Called from the sharding setup, which is the first point that sees both the
-    selected modules and the parallelism settings. Neither condition is detectable
-    from inside a module at runtime: under spmd_types an activation is a plain
-    local tensor with no placements to inspect.
-    """
-    if not enable_sp:
-        raise ValueError(
-            "tp_gemm_backend='dist_gemm' requires "
-            "parallelism.enable_sequence_parallel; the fused GEMMs replace the SP "
-            "all-gather and reduce-scatter, so there is nothing for them to fuse "
-            "with SP disabled."
-        )
-
-
-class AsyncColumnParallelLinear(Linear):
-    """Column-parallel linear that all-gathers its TP sequence shard."""
+class AsyncColumnParallelLinear(ColumnParallelLinear):
+    """Overlap an input all-gather with a column-parallel GEMM."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
+    class Config(ColumnParallelLinear.Config):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if type(self) is not AsyncColumnParallelLinear:
+            raise RuntimeError(
+                "AsyncColumnParallelLinear does not support converted linear modules"
+            )
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
@@ -349,22 +309,18 @@ class AsyncColumnParallelLinear(Linear):
         return self._unflatten_output(output)
 
 
-class AsyncRowParallelLinear(Linear):
-    """Attention output projection: matmul fused with the TP reduce-scatter.
-
-    Named for the role it fills rather than the collective it performs, so it does
-    not read like the :class:`AsyncLinearReduceScatter` autograd Function it
-    calls. The class itself is a plain rowwise linear and would work for any
-    row-parallel projection; today it is only wired in as ``wo``.
-    """
+class AsyncRowParallelLinear(RowParallelLinear):
+    """Overlap a row-parallel GEMM with its output reduce-scatter."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        """Same fields as a stock Linear. The subclass exists because it is what
-        binds ``Config.build()`` to this module rather than the stock one, so it
-        cannot be deleted as empty."""
+    class Config(RowParallelLinear.Config):
+        pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if type(self) is not AsyncRowParallelLinear:
+            raise RuntimeError(
+                "AsyncRowParallelLinear does not support converted linear modules"
+            )
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
@@ -386,5 +342,4 @@ __all__ = [
     "AsyncColumnParallelLinear",
     "AsyncLinearReduceScatter",
     "AsyncRowParallelLinear",
-    "validate_dist_gemm_preconditions",
 ]
