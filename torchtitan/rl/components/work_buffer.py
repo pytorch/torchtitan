@@ -56,7 +56,7 @@ class RolloutGroupWorkBuffer(Configurable):
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
     the pipeline at `max_active_rollout_groups` active slots; the batcher takes the oldest finalized group
-    inside a window of `window_size` ids anchored at the oldest active group (None: no window).
+    inside a window of `window_size` ids anchored at the oldest group still in the buffer (None: no window).
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
@@ -84,13 +84,13 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        """No tunables: capacity and window are derived by the controller."""
+        """No tunables: capacity and window size are derived by the controller."""
 
     def __init__(
         self, config: Config, *, max_active_rollout_groups: int, window_size: int | None
     ) -> None:
         self._max_active_rollout_groups = max_active_rollout_groups
-        # Group ids the batcher may take from, counted from the oldest active group; None means all.
+        # Group ids the batcher may take from, counted from the oldest buffered group; None means all.
         self._window_size = window_size
         self._active_rollout_groups = 0
         # metric: Per-flush peak active slots; reset on `.metrics()` call.
@@ -167,16 +167,22 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @sl.log_trace_span("take_finalized")
     async def take_finalized(self) -> RolloutGroup | None:
-        """Batcher loop: return the oldest FINALIZED group within `window_size` ids of the oldest active group.
+        """Batcher loop: return the oldest FINALIZED group inside the anchored windowed FIFO range.
 
-        The window is anchored at the oldest active group and does not move when a younger group is
-        taken, so an unfinished head is bypassed by at most `window_size - 1` younger groups before the
-        batcher waits for it. `window_size=None`: no window, the oldest finalized group anywhere is taken.
+        The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
+        window stay blocked even if they are finalized, so taking non-head groups does not slide
+        the window. A `window_size` of 1 gives strict FIFO. ``window_size=None`` removes the window:
+        the oldest finalized group anywhere is taken.
+
+        This anchored-window policy follows MiniMax's rollout scheduling approach; see
+        Section 6.2.4 of https://arxiv.org/pdf/2605.26494.
 
         Example:
-            # window_size=3: g0 INFLIGHT, g1 WAITING, g2 and g3 FINALIZED
-            assert (await buffer.take_finalized()).group_id == 2  # inside [g0, g2]
-            # g3 waits until g0 or g1 finalizes; with window_size=None it is taken next
+            # window_size=3: g0 is INFLIGHT, g1 is WAITING, and g2/g3 are FINALIZED.
+            group = await buffer.take_finalized()
+            assert group.group_id == 2  # g2 is inside the anchored window [g0, g2].
+            # g3 remains blocked because taking g2 does not move the window past g0.
+            # With window_size=None, g3 would be taken next.
         """
         async with self._condition:
             while True:

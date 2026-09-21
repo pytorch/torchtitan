@@ -169,7 +169,7 @@ class AsyncLoopConfig(Configurable.Config):
     a single group may exceed it is set by `window_batches`."""
 
     window_batches: int | None = _DEFAULT_OFFPOLICY_STEPS
-    """Batches of group ids, counted from the oldest unfinished group, that the batcher may train from;
+    """Batches of group ids, counted from the oldest group still in the buffer, that the batcher may train from;
     caps the max policy age at `target_offpolicy_steps + window_batches`. 1 is FIFO by batch: nothing
     is trained ahead of an older group outside its own batch. None removes the window and the cap: the
     oldest finalized group anywhere in the buffer trains next, and samples older than the target are
@@ -209,7 +209,7 @@ class AsyncLoopConfig(Configurable.Config):
 
     @property
     def window_size(self) -> int | None:
-        """Group ids the batcher may take from, counted from the oldest active group; None means all."""
+        """Group ids the batcher may take from, counted from the oldest buffered group; None means all."""
         if self.window_batches is None:
             return None
         return self.window_batches * self.num_prompts_per_train_step

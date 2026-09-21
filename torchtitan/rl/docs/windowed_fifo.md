@@ -7,12 +7,12 @@ target_offpolicy_steps  S    buffer depth B = (S + 1) * P groups   ->  MEAN age 
 window_batches          n    window W = n * P group ids            ->  MAX age of any group = S + n       (None: no window, no cap)
 ```
 
-`P` is `num_prompts_per_train_step`. The window is anchored at the oldest unfinished group and does not move when a younger group is taken, so at most `W - 1` younger groups can be trained before the batcher waits for that group.
+`P` is `num_prompts_per_train_step`. The window is anchored at the oldest group still in the buffer and does not move when a younger group is taken, so at most `W - 1` younger groups can be trained before the batcher waits for that group.
 
 ```text
 P = 8, S = 3 (32 slots)     window          who may pass a stuck head            max age
-window_batches = 1          8 ids           only the rest of its own batch       4
-window_batches = 3 (default) 24 ids         three batches                        6
+window_batches = 1          8 ids           at most 7 younger ids                4
+window_batches = 3 (default) 24 ids         at most 23 younger ids               6
 window_batches = None       no window       everyone; the oldest ready group is taken   unbounded; over-target samples counted + warned
 ```
 
@@ -26,7 +26,7 @@ A stuck head with a small window means the trainer waits for it while finished y
 [ 0 ready ][ 1 ready ][ 2 slow ][ 3 ready ][ 4 ready ][ 5 ready ]
 ```
 
-The batcher takes 0 and 1. The window is now anchored at 2 and covers `[2, 4]`: 3 completes the first batch and 4 is taken next, so 2 gets two more groups' worth of time. 5 is outside the window and waits until 2 finishes. With `window_batches = None`, 5 would be taken as well and 2 would be trained whenever it lands, one step older.
+The batcher takes 0 and 1. The window is now anchored at 2 and covers `[2, 4]`: 3 completes the first batch and 4 is taken next, so 2 gets two more groups' worth of time. 5 is outside the window and waits until 2 finishes. With `window_batches = None`, 5 is also eligible. If later ready groups fill another batch before 2 lands, training continues and 2 is consumed at a higher age.
 
 ## Where the cap comes from
 
