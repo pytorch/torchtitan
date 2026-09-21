@@ -299,15 +299,29 @@ class Batcher(Configurable):
     def _assign_training_samples_to_microbatches(
         self, training_samples: list[TrainingSample]
     ) -> list[list[list[TrainingSample]]]:
-        """Pack with FFD, align by LPT splitting, then schedule by attention work.
+        """Pack and schedule samples using the following steps.
 
-        FFD first determines the minimum number of fixed-capacity bins. The
-        heaviest splittable bins are recursively divided until the bin count is
-        a multiple of the DP degree. Finally, bins are sorted by workload and
-        partitioned into D-wide groups. Reversing every other group pairs heavy
-        and light bins on each DP replica across adjacent groups.
+        The future PP layout is ``[G][M][D]``, where G is the number of outer
+        gradient accumulation steps, M is the number of PP microbatches, and D
+        is the DP degree. RL currently has M=1 and returns ``[G][D]``.
+
+        1. Use first-fit decreasing (FFD) to pack samples into fixed-capacity
+           bins, with each bin becoming one flat trainer input.
+        2. Round the number of bins up to a multiple of D. With PP this target
+           will be ``G * M * D``; the current M=1 target is ``G * D``.
+        3. Fill added slots by recursively splitting the highest-workload
+           multi-sample bin using two-way longest-processing-time scheduling.
+           Keep an empty bin only when no bin can be split.
+        4. Estimate each bin workload as ``sum(L**2)`` over its samples.
+        5. Sort all bins by workload in descending order.
+        6. Partition the sorted bins into consecutive D-wide groups, so the D
+           inputs executed concurrently have similar workloads.
+        7. Reverse every other D-wide group. In a ``[G][M][D]`` layout, this
+           zig-zag pairs heavier and lighter PP microbatches on each replica.
         """
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
+
+        # Step 1: pack samples into the minimum number of bins found by FFD.
         ordered_samples = sorted(
             training_samples,
             key=self.num_tokens_to_pack,
@@ -338,16 +352,23 @@ class Batcher(Configurable):
             bins[destination].append(training_sample)
             bin_num_tokens[destination] += num_tokens
 
+        # Step 2: make the current M=1 grid rectangular in D.
         target_num_bins = math.ceil(len(bins) / self._dp_degree) * self._dp_degree
+
+        # Step 3: prefer balanced LPT splits over fully padded bins.
         self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
+
+        # Steps 4-5: estimate full-attention work and order bins by that cost.
         bins.sort(key=self._attention_workload, reverse=True)
 
         num_microbatches = len(bins) // self._dp_degree
         assignments = []
         for microbatch in range(num_microbatches):
+            # Step 6: adjacent bins form one concurrently executed DP group.
             rank_assignments = bins[
                 microbatch * self._dp_degree : (microbatch + 1) * self._dp_degree
             ]
+            # Step 7: zig-zag adjacent groups across DP replicas.
             if microbatch % 2:
                 rank_assignments.reverse()
             assignments.append(rank_assignments)
