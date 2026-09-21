@@ -145,11 +145,11 @@ try:
                         },
                         in_src_shardings={
                             **(sc.in_src_shardings or {}),
-                            "x": in_layout,
+                            "input": in_layout,
                         },
                         in_dst_shardings={
                             **(sc.in_dst_shardings or {}),
-                            "x": in_layout,
+                            "input": in_layout,
                         },
                         local_spmd=True,
                     )
