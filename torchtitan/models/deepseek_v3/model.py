@@ -13,7 +13,10 @@ import torch
 from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import _per_axis_types, spmd_mesh_group
+from torchtitan.distributed.spmd_types import (
+    current_module_forward_input_spmd_type,
+    spmd_mesh_group,
+)
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -106,18 +109,12 @@ class Attention(BaseAttention):
     ):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
-            sharding_config = self._sharding_config
-            assert sharding_config is not None
-            assert sharding_config.in_src_shardings is not None
-            input_layout = sharding_config.in_src_shardings["x"]
-            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
-            assert input_tp_type is not None
             # MLA has several branches that consume x. Gather once at the
             # attention boundary instead of once per projection.
             x = spmd.redistribute(
                 x,
                 tp_group,
-                src=input_tp_type,
+                src=current_module_forward_input_spmd_type("x", MeshAxisName.TP),
                 dst=spmd.R,
                 backward_options={"op_dtype": x.dtype},
             )

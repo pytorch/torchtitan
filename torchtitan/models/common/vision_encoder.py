@@ -29,7 +29,7 @@ import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import _per_axis_types, spmd_mesh_group
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
@@ -143,12 +143,6 @@ class VisionAttention(Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
-            sharding_config = self._sharding_config
-            assert sharding_config is not None
-            assert sharding_config.in_src_shardings is not None
-            input_layout = sharding_config.in_src_shardings["x"]
-            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
-            assert input_tp_type is not None
             # q, k, and v share this input, so gather once inside the qkv remat
             # region instead of gathering independently for each projection.
             # TODO: Consider replacing the three projections with QKVLinear
@@ -156,7 +150,7 @@ class VisionAttention(Module):
             x_TD = spmd.redistribute(
                 x_TD,
                 tp_group,
-                src=input_tp_type,
+                src=spmd.I,
                 dst=spmd.R,
                 backward_options={"op_dtype": x_TD.dtype},
             )

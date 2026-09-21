@@ -24,7 +24,11 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import _per_axis_types, spmd_mesh_group
+from torchtitan.distributed.spmd_types import (
+    current_module_forward_input_spmd_type,
+    current_module_forward_output_spmd_type,
+    spmd_mesh_group,
+)
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend for the router gate:
@@ -151,16 +155,6 @@ class CastLinear(Linear):
         )
 
 
-# TODO: Expose a public API for querying a module boundary's per-axis SPMD
-# types. User-defined parallel modules should not need to access the private
-# ``Module._sharding_config`` and ``spmd_types._per_axis_types`` APIs used here.
-def _tp_type(layout) -> spmd.PerMeshAxisSpmdType:
-    """Return the TP-axis type from a boundary layout."""
-    tp_type = _per_axis_types(layout).get(MeshAxisName.TP)
-    assert tp_type is not None
-    return tp_type
-
-
 class ColumnParallelLinear(Linear):
     """Prepare an input for a column-parallel Linear.
 
@@ -178,14 +172,10 @@ class ColumnParallelLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
-            sharding_config = self._sharding_config
-            assert sharding_config is not None
-            assert sharding_config.in_src_shardings is not None
-            input_layout = sharding_config.in_src_shardings["input"]
             input = spmd.redistribute(
                 input,
                 tp_group,
-                src=_tp_type(input_layout),
+                src=current_module_forward_input_spmd_type("input", MeshAxisName.TP),
                 dst=spmd.R,
                 backward_options={"op_dtype": input.dtype},
             )
@@ -197,8 +187,8 @@ class RowParallelLinear(Linear):
 
     This is a ``Linear`` rather than a wrapper around one, so its parameter
     FQNs remain unchanged. ``Partial -> Shard(0)`` is a reduce-scatter, while
-    ``Partial -> Invariant`` is an all-reduce without it. The output layout
-    in this module's sharding config selects between the two.
+    ``Partial -> Invariant`` is an all-reduce without it. The module's output
+    type in the active SPMD context selects between the two.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -216,15 +206,11 @@ class RowParallelLinear(Linear):
         if tp_group is None:
             return output
 
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-        output_layout = sharding_config.out_src_shardings
-        assert output_layout is not None and not isinstance(output_layout, tuple)
         return spmd.redistribute(
             output,
             tp_group,
             src=spmd.P,
-            dst=_tp_type(output_layout),
+            dst=current_module_forward_output_spmd_type(MeshAxisName.TP),
             backward_options={"op_dtype": output.dtype},
         )
 

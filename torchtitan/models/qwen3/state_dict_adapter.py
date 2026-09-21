@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-This script is adapted from torchtitan/models/llama3/model/state_dict_adapter.py.
+This script is adapted from torchtitan/models/llama3/state_dict_adapter.py.
 
 We can use this script to adapt the checkpoint from HF to the format that we can load into the torchtitan model and vice versa.
 This can enable us to do a parity test with the HF implementation and make sure that our results are

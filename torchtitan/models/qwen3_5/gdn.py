@@ -20,7 +20,10 @@ from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
 from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import _per_axis_types, spmd_mesh_group
+from torchtitan.distributed.spmd_types import (
+    current_module_forward_input_spmd_type,
+    spmd_mesh_group,
+)
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import VarlenMetadata
@@ -412,18 +415,12 @@ class GatedDeltaNet(Module):
     ) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
-            sharding_config = self._sharding_config
-            assert sharding_config is not None
-            assert sharding_config.in_src_shardings is not None
-            input_layout = sharding_config.in_src_shardings["x_TD"]
-            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
-            assert input_tp_type is not None
             # All six input projections consume x, so gather it once before
             # entering their separate compute paths.
             x_TD = spmd.redistribute(
                 x_TD,
                 tp_group,
-                src=input_tp_type,
+                src=current_module_forward_input_spmd_type("x_TD", MeshAxisName.TP),
                 dst=spmd.R,
                 backward_options={"op_dtype": x_TD.dtype},
             )

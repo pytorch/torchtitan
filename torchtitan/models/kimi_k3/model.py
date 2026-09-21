@@ -15,8 +15,8 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
-    _per_axis_types,
     annotate_input_spmd_types,
+    current_module_forward_input_spmd_type,
     spmd_local_context,
     spmd_mesh_group,
 )
@@ -116,18 +116,12 @@ class KimiMLAAttention(BaseAttention):
 
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
-            sharding_config = self._sharding_config
-            assert sharding_config is not None
-            assert sharding_config.in_src_shardings is not None
-            input_layout = sharding_config.in_src_shardings["x_TD"]
-            input_tp_type = _per_axis_types(input_layout).get(MeshAxisName.TP)
-            assert input_tp_type is not None
             # The MLA and gate projections all consume x. Gather once at their
             # common attention boundary.
             x_TD = spmd.redistribute(
                 x_TD,
                 tp_group,
-                src=input_tp_type,
+                src=current_module_forward_input_spmd_type("x_TD", MeshAxisName.TP),
                 dst=spmd.R,
                 backward_options={"op_dtype": x_TD.dtype},
             )

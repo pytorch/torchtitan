@@ -56,7 +56,7 @@ same accumulation order. Three groups of fixes make that hold.
   `torch.backends.cuda.matmul.allow_tf32 = False`,
   `torch.backends.cudnn.allow_tf32 = False`).
 
-**Generator-only patches** (`torchtitan/rl/batch_invariance.py`) --
+**Generator-only patches** (`torchtitan/rl/model/batch_invariance.py`) --
 the generator runs the same model inside vLLM, whose fused kernels must be routed
 back to the trainer's ops:
 
