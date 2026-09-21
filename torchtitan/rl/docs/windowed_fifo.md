@@ -1,35 +1,101 @@
-# Rollout buffer: depth targets the mean policy age, the window caps the max
+# Rollout consumption: greedy by default, windowed FIFO on request
 
-Two knobs on `AsyncLoopConfig`, both in train steps:
+Windowed FIFO follows the rollout scheduling described in Section 6.2.4 of the [MiniMax paper](https://arxiv.org/pdf/2605.26494).
+
+## Symbols
+
+- `P`: prompt groups per train step (`num_prompts_per_train_step`).
+- `S`: target steady-state offpolicy steps (`target_offpolicy_steps`).
+- `B`: active buffer size in prompt groups (`max_active_rollout_groups`), computed as `B = (S + 1) * P`.
+- `n`: FIFO look-ahead window in train batches (`window_batches`); `None` means no window.
+- `W`: the same window in group ids (`window_size`), computed as `W = n * P`.
+
+## Greedy consumption (default)
+
+With `window_batches = None` the batcher takes the oldest finalized group anywhere in the buffer. It does not wait for an unfinished older group while a younger finished group is ready.
+
+There is no maximum offpolicy age. A slow group is trained when it lands, however old. Samples older than `S` are counted in `train_batch/num_samples_over_target_age` and logged with a warning; they are never dropped.
+
+The mean offpolicy age is still about `S`: the buffer holds `B = (S + 1) * P` groups and the trainer consumes `P` per step, whatever the order.
+
+## The straggler problem
+
+Why bound the age at all? If the oldest group is slow, greedy consumption keeps training on younger groups and the slow group comes back older every step. The alternatives are:
+
+- **Stall:** wait for the slow group and leave the trainer idle.
+- **Drop:** train on younger groups, then drop the slow group when it becomes too old. This wastes completed rollout work and can bias which samples reach training.
+- **Increase the target offpoliciness:** enlarge the active buffer so every group may wait longer. This makes all training samples older just to accommodate a small number of stragglers.
+
+Windowed FIFO is a bounded compromise. It lets a limited number of younger groups bypass a slow group, buying time for that group to finish. A bypassed straggler is consumed at most `n` steps older than the target, and the buffer size is not increased for every sample.
+
+The window is anchored at the oldest group still in the buffer. Consuming a younger group does not slide it forward, so no more than `W - 1` younger groups can bypass the oldest group before the batcher waits for it.
+
+## Windowed FIFO configuration
+
+The user configures `S`, `P`, and `n` through `target_offpolicy_steps`, `num_prompts_per_train_step`, and `window_batches`. `window_batches` defaults to `None`.
+
+The controller derives:
 
 ```text
-target_offpolicy_steps  S    buffer depth B = (S + 1) * P groups   ->  MEAN age of a training batch ≈ S   (Little's law: S*P groups wait behind the P in training, P consumed per step)
-window_batches          n    window W = n * P group ids            ->  MAX age of any group = S + n       (None: no window, no cap)
+B = (S + 1) * P
+W = n * P            (None when window_batches is None)
 ```
 
-`P` is `num_prompts_per_train_step`. The window is anchored at the oldest group still in the buffer and does not move when a younger group is taken, so at most `W - 1` younger groups can be trained before the batcher waits for that group.
+`n = 1` is FIFO by batch: at most `P - 1` younger group ids can pass a stuck head. Increasing `n` exposes more younger groups to the scheduler without increasing `B`.
 
 ```text
-P = 8, S = 3 (32 slots)     window          who may pass a stuck head            max age
-window_batches = 1          8 ids           at most 7 younger ids                4
-window_batches = 3 (default) 24 ids         at most 23 younger ids               6
-window_batches = None       no window       everyone; the oldest ready group is taken   unbounded; over-target samples counted + warned
+P = 8, S = 3 (B = 32)    W       max offpolicy steps
+window_batches = None    none    unbounded
+window_batches = 1       8       4
+window_batches = 3       24      6
 ```
 
-## The trade-off
+## Example
 
-A stuck head with a small window means the trainer waits for it while finished younger groups sit in the buffer (head-of-line blocking): lower max age, more trainer wait. A large window or `None` trains the finished groups and lets the straggler come back older: less wait, a longer age tail. The mean age does not move either way, because the depth is fixed; the order only decides which group carries the age. The choice matters only when generation has a tail; with short, even generation the window never blocks anything.
-
-## Example: a stuck head, `P = 3`, `S = 1`, `window_batches = 1` (6 slots, window 3 ids)
+Let `target_offpolicy_steps = 1`, `num_prompts_per_train_step = 3`, and `window_batches = 1`. Then `max_active_rollout_groups = (1 + 1) * 3 = 6`, and `window_size = 1 * 3 = 3`. Groups `0`, `1`, `3`, `4`, and `5` finish quickly, but group `2` is slow:
 
 ```text
 [ 0 ready ][ 1 ready ][ 2 slow ][ 3 ready ][ 4 ready ][ 5 ready ]
 ```
 
-The batcher takes 0 and 1. The window is now anchored at 2 and covers `[2, 4]`: 3 completes the first batch and 4 is taken next, so 2 gets two more groups' worth of time. 5 is outside the window and waits until 2 finishes. With `window_batches = None`, 5 is also eligible. If later ready groups fill another batch before 2 lands, training continues and 2 is consumed at a higher age.
+The batcher consumes groups `0` and `1`. The window is now anchored at group `2` and covers groups `[2, 4]`:
 
-## Where the cap comes from
+```text
+anchored window
+[ 2 slow ][ 3 ready ][ 4 ready ]   [ 5 ready ]
+                                      ^ blocked outside the window
+```
 
-A group admitted at the back of a full buffer is preceded by `B - 1` older groups and may be passed by the `W - 1` younger ones inside its window, so at most `B + W - 2` groups are trained before it: `max age = (B + W - 2) // P`, which with `B = (S + 1) * P` and `W = n * P` is `S + n` for `P >= 2`. The trainer checks this invariant at consume time (`compute_policy_age_metrics`) and raises if it is ever violated. With `window_batches = None` there is no cap; `train_batch/num_samples_over_target_age` counts the samples older than `S` and a warning names them.
+Group `3` may bypass group `2` and complete the train batch. Group `4` may also be consumed, buying more time for group `2` to finish. Consuming either younger group does not move the anchor, so group `5` remains blocked until group `2` is consumed.
 
-Windowed FIFO originates in Section 6.2.4 of the [MiniMax paper](https://arxiv.org/pdf/2605.26494), which sizes the window as a fraction of the buffer; here it is sized in batches so the max age reads off directly.
+With `window_batches = None` there is no window: group `5` is consumed as well, and group `2` is trained whenever it finishes.
+
+## Offpolicy bound
+
+Given a window size `W`, we can calculate the worst-case offpoliciness. Consider a slow target group `g` that was admitted at the back of a full active buffer:
+
+1. When `g` is admitted, it occupies one of the `B` active slots, so the full buffer can contain at most `B - 1` older groups ahead of it. The trainer consumes those older groups first.
+2. Because `B - 1 = S * P + (P - 1)`, this completes `S` train steps and leaves the next batch one group short.
+3. Group `g`, which would complete that batch, stalls.
+4. The trainer consumes all `W - 1` younger groups that may bypass `g` within the window.
+
+```text
+older groups                                  younger groups
+[ 0 ][ 1 ] ... [ g-1 ][ g ][ g+1 ] ... [ g+W-1 ]
+                       ^    at most W-1 prompt groups can bypass g
+                       target group
+```
+
+```text
+consumed_before = B - 1
+consumed_after = W - 1
+total_consumed = consumed_before + consumed_after = B + W - 2
+```
+
+Each train step consumes `P` groups, so the maximum age of `g` at consumption is:
+
+```text
+max_offpolicy_steps = (B + W - 2) // P
+```
+
+Substituting `B = (S + 1) * P` and `W = n * P` gives `max_offpolicy_steps = S + n` for `P >= 2`. Windowed FIFO therefore increases the worst-case offpoliciness by `window_batches` steps. Without a window there is no bound.

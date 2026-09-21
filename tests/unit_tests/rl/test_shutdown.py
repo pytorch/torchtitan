@@ -96,7 +96,8 @@ class _FakeConfigManager:
 
 def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
     default_loop = AsyncLoopConfig()
-    assert default_loop.window_batches == default_loop.target_offpolicy_steps == 3
+    assert default_loop.target_offpolicy_steps == 3
+    assert default_loop.window_batches is None
 
     # P=8, S=3: window_batches=1 -> 8 ids, cap 4; 3 -> 24 ids, cap 6; None -> no window, no cap
     one_batch = AsyncLoopConfig(num_prompts_per_train_step=8, window_batches=1)

@@ -55,8 +55,9 @@ class RolloutGroupWorkBuffer(Configurable):
     """Buffer of `RolloutGroupWork` shared between the data-input, rollout, and batcher loops.
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
-    the pipeline at `max_active_rollout_groups` active slots; the batcher takes the oldest finalized group
-    inside a window of `window_size` ids anchored at the oldest group still in the buffer (None: no window).
+    the pipeline at `max_active_rollout_groups` active slots. With `window_size=None`, the batcher takes
+    the oldest finalized group anywhere in the buffer. A finite `window_size` restricts it to a look-ahead
+    range anchored at the oldest entry.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
@@ -167,22 +168,21 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @sl.log_trace_span("take_finalized")
     async def take_finalized(self) -> RolloutGroup | None:
-        """Batcher loop: return the oldest FINALIZED group inside the anchored windowed FIFO range.
+        """Batcher loop: return the oldest FINALIZED group the window allows.
 
-        The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
-        window stay blocked even if they are finalized, so taking non-head groups does not slide
-        the window. A `window_size` of 1 gives strict FIFO. ``window_size=None`` removes the window:
-        the oldest finalized group anywhere is taken.
+        With `window_size=None`, every finalized group is eligible. With a finite
+        window, only group ids `[head, head + window_size - 1]` are eligible. Entries
+        outside the window stay blocked, and taking a non-head group does not move the
+        window past the head.
 
         This anchored-window policy follows MiniMax's rollout scheduling approach; see
         Section 6.2.4 of https://arxiv.org/pdf/2605.26494.
 
         Example:
-            # window_size=3: g0 is INFLIGHT, g1 is WAITING, and g2/g3 are FINALIZED.
+            # window_size=3: g0 INFLIGHT, g1 WAITING, g2 and g3 FINALIZED
             group = await buffer.take_finalized()
-            assert group.group_id == 2  # g2 is inside the anchored window [g0, g2].
-            # g3 remains blocked because taking g2 does not move the window past g0.
-            # With window_size=None, g3 would be taken next.
+            assert group.group_id == 2  # g2 is inside [g0, g2].
+            # g3 remains blocked. With window_size=None, g3 would be taken next.
         """
         async with self._condition:
             while True:

@@ -148,9 +148,6 @@ class ValidationConfig:
     """Held-out prompts scored greedily (temp=0, n=1) per validation pass. 0 skips validation."""
 
 
-_DEFAULT_OFFPOLICY_STEPS = 3
-
-
 @dataclass(kw_only=True, slots=True)
 class AsyncLoopConfig(Configurable.Config):
     num_training_steps: int = 10
@@ -163,21 +160,25 @@ class AsyncLoopConfig(Configurable.Config):
     num_samples_per_prompt: int = 8
     """Sibling rollouts sampled per prompt (the GRPO group)."""
 
-    target_offpolicy_steps: int = _DEFAULT_OFFPOLICY_STEPS
-    """Sets the active buffer depth to `(S + 1) * P` groups, which targets a steady-state MEAN policy age
-    near S (Little's law). Lower when generation is the bottleneck and the buffer does not fill. How far
-    a single group may exceed it is set by `window_batches`."""
+    target_offpolicy_steps: int = 3
+    """Target steady-state offpolicy steps used to set the active buffer size to
+    `(S + 1) * P`. Observed offpolicy steps are not guaranteed to equal this
+    target: when rollout generation is the bottleneck, the buffer may not fill
+    and observed offpolicy steps will be lower. A finite `window_batches` bounds
+    how far a slow group may exceed this target; None leaves it unbounded. See
+    ``torchtitan/rl/docs/windowed_fifo.md`` for details."""
 
-    window_batches: int | None = _DEFAULT_OFFPOLICY_STEPS
-    """Batches of group ids, counted from the oldest group still in the buffer, that the batcher may train from;
-    caps the max policy age at `target_offpolicy_steps + window_batches`. 1 is FIFO by batch: nothing
-    is trained ahead of an older group outside its own batch. None removes the window and the cap: the
-    oldest finalized group anywhere in the buffer trains next, and samples older than the target are
-    counted and warned about, never dropped. Trade-offs: ``torchtitan/rl/docs/windowed_fifo.md``.
+    window_batches: int | None = None
+    """FIFO look-ahead window in train batches.
 
-    Example:
-        # P=8, S=3 (32 slots): 1 -> 8 ids, max age 4;  3 (default) -> 24 ids, max age 6;  None -> no cap
-    """
+    None (the default) is greedy: the batcher takes the oldest finished group
+    anywhere in the buffer. An unfinished older group does not block a younger
+    finished group. Maximum policy age is unbounded.
+
+    Set to `n >= 1` to limit consumption to `n * P` group ids from the oldest
+    group in the buffer. For `P >= 2`, maximum policy age is bounded by
+    `target_offpolicy_steps + n`. A value of 1 is FIFO by batch. See
+    ``torchtitan/rl/docs/windowed_fifo.md``."""
 
     group_buffer: RolloutGroupWorkBuffer.Config = field(
         default_factory=RolloutGroupWorkBuffer.Config
@@ -209,18 +210,18 @@ class AsyncLoopConfig(Configurable.Config):
 
     @property
     def window_size(self) -> int | None:
-        """Group ids the batcher may take from, counted from the oldest buffered group; None means all."""
+        """FIFO look-ahead window in group ids, `window_batches * P`; None means no window."""
         if self.window_batches is None:
             return None
         return self.window_batches * self.num_prompts_per_train_step
 
     @property
     def max_offpolicy_steps(self) -> int | None:
-        """Hard cap on consume-time policy age; None when `window_batches` is None.
+        """Return the worst case consume-time offpolicy bound, or None without a window.
 
-        A group admitted at the back of a full buffer waits for the `B - 1` older groups plus the
-        `W - 1` younger ones inside its window: `(B + W - 2) // P`, which is `S + window_batches`
-        for `P >= 2`.
+        For active buffer size `B`, window size `W`, and prompts per train step
+        `P`, the bound is `(B + W - 2) // P`. This equals
+        `S + window_batches` for `P >= 2`.
         """
         if self.window_size is None:
             return None

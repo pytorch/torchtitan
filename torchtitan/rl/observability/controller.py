@@ -177,14 +177,16 @@ def compute_policy_age_metrics(
     """Age of each packed training sample at the moment the trainer consumes the batch.
 
     Computed in the trainer loop (not at pack time) so the logged age is faithful to the version the
-    batch actually trains against. With a cap, exceeding it is an invariant failure (the window makes it
-    impossible). Without a cap, over-target samples are counted and warned about, never rejected.
+    batch actually trains against. Without a bound (`max_offpolicy_steps=None`) samples older than the
+    target are counted and warned about, never rejected. With a bound, exceeding it is an invariant
+    failure: the window makes it impossible.
 
     Args:
         trainer_policy_version: Policy version that will consume this batch.
         min_policy_versions: Oldest sampled policy version for each packed training sample.
         target_offpolicy_steps: Target steady-state mean offpolicy steps used to size the active buffer.
-        max_offpolicy_steps: Hard cap on the age, `target + window_batches`; None when uncapped.
+        max_offpolicy_steps: Hard consume-time offpolicy step limit, `target + window_batches`;
+            None when there is no window.
 
     Example:
         # trainer at v=10; training samples' oldest versions [8, 9, 5] -> ages [2, 1, 5]
