@@ -195,7 +195,6 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        # W&B defaults commit to False when an explicit step is provided.
         self.wandb.log(wandb_metrics, step=step, commit=True)
 
     def close(self) -> None:
