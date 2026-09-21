@@ -26,6 +26,8 @@ _FLOAT8_GEMM_ALIGNMENT = 16
 # Quantized operands are derived compute state, not differentiable model state.
 # The custom autograd functions attach gradients to the high-precision weights,
 # so recording scale computation and casting would only retain temporary storage.
+# This follows torchao.float8.float8_scaling_utils.hp_tensor_to_float8_dynamic,
+# but returns its plain qdata and scale for TorchTitan's FSDP-owned cache.
 @torch.no_grad()
 def _quantize_float8(
     tensor: torch.Tensor,
@@ -174,7 +176,12 @@ class _Float8GroupedExpertsOperands:
 def _quantize_float8_grouped_weight(
     weight_EOI: torch.Tensor,
 ) -> _Float8GroupedExpertsOperands:
-    """Build the two expert-weight orientations used by FPROP and DGRAD."""
+    """Build the two expert-weight orientations used by FPROP and DGRAD.
+
+    The kernel sequence is adapted from
+    ``torchao.prototype.moe_training.fp8_grouped_mm._Float8GroupedMM``. It is
+    hoisted out of that autograd function so FSDP can cache the results.
+    """
     from torchao.prototype.moe_training.kernels import (
         triton_fp8_colwise_3d_scale_and_cast,
         triton_fp8_rowwise_3d_transpose_rhs,

@@ -92,7 +92,11 @@ def _float8_mm_out(
     out: torch.Tensor,
     use_fast_accum: bool,
 ) -> torch.Tensor:
-    """Write a Float8 matrix product into caller-owned BF16 storage."""
+    """Write a Float8 matrix product into caller-owned BF16 storage.
+
+    Adapted from ``torchao.float8.float8_ops.addmm_float8_unwrapped`` to use
+    the ``out`` overload required by TorchTitan's storage-owning path.
+    """
     lhs_qdata, lhs_scale, rhs_qdata, rhs_scale = _prepare_float8_mm(
         lhs_qdata,
         lhs_scale,
@@ -142,6 +146,9 @@ def _float8_mm_out(
     return out
 
 
+# Adapted from
+# torchao.float8.float8_linear.matmul_with_hp_or_float8_args. TorchTitan passes
+# cached weight operands explicitly so its autograd and FSDP lifetimes compose.
 @torch._dynamo.allow_in_graph
 class _Float8LinearFunction(torch.autograd.Function):
     @staticmethod

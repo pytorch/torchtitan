@@ -37,6 +37,10 @@ from .tensor import (
 __all__: list[str] = []
 
 
+# Adapted from
+# torchao.prototype.moe_training.fp8_grouped_mm._Float8GroupedMM. TorchTitan
+# owns autograd and accepts pre-quantized weights from its FSDP cache; TorchAO
+# continues to provide the quantization kernels.
 @torch._dynamo.allow_in_graph
 class _Float8GroupedMMFunction(torch.autograd.Function):
     """Grouped Float8 GEMM with TorchTitan-owned autograd state."""

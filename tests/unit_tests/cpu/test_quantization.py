@@ -303,8 +303,9 @@ def test_nvfp4_build_configures_local_spmd_sharding(sharding_config_factory, inp
     sc = module._sharding_config
     assert sc.local_spmd
     input_layout = dense_activation_placement(tp=input_tp, cp=spmd.S(0))
-    assert sc.in_src_shardings == {"x": input_layout}
-    assert sc.in_dst_shardings == {"x": input_layout}
+    assert sc.in_src_shardings == {"input": input_layout}
+    assert sc.in_dst_shardings == {"input": input_layout}
+    assert list(inspect.signature(module.forward).parameters) == ["input"]
     assert "weight" in sc.state_shardings
     assert sc.state_shardings["_sr_seed"] == SpmdType(
         {

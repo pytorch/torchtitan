@@ -79,6 +79,9 @@ from .tensor import _LinearShardedTensorWithNVFP4Compute, _quantize_nvfp4_weight
 __all__ = ["NVFP4Linear"]
 
 
+# Factored from
+# torchao.prototype.moe_training.nvfp4_training.nvfp4_linear.nvfp4_matmul.
+# Keeping the raw scaled GEMM here lets TorchTitan pass FSDP-cached operands.
 def _nvfp4_scaled_mm(
     lhs_qdata: torch.Tensor,
     lhs_block_scale: torch.Tensor,
@@ -132,6 +135,10 @@ def _nvfp4_scaled_mm_out(
     )
 
 
+# Adapted from
+# torchao.prototype.moe_training.nvfp4_training.nvfp4_linear.nvfp4_matmul.
+# Weight quantization is removed from the autograd function and supplied by
+# TorchTitan's FSDP cache; TorchAO still provides the RHT and cast kernels.
 @torch._dynamo.allow_in_graph
 class _NVFP4LinearFunction(torch.autograd.Function):
     """NVFP4 linear whose weight state is managed by TorchTitan FSDP."""
@@ -314,7 +321,12 @@ spmd.register_local_autograd_function(_NVFP4LinearFunction)
 
 
 class NVFP4Linear(Linear):
-    """Linear with TorchTitan-owned NVFP4 autograd and FSDP operands."""
+    """Linear with TorchTitan-owned NVFP4 autograd and FSDP operands.
+
+    Runtime seed and RHT-sign-vector handling follows TorchAO's
+    ``nvfp4_training.NVFP4Linear``; this class adapts that state to TorchTitan's
+    module, sharding, and checkpoint protocols.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
@@ -354,6 +366,7 @@ class NVFP4Linear(Linear):
                     in_layout = dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
                 else:
                     in_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+                # Local-SPMD input layouts are keyed by the forward argument name.
                 instance._sharding_config = replace(
                     sc,
                     state_shardings={
@@ -368,11 +381,11 @@ class NVFP4Linear(Linear):
                     },
                     in_src_shardings={
                         **(sc.in_src_shardings or {}),
-                        "x": in_layout,
+                        "input": in_layout,
                     },
                     in_dst_shardings={
                         **(sc.in_dst_shardings or {}),
-                        "x": in_layout,
+                        "input": in_layout,
                     },
                     local_spmd=True,
                 )

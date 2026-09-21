@@ -38,7 +38,11 @@ class _NVFP4LinearOperands:
 
 
 def _quantize_nvfp4_weight(weight_NK: torch.Tensor) -> _NVFP4LinearOperands:
-    """Quantize a BF16 weight in both orientations for FPROP and DGRAD."""
+    """Quantize a BF16 weight in both orientations for FPROP and DGRAD.
+
+    TorchAO's ``nvfp4_linear._weight_quantize_2d`` owns the quantization; this
+    wrapper names its outputs for TorchTitan's FSDP operand cache.
+    """
     if weight_NK.ndim != 2:
         raise ValueError(
             f"NVFP4 weight quantization requires a 2D weight, got {weight_NK.ndim} dimensions."
