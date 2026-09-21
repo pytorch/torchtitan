@@ -8,5 +8,4 @@
 
 from .experts import _get_mx_qat_grouped_experts_cls
 
-
 __all__ = ["_get_mx_qat_grouped_experts_cls"]

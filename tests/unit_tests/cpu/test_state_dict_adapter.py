@@ -7,6 +7,7 @@
 import json
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 import torch
@@ -28,6 +29,7 @@ from torchtitan.models.deepseek_v4.state_dict_adapter import DeepSeekV4StateDict
 from torchtitan.models.gpt_oss import gptoss_configs
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
 from torchtitan.models.kimi_k3 import model_registry as kimi_k3_model_registry
+from torchtitan.models.kimi_k3.quantization import MXFP4_QUANTIZATION_CONFIG
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
@@ -136,17 +138,7 @@ class KimiK3StateDictAdapterTest(unittest.TestCase):
                 json.dumps(
                     {
                         "text_config": {
-                            "quantization_config": {
-                                "format": "mxfp4-pack-quantized",
-                                "quant_method": "compressed-tensors",
-                                "config_groups": {
-                                    "group_0": {
-                                        "targets": ["Linear"],
-                                        "weights": {"group_size": 32},
-                                    }
-                                },
-                                "ignore": ["re:.*shared_experts.*"],
-                            }
+                            "quantization_config": deepcopy(MXFP4_QUANTIZATION_CONFIG),
                         }
                     }
                 )
@@ -163,20 +155,82 @@ class KimiK3StateDictAdapterTest(unittest.TestCase):
         self.assertEqual(reader.spec.block_size, 32)
         self.assertEqual(reader.spec.target_dtype, torch.bfloat16)
         self.assertTrue(
-            reader.spec.is_target(
-                "language_model.model.layers.1.block_sparse_moe.experts.3.w1.weight"
-            )
+            "language_model.model.layers.1.block_sparse_moe.experts.3.w1.weight"
+            in reader.spec.target_fqns
         )
         self.assertFalse(
-            reader.spec.is_target(
-                "language_model.model.layers.1.block_sparse_moe.shared_experts.w1.weight"
-            )
+            "language_model.model.layers.1.block_sparse_moe.shared_experts.w1.weight"
+            in reader.spec.target_fqns
         )
-        self.assertTrue(
-            reader.spec.is_target(
-                "language_model.model.layers.1.block_sparse_moe.experts.3.w4.weight"
-            )
+        self.assertFalse(
+            "language_model.model.layers.1.block_sparse_moe.experts.3.w4.weight"
+            in reader.spec.target_fqns
         )
+        self.assertFalse(
+            "language_model.model.embed_tokens.weight" in reader.spec.target_fqns
+        )
+        self.assertFalse(
+            "language_model.model.layers.1.block_sparse_moe.gate.weight"
+            in reader.spec.target_fqns
+        )
+        self.assertIn(
+            "language_model.model.layers.1.block_sparse_moe.routed_expert_up_proj.weight",
+            reader.spec.target_fqns,
+        )
+        self.assertIn(
+            "language_model.model.layers.1.mlp_res_proj.weight", reader.spec.target_fqns
+        )
+
+    def test_qat_selection_matches_import_including_dense_projections(self) -> None:
+        from torchtitan.config.transform import MXQATTransform
+        from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
+
+        mapping = self.adapter.hf_linear_weight_mapping()
+        policy = MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
+        model = self.adapter.kimi_config
+        transform = MXQATTransform.from_weight_fqns(
+            model,
+            {mapping[key] for key in policy.weight_fqns if mapping[key] is not None},
+        )
+        model = transform.transform(model)
+        self.adapter._validate_qat_policy(policy)
+        self.assertTrue(type(model.layers[1].moe.routed_up)._owner._mx_qat)
+
+    def test_qat_rejects_expert_only_selection_for_released_policy(self) -> None:
+        from torchtitan.config.transform import MXQATTransform
+        from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
+
+        policy = MXFP4CheckpointPolicy.from_config(
+            MXFP4_QUANTIZATION_CONFIG, self.adapter.hf_linear_weight_mapping()
+        )
+        MXQATTransform().transform(self.adapter.kimi_config)
+        with self.assertRaisesRegex(ValueError, "selection disagrees"):
+            self.adapter._validate_qat_policy(policy)
+
+    def test_vision_policy_uses_runtime_layer_names(self) -> None:
+        from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
+
+        mapping = self.adapter.hf_linear_weight_mapping()
+        name = "vision_tower.encoder.blocks.0.mlp.fc0.weight"
+        self.assertEqual(mapping[name], "vision_encoder.layers.0.mlp.linear_fc1.weight")
+        policy = MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
+        self.assertNotIn(name, policy.weight_fqns)
+        quantization = deepcopy(MXFP4_QUANTIZATION_CONFIG)
+        quantization["ignore"] = []
+        self.assertIn(
+            name, MXFP4CheckpointPolicy.from_config(quantization, mapping).weight_fqns
+        )
+
+    def test_qat_recipe_is_valid_with_and_without_initial_checkpoint(self) -> None:
+        from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel_mx_qat
+
+        recipe = kimi_k3_debugmodel_mx_qat(seq_len=16)
+        self.assertFalse(recipe.checkpointer.initial_load_in_hf_quantized)
+        recipe = kimi_k3_debugmodel_mx_qat(
+            seq_len=16, checkpoint_path="/tmp/packed-kimi"
+        )
+        self.assertTrue(recipe.checkpointer.initial_load_in_hf_quantized)
+        self.assertEqual(recipe.checkpointer.initial_load_path, "/tmp/packed-kimi")
 
     def test_quantized_load_rejects_missing_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

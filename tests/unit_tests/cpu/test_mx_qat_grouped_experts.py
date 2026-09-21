@@ -8,26 +8,9 @@ import unittest
 from unittest.mock import patch
 
 import torch
-
-from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.quantization.mx_qat.experts import (
-    _get_mx_qat_grouped_experts_cls,
-)
 from torchao.prototype.qat import mx_fake_quantized_grouped_mm
-
-
-def _emulated_grouped_mm(
-    activation: torch.Tensor,
-    weight: torch.Tensor,
-    *,
-    offs: torch.Tensor,
-) -> torch.Tensor:
-    outputs = []
-    start = 0
-    for expert, stop in enumerate(offs.tolist()):
-        outputs.append(activation[start:stop] @ weight[expert])
-        start = stop
-    return torch.cat(outputs)
+from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.quantization.mx_qat.experts import _get_mx_qat_grouped_experts_cls
 
 
 class MXQATGroupedExpertsTest(unittest.TestCase):
@@ -64,20 +47,15 @@ class MXQATGroupedExpertsTest(unittest.TestCase):
             requires_grad=True,
         )
         offsets = torch.tensor([2, 4], dtype=torch.int32)
-        original_grouped_mm = torch._grouped_mm
-        torch._grouped_mm = _emulated_grouped_mm
-        try:
-            with patch(
-                "torchao.prototype.qat.mx_fake_quantized_grouped_mm",
-                wraps=mx_fake_quantized_grouped_mm,
-            ) as grouped_mm:
-                output = module._grouped_mm(
-                    A=activation,
-                    weight_EOI=module.w1_EFD,
-                    offs=offsets,
-                )
-        finally:
-            torch._grouped_mm = original_grouped_mm
+        with patch(
+            "torchao.prototype.qat.mx_fake_quantized_grouped_mm",
+            wraps=mx_fake_quantized_grouped_mm,
+        ) as grouped_mm:
+            output = module._grouped_mm(
+                A=activation,
+                weight_EOI=module.w1_EFD,
+                offs=offsets,
+            )
 
         output.float().sum().backward()
         self.assertEqual(grouped_mm.call_count, 1)
@@ -85,6 +63,10 @@ class MXQATGroupedExpertsTest(unittest.TestCase):
         self.assertIsNotNone(module.w1_EFD.grad)
         self.assertTrue(torch.isfinite(activation.grad).all())
         self.assertTrue(torch.isfinite(module.w1_EFD.grad).all())
+        before = module.w1_EFD.detach().clone()
+        optimizer.step()
+        self.assertFalse(torch.equal(before, module.w1_EFD))
+        self.assertEqual(parameter_ids, {id(p) for p in module.parameters()})
 
 
 if __name__ == "__main__":

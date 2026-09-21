@@ -33,7 +33,7 @@ class PackedPairSpec:
     block_size: int
     packed_values_per_byte: int
     target_dtype: torch.dtype
-    is_target: Callable[[str], bool]
+    target_fqns: frozenset[str]
     decode: Callable[[torch.Tensor, torch.Tensor, int, torch.dtype], torch.Tensor]
 
     def __post_init__(self) -> None:
@@ -83,7 +83,7 @@ class PackedPairHuggingFaceStorageReader(HuggingFaceStorageReader):
         packed_metadata: TensorStorageMetadata,
         scale_metadata: TensorStorageMetadata,
     ) -> None:
-        if not self.spec.is_target(virtual_fqn):
+        if virtual_fqn not in self.spec.target_fqns:
             raise ValueError(
                 f"Packed tensor {virtual_fqn!r} is outside the packed-weight policy."
             )
@@ -178,6 +178,12 @@ class PackedPairHuggingFaceStorageReader(HuggingFaceStorageReader):
         if orphan_scales:
             raise ValueError(f"Found orphan scale tensor {orphan_scales[0]!r}.")
 
+        missing = self.spec.target_fqns - pairs.keys()
+        if missing:
+            raise ValueError(
+                f"Packed-weight policy requires missing pairs: {sorted(missing)[:10]}."
+            )
+
         virtual_state_dict_metadata = {
             fqn: tensor_metadata
             for fqn, tensor_metadata in state_dict_metadata.items()
@@ -258,9 +264,7 @@ class PackedPairHuggingFaceStorageReader(HuggingFaceStorageReader):
         row_stop = row_start + row_count
         column_stop = column_start + column_count
         group_start = column_start // self.spec.block_size
-        group_stop = (
-            column_stop + self.spec.block_size - 1
-        ) // self.spec.block_size
+        group_stop = (column_stop + self.spec.block_size - 1) // self.spec.block_size
         packed_values_per_group = (
             self.spec.block_size // self.spec.packed_values_per_byte
         )

@@ -12,7 +12,7 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
-from torchtitan.config.transform import MXQATGroupedExpertsConverter
+from torchtitan.config.transform import apply_transforms, MXQATTransform
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
@@ -25,9 +25,12 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
 from torchtitan.trainer import Trainer
 
 from . import KIMI_K3_SPECIAL_TOKENS, model_registry
+from .quantization import MXFP4_QUANTIZATION_CONFIG
+from .state_dict_adapter import KimiK3StateDictAdapter
 
 
 def _kimi_k3_multimodal_dataloader(
@@ -96,18 +99,25 @@ def kimi_k3_debugmodel(
 
 def kimi_k3_debugmodel_mx_qat(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    checkpoint_path: str | None = None,
 ) -> Trainer.Config:
-    """Kimi-K3 debug recipe with MXFP4-weight/MXFP8-activation expert QAT."""
+    """Kimi QAT using the released policy and optional packed HF initialization.
+
+    Pass an absolute checkpoint_path to load the packed debug fixture. Without
+    it, the recipe uses random initialization and remains valid before overrides.
+    """
     config = kimi_k3_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[MXQATGroupedExpertsConverter.Config()],
-    )
+    adapter = KimiK3StateDictAdapter(config.model_spec.model, hf_assets_path=None)
+    mapping = adapter.hf_linear_weight_mapping()
+    policy = MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
+    weights = {mapping[key] for key in policy.weight_fqns if mapping[key] is not None}
+    transform = MXQATTransform.from_weight_fqns(config.model_spec.model, weights)
     config.checkpointer = CheckpointManager.Config(
         interval=5,
-        initial_load_in_hf=True,
-        initial_load_in_hf_quantized=True,
+        initial_load_path=checkpoint_path,
+        initial_load_in_hf=checkpoint_path is not None,
+        initial_load_in_hf_quantized=checkpoint_path is not None,
         last_save_model_only=False,
     )
-    return config
+    return apply_transforms(config, [transform])

@@ -10,7 +10,6 @@
 import argparse
 import hashlib
 import json
-import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -19,13 +18,10 @@ import torch
 import torchao
 from safetensors.torch import save_file
 from torchao.prototype.mx_formats.mx_tensor import MXTensor
-
 from torchtitan.models.kimi_k3 import KimiK3StateDictAdapter, model_registry
+from torchtitan.models.kimi_k3.quantization import MXFP4_QUANTIZATION_CONFIG
+from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
 
-_EXPERT_WEIGHT = re.compile(
-    r"^language_model\.model\.layers\.\d+\.block_sparse_moe\.experts\.\d+\."
-    r"w[123]\.weight$"
-)
 _DEFAULT_MAX_SHARD_BYTES = 1 << 30
 
 
@@ -50,26 +46,28 @@ def _sha256(path: Path) -> str:
 
 def convert_hf_state_dict_to_mxfp4(
     hf_state_dict: dict[str, torch.Tensor],
+    policy: MXFP4CheckpointPolicy,
 ) -> tuple[dict[str, torch.Tensor], int]:
-    """Replace routed-expert weights with released Kimi packed/scale pairs."""
+    """Pack the exact resolved policy, including non-expert Linear weights."""
+    missing = policy.weight_fqns - hf_state_dict.keys()
+    if missing:
+        raise ValueError(f"Fixture is missing selected weights: {sorted(missing)}")
     converted: dict[str, torch.Tensor] = {}
     pair_count = 0
     for key, value in hf_state_dict.items():
         value = value.detach().to(device="cpu").contiguous()
-        if _EXPERT_WEIGHT.fullmatch(key) is None:
+        if key not in policy.weight_fqns:
             converted[key] = value
             continue
 
         mx = MXTensor.to_mx(
             value,
             elem_dtype=torch.float4_e2m1fn_x2,
-            block_size=32,
+            block_size=policy.block_size,
         )
         prefix = key.removesuffix(".weight")
         converted[f"{prefix}.weight_packed"] = mx.qdata.contiguous()
-        converted[f"{prefix}.weight_scale"] = (
-            mx.scale.view(torch.uint8).contiguous()
-        )
+        converted[f"{prefix}.weight_scale"] = mx.scale.view(torch.uint8).contiguous()
         pair_count += 1
     return converted, pair_count
 
@@ -141,30 +139,17 @@ def create_fixture(
     model.to(dtype=torch.bfloat16)
     adapter = KimiK3StateDictAdapter(model_spec.model, hf_assets_path=None)
     hf_state_dict = adapter.to_hf(model.state_dict())
-    converted, pair_count = convert_hf_state_dict_to_mxfp4(hf_state_dict)
+    policy = MXFP4CheckpointPolicy.from_config(
+        MXFP4_QUANTIZATION_CONFIG, adapter.hf_linear_weight_mapping()
+    )
+    converted, pair_count = convert_hf_state_dict_to_mxfp4(hf_state_dict, policy)
     storage = write_sharded_checkpoint(converted, output, max_shard_bytes)
     (output / "config.json").write_text(
         json.dumps(
             {
                 "model_type": "kimi_k3",
                 "text_config": {
-                    "quantization_config": {
-                        "format": "mxfp4-pack-quantized",
-                        "quant_method": "compressed-tensors",
-                        "config_groups": {
-                            "group_0": {
-                                "targets": ["Linear"],
-                                "weights": {"group_size": 32},
-                            }
-                        },
-                        "ignore": [
-                            "re:.*self_attn.*",
-                            "re:.*shared_experts.*",
-                            "re:.*vision_tower.*",
-                            "re:.*mm_projector.*",
-                            "re:.*lm_head.*",
-                        ],
-                    }
+                    "quantization_config": MXFP4_QUANTIZATION_CONFIG,
                 },
             },
             indent=2,
@@ -176,7 +161,7 @@ def create_fixture(
     repo_root = Path(__file__).resolve().parents[2]
     manifest = {
         "block_size": 32,
-        "expert_pair_count": pair_count,
+        "packed_pair_count": pair_count,
         "model": "kimi_k3_debugmodel",
         "seed": seed,
         "torch_version": torch.__version__,
