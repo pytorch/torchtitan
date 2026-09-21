@@ -98,7 +98,7 @@ class TestDistMuon(DTensorTestBase):
                         shardings_by_mesh_axis={
                             "dp_shard": BlockShard(
                                 dim=0,
-                                block_size=matrix_rows,
+                                block_sizes=(matrix_rows,),
                             )
                         },
                     ),

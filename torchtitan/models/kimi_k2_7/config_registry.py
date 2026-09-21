@@ -300,11 +300,22 @@ def _dist_muon_optimizer(
             MeshAxisName.DP_SHARD.value: Owned(),
         },
     )
+    # Kimi runs Newton-Schulz per logical projection within each MLA head.
     per_query_head = ComputeLayout(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: BlockShard(
                 dim=0,
-                block_size=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
+                # per head: [q_nope_h; q_rope_h]
+                block_sizes=(attention.qk_nope_head_dim, attention.qk_rope_head_dim),
+            )
+        },
+    )
+    kv_latent_and_rope = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                # Shared projections: [kv_latent; k_rope]
+                block_sizes=(attention.kv_lora_rank, attention.qk_rope_head_dim),
             )
         },
     )
@@ -312,7 +323,8 @@ def _dist_muon_optimizer(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: BlockShard(
                 dim=0,
-                block_size=attention.qk_nope_head_dim + attention.v_head_dim,
+                # per head: [k_nope_h; v_h]
+                block_sizes=(attention.qk_nope_head_dim, attention.v_head_dim),
             )
         },
     )
@@ -327,7 +339,7 @@ def _dist_muon_optimizer(
     )
     attention_shardings = {
         **query_shardings,
-        "wkv_a": owned,
+        "wkv_a": kv_latent_and_rope,
         "wkv_b": per_key_value_head,
         "wo": owned,
     }
