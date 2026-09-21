@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 
 import pytest
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 
@@ -17,6 +18,12 @@ from torchtitan.config.transform import (
     transform_model_config_,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.config_utils import make_ffn_config
+from torchtitan.models.common.decoder_sharding import (
+    dense_param_placement,
+    dense_sequence_parallel_placement,
+    set_dense_ffn_sharding,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import model_registry
@@ -106,7 +113,9 @@ def test_lora_targets_fused_feed_forward_projection():
     """The physical w13 projection uses one LoRA adapter."""
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w13=Linear.Config(in_features=4, out_features=16, param_init=init),
+        w13=Linear.Config(
+            in_features=4, out_features=8, num_linears=2, param_init=init
+        ),
         w2=Linear.Config(in_features=8, out_features=4, param_init=init),
     )
     config = LoRATransform(
@@ -119,9 +128,8 @@ def test_lora_targets_fused_feed_forward_projection():
     feed_forward.init_states()
 
     assert set(feed_forward.state_dict()) == {
-        "w1.weight",
+        "w13.weight",
         "w2.weight",
-        "w3.weight",
         "w13.lora_a.weight",
         "w13.lora_b.weight",
     }
@@ -139,10 +147,9 @@ def test_lora_targets_fused_feed_forward_projection():
             adapter.weight.copy_(torch.randn_like(adapter.weight))
 
     x = torch.randn(3, 4)
-    gate_up = F.linear(x, feed_forward.w13.weight)
+    gate_up = F.linear(x, feed_forward.w13.weight.flatten(0, -2)).unflatten(-1, (2, 8))
     gate_up = gate_up + 2 * feed_forward.w13.lora_b(feed_forward.w13.lora_a(x))
-    gate_up = gate_up.unflatten(-1, (8, 2))
-    gate, up = gate_up.unbind(-1)
+    gate, up = gate_up.unbind(-2)
     expected = feed_forward.w2(F.silu(gate) * up)
     torch.testing.assert_close(feed_forward(x), expected)
 
@@ -150,6 +157,42 @@ def test_lora_targets_fused_feed_forward_projection():
     reloaded.init_states()
     reloaded.load_state_dict(feed_forward.state_dict())
     torch.testing.assert_close(reloaded(x), expected)
+
+
+def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
+    """The LoRA adapters inherit state sharding, not TP collectives."""
+    init = {"weight": torch.nn.init.zeros_}
+    config = make_ffn_config(
+        dim=4,
+        hidden_dim=8,
+        w1_param_init=init,
+        w2w3_param_init=init,
+    )
+    config = LoRATransform(
+        handlers=LINEAR_LORA_HANDLERS,
+        rank=2,
+        alpha=4,
+        target_modules=["w13"],
+    ).transform(config)
+    assert isinstance(config, FeedForward.Config)
+    set_dense_ffn_sharding(
+        config,
+        attn_x_layout=dense_sequence_parallel_placement(),
+        enable_sp=True,
+    )
+
+    feed_forward = config.build()
+    assert feed_forward.w13._sharding_config is not None
+
+    lora_b_sharding = feed_forward.w13.lora_b._sharding_config
+    assert lora_b_sharding is not None
+    assert lora_b_sharding.state_shardings["weight"] == dense_param_placement(
+        tp=spmd.S(1)
+    )
+    assert lora_b_sharding.in_src_shardings is None
+    assert lora_b_sharding.in_dst_shardings is None
+    assert lora_b_sharding.out_src_shardings is None
+    assert lora_b_sharding.out_dst_shardings is None
 
 
 def test_float8_lora_targets_fused_feed_forward_projection():
@@ -162,7 +205,9 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
     init = {"weight": torch.nn.init.ones_}
     config = FeedForward.Config(
-        w13=Linear.Config(in_features=16, out_features=64, param_init=init),
+        w13=Linear.Config(
+            in_features=16, out_features=32, num_linears=2, param_init=init
+        ),
         w2=Linear.Config(in_features=32, out_features=16, param_init=init),
     )
     config = Float8LinearConverter(
@@ -179,9 +224,8 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
     assert isinstance(feed_forward.w13, Float8Linear)
     assert set(feed_forward.state_dict()) == {
-        "w1.weight",
+        "w13.weight",
         "w2.weight",
-        "w3.weight",
         "w13.lora_a.weight",
         "w13.lora_b.weight",
     }

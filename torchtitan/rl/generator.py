@@ -1340,11 +1340,10 @@ class VLLMGenerator(Configurable):
         model = self._get_model()
         model_sd = model.model.state_dict()
         await self._get_spmd_state_dict(model_sd, model=model)
-        # state_dict() returns hook-produced copies for fused modules (e.g.
-        # QKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never
-        # reaches the real param. Re-apply via load_state_dict to run the merge hook.
-        # Non-fused params share storage with model_sd, so reloading them is a
-        # harmless self-copy; only the fused wqkv is actually rebuilt.
+        # QKVLinear's state_dict hook produces wq/wk/wv copies, so the in-place
+        # fill above does not reach wqkv. Re-apply via load_state_dict to run its
+        # merge hook. Other params share storage with model_sd, so reloading them
+        # is a harmless self-copy; only fused wqkv is rebuilt.
         # TODO: investigate can we avoid the copy and properly load fused qkv weights
         model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version

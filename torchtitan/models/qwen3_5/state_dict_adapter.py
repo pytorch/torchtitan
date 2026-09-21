@@ -122,6 +122,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert torchtitan state dict to HuggingFace Qwen3.5 format."""
+        state_dict = self._native_fused_linears_to_hf(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
 
@@ -367,4 +368,4 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     tt_value = value.reshape(value.shape[0], -1)
                 tt_state_dict[tt_key] = tt_value
 
-        return tt_state_dict
+        return self._native_fused_linears_from_hf(tt_state_dict)

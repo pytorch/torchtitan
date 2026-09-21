@@ -71,6 +71,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
         )
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        state_dict = self._native_fused_linears_to_hf(state_dict)
         # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
@@ -154,4 +155,4 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
             state_dict[new_key] = value
 
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)

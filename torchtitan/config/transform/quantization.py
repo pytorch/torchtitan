@@ -157,6 +157,7 @@ class Float8LinearConverter(QuantizationConverter):
                 new_config = Float8Linear.Config(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,
+                    num_linears=linear_config.num_linears,
                     bias=linear_config.bias,
                     param_init=linear_config.param_init,
                     _torchao_config=self.torchao_config,
@@ -359,6 +360,7 @@ class MXFP8LinearConverter(QuantizationConverter):
             new_config = MXFP8Linear.Config(
                 in_features=config.in_features,
                 out_features=config.out_features,
+                num_linears=config.num_linears,
                 bias=config.bias,
                 param_init=config.param_init,
                 input_activation_format_for_backward=(
@@ -487,6 +489,7 @@ class NVFP4LinearConverter(QuantizationConverter):
                 new_config = NVFP4Linear.Config(
                     in_features=config.in_features,
                     out_features=config.out_features,
+                    num_linears=config.num_linears,
                     bias=config.bias,
                     param_init=config.param_init,
                 )
