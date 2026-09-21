@@ -52,6 +52,7 @@ from .optimizer_reshard import (
 
 __all__ = [
     "build_dist_muon",
+    "validate_dist_muon_assignments",
 ]
 
 
@@ -108,6 +109,29 @@ def _normalize_param_groups(
         normalized_param_groups.append(normalized_group)
 
     return normalized_param_groups
+
+
+def validate_dist_muon_assignments(
+    optimizer_by_fqn: Mapping[str, str | None],
+    factory_kwargs: Mapping[str, Any],
+) -> None:
+    """Require local trainable parameters with Muon layouts to use DistMuon.
+
+    The caller supplies canonical FQNs for local trainable parameters, including
+    unassigned parameters with a value of None. Frozen parameters and entries
+    for other pipeline stages are excluded from this assignment map.
+    """
+    compute_sharding_fqns = factory_kwargs.get("compute_sharding_by_fqn", {})
+    for fqn, opt_name in optimizer_by_fqn.items():
+        if fqn not in compute_sharding_fqns:
+            continue
+        if opt_name != DistMuon.__name__:
+            assignment = (
+                f"assigned to {opt_name}"
+                if opt_name is not None
+                else "not assigned to an optimizer"
+            )
+            raise ValueError(f"{fqn} has a DistMuon compute layout but is {assignment}")
 
 
 def _validate_compute_sharding_configuration(

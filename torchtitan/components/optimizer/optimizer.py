@@ -7,7 +7,7 @@
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
@@ -19,7 +19,11 @@ from torch.optim import Optimizer
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.flex_shard import build_dist_muon
+from torchtitan.distributed.flex_shard import (
+    build_dist_muon,
+    validate_dist_muon_assignments,
+)
+from torchtitan.distributed.flex_shard.dist_muon import DistMuon
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -37,6 +41,10 @@ __all__ = [
     "register_moe_load_balancing_hook",
     "register_moe_quantile_balancing_hook",
 ]
+
+_ASSIGNMENT_VALIDATORS: dict[
+    str, Callable[[Mapping[str, str | None], Mapping[str, Any]], None]
+] = {DistMuon.__name__: validate_dist_muon_assignments}
 
 
 @dataclass(kw_only=True, slots=True)
@@ -150,7 +158,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         optimizer_factories: dict[str, Callable[..., Optimizer]] = {
             "Adam": torch.optim.Adam,
             "AdamW": torch.optim.AdamW,
-            "DistMuon": build_dist_muon,
+            DistMuon.__name__: build_dist_muon,
         }
         if name not in optimizer_factories:
             raise NotImplementedError(f"Optimizer {name} not added.")
@@ -233,6 +241,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
                 model, param_group_configs, impl_kwargs
             )
+            self._validate_optimizer_assignments(
+                model, groups_by_opt_name, config.optimizer_factory_kwargs_by_name
+            )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
                 optimizer = self._resolve_optimizer_factory(opt_name)(
                     opt_param_groups,
@@ -271,6 +282,28 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 f"Optimizer {opt_name} (model_part={part_idx}): "
                 f"{num_params} params [{pattern}] {kwargs}"
             )
+
+    @staticmethod
+    def _validate_optimizer_assignments(
+        model: nn.Module,
+        groups_by_opt_name: dict[str, list[dict[str, Any]]],
+        factory_kwargs_by_name: dict[str, dict[str, Any]],
+    ) -> None:
+        """Run registered checks on all local trainable parameter assignments."""
+        optimizer_by_fqn: dict[str, str | None] = {
+            canonical_fqn(name): None
+            for name, param in model.named_parameters()
+            if param.requires_grad
+        }
+        for opt_name, groups in groups_by_opt_name.items():
+            for group in groups:
+                optimizer_by_fqn.update((fqn, opt_name) for fqn in group["param_names"])
+        # Include metadata-only entries so misassigned parameters cannot skip
+        # validation merely because their intended optimizer has no groups.
+        for opt_name in dict.fromkeys((*groups_by_opt_name, *factory_kwargs_by_name)):
+            validator = _ASSIGNMENT_VALIDATORS.get(opt_name)
+            if validator is not None:
+                validator(optimizer_by_fqn, factory_kwargs_by_name.get(opt_name, {}))
 
     def _validate_params(self, all_params: list[nn.Parameter]) -> None:
         """Verify every trainable param is assigned to exactly one optimizer."""
