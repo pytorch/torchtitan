@@ -27,10 +27,10 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   forms one independent `[R, C]` matrix. FlexShard routes the flat 2D compute
   tensor, and DistMuon applies a zero-copy local `[M_local, R, C]` view
   immediately before Muon compute. A native batch-first 3D `[M, R, C]`
-  parameter uses `Shard(0)` to distribute complete matrices. A single 2D
-  matrix without `BlockShard` uses whole-matrix compute such as `Owned`. The
-  builder validates named DTensor parameters and plans their storage-to-compute
-  transitions.
+  parameter uses `Shard(0)` to distribute complete matrices, or `Owned` to
+  assign the complete batch to one rank. A single 2D matrix without
+  `BlockShard` uses whole-matrix compute such as `Owned`. The builder validates
+  named DTensor parameters and plans their storage-to-compute transitions.
 
 Storage placements describe persistent ownership only; they do not define
 Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at

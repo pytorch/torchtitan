@@ -13,6 +13,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any
 
+import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate
 
@@ -161,6 +162,85 @@ class StateDictAdapter(BaseStateDictAdapter):
                     f"HF checkpoint conversion assumes {expected_name}; "
                     f"got {type(rope).__qualname__}."
                 )
+
+    @staticmethod
+    def _split_stacked_linear(
+        state_dict: dict[str, Any],
+        *,
+        fused_key: str,
+        logical_keys: tuple[str, ...],
+        dim: int,
+    ) -> None:
+        """Expose a native stacked parameter as logical projection views."""
+        if fused_key not in state_dict:
+            return
+        projections = state_dict.pop(fused_key).unbind(dim)
+        assert len(projections) == len(logical_keys)
+        state_dict.update(zip(logical_keys, projections, strict=True))
+
+    @staticmethod
+    def _stack_logical_linears(
+        state_dict: dict[str, Any],
+        *,
+        fused_key: str,
+        logical_keys: tuple[str, ...],
+        dim: int,
+    ) -> None:
+        """Stack logical projection parameters into one native parameter."""
+        if not all(key in state_dict for key in logical_keys):
+            return
+        state_dict[fused_key] = torch.stack(
+            [state_dict.pop(key) for key in logical_keys], dim=dim
+        )
+
+    def _native_fused_linears_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        """Convert native fused linear parameters to logical HF-facing keys.
+
+        This pass currently handles the stacked gate/up projection in
+        ``FeedForward``. Model-specific adapters subsequently rename the
+        logical keys to their corresponding HF keys. Other native fused
+        projection families should add their conversion to this pass rather
+        than exposing logical keys through module state-dict hooks.
+        """
+        from torchtitan.models.common.feed_forward import FeedForward
+
+        result = dict(state_dict)
+        for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
+            prefix = f"{fqn}." if fqn else ""
+            for name in ("weight", "bias"):
+                self._split_stacked_linear(
+                    result,
+                    fused_key=f"{prefix}w13.{name}",
+                    logical_keys=(
+                        f"{prefix}w1.{name}",
+                        f"{prefix}w3.{name}",
+                    ),
+                    dim=0,
+                )
+
+        return result
+
+    def _native_fused_linears_from_hf(
+        self, state_dict: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Convert logical HF-facing keys to native fused linear parameters."""
+        from torchtitan.models.common.feed_forward import FeedForward
+
+        result = dict(state_dict)
+        for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
+            prefix = f"{fqn}." if fqn else ""
+            for name in ("weight", "bias"):
+                self._stack_logical_linears(
+                    result,
+                    fused_key=f"{prefix}w13.{name}",
+                    logical_keys=(
+                        f"{prefix}w1.{name}",
+                        f"{prefix}w3.{name}",
+                    ),
+                    dim=0,
+                )
+
+        return result
 
     def get_hf_storage_reader(
         self, path: str, from_quantized: bool = False

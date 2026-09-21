@@ -79,13 +79,11 @@ def parallelize_muse_glimmer(
             parallel_dims=parallel_dims,
         )
         if has_vision:
+            # apply_compile walks ``layers`` (TransformerBlock stack). The
+            # adapter is a 2-layer MLP with no ``layers`` attribute, so it is
+            # left uncompiled -- matching the AC skip above.
             apply_compile(
                 model.vision_encoder,  # pyrefly: ignore [bad-argument-type]
-                compile_config=compile_config,
-                parallel_dims=parallel_dims,
-            )
-            apply_compile(
-                model.vision_adapter,  # pyrefly: ignore [bad-argument-type]
                 compile_config=compile_config,
                 parallel_dims=parallel_dims,
             )

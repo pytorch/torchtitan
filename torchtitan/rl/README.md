@@ -47,7 +47,7 @@ The pipeline has three layers.
 **3. Distributed execution.** A router sends requests to one or more vLLM generator replicas. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
 
 Core and RL each expose a workflow-specific `Trainer`. Both compose the shared
-`torchtitan.trainer.TrainingEngine`, which owns distributed model execution,
+`torchtitan.training_engine.TrainingEngine`, which owns distributed model execution,
 optimization, checkpointing, profiling, GC, SDC replay, and CUDA graphs.
 
 The distributed layer builds on two core components:

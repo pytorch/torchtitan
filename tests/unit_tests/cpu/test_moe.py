@@ -400,10 +400,10 @@ class TestMoE(unittest.TestCase):
         assert shared.sharding_config.in_dst_shardings is not None
         self.assertEqual(tp_type(shared.sharding_config.in_dst_shardings["x"]), spmd.R)
         self.assertEqual(
-            tp_type(shared.w13.sharding_config.state_shardings["weight"]), spmd.S(0)
+            tp_type(shared.w13.sharding_config.state_shardings["weight"]), spmd.S(1)
         )
         self.assertEqual(
-            tp_type(shared.w13.sharding_config.out_src_shardings), spmd.S(1)
+            tp_type(shared.w13.sharding_config.out_src_shardings), spmd.S(2)
         )
         self.assertEqual(
             tp_type(shared.w2.sharding_config.state_shardings["weight"]), spmd.S(1)
