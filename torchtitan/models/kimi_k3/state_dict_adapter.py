@@ -6,11 +6,10 @@
 
 from __future__ import annotations
 
-"""HuggingFace checkpoint adapter for unquantized Kimi K3 weights."""
+"""HuggingFace checkpoint adapter for dense and packed Kimi K3 weights."""
 
 import json
 import re
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -22,7 +21,13 @@ from torchtitan.components.checkpointer.packed_hf_storage import (
     PackedPairHuggingFaceStorageReader,
     PackedPairSpec,
 )
+from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.utils import MoEStateDictAdapter
+from torchtitan.quantization.mx_qat.checkpoint import (
+    decode_mxfp4,
+    MXFP4CheckpointPolicy,
+)
 
 if TYPE_CHECKING:
     from .model import KimiK3Model
@@ -31,77 +36,6 @@ _UNUSED_HF_LAYER_ZERO_ATTN_RES_KEYS = {
     "language_model.model.layers.0.self_attention_res_norm.weight",
     "language_model.model.layers.0.self_attention_res_proj.weight",
 }
-
-
-def _released_mxfp4_policy(path: str) -> tuple[int, Callable[[str], bool]]:
-    config_path = Path(path) / "config.json"
-    if not config_path.is_file():
-        raise ValueError(f"Quantized Kimi checkpoint is missing {config_path}.")
-    config = json.loads(config_path.read_text())
-    text_config = config.get("text_config", config)
-    quantization = text_config.get("quantization_config")
-    if not isinstance(quantization, dict):
-        raise ValueError("Kimi checkpoint is missing quantization_config metadata.")
-    if (
-        quantization.get("format") != "mxfp4-pack-quantized"
-        or quantization.get("quant_method") != "compressed-tensors"
-    ):
-        raise ValueError("Kimi checkpoint does not declare compressed MXFP4 weights.")
-
-    config_groups = quantization.get("config_groups")
-    if not isinstance(config_groups, dict) or not config_groups:
-        raise ValueError("Kimi quantization_config has no config groups.")
-    group_sizes = set()
-    targets = set()
-    for group in config_groups.values():
-        if not isinstance(group, dict):
-            raise ValueError("Kimi quantization config group must be an object.")
-        targets.update(group.get("targets", ()))
-        weights = group.get("weights")
-        if not isinstance(weights, dict):
-            raise ValueError("Kimi quantization config group has no weight config.")
-        group_sizes.add(weights.get("group_size"))
-    if targets != {"Linear"} or len(group_sizes) != 1:
-        raise ValueError(
-            "Kimi packed import currently requires one Linear MXFP4 group size."
-        )
-    block_size = group_sizes.pop()
-    if not isinstance(block_size, int):
-        raise ValueError("Kimi MXFP4 group_size must be an integer.")
-
-    ignore_patterns = []
-    for pattern in quantization.get("ignore", ()):
-        if not isinstance(pattern, str) or not pattern.startswith("re:"):
-            raise ValueError("Kimi packed import requires regex ignore entries.")
-        ignore_patterns.append(re.compile(pattern.removeprefix("re:")))
-
-    def is_target(weight_fqn: str) -> bool:
-        if not weight_fqn.endswith(".weight"):
-            return False
-        module_fqn = weight_fqn.removesuffix(".weight")
-        return not any(pattern.fullmatch(module_fqn) for pattern in ignore_patterns)
-
-    return block_size, is_target
-
-
-def _decode_mxfp4(
-    packed: torch.Tensor,
-    scales: torch.Tensor,
-    block_size: int,
-    target_dtype: torch.dtype,
-) -> torch.Tensor:
-    from torchao.prototype.mx_formats.mx_tensor import MXTensor
-
-    return MXTensor(
-        packed,
-        scales.view(torch.float8_e8m0fnu),
-        torch.float4_e2m1fn_x2,
-        block_size,
-        target_dtype,
-        None,
-        None,
-        False,
-    ).dequantize(target_dtype)
 
 
 class KimiK3StateDictAdapter(MoEStateDictAdapter):
@@ -214,6 +148,124 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         )
         return attention_map.get(abstract_key)
 
+    def hf_linear_weight_mapping(self) -> dict[str, str | None]:
+        """Map the supported HF Linear hierarchy to Titan parameter FQNs.
+
+        Reuse the adapter's architecture mapping. RouterGateLinear represents
+        HF KimiMoEGate's raw parameter, not an HF Linear. Grouped expert tensors
+        represent one HF Linear per expert; no quantization-name regex is used.
+        """
+        linear_weights = {
+            f"{fqn}.weight"
+            for fqn, config, _, _ in self.kimi_config.traverse(Linear.Config)
+            if not isinstance(config, RouterGateLinear.Config)
+        }
+        # MoonViT builds repeated layers from one block config and renames MLP
+        # fields. Inspect one meta block to recover its actual parameter names.
+        vision = self.kimi_config.vision_encoder
+        if vision is not None:
+            with torch.device("meta"):
+                block = vision.block.build()
+            linear_weights.update(
+                f"vision_encoder.layers.{layer}.{name}.weight"
+                for layer in range(vision.num_layers)
+                for name, module in block.named_modules()
+                if isinstance(module, Linear)
+            )
+        grouped = {
+            fqn: config
+            for fqn, config, _, _ in self.kimi_config.traverse(GroupedExperts.Config)
+        }
+        result: dict[str, str | None] = {}
+        for mapping in (self.from_hf_map, self.mla_from_hf_map, self.kda_from_hf_map):
+            for hf_template, titan_template in mapping.items():
+                layers = (
+                    range(
+                        vision.num_layers
+                        if hf_template.startswith("vision_tower.")
+                        and vision is not None
+                        else len(self.kimi_config.layers)
+                    )
+                    if "{}" in titan_template
+                    else (None,)
+                )
+                for layer in layers:
+                    titan_key = titan_template.format(layer)
+                    if titan_key in linear_weights:
+                        result[hf_template.format(layer)] = titan_key
+                    elif hf_template.count("{}") == 2:
+                        module = titan_key.rsplit(".", 1)[0]
+                        if module in grouped:
+                            for expert in range(grouped[module].num_experts):
+                                result[hf_template.format(layer, expert)] = titan_key
+        # HF has an unused layer-zero residual projection absent from Titan.
+        if self.kimi_config.layers[0].attention_res_proj is None:
+            result[
+                "language_model.model.layers.0.self_attention_res_proj.weight"
+            ] = None
+        # The HF vision projection is fused; Titan stores its three slices.
+        # Current Kimi recipes require vision to remain unquantized.
+        if self.kimi_config.vision_encoder is not None:
+            for layer in range(self.kimi_config.vision_encoder.num_layers):
+                result[
+                    f"vision_tower.encoder.blocks.{layer}.wqkv.weight"
+                ] = f"vision_encoder.layers.{layer}.attn.wqkv.weight"
+        return result
+
+    def mxfp4_policy(self, path: str) -> MXFP4CheckpointPolicy:
+        config_path = Path(path) / "config.json"
+        if not config_path.is_file():
+            raise ValueError(f"Quantized Kimi checkpoint is missing {config_path}.")
+        config = json.loads(config_path.read_text())
+        quantization = config.get("text_config", config).get("quantization_config")
+        if not isinstance(quantization, dict):
+            raise ValueError("Kimi checkpoint is missing quantization_config metadata.")
+        return MXFP4CheckpointPolicy.from_config(
+            quantization, self.hf_linear_weight_mapping()
+        )
+
+    @staticmethod
+    def _validate_qat_weight_config(config, policy: MXFP4CheckpointPolicy) -> None:
+        if (
+            config.dtype != torch.float4_e2m1fn_x2
+            or config.block_size != policy.block_size
+        ):
+            raise ValueError("MX QAT weight format disagrees with checkpoint policy")
+
+    def _validate_qat_policy(self, policy: MXFP4CheckpointPolicy) -> None:
+        """Reject a QAT recipe whose selected parameters differ from import."""
+        mapping = self.hf_linear_weight_mapping()
+        selected = set()
+        has_qat = False
+        for fqn, config, _, _ in self.kimi_config.traverse(Linear.Config):
+            if getattr(type(config)._owner, "_mx_qat", False):
+                has_qat = True
+                self._validate_qat_weight_config(
+                    config.weight_fake_quant_config, policy
+                )
+                selected.add(f"{fqn}.weight")
+        for fqn, config, _, _ in self.kimi_config.traverse(GroupedExperts.Config):
+            if getattr(type(config)._owner, "_mx_qat", False):
+                has_qat = True
+                self._validate_qat_weight_config(
+                    config.weight_fake_quant_config, policy
+                )
+                selected.update(
+                    key
+                    for key in mapping.values()
+                    if key and key.rsplit(".", 1)[0] == fqn
+                )
+        if not has_qat:
+            return  # Packed import into a BF16 model remains supported.
+        expected = {
+            mapping[key] for key in policy.weight_fqns if mapping[key] is not None
+        }
+        if selected != expected:
+            raise ValueError(
+                "MX QAT selection disagrees with checkpoint policy: "
+                f"missing={sorted(expected - selected)}, unexpected={sorted(selected - expected)}"
+            )
+
     def get_hf_storage_reader(
         self,
         path: str,
@@ -221,7 +273,8 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
     ) -> HuggingFaceStorageReader:
         if not from_quantized:
             return super().get_hf_storage_reader(path, from_quantized=False)
-        block_size, is_target = _released_mxfp4_policy(path)
+        policy = self.mxfp4_policy(path)
+        self._validate_qat_policy(policy)
         return PackedPairHuggingFaceStorageReader(
             path=path,
             thread_count=4,
@@ -229,11 +282,11 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 packed_suffix=".weight_packed",
                 scale_suffix=".weight_scale",
                 virtual_suffix=".weight",
-                block_size=block_size,
+                block_size=policy.block_size,
                 packed_values_per_byte=2,
                 target_dtype=torch.bfloat16,
-                is_target=is_target,
-                decode=_decode_mxfp4,
+                target_fqns=policy.weight_fqns,
+                decode=decode_mxfp4,
             ),
         )
 

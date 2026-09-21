@@ -10,33 +10,21 @@ from pathlib import Path
 
 import torch
 import torch.distributed.checkpoint as dcp
-from torchao.prototype.mx_formats.mx_tensor import MXTensor
-
 from scripts.checkpoint_conversion.create_kimi_k3_mxfp4_fixture import (
     convert_hf_state_dict_to_mxfp4,
     write_sharded_checkpoint,
 )
+from torchao.prototype.mx_formats.mx_tensor import MXTensor
 from torchtitan.components.checkpointer.packed_hf_storage import (
     PackedPairHuggingFaceStorageReader,
     PackedPairSpec,
 )
-
-_HF_WEIGHT = (
-    "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight"
+from torchtitan.quantization.mx_qat.checkpoint import (
+    decode_mxfp4,
+    MXFP4CheckpointPolicy,
 )
 
-
-def _decode_mxfp4(packed, scales, block_size, target_dtype):
-    return MXTensor(
-        packed,
-        scales.view(torch.float8_e8m0fnu),
-        torch.float4_e2m1fn_x2,
-        block_size,
-        target_dtype,
-        None,
-        None,
-        False,
-    ).dequantize(target_dtype)
+_HF_WEIGHT = "language_model.model.layers.1.block_sparse_moe.experts.0.w1.weight"
 
 
 class KimiK3MXFP4CheckpointIntegrationTest(unittest.TestCase):
@@ -49,7 +37,8 @@ class KimiK3MXFP4CheckpointIntegrationTest(unittest.TestCase):
             block_size=32,
         ).dequantize(torch.bfloat16)
         converted, pair_count = convert_hf_state_dict_to_mxfp4(
-            {_HF_WEIGHT: weight, "dense.weight": dense}
+            {_HF_WEIGHT: weight, "dense.weight": dense},
+            MXFP4CheckpointPolicy(frozenset({_HF_WEIGHT})),
         )
         self.assertEqual(pair_count, 1)
         self.assertNotIn(_HF_WEIGHT, converted)
@@ -75,8 +64,8 @@ class KimiK3MXFP4CheckpointIntegrationTest(unittest.TestCase):
                     block_size=32,
                     packed_values_per_byte=2,
                     target_dtype=torch.bfloat16,
-                    is_target=lambda key: key == _HF_WEIGHT,
-                    decode=_decode_mxfp4,
+                    target_fqns=frozenset({_HF_WEIGHT}),
+                    decode=decode_mxfp4,
                 ),
             )
             dcp.load(destination, storage_reader=reader)
@@ -86,10 +75,7 @@ class KimiK3MXFP4CheckpointIntegrationTest(unittest.TestCase):
         )
         torch.testing.assert_close(destination["dense.weight"], dense, rtol=0, atol=0)
         self.assertFalse(
-            any(
-                key.endswith(("weight_packed", "weight_scale"))
-                for key in destination
-            )
+            any(key.endswith(("weight_packed", "weight_scale")) for key in destination)
         )
 
 

@@ -14,39 +14,15 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from torch.distributed.checkpoint.metadata import MetadataIndex
 from torch.distributed.checkpoint.planner import LoadItemType, ReadItem
-
 from torchtitan.components.checkpointer.packed_hf_storage import (
     PackedPairHuggingFaceStorageReader,
     PackedPairSpec,
 )
+from torchtitan.quantization.mx_qat.checkpoint import decode_mxfp4
 
 _PACKED_KEY = "model.layers.0.experts.0.w1.weight_packed"
 _SCALE_KEY = "model.layers.0.experts.0.w1.weight_scale"
 _VIRTUAL_KEY = "model.layers.0.experts.0.w1.weight"
-
-
-def _is_expert_weight(key: str) -> bool:
-    return ".experts." in key
-
-
-def _decode_mxfp4(
-    packed: torch.Tensor,
-    scales: torch.Tensor,
-    block_size: int,
-    target_dtype: torch.dtype,
-) -> torch.Tensor:
-    from torchao.prototype.mx_formats.mx_tensor import MXTensor
-
-    return MXTensor(
-        packed,
-        scales.view(torch.float8_e8m0fnu),
-        torch.float4_e2m1fn_x2,
-        block_size,
-        target_dtype,
-        None,
-        None,
-        False,
-    ).dequantize(target_dtype)
 
 
 def _spec() -> PackedPairSpec:
@@ -57,8 +33,8 @@ def _spec() -> PackedPairSpec:
         block_size=32,
         packed_values_per_byte=2,
         target_dtype=torch.bfloat16,
-        is_target=_is_expert_weight,
-        decode=_decode_mxfp4,
+        target_fqns=frozenset({_VIRTUAL_KEY}),
+        decode=decode_mxfp4,
     )
 
 
@@ -158,6 +134,13 @@ class PackedPairHuggingFaceStorageReaderMetadataTest(unittest.TestCase):
             {index.fqn for index in metadata.storage_data},
             {_VIRTUAL_KEY, "dense.weight"},
         )
+
+    def test_read_metadata_rejects_dense_substitution_for_expected_pair(self) -> None:
+        path = self._write_checkpoint(
+            {_VIRTUAL_KEY: torch.ones((2, 64), dtype=torch.bfloat16)}
+        )
+        with self.assertRaisesRegex(ValueError, "requires missing pairs"):
+            PackedPairHuggingFaceStorageReader(path, _spec()).read_metadata()
 
     def test_read_metadata_rejects_missing_scale(self) -> None:
         path = self._write_checkpoint(
@@ -328,6 +311,7 @@ class PackedPairHuggingFaceStorageReaderReadTest(unittest.TestCase):
             atol=0,
             equal_nan=True,
         )
+
 
 if __name__ == "__main__":
     unittest.main()

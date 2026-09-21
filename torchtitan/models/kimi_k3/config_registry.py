@@ -21,6 +21,7 @@ from torchtitan.components.optimizer import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms, MXQATTransform
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.distributed.flex_shard import (
     BlockShard,
@@ -44,10 +45,13 @@ from torchtitan.models.kimi_k2_7.config_registry import (
     _per_expert_compute_layout,
 )
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
 from torchtitan.trainer import Trainer
 
 from . import KIMI_K3_SPECIAL_TOKENS, KimiK3Model, model_registry
 from .model import KimiMLAAttention
+from .quantization import MXFP4_QUANTIZATION_CONFIG
+from .state_dict_adapter import KimiK3StateDictAdapter
 
 
 def _kimi_k3_multimodal_dataloader(
@@ -319,3 +323,29 @@ class _KimiK3TrainerConfig(Trainer.Config):
                 "tensor parallelism can produce unsupported _StridedShard "
                 "parameter layouts."
             )
+
+
+def kimi_k3_debugmodel_mx_qat(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    checkpoint_path: str | None = None,
+) -> Trainer.Config:
+    """Kimi QAT using the released policy and optional packed HF initialization.
+
+    Pass an absolute checkpoint_path to load the packed debug fixture. Without
+    it, the recipe uses random initialization and remains valid before overrides.
+    """
+    config = kimi_k3_debugmodel(seq_len=seq_len)
+    adapter = KimiK3StateDictAdapter(config.model_spec.model, hf_assets_path=None)
+    mapping = adapter.hf_linear_weight_mapping()
+    policy = MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
+    weights = {mapping[key] for key in policy.weight_fqns if mapping[key] is not None}
+    transform = MXQATTransform.from_weight_fqns(config.model_spec.model, weights)
+    config.checkpointer = CheckpointManager.Config(
+        interval=5,
+        initial_load_path=checkpoint_path,
+        initial_load_in_hf=checkpoint_path is not None,
+        initial_load_in_hf_quantized=checkpoint_path is not None,
+        last_save_model_only=False,
+    )
+    return apply_transforms(config, [transform])
