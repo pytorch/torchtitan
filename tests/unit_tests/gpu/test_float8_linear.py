@@ -13,11 +13,13 @@ from torch.utils.checkpoint import checkpoint
 pytest.importorskip("torchao")
 
 from torchao.float8 import Float8LinearConfig  # noqa: E402
-from torchao.float8.float8_linear import Float8Linear as TorchAOFloat8Linear  # noqa: E402
+from torchao.float8.float8_linear import (  # noqa: E402
+    Float8Linear as TorchAOFloat8Linear,
+)
 
 from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
 from torchtitan.quantization.float8 import Float8Linear  # noqa: E402
-from torchtitan.quantization.float8_tensor import (  # noqa: E402
+from torchtitan.quantization.float8.tensor import (  # noqa: E402
     _LinearShardedTensorWithFloat8Compute,
     _LinearShardedTensorWithFloat8GWHPCompute,
 )

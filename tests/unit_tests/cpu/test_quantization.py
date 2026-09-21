@@ -443,6 +443,28 @@ def test_quantized_grouped_experts():
     assert hasattr(mxfp8_cls.Config, "swiglu_limit")
     assert hasattr(float8_cls.Config, "swiglu_limit")
 
+    from torchtitan.quantization.float8.tensor import (
+        _GroupedExpertsShardedTensorWithFloat8Compute,
+    )
+
+    for parent_cls in (GroupedExperts, GptOssGroupedExperts):
+        quantized_cls = _get_float8_grouped_experts_cls(parent_cls)
+        module = quantized_cls.Config(
+            dim=128,
+            hidden_dim=128,
+            num_experts=4,
+        ).build()
+        grouped_weights = [
+            parameter
+            for parameter in module.parameters(recurse=False)
+            if parameter.ndim == 3
+        ]
+        assert grouped_weights
+        assert all(
+            isinstance(weight, _GroupedExpertsShardedTensorWithFloat8Compute)
+            for weight in grouped_weights
+        )
+
 
 @pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
 @pytest.mark.parametrize(
@@ -470,11 +492,20 @@ def test_grouped_mm_overrides_keep_the_seam_signature(make_quantized_cls, parent
 @pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
 def test_float8_grouped_experts_checkpoint_state_uses_plain_tensors(parent_cls):
     pytest.importorskip("torchao")
+    from torchtitan.quantization.float8.tensor import (
+        _GroupedExpertsShardedTensorWithFloat8Compute,
+    )
+
     stock = parent_cls.Config(dim=16, hidden_dim=32, num_experts=2).build()
     float8_cls = _get_float8_grouped_experts_cls(parent_cls)
     module = float8_cls.Config(dim=16, hidden_dim=32, num_experts=2).build()
 
-    assert all(type(param) is torch.nn.Parameter for param in module.parameters())
+    assert all(
+        isinstance(param, _GroupedExpertsShardedTensorWithFloat8Compute)
+        if param.ndim == 3
+        else type(param) is torch.nn.Parameter
+        for param in module.parameters()
+    )
     stock_state = stock.state_dict()
     float8_state = module.state_dict()
     assert float8_state.keys() == stock_state.keys()

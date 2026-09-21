@@ -18,7 +18,7 @@ from torchao.prototype.moe_training.nvfp4_training.nvfp4_linear import (
 )
 from torchao.quantization.quantize_.common.kernel_preference import KernelPreference
 
-from ._fsdp_tensor import _ShardedFSDPTensor
+from .._fsdp_tensor import _ShardedFSDPTensor
 
 
 __all__: list[str] = []

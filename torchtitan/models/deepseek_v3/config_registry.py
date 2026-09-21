@@ -129,6 +129,21 @@ def deepseek_v3_debugmodel_mxfp8(
     return config
 
 
+def deepseek_v3_debugmodel_float8_grouped(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
+    config.compile = CompileConfig(components=["model"])
+    config.model_spec = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+        converters=[
+            Float8GroupedExpertsConverter.Config(model_compile_enabled=True),
+        ],
+    )
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:

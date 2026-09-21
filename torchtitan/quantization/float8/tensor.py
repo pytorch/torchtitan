@@ -15,7 +15,7 @@ import torch
 from torchao.float8.config import e4m3_dtype
 from torchao.float8.float8_utils import amax_to_scale, to_fp8_saturated
 
-from ._fsdp_tensor import _ShardedFSDPTensor
+from .._fsdp_tensor import _ShardedFSDPTensor
 
 
 __all__: list[str] = []
@@ -126,3 +126,74 @@ class _LinearShardedTensorWithFloat8GWHPCompute(_LinearShardedTensorWithFloat8Co
     """Float8 weight whose DGRAD operand uses tensorwise scaling."""
 
     dgrad_weight_tensorwise = True
+
+
+@dataclass(frozen=True, slots=True)
+class _Float8GroupedExpertsOperands:
+    """Float8 expert-weight operands owned by one FSDP unshard lifetime."""
+
+    weight_qdata_fprop_EIO: torch.Tensor  # noqa: N815
+    weight_scale_fprop_E1O: torch.Tensor  # noqa: N815
+    weight_qdata_dgrad_EOI: torch.Tensor  # noqa: N815
+    weight_scale_dgrad_EI: torch.Tensor  # noqa: N815
+
+
+@torch.no_grad()
+def _quantize_float8_grouped_weight(
+    weight_EOI: torch.Tensor,
+) -> _Float8GroupedExpertsOperands:
+    """Build the two expert-weight orientations used by FPROP and DGRAD."""
+    from torchao.prototype.moe_training.kernels import (
+        triton_fp8_colwise_3d_scale_and_cast,
+        triton_fp8_rowwise_3d_transpose_rhs,
+    )
+
+    if weight_EOI.ndim != 3:
+        raise ValueError(
+            "Float8 grouped weight quantization requires a 3D weight, "
+            f"got {weight_EOI.ndim} dimensions."
+        )
+    if any(size % _FLOAT8_ALIGNMENT for size in weight_EOI.shape[-2:]):
+        raise ValueError(
+            "Float8 grouped weight quantization requires both matrix dimensions "
+            f"divisible by {_FLOAT8_ALIGNMENT}, got {tuple(weight_EOI.shape)}."
+        )
+
+    weight_EIO = weight_EOI.bfloat16().transpose(-2, -1)
+    (
+        weight_qdata_fprop_EIO,
+        weight_scale_fprop_E1O,
+    ) = triton_fp8_colwise_3d_scale_and_cast(
+        weight_EIO,
+        output_dtype=e4m3_dtype,
+        round_scales_to_power_of_2=True,
+    )
+    weight_qdata_dgrad_EOI, weight_scale_dgrad_EI = triton_fp8_rowwise_3d_transpose_rhs(
+        weight_EIO,
+        output_dtype=e4m3_dtype,
+        round_scales_to_power_of_2=True,
+    )
+    return _Float8GroupedExpertsOperands(
+        weight_qdata_fprop_EIO=weight_qdata_fprop_EIO,
+        weight_scale_fprop_E1O=weight_scale_fprop_E1O,
+        weight_qdata_dgrad_EOI=weight_qdata_dgrad_EOI,
+        weight_scale_dgrad_EI=weight_scale_dgrad_EI,
+    )
+
+
+class _GroupedExpertsShardedTensorWithFloat8Compute(_ShardedFSDPTensor):
+    """Persistent expert parameter with cached Float8 compute operands."""
+
+    def _build_operands(
+        self,
+        logical_tensor: torch.Tensor,
+        out: _Float8GroupedExpertsOperands | None = None,
+    ) -> _Float8GroupedExpertsOperands:
+        operands = _quantize_float8_grouped_weight(logical_tensor)
+        if out is None:
+            return operands
+        out.weight_qdata_fprop_EIO.copy_(operands.weight_qdata_fprop_EIO)
+        out.weight_scale_fprop_E1O.copy_(operands.weight_scale_fprop_E1O)
+        out.weight_qdata_dgrad_EOI.copy_(operands.weight_qdata_dgrad_EOI)
+        out.weight_scale_dgrad_EI.copy_(operands.weight_scale_dgrad_EI)
+        return out

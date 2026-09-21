@@ -59,14 +59,14 @@ For scaling strategy, we support rowwise dynamic scaling (alpha).
 
 ### TorchAO and TorchTitan boundary
 
-TorchTitan owns the dense `Float8Linear` module, its autograd function, recipe
-selection, and the lifetime of quantized weights. TorchAO supplies the low-level
-Float8 scaling, casting, and matrix-multiplication helpers. The grouped-expert
-path remains a separate TorchAO-backed implementation.
+TorchTitan owns the dense `Float8Linear` and grouped-expert modules, their
+autograd functions, recipe selection, and the lifetime of quantized weights.
+TorchAO supplies only the low-level Float8 quantization and matrix-multiplication
+kernels.
 
-With FSDP, the persistent parameter and checkpoint state remain in high
-precision. After each all-gather, FSDP builds and owns separate Float8 weight
-operands for FPROP and DGRAD, then releases the high-precision all-gather
+With FSDP, persistent dense and expert parameters and checkpoint state remain
+in high precision. After each all-gather, FSDP builds and owns separate Float8
+weight operands for FPROP and DGRAD, then releases the high-precision all-gather
 output. With `reshard_after_forward=False`, those operands are reused across
 pipeline microbatches. With `reshard_after_forward=True`, FSDP frees them after
 forward and refills the same tensor objects before backward.

@@ -18,10 +18,10 @@ from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 pytest.importorskip("torchao")
 pytest.importorskip("torchao.prototype.moe_training.nvfp4_training")
 
-import torchtitan.quantization.nvfp4_tensor as nvfp4_tensor  # noqa: E402
+import torchtitan.quantization.nvfp4.tensor as nvfp4_tensor  # noqa: E402
 from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
 from torchtitan.quantization.nvfp4 import NVFP4Linear  # noqa: E402
-from torchtitan.quantization.nvfp4_tensor import (  # noqa: E402
+from torchtitan.quantization.nvfp4.tensor import (  # noqa: E402
     _LinearShardedTensorWithNVFP4Compute,
 )
 

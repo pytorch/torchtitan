@@ -70,7 +70,7 @@ We look forward to your contributions!
 4. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
    - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
 5. `torch.compile` support
-6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](torchtitan/quantization/float8.md))
+6. [Float8](https://discuss.pytorch.org/t/distributed-w-torchtitan-enabling-float8-all-gather-in-fsdp2/209323) support ([how-to](torchtitan/quantization/float8/README.md))
 7. [MXFP8 training for dense and MoE models](torchtitan/quantization/mxfp8/README.md) on Blackwell GPUs.
 8. Supervised Fine-Tuning (SFT) with chat-formatted datasets
 9. DDP and HSDP
@@ -100,7 +100,7 @@ You may want to see how the model is defined or how parallelism techniques are a
 * [torchtitan/models/llama3/parallelize.py](torchtitan/models/llama3/parallelize.py) - helpers for applying Data Parallel, Tensor Parallel, activation checkpointing, and `torch.compile` to the model
 * [torchtitan/distributed/pipeline_parallel.py](torchtitan/distributed/pipeline_parallel.py) - helpers for applying Pipeline Parallel to the model
 * [torchtitan/components/checkpointer/dcp.py](torchtitan/components/checkpointer/dcp.py) - utils for saving/loading distributed checkpoints
-* [torchtitan/quantization/float8.py](torchtitan/quantization/float8.py) - utils for applying Float8 techniques
+* [torchtitan/quantization/float8/](torchtitan/quantization/float8/) - Float8 training components
 
 
 ## Installation

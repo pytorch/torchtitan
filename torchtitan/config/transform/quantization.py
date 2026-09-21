@@ -18,7 +18,11 @@ import torch._inductor.config
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls, Float8Linear
+from torchtitan.quantization.float8 import (
+    _float8_experts_import_error,
+    _get_float8_grouped_experts_cls,
+    Float8Linear,
+)
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
 from torchtitan.quantization.nvfp4 import NVFP4Linear
@@ -171,10 +175,10 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
     def __init__(self, config: Config):
         self.config = config
 
-        if find_spec("torchao") is None:
+        if _get_float8_grouped_experts_cls is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 MoE training."
-            )
+            ) from _float8_experts_import_error
 
         if not (has_cuda_capability(8, 9) or has_rocm_capability(9, 4)):
             raise ValueError(
@@ -189,6 +193,7 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
             )
 
     def convert(self, model_config):
+        assert _get_float8_grouped_experts_cls is not None
         for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
             swap_token_dispatcher(parent, self.PAD_MULTIPLE)
             base_module_cls = type(config)._owner

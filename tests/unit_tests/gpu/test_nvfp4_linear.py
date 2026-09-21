@@ -22,7 +22,7 @@ from torchtitan.quantization.nvfp4 import (  # noqa: E402
     _HARDCODED_SIGN_VECTOR,
     NVFP4Linear,
 )
-from torchtitan.quantization.nvfp4_tensor import (  # noqa: E402
+from torchtitan.quantization.nvfp4.tensor import (  # noqa: E402
     _LinearShardedTensorWithNVFP4Compute,
 )
 
