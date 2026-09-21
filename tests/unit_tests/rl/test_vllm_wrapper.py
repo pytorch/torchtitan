@@ -6,6 +6,7 @@
 
 import spmd_types as spmd
 import torch
+from torchtitan.models.common.attention import QKVLinear
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
@@ -46,6 +47,33 @@ def test_state_dict_layouts_include_native_feed_forward_weight():
     assert "feed_forward.w1.weight" not in layouts
     assert "feed_forward.w3.weight" not in layouts
     assert layouts["feed_forward.w2.weight"] is rowwise
+
+
+def test_state_dict_layouts_include_native_qkv_weight():
+    """Verify QKV layout lookup uses the native packed state-dict key."""
+    colwise = dense_param_placement(tp=spmd.S(0))
+    config = QKVLinear.Config(
+        head_dim=8,
+        n_heads=4,
+        n_kv_heads=2,
+        wqkv=Linear.Config(
+            in_features=16,
+            out_features=64,
+            sharding_config=ShardingConfig(state_shardings={"weight": colwise}),
+        ),
+    )
+    model = torch.nn.Module()
+    model.qkv_linear = config.build()
+    wrapper = VLLMModelWrapper.__new__(VLLMModelWrapper)
+    torch.nn.Module.__init__(wrapper)
+    wrapper.model = model
+
+    layouts = wrapper.get_state_dict_layouts()
+
+    assert layouts["qkv_linear.wqkv.weight"] is colwise
+    assert "qkv_linear.wq.weight" not in layouts
+    assert "qkv_linear.wk.weight" not in layouts
+    assert "qkv_linear.wv.weight" not in layouts
 
 
 def test_state_dict_layouts_include_split_expert_weights():

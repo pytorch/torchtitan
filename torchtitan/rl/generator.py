@@ -1340,11 +1340,10 @@ class VLLMGenerator(Configurable):
         model = self._get_model()
         model_sd = model.model.state_dict()
         await self._get_spmd_state_dict(model_sd, model=model)
-        # QKVLinear's state_dict hook produces wq/wk/wv copies, so the in-place
-        # fill above does not reach wqkv. Re-apply via load_state_dict to run its
-        # merge hook. Other params share storage with model_sd, so reloading them
-        # is a harmless self-copy; only fused wqkv is rebuilt.
-        # TODO: investigate can we avoid the copy and properly load fused qkv weights
+        # Fused grouped experts still expose hook-produced w1/w3 copies, so the
+        # in-place fill above does not reach their physical w13 parameter.
+        # Re-apply the state dict to run that module's merge hook. Other params,
+        # including native QKVLinear.wqkv, share storage with model_sd.
         model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:

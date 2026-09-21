@@ -193,15 +193,90 @@ class StateDictAdapter(BaseStateDictAdapter):
             [state_dict.pop(key) for key in logical_keys], dim=dim
         )
 
+    @staticmethod
+    def _split_qkv_linear(
+        state_dict: dict[str, Any],
+        *,
+        prefix: str,
+        head_dim: int,
+        heads_per_kv: int,
+    ) -> None:
+        """Expose a native packed QKV parameter as logical Q/K/V projections."""
+        qkv_group_size = heads_per_kv + 2
+        for param_name in ("weight", "bias"):
+            fused_key = f"{prefix}wqkv.{param_name}"
+            if fused_key not in state_dict:
+                continue
+            tensor = state_dict.pop(fused_key)
+            # The packed groups cross a dim-0 shard boundary when the FSDP
+            # degree does not divide the KV-head count, so reshape a replicated
+            # DTensor and keep the result distributed for HF checkpoint I/O.
+            if isinstance(tensor, DTensor):
+                tensor = tensor.redistribute(
+                    tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
+                )
+            num_kv_heads = tensor.shape[0] // (qkv_group_size * head_dim)
+            tail = tensor.shape[1:]
+            packed = tensor.reshape(
+                num_kv_heads,
+                qkv_group_size,
+                head_dim,
+                *tail,
+            )
+            state_dict[f"{prefix}wq.{param_name}"] = (
+                packed[:, :heads_per_kv].reshape(-1, *tail).contiguous()
+            )
+            state_dict[f"{prefix}wk.{param_name}"] = (
+                packed[:, heads_per_kv].reshape(-1, *tail).contiguous()
+            )
+            state_dict[f"{prefix}wv.{param_name}"] = (
+                packed[:, heads_per_kv + 1].reshape(-1, *tail).contiguous()
+            )
+
+    @staticmethod
+    def _merge_qkv_linear(
+        state_dict: dict[str, Any],
+        *,
+        prefix: str,
+        head_dim: int,
+        heads_per_kv: int,
+    ) -> None:
+        """Pack logical Q/K/V projections into one native QKV parameter."""
+        for param_name in ("weight", "bias"):
+            logical_keys = tuple(
+                f"{prefix}{projection}.{param_name}"
+                for projection in ("wq", "wk", "wv")
+            )
+            if not all(key in state_dict for key in logical_keys):
+                continue
+            wq, wk, wv = (state_dict.pop(key) for key in logical_keys)
+            # Loading may provide dim-0-sharded DTensors whose local shapes
+            # cannot express whole QKV groups. Rebuild from replicated inputs;
+            # FSDP subsequently copies the result into its native shard.
+            if isinstance(wq, DTensor):
+                wq, wk, wv = (
+                    tensor.redistribute(
+                        tensor.device_mesh,
+                        [Replicate()] * tensor.device_mesh.ndim,
+                    )
+                    for tensor in (wq, wk, wv)
+                )
+            num_kv_heads = wk.shape[0] // head_dim
+            tail = wq.shape[1:]
+            q = wq.reshape(num_kv_heads, heads_per_kv, head_dim, *tail)
+            k = wk.reshape(num_kv_heads, 1, head_dim, *tail)
+            v = wv.reshape(num_kv_heads, 1, head_dim, *tail)
+            state_dict[f"{prefix}wqkv.{param_name}"] = torch.cat(
+                [q, k, v], dim=1
+            ).reshape(-1, *tail)
+
     def _native_fused_linears_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert native fused linear parameters to logical HF-facing keys.
 
-        This pass currently handles the stacked gate/up projection in
-        ``FeedForward``. Model-specific adapters subsequently rename the
-        logical keys to their corresponding HF keys. Other native fused
-        projection families should add their conversion to this pass rather
-        than exposing logical keys through module state-dict hooks.
+        Model-specific adapters subsequently rename the logical keys to their
+        corresponding HF keys.
         """
+        from torchtitan.models.common.attention import QKVLinear
         from torchtitan.models.common.feed_forward import FeedForward
 
         result = dict(state_dict)
@@ -218,12 +293,22 @@ class StateDictAdapter(BaseStateDictAdapter):
                     dim=0,
                 )
 
+        for fqn, config, _parent, _ in self.model_config.traverse(QKVLinear.Config):
+            prefix = f"{fqn}." if fqn else ""
+            self._split_qkv_linear(
+                result,
+                prefix=prefix,
+                head_dim=config.head_dim,
+                heads_per_kv=config.n_heads // config.n_kv_heads,
+            )
+
         return result
 
     def _native_fused_linears_from_hf(
         self, state_dict: dict[str, Any]
     ) -> dict[str, Any]:
         """Convert logical HF-facing keys to native fused linear parameters."""
+        from torchtitan.models.common.attention import QKVLinear
         from torchtitan.models.common.feed_forward import FeedForward
 
         result = dict(state_dict)
@@ -239,6 +324,15 @@ class StateDictAdapter(BaseStateDictAdapter):
                     ),
                     dim=0,
                 )
+
+        for fqn, config, _parent, _ in self.model_config.traverse(QKVLinear.Config):
+            prefix = f"{fqn}." if fqn else ""
+            self._merge_qkv_linear(
+                result,
+                prefix=prefix,
+                head_dim=config.head_dim,
+                heads_per_kv=config.n_heads // config.n_kv_heads,
+            )
 
         return result
 
