@@ -9,11 +9,18 @@ from typing import cast
 from unittest.mock import patch
 
 import pytest
+import spmd_types as spmd
 import torch
+from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import CommConfig
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.spmd_types import (
+    current_module_forward_input_spmd_type,
+    current_module_forward_output_spmd_type,
+    set_current_module_forward_spmd_types,
+)
 from torchtitan.distributed.utils import init_distributed
 
 
@@ -77,3 +84,24 @@ def test_dist_sum_tensor_waits_for_distributed_result():
     assert result is reduced
     reduce.assert_called_once_with(value, reduceOp="SUM", group=mesh)
     wait.assert_called_once_with(reduced)
+
+
+def test_module_spmd_context_exposes_forward_types() -> None:
+    outer_input = SpmdType({"tp": spmd.S(0)})
+    outer_output = SpmdType({"tp": spmd.S(0)})
+    inner_input = SpmdType({"tp": spmd.I})
+    inner_output = SpmdType({"tp": spmd.P})
+
+    with set_current_module_forward_spmd_types(
+        input_types={"x": outer_input},
+        output_type=outer_output,
+    ):
+        assert current_module_forward_input_spmd_type("x", "tp") == spmd.S(0)
+        assert current_module_forward_output_spmd_type("tp") == spmd.S(0)
+        with set_current_module_forward_spmd_types(
+            input_types={"input": inner_input},
+            output_type=inner_output,
+        ):
+            assert current_module_forward_input_spmd_type("input", "tp") == spmd.I
+            assert current_module_forward_output_spmd_type("tp") == spmd.P
+        assert current_module_forward_input_spmd_type("x", "tp") == spmd.S(0)
