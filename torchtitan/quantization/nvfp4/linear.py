@@ -420,6 +420,20 @@ class NVFP4Linear(Linear):
         self.register_buffer("_rht_sign_vector", None, persistent=False)
         self._rht_sign_vector_tuple = None
 
+    def _parallelize(self, parallel_dims) -> None:
+        # spmd_types returns a plain tensor when TP shards the weight. Restore
+        # the FSDP extension wrapper before fully_shard() consumes it.
+        super()._parallelize(parallel_dims)
+        if isinstance(self.weight, _LinearShardedTensorWithNVFP4Compute):
+            return
+        distributed_weight = self.weight
+        wrapped_weight = nn.Parameter(
+            _LinearShardedTensorWithNVFP4Compute(distributed_weight.data),
+            requires_grad=distributed_weight.requires_grad,
+        )
+        spmd.assert_type_like(wrapped_weight, distributed_weight)
+        self.weight = wrapped_weight
+
     def _refresh_rht_sign_vector_tuple(self) -> None:
         sign_vector = self._rht_sign_vector
         if sign_vector is not None and hasattr(sign_vector, "to_local"):

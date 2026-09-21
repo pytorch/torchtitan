@@ -43,7 +43,6 @@ class MultimodalModel(Decoder):
         compile_config: CompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> Self:
         from torchtitan.distributed.utils import get_spmd_context
 
@@ -75,12 +74,11 @@ class MultimodalModel(Decoder):
                         parallel_dims=parallel_dims,
                     )
 
-            if not skip_dp:
-                self._apply_fsdp(
-                    parallel_dims=parallel_dims,
-                    training=training,
-                    parallelism=parallelism,
-                )
+            self._apply_fsdp(
+                parallel_dims=parallel_dims,
+                training=training,
+                parallelism=parallelism,
+            )
         return self
 
     def _apply_fsdp(

@@ -106,9 +106,6 @@ jobs:
           --assert-equal \
           --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --num_generators 1'
 
-        # HF adapter layout regression uses two CPU/Gloo ranks.
-        python -m pytest tests/unit_tests/rl/test_vllm_wrapper.py -v
-
         # Bitwise trainer/generator parity tests (batch-invariant). Each TP=2 case
         # runs in a separate torchrun invocation so it gets a fresh process group
         # and vLLM engine.

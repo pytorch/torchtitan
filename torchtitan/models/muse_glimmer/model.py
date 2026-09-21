@@ -394,7 +394,6 @@ class MuseGlimmerModel(MultimodalModel):
         compile_config: CompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> MuseGlimmerModel:
         if self.vision_encoder is not None and parallel_dims.tp_enabled:
             assert self.vision_encoder.num_heads % parallel_dims.tp == 0, (
@@ -409,7 +408,6 @@ class MuseGlimmerModel(MultimodalModel):
             compile_config=compile_config,
             ac_config=ac_config,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )
 
     def preprocess_inputs(
