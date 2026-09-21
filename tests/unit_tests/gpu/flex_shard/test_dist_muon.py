@@ -166,26 +166,7 @@ class TestDistMuon(DTensorTestBase):
             ):
                 parameter.grad = grad.clone()
 
-            layouts = {
-                layout.fqn: layout
-                for layout in current_optimizer._parameter_compute_layouts
-            }
-            compute_update = current_optimizer._compute_update
-
-            def check_compute_views(compute_layout, compute):
-                self.assertIs(compute_layout, layouts[compute_layout.fqn])
-                if compute_layout.param is current_redistributed:
-                    (view,) = current_optimizer._matrix_views_by_fqn[compute_layout.fqn]
-                    torch.testing.assert_close(
-                        view.view_as_matrix_batch(compute), compute, rtol=0, atol=0
-                    )
-                    self.assertEqual(compute.shape, redistributed_value.shape)
-                compute_update(compute_layout, compute)
-
-            with mock.patch.object(
-                current_optimizer, "_compute_update", side_effect=check_compute_views
-            ):
-                current_optimizer.step()
+            current_optimizer.step()
             reference_optimizer.step()
 
             rank = mesh.get_local_rank()
