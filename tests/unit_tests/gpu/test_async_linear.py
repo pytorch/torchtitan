@@ -141,11 +141,11 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
 
 class TestAsyncTensorParallelSharding(DTensorTestBase):
-    """The declared contracts, as they survive a real ``parallelize``.
+    """Projection contracts and synchronous boundary behavior.
 
-    Contracts only -- nothing here runs the fused ops, so it needs no CUDA and
-    does run in CI on a gloo mesh. Anything that actually calls symmetric memory
-    belongs in a CUDA-guarded class.
+    Nothing here runs the fused ops, so these tests need no CUDA and run in CI
+    on a gloo mesh. Anything that calls symmetric memory belongs in a
+    CUDA-guarded class.
     """
 
     @property
@@ -249,6 +249,38 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             spmd.assert_type(x_local, input_layout)
             output = feed_forward(x_local)
             output.sum().backward()
+
+        self.assertEqual(output.shape, x_local.shape)
+
+    @with_comms
+    def test_gpt_oss_attention_reshapes_gathered_tokens(self):
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.models.gpt_oss import model_registry
+        from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
+
+        class _IdentityRope(torch.nn.Module):
+            def forward(self, q, k, positions):
+                return q, k
+
+        class _AttentionOutput(torch.nn.Module):
+            def forward(self, q, k, v, *, out_transform=None, **kwargs):
+                if out_transform is None:
+                    return q
+                lse = torch.zeros(q.shape[:2], device=q.device, dtype=q.dtype)
+                return out_transform(q, lse)
+
+        config = model_registry("debugmodel", seq_len=128, attn_backend="flex").model
+        set_gpt_oss_sharding_config(config, enable_sp=True, enable_ep=False)
+        attention = config.layers[0].attention.build().to(self.device_type)
+        attention.rope = _IdentityRope()
+        attention.inner_attention = _AttentionOutput()
+
+        parallel_dims = self._parallel_dims()
+        attention.parallelize(parallel_dims)
+
+        x_local = torch.randn(8, config.dim, device=self.device_type)
+        with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+            output = attention(x_local, None, None)
 
         self.assertEqual(output.shape, x_local.shape)
 
