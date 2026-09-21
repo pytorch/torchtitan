@@ -407,7 +407,6 @@ class KimiK3Model(MultimodalModel):
         compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> KimiK3Model:
         # Bind local implementations early; torch.compile traces on first use.
         compile_config.apply_local_compile()
@@ -423,12 +422,11 @@ class KimiK3Model(MultimodalModel):
                 policy.apply(self)
                 if self.vision_encoder is not None:
                     policy.apply(self.vision_encoder)
-            if not skip_dp:
-                self._apply_fsdp(
-                    parallelism_context=parallelism_context,
-                    training=training,
-                    parallelism=parallelism,
-                )
+            self._apply_fsdp(
+                parallelism_context=parallelism_context,
+                training=training,
+                parallelism=parallelism,
+            )
         return self
 
     def preprocess_inputs(

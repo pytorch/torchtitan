@@ -27,7 +27,7 @@ from spmd_types import SpmdType
 from torch import nn
 from torch.autograd.function import once_differentiable
 
-from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -419,6 +419,20 @@ class NVFP4Linear(Linear):
         self.register_buffer("_sr_seed", None, persistent=False)
         self.register_buffer("_rht_sign_vector", None, persistent=False)
         self._rht_sign_vector_tuple = None
+
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        # spmd_types returns a plain tensor when TP shards the weight. Restore
+        # the FSDP extension wrapper before fully_shard() consumes it.
+        super()._parallelize(parallelism_context)
+        if isinstance(self.weight, _LinearShardedTensorWithNVFP4Compute):
+            return
+        distributed_weight = self.weight
+        wrapped_weight = nn.Parameter(
+            _LinearShardedTensorWithNVFP4Compute(distributed_weight.data),
+            requires_grad=distributed_weight.requires_grad,
+        )
+        spmd.assert_type_like(wrapped_weight, distributed_weight)
+        self.weight = wrapped_weight
 
     def _refresh_rht_sign_vector_tuple(self) -> None:
         sign_vector = self._rht_sign_vector

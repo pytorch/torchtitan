@@ -616,7 +616,6 @@ class Controller(Configurable):
                 InterGeneratorRouter,
                 config.generator_router,
                 generators=generators,
-                enable_cpu_weight_prefetch=config.generator.enable_cpu_weight_prefetch,
             )
 
             await self._rollouter.setup_async(
