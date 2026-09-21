@@ -24,8 +24,6 @@ from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     _per_axis_types,
     current_spmd_mesh,
-    register_module_forward_spmd_types,
-    set_current_module_forward_spmd_types,
     set_current_spmd_mesh,
     spmd_axes,
     spmd_distribute_tensor,
@@ -254,8 +252,7 @@ class Module(nn.Module, Configurable):
         For each module with a ``sharding_config``:
 
         1. Shard states (parameters and buffers).
-        2. Expose the types visible inside its forward through the SPMD context.
-        3. Wrap the forward with:
+        2. Wrap the forward with:
             ``reshard inputs -> [optional local SPMD] forward -> reshard outputs``.
 
         ``fully_shard`` hooks on ``__call__`` fire around the wrapped ``forward``.
@@ -280,28 +277,17 @@ class Module(nn.Module, Configurable):
                 queue.extend(child.children())
 
         # TODO(fegin): Change to assert once ALL Models are migrated to use _sharding_config.
-        sharding_config = self._sharding_config
-        if sharding_config is None:
+        if self._sharding_config is None:
             return
 
-        spmd_validate_redistributions(sharding_config)
+        spmd_validate_redistributions(self._sharding_config)
         self._distribute_states(parallel_dims)
         self._cache_pos_arg_names()
         fn = self._maybe_wrap_with_local_region(self.forward)
-        forward_input_types = {
-            **(sharding_config.in_src_shardings or {}),
-            **(sharding_config.in_dst_shardings or {}),
-        }
-        forward_spmd_context_id = register_module_forward_spmd_types(
-            input_types=forward_input_types or None,
-            output_type=sharding_config.out_src_shardings,
-        )
 
         def forward_with_redistribution(*args, **kwargs):
-            assert sharding_config is not None
             args, kwargs = self._redistribute_inputs(args, kwargs)
-            with set_current_module_forward_spmd_types(forward_spmd_context_id):
-                outputs = fn(*args, **kwargs)
+            outputs = fn(*args, **kwargs)
             return self._redistribute_outputs(outputs)
 
         self.forward = forward_with_redistribution

@@ -32,8 +32,6 @@ setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B0
 __all__ = [
     "annotate_input_spmd_types",
     "annotate_replicated_parameters",
-    "current_module_forward_input_spmd_type",
-    "current_module_forward_output_spmd_type",
     "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
@@ -41,33 +39,19 @@ __all__ = [
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
+    "spmd_dense_sp_enabled",
     "spmd_mesh_group",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
     "spmd_distribute_tensor",
     "spmd_redistribute_per_axis",
     "spmd_validate_redistributions",
-    "register_module_forward_spmd_types",
-    "set_current_module_forward_spmd_types",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
 ]
 
 
-class _SpmdThreadLocal(local):
-    module_forward_spmd_types_id: int = 0
-
-
-_SPMD_TLS = _SpmdThreadLocal()
-
-_ModuleForwardSpmdTypes = tuple[
-    Mapping[str, spmd.SpmdType] | None,
-    spmd.SpmdType | tuple[spmd.SpmdType, ...] | None,
-]
-# Registration mutates this table only during Module.parallelize(), before
-# Dynamo tracing. Module forwards temporarily swap and restore an integer ID;
-# Dynamo supports that nullified attribute mutation inside checkpoint regions.
-_MODULE_FORWARD_SPMD_TYPES: list[_ModuleForwardSpmdTypes] = [(None, None)]
+_MESH_TLS = local()
 
 
 def spmd_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
@@ -128,78 +112,37 @@ def set_spmd_meshes(
     *,
     dense_mesh: DeviceMesh,
     sparse_mesh: DeviceMesh | None,
+    dense_sp_enabled: bool = False,
 ) -> None:
     """Register the SPMD meshes for dense and sparse runtime regions."""
-    _SPMD_TLS.dense_mesh = dense_mesh
-    _SPMD_TLS.sparse_mesh = sparse_mesh
+    _MESH_TLS.dense_mesh = dense_mesh
+    _MESH_TLS.sparse_mesh = sparse_mesh
+    _MESH_TLS.dense_sp_enabled = dense_sp_enabled
 
 
 def spmd_dense_mesh() -> DeviceMesh:
     """Return the registered dense SPMD mesh."""
-    mesh = getattr(_SPMD_TLS, "dense_mesh", None)
+    mesh = getattr(_MESH_TLS, "dense_mesh", None)
     assert mesh is not None, "SPMD dense mesh has not been registered"
     return mesh
 
 
+def spmd_dense_sp_enabled() -> bool:
+    """Return whether sequence parallelism is enabled in the dense region."""
+    return getattr(_MESH_TLS, "dense_sp_enabled", False)
+
+
 def spmd_sparse_mesh() -> DeviceMesh | None:
     """Return the registered sparse SPMD mesh, if EP is enabled."""
-    return getattr(_SPMD_TLS, "sparse_mesh", None)
+    return getattr(_MESH_TLS, "sparse_mesh", None)
 
 
 def _spmd_mesh_stack() -> list[DeviceMesh | None]:
-    stack = getattr(_SPMD_TLS, "mesh_stack", None)
+    stack = getattr(_MESH_TLS, "mesh_stack", None)
     if stack is None:
         stack = []
-        _SPMD_TLS.mesh_stack = stack
+        _MESH_TLS.mesh_stack = stack
     return stack
-
-
-def register_module_forward_spmd_types(
-    *,
-    input_types: Mapping[str, spmd.SpmdType] | None,
-    output_type: spmd.SpmdType | tuple[spmd.SpmdType, ...] | None,
-) -> int:
-    """Register one module's forward types outside compiled execution."""
-    context_id = len(_MODULE_FORWARD_SPMD_TYPES)
-    _MODULE_FORWARD_SPMD_TYPES.append((input_types, output_type))
-    return context_id
-
-
-def _current_module_forward_spmd_types() -> _ModuleForwardSpmdTypes:
-    context_id = _SPMD_TLS.module_forward_spmd_types_id
-    assert context_id != 0, "No module forward SPMD type context is active"
-    return _MODULE_FORWARD_SPMD_TYPES[context_id]
-
-
-def current_module_forward_input_spmd_type(
-    input_name: str,
-    axis_name: MeshAxisName | str,
-) -> spmd.PerMeshAxisSpmdType:
-    """Return an input's type on one axis inside the current module forward."""
-    input_types, _ = _current_module_forward_spmd_types()
-    assert input_types is not None, "Current module forward has no declared input types"
-    assert (
-        input_name in input_types
-    ), f"Current module forward has no declared type for input {input_name!r}"
-    axis_type = _per_axis_types(input_types[input_name]).get(MeshAxisName(axis_name))
-    assert axis_type is not None, f"Input {input_name!r} has no {axis_name!s} axis type"
-    return axis_type
-
-
-def current_module_forward_output_spmd_type(
-    axis_name: MeshAxisName | str,
-) -> spmd.PerMeshAxisSpmdType:
-    """Return the output type on one axis produced by the current forward."""
-    _, output_type = _current_module_forward_spmd_types()
-    assert output_type is not None, "Current module forward has no declared output type"
-    assert not isinstance(
-        output_type, tuple
-    ), "Current module forward has multiple output types"
-    axis_type = _per_axis_types(output_type).get(MeshAxisName(axis_name))
-    assert (
-        axis_type is not None
-    ), f"Current module output has no {axis_name!s} axis type"
-    return axis_type
 
 
 def current_spmd_mesh() -> DeviceMesh | None:
@@ -270,17 +213,6 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
         finally:
             popped = stack.pop()
             assert popped is mesh
-
-
-@contextlib.contextmanager
-def set_current_module_forward_spmd_types(context_id: int) -> Iterator[None]:
-    """Set the registered module forward types for the current execution scope."""
-    previous_context_id = _SPMD_TLS.module_forward_spmd_types_id
-    _SPMD_TLS.module_forward_spmd_types_id = context_id
-    try:
-        yield
-    finally:
-        _SPMD_TLS.module_forward_spmd_types_id = previous_context_id
 
 
 @contextlib.contextmanager
