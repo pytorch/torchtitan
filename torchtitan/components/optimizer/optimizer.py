@@ -7,7 +7,7 @@
 import logging
 import re
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
@@ -140,6 +140,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         metadata and communication bucket specs. These arguments are not copied
         into PyTorch parameter groups; group hyperparameters belong in
         ``ParamGroupConfig.optimizer_kwargs``.
+
+        Locally trainable parameters listed in DistMuon's
+        ``compute_sharding_by_fqn`` must be assigned to DistMuon.
         """
 
     optimizers: list[T]
@@ -222,16 +225,50 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
 
         return groups, patterns
 
+    @staticmethod
+    def _validate_dist_muon_assignments(
+        model: nn.Module,
+        groups_by_opt_name: dict[str, list[dict[str, Any]]],
+        compute_sharding_fqns: Collection[str],
+    ) -> None:
+        """Require local trainable parameters with Muon layouts to use DistMuon."""
+        optimizer_by_fqn = {
+            fqn: opt_name
+            for opt_name, groups in groups_by_opt_name.items()
+            for group in groups
+            for fqn in group["param_names"]
+        }
+        for name, param in model.named_parameters():
+            fqn = canonical_fqn(name)
+            if not param.requires_grad or fqn not in compute_sharding_fqns:
+                continue
+            opt_name = optimizer_by_fqn.get(fqn)
+            if opt_name != "DistMuon":
+                assignment = (
+                    f"assigned to {opt_name}"
+                    if opt_name is not None
+                    else "not assigned to an optimizer"
+                )
+                raise ValueError(
+                    f"{fqn} has a DistMuon compute layout but is {assignment}"
+                )
+
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
         impl_kwargs = self._build_impl_kwargs(config)
         param_group_configs = config.param_groups
         all_params = []
         self.optimizers = []
         self.model_parts = model_parts
+        compute_sharding_fqns = config.optimizer_factory_kwargs_by_name.get(
+            "DistMuon", {}
+        ).get("compute_sharding_by_fqn", {})
 
         for part_idx, model in enumerate(self.model_parts):
             groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
                 model, param_group_configs, impl_kwargs
+            )
+            self._validate_dist_muon_assignments(
+                model, groups_by_opt_name, compute_sharding_fqns
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
                 optimizer = self._resolve_optimizer_factory(opt_name)(
