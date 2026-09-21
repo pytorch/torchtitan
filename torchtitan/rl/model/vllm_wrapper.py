@@ -145,6 +145,8 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         state_dict = self.adapter.from_hf(hf_state_dict)
+        # TODO(@andrewor14): Wrap the generator model with FSDP and revisit this
+        # explicit layout restoration once weights load into DTensor parameters.
         for name, value in state_dict.items():
             if isinstance(value, DTensor):
                 # Format conversions can reshard tensors, e.g. fused QKV splits.
