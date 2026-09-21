@@ -24,7 +24,9 @@ CUDA-guarded is developer-run only.
 import unittest
 from unittest.mock import patch
 
+import spmd_types as spmd
 import torch
+from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
 
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -44,6 +46,7 @@ from torchtitan.models.common.async_linear import (
 )
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import (
+    colwise_config,
     dense_sequence_parallel_placement,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
@@ -74,11 +77,12 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         async_layer = async_model.layers[0]
         set_gqa_attention_sharding(stock_layer.attention, enable_sp=True)
         set_gqa_attention_sharding(async_layer.attention, enable_sp=True)
-        set_dense_ffn_sharding(
-            async_layer.feed_forward,
-            attn_x_layout=dense_sequence_parallel_placement(),
-            enable_sp=True,
-        )
+        for layer in (stock_layer, async_layer):
+            set_dense_ffn_sharding(
+                layer.feed_forward,
+                attn_x_layout=dense_sequence_parallel_placement(),
+                enable_sp=True,
+            )
 
         self.assertIsNone(stock_layer.attention.sharding_config.in_dst_shardings)
         self.assertIsNone(stock_layer.attention.sharding_config.out_dst_shardings)
@@ -104,6 +108,8 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         self.assertIsNone(async_layer.feed_forward.sharding_config.in_dst_shardings)
         self.assertIsNotNone(async_layer.feed_forward.sharding_config.out_src_shardings)
         self.assertIsNone(async_layer.feed_forward.w13.sharding_config.in_dst_shardings)
+        self.assertTrue(stock_layer.feed_forward.w13.sharding_config.local_spmd)
+        self.assertTrue(async_layer.feed_forward.w13.sharding_config.local_spmd)
         self.assertIsNotNone(
             async_layer.feed_forward.w2.sharding_config.out_src_shardings
         )
@@ -214,6 +220,38 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             (DIM, hidden_dim // self.world_size),
         )
 
+    @with_comms
+    def test_stacked_w13_typechecks(self):
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.models.common.config_utils import make_ffn_config
+
+        input_layout = dense_sequence_parallel_placement()
+        init = {"weight": torch.nn.init.zeros_}
+        ffn_config = make_ffn_config(
+            dim=DIM,
+            hidden_dim=128,
+            w1_param_init=init,
+            w2w3_param_init=init,
+        )
+        set_dense_ffn_sharding(
+            ffn_config,
+            attn_x_layout=input_layout,
+            enable_sp=True,
+        )
+        feed_forward = ffn_config.build().to(self.device_type)
+        parallel_dims = self._parallel_dims()
+        feed_forward.parallelize(parallel_dims)
+
+        x_local = torch.randn(8, DIM, device=self.device_type, requires_grad=True)
+        with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()), typecheck(
+            local=False
+        ):
+            spmd.assert_type(x_local, input_layout)
+            output = feed_forward(x_local)
+            output.sum().backward()
+
+        self.assertEqual(output.shape, x_local.shape)
+
 
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
@@ -250,15 +288,28 @@ class TestAsyncQKVNumerics(DTensorTestBase):
                 out_features=out_features,
             ),
         )
+        input_layout = dense_sequence_parallel_placement()
+        async_config.wqkv.sharding_config = colwise_config(input_layout=input_layout)
         stock = stock_config.build().to(device=device, dtype=torch.bfloat16)
         async_qkv = async_config.build().to(device=device, dtype=torch.bfloat16)
 
         torch.manual_seed(0)
         with torch.no_grad():
             stock.wqkv.weight.copy_(torch.randn_like(stock.wqkv.weight))
-            async_qkv.wqkv.weight = torch.nn.Parameter(
-                stock.wqkv.weight.chunk(R, 0)[self.rank].contiguous()
-            )
+            async_qkv.wqkv.weight.copy_(stock.wqkv.weight)
+
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=R,
+            pp=1,
+            ep=1,
+            world_size=R,
+        )
+        with patch("torchtitan.distributed.parallel_dims.device_type", device):
+            parallel_dims.build_mesh()
+        async_qkv.parallelize(parallel_dims)
 
         x_TD = torch.randn(
             num_tokens,
@@ -271,8 +322,9 @@ class TestAsyncQKVNumerics(DTensorTestBase):
         torch.stack([output.sum() for output in expected]).sum().backward()
 
         x_local_TD = x_TD.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()
-        mesh = init_device_mesh(device, (R,), mesh_dim_names=("tp",))
-        with set_current_spmd_mesh(mesh):
+        mesh = parallel_dims.spmd_dense_mesh()
+        with set_current_spmd_mesh(mesh), typecheck(local=False):
+            spmd.assert_type(x_local_TD, input_layout)
             actual = async_qkv(x_local_TD)
             torch.stack([output.sum() for output in actual]).sum().backward()
 
@@ -303,10 +355,9 @@ class TestAsyncQKVNumerics(DTensorTestBase):
 class TestAsyncFeedForwardNumerics(DTensorTestBase):
     """The async FFN projections must match the standard FFN under TP+SP.
 
-    The test manually shards w13 colwise and w2 rowwise. DistGEMM must
-    all-gather the sequence-sharded input before w13 and reduce-scatter w2's
-    output. The standard forward can execute on these local shards, but it would
-    produce an incorrect local partial result.
+    DistGEMM must all-gather the sequence-sharded input before w13 and
+    reduce-scatter w2's output. The forward runs with global SPMD typechecking
+    to exercise the local boundary around the stacked w13 projection.
     """
 
     @property
@@ -340,6 +391,12 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
         async_config = AsyncTensorParallelTransform(
             enable_sequence_parallel=True
         ).transform(base_async_config)
+        input_layout = dense_sequence_parallel_placement()
+        set_dense_ffn_sharding(
+            async_config,
+            attn_x_layout=input_layout,
+            enable_sp=True,
+        )
         dist_gemm = async_config.build().to(dev)
 
         with torch.no_grad():
@@ -348,27 +405,48 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
                     torch.manual_seed(hash(tuple(w.shape)) % 2**31)
                     w.copy_(torch.randn_like(w) * 0.1)
 
-        x = torch.randn(num_tokens, dim, device=dev)
+        x = torch.randn(num_tokens, dim, device=dev, requires_grad=True)
         ref = standard(x)
+        ref.sum().backward()
 
-        # Shard the dist-GEMM module's weights: w13 colwise, w2 rowwise.
-        with torch.no_grad():
-            dist_gemm.w13.weight = torch.nn.Parameter(
-                standard.w13.weight.chunk(R, 1)[self.rank].contiguous()
-            )
-            dist_gemm.w2.weight = torch.nn.Parameter(
-                standard.w2.weight.chunk(R, 1)[self.rank].contiguous()
-            )
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=R,
+            pp=1,
+            ep=1,
+            world_size=R,
+        )
+        with patch("torchtitan.distributed.parallel_dims.device_type", dev):
+            parallel_dims.build_mesh()
+        dist_gemm.parallelize(parallel_dims)
 
-        # needs mesh_dim_names, and a "tp" axis for _tp_group_from_context
-        mesh = init_device_mesh(self.device_type, (R,), mesh_dim_names=("tp",))
-        with set_current_spmd_mesh(mesh):
-            x_shard = x.chunk(R, 0)[self.rank].contiguous()
+        mesh = parallel_dims.spmd_dense_mesh()
+        x_shard = x.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()
+        with set_current_spmd_mesh(mesh), typecheck(local=False):
+            spmd.assert_type(x_shard, input_layout)
             out_shard = dist_gemm(x_shard)
+            out_shard.sum().backward()
 
         # DistGEMM returns this rank's sequence shard of the full result.
         torch.testing.assert_close(
             out_shard, ref.chunk(R, 0)[self.rank], atol=2e-3, rtol=2e-3
+        )
+        torch.testing.assert_close(
+            x_shard.grad, x.grad.chunk(R, 0)[self.rank], atol=2e-3, rtol=2e-3
+        )
+        torch.testing.assert_close(
+            dist_gemm.w13.weight.grad,
+            standard.w13.weight.grad.chunk(R, 1)[self.rank],
+            atol=2e-3,
+            rtol=2e-3,
+        )
+        torch.testing.assert_close(
+            dist_gemm.w2.weight.grad,
+            standard.w2.weight.grad.chunk(R, 1)[self.rank],
+            atol=2e-3,
+            rtol=2e-3,
         )
 
 

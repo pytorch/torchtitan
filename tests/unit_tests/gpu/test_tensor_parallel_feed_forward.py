@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
+from spmd_types.checker import typecheck
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -48,13 +49,14 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                 )
                 reference = copy.deepcopy(base_config).build().to(device)
                 parallel_config = copy.deepcopy(base_config)
+                attn_x_layout = (
+                    dense_sequence_parallel_placement()
+                    if enable_sp
+                    else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+                )
                 set_dense_ffn_sharding(
                     parallel_config,
-                    attn_x_layout=(
-                        dense_sequence_parallel_placement()
-                        if enable_sp
-                        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-                    ),
+                    attn_x_layout=attn_x_layout,
                     enable_sp=enable_sp,
                 )
                 parallel = parallel_config.build().to(device)
@@ -92,7 +94,8 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     else x_full.detach().clone()
                 ).requires_grad_()
                 mesh = parallel_dims.spmd_dense_mesh()
-                with set_current_spmd_mesh(mesh):
+                with set_current_spmd_mesh(mesh), typecheck(local=False):
+                    spmd.assert_type(x_local, attn_x_layout)
                     parallel_out = parallel(x_local)
                     parallel_out.sum().backward()
 

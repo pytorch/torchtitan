@@ -78,20 +78,19 @@ class AsyncAllGatherLinear(torch.autograd.Function):
         x_shard_m: torch.Tensor,
         w_shard_n: torch.Tensor,
         bias_shard_n: torch.Tensor | None,
-        group_name: str,
+        group: dist.ProcessGroup,
     ) -> None:
-        """SPMD type: x S(0)@TP, w S(-2)@TP -> y S(-1)@TP."""
-        spmd.assert_type(x_shard_m, {group_name: spmd.S(0)})
-        # A regular weight is [N, K], while stacked projections use
-        # [num_linears, N, K]. In both cases N is the penultimate dimension.
-        spmd.assert_type(w_shard_n, {group_name: spmd.S(w_shard_n.ndim - 2)})
+        """SPMD type: x S(0)@TP, w S(0)@TP -> y S(1)@TP."""
+        spmd.assert_type(x_shard_m, {group: spmd.S(0)})
+        # Torch stores weight as [N, K], so column-parallel output-feature
+        # sharding is dimension 0 of the stored weight.
+        spmd.assert_type(w_shard_n, {group: spmd.S(0)})
         if bias_shard_n is not None:
-            spmd.assert_type(bias_shard_n, {group_name: spmd.S(bias_shard_n.ndim - 1)})
-        result_tp_type = spmd.S(result.ndim - 1)
+            spmd.assert_type(bias_shard_n, {group: spmd.S(0)})
         spmd.assert_local_type_like(
             result,
             x_shard_m,
-            {group_name: result_tp_type},  # pyrefly: ignore [bad-argument-type]
+            {group: spmd.S(1)},  # pyrefly: ignore [bad-argument-type]
         )
 
     @staticmethod
@@ -107,20 +106,15 @@ class AsyncAllGatherLinear(torch.autograd.Function):
         if not x_shard_m.is_contiguous():
             x_shard_m = x_shard_m.contiguous()
 
-        weight_shape = w_shard_n.shape
-        weight_shard_NK = w_shard_n.flatten(0, -2)
-        bias_shape = None if bias_shard_n is None else bias_shard_n.shape
-        bias_shard_N = None if bias_shard_n is None else bias_shard_n.flatten()
-
         x_full, outputs = torch.ops.symm_mem.fused_all_gather_matmul(
             x_shard_m,
-            [weight_shard_NK.T],
+            [w_shard_n.T],
             0,
             group_name,
         )
         y_shard_n = outputs[0]
-        if bias_shard_N is not None:
-            y_shard_n = y_shard_n + bias_shard_N
+        if bias_shard_n is not None:
+            y_shard_n = y_shard_n + bias_shard_n
 
         rank = group.rank()
         world_size = group.size()
@@ -128,25 +122,20 @@ class AsyncAllGatherLinear(torch.autograd.Function):
         # input, and backward all-gathers it back along K.
         x_shard_k = torch.chunk(x_full, world_size, dim=1)[rank].contiguous()
 
-        ctx.save_for_backward(x_shard_k, weight_shard_NK)
+        ctx.save_for_backward(x_shard_k, w_shard_n)
         ctx.group_name = group_name
         ctx.has_bias = bias_shard_n is not None
-        ctx.weight_shape = weight_shape
-        ctx.bias_shape = bias_shape
-        if w_shard_n.ndim == 2:
-            return y_shard_n
-        return y_shard_n.unflatten(-1, weight_shape[:-1])
+        return y_shard_n
 
     @staticmethod
     def backward(ctx, grad_y_shard_n: torch.Tensor):  # pyrefly: ignore[bad-override]
-        x_shard_k, weight_shard_NK = ctx.saved_tensors
-        grad_y_shard_N = (
-            grad_y_shard_n if len(ctx.weight_shape) == 2 else grad_y_shard_n.flatten(-2)
-        ).contiguous()
+        x_shard_k, w_shard_n = ctx.saved_tensors
+        if not grad_y_shard_n.is_contiguous():
+            grad_y_shard_n = grad_y_shard_n.contiguous()
 
         grad_x_shard_m = torch.ops.symm_mem.fused_matmul_reduce_scatter(
-            grad_y_shard_N,
-            weight_shard_NK,
+            grad_y_shard_n,
+            w_shard_n,
             "sum",
             0,
             ctx.group_name,
@@ -157,15 +146,13 @@ class AsyncAllGatherLinear(torch.autograd.Function):
         # buffer and uses substantially more symmetric memory for this shape.
         _, grad_w_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
             x_shard_k.T.contiguous(),
-            [grad_y_shard_N],
+            [grad_y_shard_n],
             0,
             ctx.group_name,
         )
-        grad_weight = grad_w_outputs[0].T.contiguous().reshape(ctx.weight_shape)
-        grad_bias = None
-        if ctx.has_bias:
-            grad_bias = grad_y_shard_N.sum(dim=0).reshape(ctx.bias_shape)
-        return grad_x_shard_m, grad_weight, grad_bias, None, None
+        grad_w_shard_n = grad_w_outputs[0].T.contiguous()
+        grad_bias = grad_y_shard_n.sum(dim=0) if ctx.has_bias else None
+        return grad_x_shard_m, grad_w_shard_n, grad_bias, None, None
 
 
 class AsyncLinearReduceScatter(torch.autograd.Function):
@@ -190,19 +177,19 @@ class AsyncLinearReduceScatter(torch.autograd.Function):
         x_shard_k: torch.Tensor,
         w_shard_k: torch.Tensor,
         bias: torch.Tensor | None,
-        group_name: str,
+        group: dist.ProcessGroup,
     ) -> None:
         """SPMD type: x S(1)@TP, w S(1)@TP, bias R@TP -> y S(0)@TP."""
-        spmd.assert_type(x_shard_k, {group_name: spmd.S(1)})
+        spmd.assert_type(x_shard_k, {group: spmd.S(1)})
         # Torch stores weight as [N, K], so row-parallel input-feature sharding
         # is dimension 1 of the stored weight.
-        spmd.assert_type(w_shard_k, {group_name: spmd.S(1)})
+        spmd.assert_type(w_shard_k, {group: spmd.S(1)})
         if bias is not None:
-            spmd.assert_type(bias, {group_name: spmd.R})
+            spmd.assert_type(bias, {group: spmd.R})
         spmd.assert_local_type_like(
             result,
             x_shard_k,
-            {group_name: spmd.S(0)},  # pyrefly: ignore [bad-argument-type]
+            {group: spmd.S(0)},  # pyrefly: ignore [bad-argument-type]
         )
 
     @staticmethod
@@ -311,13 +298,15 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
-        return AsyncAllGatherLinear.apply(
+        weight, bias = self._flatten_weight_and_bias()
+        output = AsyncAllGatherLinear.apply(
             input,
-            self.weight,
-            self.bias,
+            weight,
+            bias,
             tp_group,
             tp_group.group_name,
         )
+        return self._unflatten_output(output)
 
 
 class AsyncRowParallelLinear(RowParallelLinear):

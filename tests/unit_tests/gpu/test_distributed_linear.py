@@ -90,24 +90,30 @@ class TestDistLinearPrimitives(DTensorTestBase):
         torch.manual_seed(0)
         x = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
         weight = torch.randn(2, N, K, device=dev, dtype=torch.bfloat16)
+        bias = torch.randn(2, N, device=dev, dtype=torch.bfloat16)
         grad_y = torch.randn(M, 2, N, device=dev, dtype=torch.bfloat16)
 
         reference_x = x.clone().requires_grad_()
         reference_weight = weight.clone().requires_grad_()
-        reference_y = F.linear(reference_x, reference_weight.flatten(0, -2)).unflatten(
-            -1, (2, N)
-        )
+        reference_bias = bias.clone().requires_grad_()
+        reference_y = F.linear(
+            reference_x,
+            reference_weight.flatten(0, -2),
+            reference_bias.flatten(),
+        ).unflatten(-1, (2, N))
         reference_y.backward(grad_y)
 
         x_shard = x.chunk(W, 0)[self.rank].clone().requires_grad_()
         weight_shard = weight.chunk(W, 1)[self.rank].clone().requires_grad_()
-        y_shard = AsyncAllGatherLinear.apply(
+        bias_shard = bias.chunk(W, 1)[self.rank].clone().requires_grad_()
+        y_shard_flat = AsyncAllGatherLinear.apply(
             x_shard,
-            weight_shard,
-            None,
+            weight_shard.flatten(0, -2),
+            bias_shard.flatten(),
             group,
             group.group_name,
         )
+        y_shard = y_shard_flat.unflatten(-1, weight_shard.shape[:-1])
         y_shard.backward(grad_y.chunk(W, 2)[self.rank])
 
         torch.testing.assert_close(
@@ -125,6 +131,12 @@ class TestDistLinearPrimitives(DTensorTestBase):
         self.assertEqual(
             weight_shard.grad,
             reference_weight.grad.chunk(W, 1)[self.rank],
+            atol=0,
+            rtol=0,
+        )
+        self.assertEqual(
+            bias_shard.grad,
+            reference_bias.grad.chunk(W, 1)[self.rank],
             atol=0,
             rtol=0,
         )

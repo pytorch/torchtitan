@@ -123,9 +123,7 @@ def test_quantization_preserves_partial_bias_row_parallel_linear(monkeypatch):
 @pytest.mark.parametrize("parallel_cls", [ColumnParallelLinear, RowParallelLinear])
 def test_quantized_linear_specialization_preserves_compute_and_tp_role(parallel_cls):
     specialized = specialize_quantized_linear(_ScaledLinear, parallel_cls)
-    config = specialized.Config(
-        in_features=4, out_features=2, num_linears=2, scale=3.0
-    )
+    config = specialized.Config(in_features=4, out_features=2, num_linears=2, scale=3.0)
     linear = config.build()
 
     assert specialized is specialize_quantized_linear(_ScaledLinear, parallel_cls)

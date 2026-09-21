@@ -149,6 +149,11 @@ def stacked_colwise_config(*, input_layout: SpmdType) -> ShardingConfig:
         },
         in_src_shardings={"input": input_layout},
         out_src_shardings=output_TNF_layout,
+        # Flattening [N, F, D] sharded on F produces a strided shard, which
+        # global SPMD typechecking cannot represent. Keep the local projection
+        # opaque while declaring its physical input and output layouts here.
+        # ColumnParallelLinear still owns the input redistribution.
+        local_spmd=True,
     )
 
 
