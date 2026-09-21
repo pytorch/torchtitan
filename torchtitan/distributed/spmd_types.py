@@ -32,6 +32,8 @@ setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B0
 __all__ = [
     "annotate_input_spmd_types",
     "annotate_replicated_parameters",
+    "current_module_input_spmd_type",
+    "current_module_output_spmd_type",
     "current_spmd_mesh",
     "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
@@ -45,12 +47,13 @@ __all__ = [
     "spmd_distribute_tensor",
     "spmd_redistribute_per_axis",
     "spmd_validate_redistributions",
+    "set_current_module_spmd_types",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
 ]
 
 
-_MESH_TLS = local()
+_SPMD_TLS = local()
 
 
 def spmd_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
@@ -113,28 +116,76 @@ def set_spmd_meshes(
     sparse_mesh: DeviceMesh | None,
 ) -> None:
     """Register the SPMD meshes for dense and sparse runtime regions."""
-    _MESH_TLS.dense_mesh = dense_mesh
-    _MESH_TLS.sparse_mesh = sparse_mesh
+    _SPMD_TLS.dense_mesh = dense_mesh
+    _SPMD_TLS.sparse_mesh = sparse_mesh
 
 
 def spmd_dense_mesh() -> DeviceMesh:
     """Return the registered dense SPMD mesh."""
-    mesh = getattr(_MESH_TLS, "dense_mesh", None)
+    mesh = getattr(_SPMD_TLS, "dense_mesh", None)
     assert mesh is not None, "SPMD dense mesh has not been registered"
     return mesh
 
 
 def spmd_sparse_mesh() -> DeviceMesh | None:
     """Return the registered sparse SPMD mesh, if EP is enabled."""
-    return getattr(_MESH_TLS, "sparse_mesh", None)
+    return getattr(_SPMD_TLS, "sparse_mesh", None)
 
 
 def _spmd_mesh_stack() -> list[DeviceMesh | None]:
-    stack = getattr(_MESH_TLS, "mesh_stack", None)
+    stack = getattr(_SPMD_TLS, "mesh_stack", None)
     if stack is None:
         stack = []
-        _MESH_TLS.mesh_stack = stack
+        _SPMD_TLS.mesh_stack = stack
     return stack
+
+
+def _module_spmd_type_stack() -> list[
+    tuple[
+        Mapping[str, spmd.SpmdType] | None,
+        spmd.SpmdType | tuple[spmd.SpmdType, ...] | None,
+    ]
+]:
+    stack = getattr(_SPMD_TLS, "module_spmd_type_stack", None)
+    if stack is None:
+        stack = []
+        _SPMD_TLS.module_spmd_type_stack = stack
+    return stack
+
+
+def current_module_input_spmd_type(
+    input_name: str,
+    axis_name: MeshAxisName | str,
+) -> spmd.PerMeshAxisSpmdType:
+    """Return an input's type on one axis at the current module boundary."""
+    stack = _module_spmd_type_stack()
+    assert stack, "No module SPMD type context is active"
+    input_types, _ = stack[-1]
+    assert input_types is not None, "Current module has no declared input types"
+    assert (
+        input_name in input_types
+    ), f"Current module has no declared type for input {input_name!r}"
+    axis_type = _per_axis_types(input_types[input_name]).get(MeshAxisName(axis_name))
+    assert axis_type is not None, f"Input {input_name!r} has no {axis_name!s} axis type"
+    return axis_type
+
+
+def current_module_output_spmd_type(
+    axis_name: MeshAxisName | str,
+) -> spmd.PerMeshAxisSpmdType:
+    """Return the output type on one axis at the current module boundary."""
+    stack = _module_spmd_type_stack()
+    assert stack, "No module SPMD type context is active"
+    _, output_type = stack[-1]
+    assert output_type is not None, "Current module has no declared output type"
+    assert not isinstance(
+        output_type, tuple
+    ), "Current module has multiple output types"
+    axis_type = _per_axis_types(output_type).get(MeshAxisName(axis_name))
+    assert (
+        axis_type is not None
+    ), f"Current module output has no {axis_name!s} axis type"
+    return axis_type
 
 
 def current_spmd_mesh() -> DeviceMesh | None:
@@ -205,6 +256,23 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
         finally:
             popped = stack.pop()
             assert popped is mesh
+
+
+@contextlib.contextmanager
+def set_current_module_spmd_types(
+    *,
+    input_types: Mapping[str, spmd.SpmdType] | None,
+    output_type: spmd.SpmdType | tuple[spmd.SpmdType, ...] | None,
+) -> Iterator[None]:
+    """Expose a module boundary's declared SPMD types during its forward."""
+    stack = _module_spmd_type_stack()
+    entry = (input_types, output_type)
+    stack.append(entry)
+    try:
+        yield
+    finally:
+        popped = stack.pop()
+        assert popped is entry
 
 
 @contextlib.contextmanager
