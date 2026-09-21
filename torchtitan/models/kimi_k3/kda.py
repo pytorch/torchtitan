@@ -25,6 +25,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
+from torchtitan.models.flops import delta_rule_flops_per_token
 from torchtitan.protocols.module import Module
 
 # Shape suffixes:
@@ -207,6 +208,14 @@ class KDA(Module):
         inner_kda: Module.Config
         output_norm: KimiRMSNormGated.Config
         output_proj: Linear.Config
+
+        def flops_per_token(self, seq_len: int) -> int:
+            del seq_len
+            return delta_rule_flops_per_token(
+                num_heads=self.num_heads,
+                key_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+            )
 
         def __post_init__(self):
             if self.num_heads < 1:

@@ -6,13 +6,14 @@
 
 from torchtitan.config import Configurable
 
-from .model import BaseModel
+from .model import BaseModel, FlopsEstimator
 from .module import Module
 from .state_dict_adapter import BaseStateDictAdapter, StateDictAdapter
 
 __all__ = [
     "BaseModel",
     "Configurable",
+    "FlopsEstimator",
     "Module",
     "StateDictAdapter",
     "BaseStateDictAdapter",

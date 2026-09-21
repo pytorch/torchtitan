@@ -24,6 +24,7 @@ from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_g
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.flops import delta_rule_flops_per_token
 from torchtitan.protocols.module import Module
 
 
@@ -379,6 +380,15 @@ class GatedDeltaNet(Module):
         inner_gated_delta_net: Module.Config
         norm: RMSNormGated.Config
         out_proj: Linear.Config
+
+        def flops_per_token(self, seq_len: int) -> int:
+            del seq_len
+            num_heads = self.in_proj_v.out_features // self.value_head_dim
+            return delta_rule_flops_per_token(
+                num_heads=num_heads,
+                key_head_dim=self.key_head_dim,
+                v_head_dim=self.value_head_dim,
+            )
 
     def __init__(self, config: Config):
         super().__init__()

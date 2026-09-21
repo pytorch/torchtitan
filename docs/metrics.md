@@ -32,3 +32,23 @@ So all you need to do is make sure that `metrics.enable_wandb` is enabled
 For an example you can inspect the Llama 3 [config_registry.py](../torchtitan/models/llama3/config_registry.py)
 
 If both W&B and TensorBoard are enabled, both loggers run.
+
+## FLOPs, throughput, and MFU
+
+TorchTitan estimates model-wide logical training FLOPs from each raw input
+batch and accumulates them over the reporting interval. At the logging
+boundary, it averages FLOPs across DP x CP ranks; TorchFT also averages across
+the active fault-tolerance group. It then divides the logical FLOP rate by
+`CP * TP * PP` to report per-device TFLOPS and MFU.
+
+Each trainer retains its existing logical-token throughput convention.
+For standard Trainer and TorchFT, each yielded GA/PP microbatch contributes
+`training.num_tokens_per_microbatch_per_dp_rank` to throughput and advances
+`TrainingEngine.ntokens_seen` using that configured logical count. RL
+throughput instead uses its existing local `labels.numel()` count.
+`num_valid_tokens` remains dedicated to loss normalization and loss metrics,
+so padding or ignored labels can affect loss normalization without changing
+logical token throughput.
+
+For the estimator callback contract and model-authoring guidance, see
+[Batch FLOP estimation](../torchtitan/models/README.md#batch-flop-estimation).

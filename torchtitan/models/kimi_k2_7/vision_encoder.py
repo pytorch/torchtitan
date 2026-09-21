@@ -29,8 +29,11 @@ from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
+    VisionFlopsEstimator,
+    VisionGrid,
     VisionTransformerBlock,
 )
+from torchtitan.models.flops import active_parameter_flops_per_unit
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -483,3 +486,46 @@ class KimiK25VisionEncoder(MoonViTEncoder):
 
         final_norm: LayerNorm.Config  # pyrefly: ignore [bad-override]
         projector: VisionProjector.Config  # pyrefly: ignore [bad-override]
+
+        def build_vision_flops_estimator(
+            self,
+            encoder: "KimiK25VisionEncoder",
+        ) -> VisionFlopsEstimator:
+            input_patch_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in (
+                    encoder.patch_embed,
+                    encoder.layers,
+                    encoder.final_norm,
+                )
+            )
+            spatial_patch_flops = active_parameter_flops_per_unit(
+                encoder.projector.pre_norm
+            )
+            output_token_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in (
+                    encoder.projector.linear_1,
+                    encoder.projector.linear_2,
+                )
+            )
+            attention_pair_flops = (
+                self.num_layers * self.block.attn.flops_per_query_key_pair()
+            )
+            merge_h, merge_w = self.merge_kernel_size
+
+            def estimate(grids: tuple[VisionGrid, ...]) -> int:
+                total_flops = 0
+                for temporal, grid_h, grid_w in grids:
+                    num_spatial_patches = grid_h * grid_w
+                    num_input_patches = temporal * num_spatial_patches
+                    num_output_tokens = (grid_h // merge_h) * (grid_w // merge_w)
+                    total_flops += (
+                        num_input_patches * input_patch_flops
+                        + num_spatial_patches * spatial_patch_flops
+                        + num_output_tokens * output_token_flops
+                        + num_input_patches**2 * attention_pair_flops
+                    )
+                return total_flops
+
+            return estimate

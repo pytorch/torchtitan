@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -37,18 +38,16 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
+    get_packed_vision_grids,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
-from torchtitan.models.utils import (
-    delta_rule_flops_per_token,
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
+from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.module import Module
 
 from .kda import KDA
@@ -91,6 +90,14 @@ class KimiMLAAttention(BaseAttention):
         inner_attention: Module.Config = field(
             default_factory=FlexInnerAttention.Config
         )
+
+        def flops_per_token(self, seq_len: int) -> int:
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                seq_len=seq_len,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -348,34 +355,41 @@ class KimiK3Model(MultimodalModel):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
+        def _layer_flops_per_token(self, layer_config: Any, seq_len: int) -> int:
+            if layer_config.attention is not None:
+                return layer_config.attention.flops_per_token(seq_len)
+
+            assert layer_config.delta_attention is not None
+            return layer_config.delta_attention.flops_per_token(seq_len)
+
+        def build_flops_estimator(
+            self, model: nn.Module, *, seq_len: int
+        ) -> FlopsEstimator:
             kimi_model = cast("KimiK3Model", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
+            decoder_flops_per_token = self._decoder_flops_per_token(
                 model,
-                modules_excluded_from_active_params=(kimi_model.vision_encoder,),
+                seq_len,
+                excluded_modules=(kimi_model.vision_encoder,),
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                if isinstance(layer.attention, KimiMLAAttention.Config):
-                    attention = layer.attention
-                    attention_op_flops += quadratic_attention_flops_per_token(
-                        num_heads=attention.n_heads,
-                        qk_head_dim=(
-                            attention.qk_nope_head_dim + attention.qk_rope_head_dim
-                        ),
-                        v_head_dim=attention.v_head_dim,
-                        seq_len=seq_len,
-                    )
-                elif isinstance(layer.delta_attention, KDA.Config):
-                    delta_attention = layer.delta_attention
-                    attention_op_flops += delta_rule_flops_per_token(
-                        num_heads=delta_attention.num_heads,
-                        key_head_dim=delta_attention.head_dim,
-                        v_head_dim=delta_attention.head_dim,
-                    )
-            return nparams, 6 * active_nparams + attention_op_flops
+            vision_encoder = kimi_model.vision_encoder
+            if vision_encoder is None:
+                return lambda batch: decoder_flops_per_token * batch["input"].numel()
+
+            assert self.vision_encoder is not None
+            vision_estimator = self.vision_encoder.build_vision_flops_estimator(
+                vision_encoder
+            )
+
+            def estimate_flops(batch: Mapping[str, Any]) -> int:
+                vision_grids = get_packed_vision_grids(
+                    batch,
+                    modality_fields=(("pixel_values", "grid_thw"),),
+                )
+                return decoder_flops_per_token * batch[
+                    "input"
+                ].numel() + vision_estimator(vision_grids)
+
+            return estimate_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

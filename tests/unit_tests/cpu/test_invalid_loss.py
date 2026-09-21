@@ -43,12 +43,14 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config = MagicMock()
         trainer.config.training.max_norm = 1.0
         trainer.config.training.disable_cuda_graphs = True
+        trainer.config.training.num_tokens_per_microbatch_per_dp_rank = 3
         trainer.sdc_replayer = None
         trainer.ema = None
         trainer.device = torch.device("cpu")
         trainer.num_completed_steps = 1
         trainer.ntokens_seen = 0
         trainer._num_optimizer_steps_since_cuda_graph_init = 0
+        trainer.flops_estimator = lambda batch: 0
         trainer.gc_handler = MagicMock()
         trainer._deferred_cuda_graph_options = None
 
@@ -59,6 +61,9 @@ class TestInvalidLoss(unittest.TestCase):
         parallel_dims.ep_enabled = False
         parallel_dims.dp_replicate_enabled = False
         parallel_dims.get_optional_mesh.return_value = None
+        parallel_dims.dp_replicate = 1
+        parallel_dims.dp_shard = 1
+        parallel_dims.cp = 1
         trainer.parallel_dims = parallel_dims
 
         loop.engine = trainer
@@ -67,6 +72,7 @@ class TestInvalidLoss(unittest.TestCase):
         loop.num_pp_microbatches = 1
         loop.metrics_processor = MagicMock()
         loop.metrics_processor.should_log.return_value = should_log
+        loop._local_num_flops_since_last_log = 0
 
         trainer.forward_backward_body_fn = MagicMock(
             return_value=torch.tensor(loss_value)

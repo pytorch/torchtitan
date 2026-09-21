@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Annotated, Any, cast
 
@@ -57,7 +57,7 @@ from torchtitan.observability.metrics import (
 )
 from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
-from torchtitan.protocols import BaseModel
+from torchtitan.protocols import BaseModel, FlopsEstimator
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
 
@@ -189,7 +189,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     ntokens_seen: int
     sdc_replayer: SDCReplayer | None
     model_param_count: int
-    num_flops_per_token: int
+    model_active_param_count: int
+    flops_estimator: FlopsEstimator
     has_quantization: bool
     loss_is_finite: torch.Tensor
     loss_metrics: dict[str, torch.Tensor]
@@ -304,9 +305,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         (
             self.model_param_count,
-            self.num_flops_per_token,
-        ) = self.model_config.get_nparams_and_flops(
-            model, self.config.training.max_context_length
+            self.model_active_param_count,
+        ) = self.model_config.get_parameter_counts(model)
+        self.flops_estimator = self.model_config.build_flops_estimator(
+            model,
+            seq_len=self.config.training.max_context_length,
         )
         config = self.config
         if self.parallel_dims.pp_enabled:
@@ -367,7 +370,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         logger.info(
             f"Model {type(self.model_config).__qualname__} size: "
-            f"{self.model_param_count:,} total parameters"
+            f"{self.model_param_count:,} total parameters, "
+            f"{self.model_active_param_count:,} active parameters"
         )
 
     def _initialize_optimizer(self) -> None:
@@ -711,6 +715,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_completed_steps = current_step
         self._num_optimizer_steps_since_cuda_graph_init += 1
         return grad_norm
+
+    def estimate_flops(self, batch: Mapping[str, Any]) -> int:
+        """Estimate logical model FLOPs for one raw CPU batch."""
+        num_flops = self.flops_estimator(batch)
+        if num_flops < 0:
+            raise ValueError("num_flops must be non-negative")
+        return num_flops
 
     def state_dict(self) -> dict[str, Any]:
         return {"step": self.num_completed_steps, "ntokens_seen": self.ntokens_seen}

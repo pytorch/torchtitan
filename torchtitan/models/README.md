@@ -12,7 +12,7 @@ The folder should be organized as follows
   - NOTE: We prioritize readability over flexibility. The preferred style is to not share modules among different models, except for the most common and complicated ones.
   - Define a Model class inheriting from a base model (e.g. `Decoder` from `torchtitan/models/common/decoder.py`).
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
-    - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
+    - `build_flops_estimator()` builds the model-owned callback used to estimate the work of each input batch. See [Batch FLOP estimation](#batch-flop-estimation).
     - `update_from_config()` updates the model config from training configs (e.g. syncing seq_len, handling hardware-specific settings).
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model config registry. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
@@ -52,6 +52,72 @@ The folder should be organized as follows
   - Include instructions to download model checkpoints for continued pretraining or post training.
   - Update the current status of development, including the supported features and coming features.
   - This is optional for offline exploration.
+
+## Batch FLOP estimation
+
+A model config implements `build_flops_estimator(model, *, seq_len)` and
+returns a `FlopsEstimator`. The factory may inspect the full meta-device model
+once. Its returned callback has this contract:
+
+```python
+def estimate_flops(batch: Mapping[str, Any]) -> int:
+    ...
+```
+
+- `batch` is the raw, unsharded, DP-rank-local input mapping on CPU. The
+  callback runs before device transfer, model preprocessing, or context
+  parallel sharding.
+- The result is a Python `int` containing model-wide logical training FLOPs for
+  that batch.
+- Capture only precomputed Python scalars in the callback. Do not capture the
+  model, parameters, tensors, or bound methods.
+- Keep each invocation CPU-only and O(batch metadata). Inspect shapes and small
+  metadata such as `grid_thw`, but do not transfer data, call `.item()`, run a
+  collective, or enter model execution.
+- Access required fields directly. A missing field should raise `KeyError`
+  instead of silently guessing a substitute.
+
+Every trainer calls `TrainingEngine.estimate_flops(raw_batch)`. Fixed-shape
+decoder models should multiply their cached per-token estimate by
+`batch["input"].numel()`. Other workloads should
+use the raw CPU field that actually determines their work rather than fabricate
+an `input` dependency.
+
+Decoder model configs compose `flops_per_token()` directly from the attention
+config owned by each block. This does not require a shared transformer-block base
+class.
+
+`BaseModel.Config.get_parameter_counts(model)` provides the default model-structure
+accounting path. Backends with a different pre-parallel module representation may
+override it while preserving the same total/active semantics.
+
+`get_parameter_counts()` reports architectural total and active parameter
+counts. It includes embedding tables and relies on PyTorch's parameter iterator
+to count shared parameters only once. `active_parameter_flops_per_unit()` is a
+separate compute-oriented helper: it excludes embedding lookups and derives the
+conventional `6P` component for matrix-multiplication parameters. Both helpers
+weight routed-expert parameters by the expected active fraction
+`top_k / num_experts`; this is an expected-use estimate, not an observation of
+the router's choices for that batch. A model may instead consume compact CPU
+routing metadata when such metadata is already part of the raw batch and is
+needed to represent input-dependent work. It must not read routing results back
+from an accelerator.
+
+For multimodal models, keep scaling units disjoint. For example, partition
+parameter work into per-text-token, per-input-patch or frame, and
+per-vision-output-token terms, then add attention contractions separately. For
+block-diagonal attention over independently packed examples, count
+`sum(length_i**2)`, not `sum(length_i)**2`; the latter incorrectly introduces
+cross-example attention. `get_packed_vision_grids()` centralizes selecting
+present modalities and traversing their CPU grid metadata once. Each vision
+encoder config implements `build_vision_flops_estimator()` because attention segmentation, temporal
+pooling, spatial merging, and sparse attention are encoder semantics. The model
+config composes that estimator with text and any modules outside the encoder.
+Tests should cover fixed-path parity, variable and optional
+modalities, closure release, and invocation before device transfer or sharding.
+
+For reporting-window aggregation and TFLOPS/MFU semantics, see
+[FLOPs, throughput, and MFU](../../docs/metrics.md#flops-throughput-and-mfu).
 
 ## Testing and Benchmarking
 - Numerics testing

@@ -703,6 +703,10 @@ class BaseAttention(Module):
         n_heads: int
         inner_attention: Module.Config
 
+        def flops_per_token(self, seq_len: int) -> int:
+            """Return non-parameter training FLOPs per input token."""
+            raise NotImplementedError
+
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
 
@@ -813,6 +817,12 @@ class GQAttention(BaseAttention):
                     f"n_heads ({self.n_heads}) must be divisible by "
                     f"n_kv_heads ({n_kv_heads})"
                 )
+
+        def flops_per_token(self, seq_len: int) -> int:
+            head_dim = (
+                self.head_dim if self.head_dim is not None else self.dim // self.n_heads
+            )
+            return 6 * self.n_heads * (head_dim + head_dim) * seq_len
 
     def __init__(self, config: Config):
         super().__init__()

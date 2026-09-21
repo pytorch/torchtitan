@@ -22,12 +22,12 @@ Shape suffixes:
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TypeAlias
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
-
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
@@ -88,6 +88,10 @@ class InvariantRowParallelLinear(Linear):
             dst=spmd.I,
             backward_options={"op_dtype": output.dtype},
         )
+
+
+VisionGrid: TypeAlias = tuple[int, int, int]
+VisionFlopsEstimator: TypeAlias = Callable[[tuple[VisionGrid, ...]], int]
 
 
 def create_block_diagonal_mask(
@@ -169,6 +173,9 @@ class VisionAttention(Module):
         inner_attention: Module.Config = field(
             default_factory=FlexInnerAttention.Config
         )
+
+        def flops_per_query_key_pair(self) -> int:
+            return 6 * self.num_heads * 2 * (self.dim // self.num_heads)
 
     def __init__(self, config: Config):
         super().__init__()

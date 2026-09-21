@@ -9,14 +9,10 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
 
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
+
 from .state_dict_adapter import Qwen3StateDictAdapter
 
 
@@ -105,23 +101,3 @@ class Qwen3Model(Decoder):
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            nparams, active_nparams = get_nparams_and_active_nparams(model)
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                head_dim = (
-                    attention.head_dim
-                    if attention.head_dim is not None
-                    else attention.dim // attention.n_heads
-                )
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=head_dim,
-                    v_head_dim=head_dim,
-                    seq_len=seq_len,
-                )
-            return nparams, 6 * active_nparams + attention_op_flops

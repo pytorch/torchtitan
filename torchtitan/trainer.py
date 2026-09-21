@@ -153,6 +153,7 @@ class Trainer(Configurable):
     metrics_processor: MetricsProcessor
     gradient_accumulation_steps: int
     num_pp_microbatches: int
+    _local_num_flops_since_last_log: int
 
     # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
     @record
@@ -200,6 +201,7 @@ class Trainer(Configurable):
             has_quantization=engine.has_quantization,
         )
         color = self.metrics_processor.color
+        self._local_num_flops_since_last_log = 0
 
         self.num_pp_microbatches = (
             config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
@@ -247,7 +249,6 @@ class Trainer(Configurable):
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
-        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
         self.metrics_processor.optimizers = engine.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
@@ -348,6 +349,12 @@ class Trainer(Configurable):
                 local_valid_tokens += microbatch.num_valid_tokens
                 microbatch_group.append(microbatch)
             microbatch_groups.append(microbatch_group)
+
+        optimizer_step_flops = sum(
+            engine.estimate_flops(microbatch.as_input_dict())
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        )
         sl.log_trace_scalar({"local_valid_tokens": local_valid_tokens})
 
         # Keep the global token count on device so loss normalization does not
@@ -392,6 +399,7 @@ class Trainer(Configurable):
         # scheduler advances in engine.optimizer_step().
         lr_metrics = engine.lr_schedulers.get_metrics() if should_log else {}
         grad_norm = engine.optimizer_step()
+        self._local_num_flops_since_last_log += optimizer_step_flops
 
         # log metrics
         if not should_log:
@@ -402,9 +410,8 @@ class Trainer(Configurable):
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
+            loss_mesh = parallel_dims.get_optional_mesh("loss")
             if parallel_dims.dp_cp_enabled:
-                loss_mesh = parallel_dims.get_optional_mesh("loss")
-
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
                 # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
@@ -433,6 +440,17 @@ class Trainer(Configurable):
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
 
+            local_num_flops_tensor = torch.tensor(
+                self._local_num_flops_since_last_log,
+                dtype=torch.float64,
+                device=engine.device,
+            )
+            mean_num_flops = dist_utils.dist_mean(
+                local_num_flops_tensor,
+                mesh=loss_mesh,
+            )
+            grad_norm = float(grad_norm.item())
+
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
@@ -442,9 +460,11 @@ class Trainer(Configurable):
             engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
-            float(grad_norm.item()),
+            grad_norm,
             extra_metrics=extra_metrics,
+            num_flops=mean_num_flops,
         )
+        self._local_num_flops_since_last_log = 0
 
     @record
     def train(self):
@@ -487,6 +507,7 @@ class Trainer(Configurable):
                         self.validator.validate(
                             engine.model_parts, engine.num_completed_steps
                         )
+                        self._local_num_flops_since_last_log = 0
 
                     engine.step_profiler()
 

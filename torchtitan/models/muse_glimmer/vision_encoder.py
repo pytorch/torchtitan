@@ -29,6 +29,7 @@ The transformer block stack is named ``layers`` so the shared
 from __future__ import annotations
 
 import math
+
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
@@ -41,8 +42,11 @@ from torchtitan.models.common import ComplexRoPE, Linear
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
+    VisionFlopsEstimator,
+    VisionGrid,
     VisionTransformerBlock,
 )
+from torchtitan.models.flops import active_parameter_flops_per_unit
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -237,6 +241,57 @@ class MuseGlimmerVisionEncoder(Module):
         ln_post: LayerNorm.Config
         pos_embed: Module.Config = field(default_factory=_VisionPosEmbed.Config)
         token_permute: Module.Config = field(default_factory=_VisionTokenPermute.Config)
+
+        def build_vision_flops_estimator(
+            self,
+            encoder: "MuseGlimmerVisionEncoder",
+            *,
+            output_token_flops: int = 0,
+        ) -> VisionFlopsEstimator:
+            input_patch_flops = sum(
+                active_parameter_flops_per_unit(module)
+                for module in (
+                    encoder.conv1_linear,
+                    encoder.ln_pre,
+                    encoder.layers,
+                    encoder.ln_post,
+                )
+            )
+            attention_pair_flops = self.block.attn.flops_per_query_key_pair()
+            if self.sparse_attention_factor <= 1:
+                num_global_layers = self.num_layers
+            else:
+                num_global_layers = (
+                    self.num_layers + self.sparse_attention_factor - 1
+                ) // self.sparse_attention_factor
+            num_window_layers = self.num_layers - num_global_layers
+            downsample_factor = self.downsample_factor
+            window_h = self.pos_emb_grid_h
+            window_w = self.pos_emb_grid_w
+
+            def estimate(grids: tuple[VisionGrid, ...]) -> int:
+                total_flops = 0
+                for temporal, grid_h, grid_w in grids:
+                    num_input_patches = temporal * grid_h * grid_w
+                    num_output_tokens = (grid_h // downsample_factor) * (
+                        grid_w // downsample_factor
+                    )
+                    num_full_h, remainder_h = divmod(grid_h, window_h)
+                    num_full_w, remainder_w = divmod(grid_w, window_w)
+                    num_window_pairs = (
+                        temporal
+                        * (num_full_h * window_h**2 + remainder_h**2)
+                        * (num_full_w * window_w**2 + remainder_w**2)
+                    )
+                    total_flops += input_patch_flops * num_input_patches
+                    total_flops += output_token_flops * num_output_tokens
+                    total_flops += attention_pair_flops * (
+                        num_global_layers * num_input_patches**2
+                        + num_window_layers * num_window_pairs
+                    )
+                return total_flops
+
+            return estimate
 
     def __init__(self, config: Config) -> None:
         super().__init__()
