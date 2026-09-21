@@ -67,12 +67,6 @@ recipes in that registry.
 
 ## Package boundary
 
-Within `dist_muon.py`, optimizer orchestration manages DTensor state, resolves
-layouts, and connects the redistribution runtime to dense Muon math helpers.
-Those helpers consume ordinary tensors, explicit matrix views, and optimizer
-hyperparameters. The math helpers do not inspect sharding
-placements or perform redistribution.
-
 FlexShard currently lives in TorchTitan while its API matures. We intend to
 annex this directory into a standalone Python package and repository.
 

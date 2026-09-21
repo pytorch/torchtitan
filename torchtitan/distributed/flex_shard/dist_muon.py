@@ -294,17 +294,21 @@ class DistMuon(Optimizer):
         self,
         compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     ) -> tuple[_ParameterComputeLayout, ...]:
-        group = self.param_groups[0]
-        params = group["params"]
-        names = group["param_names"]
+        parameters = []
         seen_names = set()
         seen_params = set()
+        for group_index, group in enumerate(self.param_groups):
+            params = group["params"]
+            names = group["param_names"]
+            for fqn, param in zip(names, params, strict=True):
+                if fqn in seen_names or id(param) in seen_params:
+                    raise ValueError(f"duplicate Muon parameter {fqn!r}")
+                seen_names.add(fqn)
+                seen_params.add(id(param))
+                parameters.append((group_index, fqn, param))
+
         compute_layouts = []
-        for fqn, param in zip(names, params, strict=True):
-            if fqn in seen_names or id(param) in seen_params:
-                raise ValueError(f"duplicate Muon parameter {fqn!r}")
-            seen_names.add(fqn)
-            seen_params.add(id(param))
+        for group_index, fqn, param in parameters:
             resolved_transition = _resolve_storage_to_compute_transition(
                 fqn,
                 param,
@@ -314,6 +318,7 @@ class DistMuon(Optimizer):
                 _ParameterComputeLayout(
                     fqn=fqn,
                     param=param,
+                    group_index=group_index,
                     storage_mesh_ranks=_device_mesh_ranks(param.device_mesh),
                     storage_layout_signature=_storage_layout_signature(param),
                     local_storage_signature=_local_storage_signature(param.to_local()),
@@ -333,6 +338,7 @@ class DistMuon(Optimizer):
         self,
         compute_layouts: Sequence[_ParameterComputeLayout],
     ) -> None:
+        ns_steps_by_group = tuple(group["ns_steps"] for group in self.param_groups)
         result = _build_bucket_plans(
             compute_layouts,
             self._specs,
@@ -341,9 +347,7 @@ class DistMuon(Optimizer):
             requires_redistribution=lambda item: (not item.storage_is_compute_ready),
             resolve_redistribution_plans=partial(
                 _resolve_muon_redistribution_plans,
-                # DistMuon requires one parameter group, so owner cost estimates
-                # all use the same Newton-Schulz step count.
-                ns_steps=self.param_groups[0]["ns_steps"],
+                ns_steps_by_group=ns_steps_by_group,
             ),
         )
 
@@ -416,11 +420,16 @@ class DistMuon(Optimizer):
             compute_layout.resolved_compute_layout_signature,
             _device_mesh_ranks(compute_layout.param.device_mesh),
             tuple(map(str, compute_layout.param.placements)),
-            self._group_signature(),
+            self._group_signature(compute_layout),
         )
 
-    def _group_signature(self) -> tuple[Any, ...]:
-        group = self.param_groups[0]
+    def _group(self, compute_layout: _ParameterComputeLayout) -> dict[str, Any]:
+        return self.param_groups[compute_layout.group_index]
+
+    def _group_signature(
+        self, compute_layout: _ParameterComputeLayout
+    ) -> tuple[Any, ...]:
+        group = self._group(compute_layout)
         return tuple(
             group[key]
             for key in (
@@ -541,7 +550,7 @@ class DistMuon(Optimizer):
             local_reference = local_reference.detach()
         local_grad = grad.to_local().view_as(local_reference)
         local_momentum = momentum_state.to_local().view_as(local_reference)
-        group = self.param_groups[0]
+        group = self._group(compute_layout)
         return local_grad, local_momentum, momentum_state, group
 
     def _prepare_local(
@@ -562,7 +571,7 @@ class DistMuon(Optimizer):
     def _compute_update(
         self, compute_layout: _ParameterComputeLayout, compute: Tensor
     ) -> None:
-        group = self.param_groups[0]
+        group = self._group(compute_layout)
         _compute_muon_direction(
             compute,
             matrix_views=self._matrix_views_by_fqn[compute_layout.fqn],
@@ -574,7 +583,7 @@ class DistMuon(Optimizer):
     def _apply_update(
         self, compute_layout: _ParameterComputeLayout, direction: Tensor
     ) -> None:
-        group = self.param_groups[0]
+        group = self._group(compute_layout)
         local_param = compute_layout.param.to_local()
         if compute_layout.storage_is_compute_ready:
             local_param = local_param.detach()
@@ -830,6 +839,7 @@ def _resolve_storage_to_compute_redistribution_requirement(
 class _ParameterComputeLayout:
     fqn: str
     param: DTensor
+    group_index: int
     storage_mesh_ranks: tuple[int, ...]
     storage_layout_signature: tuple[Any, ...]
     local_storage_signature: tuple[Any, ...]
@@ -898,7 +908,7 @@ class _ResolvedStorageToComputeTransition:
 def _resolve_muon_redistribution_plans(
     contexts: tuple[_BucketPlanningContext[_ParameterComputeLayout], ...],
     *,
-    ns_steps: int,
+    ns_steps_by_group: Sequence[int],
 ) -> tuple[tuple[_RedistributionPlan | None, ...], ...]:
     """Resolve Muon compute shardings directly into transport plans."""
     cumulative_loads_by_participants: dict[tuple[int, ...], tuple[int, ...]] = {}
@@ -914,7 +924,7 @@ def _resolve_muon_redistribution_plans(
             context.items,
             participants=participants,
             cumulative_loads=initial_loads,
-            ns_steps=ns_steps,
+            ns_steps_by_group=ns_steps_by_group,
         )
         cumulative_loads_by_participants[participants] = cumulative_loads
         bucket_specs = []
@@ -951,7 +961,7 @@ def _assign_balanced_owner_ranks(
     *,
     participants: tuple[int, ...],
     cumulative_loads: Sequence[int],
-    ns_steps: int,
+    ns_steps_by_group: Sequence[int],
 ) -> tuple[tuple[int | None, ...], tuple[int, ...]]:
     """Balance temporary compute ownership within and across ordered buckets."""
     assignments: list[int | None] = [None] * len(compute_layouts)
@@ -965,7 +975,7 @@ def _assign_balanced_owner_ranks(
             (
                 _estimate_muon_compute_cost(
                     layout.param.shape,
-                    ns_steps,
+                    ns_steps_by_group[layout.group_index],
                 ),
                 layout.param.numel() * layout.param.element_size(),
                 layout.fqn,
