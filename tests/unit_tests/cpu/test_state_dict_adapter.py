@@ -335,12 +335,12 @@ class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
     """
 
     def test_permute_does_not_raise_when_fsdp_degree_exceeds_head_count(self) -> None:
-        # llama3 debugmodel has 16 attention heads; sharding a (256, 256) q/k
-        # weight over a 32-rank mesh reproduces the production failure (e.g.
-        # llama3-8B's 8 KV heads break the same way above an 8-way FSDP
-        # degree). A "fake" process group is enough here: no real collectives
-        # run, but the DTensor op dispatch that raised
-        # "Cannot unflatten unevenly sharded tensor" still executes.
+        # llama3 debugmodel has 16 attention heads and 16 KV heads. Sharding its
+        # packed QKV weight over a 32-rank mesh reproduces the production
+        # failure: the QKV group reshape cannot be applied to a dim-0 shard
+        # when the FSDP degree exceeds the KV-head count. A "fake" process
+        # group is enough here; no real collectives run, but DTensor shape
+        # propagation still executes.
         world_size = 32
         dist.init_process_group(
             "fake", store=FakeStore(), rank=0, world_size=world_size
@@ -352,20 +352,30 @@ class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
 
-        full = torch.arange(256 * 256, dtype=torch.float32).reshape(256, 256)
-        local_shard = full[: 256 // world_size].clone()
+        qkv_config = config.layers[0].attention.qkv_linear
+        qkv_out_features = qkv_config.wqkv.out_features
+        full = torch.arange(qkv_out_features * config.dim, dtype=torch.float32).reshape(
+            qkv_out_features, config.dim
+        )
+        local_shard = full[: qkv_out_features // world_size].clone()
         sharded_weight = DTensor.from_local(
             local_shard, mesh, (Shard(0),), run_check=False
         )
 
         hf_state_dict = adapter.to_hf(
-            {"layers.0.attention.qkv_linear.wq.weight": sharded_weight}
+            {"layers.0.attention.qkv_linear.wqkv.weight": sharded_weight}
         )
         out = hf_state_dict["model.layers.0.self_attn.q_proj.weight"]
         self.assertIsInstance(out, DTensor)
         self.assertEqual(out.shape, torch.Size((256, 256)))
 
-    def test_permute_roundtrip_preserves_dtensor_values_and_placement(self) -> None:
+        restored = adapter.from_hf(hf_state_dict)
+        native = restored["layers.0.attention.qkv_linear.wqkv.weight"]
+        self.assertIsInstance(native, DTensor)
+        self.assertEqual(native.placements, sharded_weight.placements)
+        self.assertEqual(native.to_local().shape, local_shard.shape)
+
+    def test_permute_roundtrip_preserves_native_dtensor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             dist.init_process_group(
                 "gloo",
@@ -379,9 +389,13 @@ class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
                 config = build_config(attn_backend="flex", seq_len=max_context_length)
                 adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
 
-                full = torch.arange(256 * 256, dtype=torch.float32).reshape(256, 256)
+                qkv_config = config.layers[0].attention.qkv_linear
+                qkv_out_features = qkv_config.wqkv.out_features
+                full = torch.arange(
+                    qkv_out_features * config.dim, dtype=torch.float32
+                ).reshape(qkv_out_features, config.dim)
                 weight = DTensor.from_local(full, mesh, (Shard(0),), run_check=False)
-                key = "layers.0.attention.qkv_linear.wq.weight"
+                key = "layers.0.attention.qkv_linear.wqkv.weight"
 
                 restored = adapter.from_hf(adapter.to_hf({key: weight}))
                 out = restored[key]
