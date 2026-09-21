@@ -127,6 +127,11 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             optimizers=self.optimizers,
             training_steps=self.config.training.steps,
         )
+        self.ema = (
+            self.config.ema.build(model_parts=self.model_parts)
+            if self.config.ema is not None
+            else None
+        )
 
     def _initialize_checkpointer(
         self,
@@ -142,6 +147,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states={"train_state": self},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,

@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 
 from torchtitan.components.checkpointer import CheckpointManager
 
-from torchtitan.components.optimizer import LRSchedulersContainer, ParamGroupConfig
+from torchtitan.components.optimizer import EMA, LRSchedulersContainer, ParamGroupConfig
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
@@ -103,6 +103,7 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.states = {"trainer": torch.tensor([1.2347])}
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
+        self.ema = None
         self.data_loader = FakeDataLoader()
         self.ft_manager = DummyFTManager(enabled=True, participating_rank=0)
         self.patcher_group = mock.patch(
@@ -151,6 +152,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
@@ -190,6 +192,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
@@ -252,7 +255,7 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.assertEqual([False], ft_grad_enabled)
         manager.close()
 
-    def _build_replica(self, replica_id):
+    def _build_replica(self, replica_id, *, with_ema=False):
         model = nn.Linear(1, 1, bias=False)
         ft_manager = DummyFTManager(replica_id=replica_id)
         ft_manager.use_async_quorum = True
@@ -274,6 +277,7 @@ class TestFTCheckpointManager(unittest.TestCase):
         schedulers = LRSchedulersContainer.Config(warmup_steps=0).build(
             optimizers=optimizers, training_steps=8
         )
+        ema = EMA.Config().build(model_parts=[model]) if with_ema else self.ema
         checkpoint = TorchFTCheckpointManager(
             TorchFTCheckpointManager.Config(
                 folder=os.path.join(self.test_folder, str(replica_id)),
@@ -285,6 +289,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model_parts=[model],
             optimizers=optimizers,
             lr_schedulers=schedulers,
+            ema=ema,
             states={},
             sd_adapter=None,
             ft_manager=ft_manager,
@@ -298,6 +303,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model=model,
             optimizer=optimizers,
             scheduler=schedulers,
+            ema=ema,
             state_dict=state_dict,
             load_state_dict=load_state_dict,
         )
@@ -331,6 +337,25 @@ class TestFTCheckpointManager(unittest.TestCase):
         for key, tensor in cached_tensors.items():
             with self.subTest(state_key=key):
                 self.assertIs(cached_state[key], tensor)
+
+    def test_live_sync_includes_ema_when_configured(self):
+        """Regression test: the state_dict()/load_state_dict() closures used
+        for TorchFT's live replica-to-replica quorum-recovery sync must
+        include EMA when it's configured -- previously the hardcoded key
+        whitelist silently excluded it, so a recovering replica never got a
+        healthy replica's EMA state."""
+        replica = self._build_replica(replica_id=0, with_ema=True)
+        self.assertIsNotNone(replica.ema)
+        exported = replica.state_dict()
+        self.assertIn("ema", exported)
+        # A dict-to-dict assertEqual here passes on CPython's identity
+        # shortcut (state_dict() hands back the same tensor objects) and would
+        # otherwise raise "Boolean value of Tensor is ambiguous". Compare the
+        # keys, then the tensors elementwise.
+        expected = replica.ema.state_dict()
+        self.assertEqual(sorted(exported["ema"]), sorted(expected))
+        for key, value in expected.items():
+            torch.testing.assert_close(exported["ema"][key], value, rtol=0, atol=0)
 
     def test_joining_replica_restores_healthy_replica_learning_rate(self):
         healthy = self._build_replica(replica_id=0)

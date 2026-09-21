@@ -526,6 +526,7 @@ class VLLMModelWrapper(Module):
             model_parts=[self.model],
             optimizers=None,
             lr_schedulers=None,
+            ema=None,
             states={},
             sd_adapter=sd_adapter,
         )

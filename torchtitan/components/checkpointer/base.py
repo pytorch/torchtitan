@@ -39,6 +39,7 @@ OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
+EMA = "ema"
 
 
 def purge_thread(

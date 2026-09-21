@@ -28,13 +28,18 @@ from torchtitan.components.checkpointer import (
     AsyncMode,
     CheckpointManager,
     DATALOADER,
+    EMA,
     LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
     TRAIN_STATE,
 )
 from torchtitan.components.data.loader import BaseDataLoader
-from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.components.optimizer import (  # noqa: N811
+    EMA as EMAContainer,
+    LRSchedulersContainer,
+    OptimizersContainer,
+)
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -81,6 +86,7 @@ class TorchFTCheckpointManager(CheckpointManager):
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
+        ema: EMAContainer | None,
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
@@ -93,6 +99,7 @@ class TorchFTCheckpointManager(CheckpointManager):
             model_parts=model_parts,
             optimizers=optimizers,
             lr_schedulers=lr_schedulers,
+            ema=ema,
             states=states,
             sd_adapter=sd_adapter,
             base_folder=base_folder,
@@ -120,7 +127,7 @@ class TorchFTCheckpointManager(CheckpointManager):
                 optimizers._refresh_cached_state_dict()
                 ret = {}
                 for k, v in self.states.items():
-                    if k in {MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE}:
+                    if k in {MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE, EMA}:
                         ret[k] = v.state_dict()
                 return ret
 

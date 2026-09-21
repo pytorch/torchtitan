@@ -643,6 +643,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
                 ),
             ),
             optimizers=MagicMock(),
+            ema=None,
             lr_schedulers=SimpleNamespace(
                 get_metrics=MagicMock(return_value={}),
                 step=MagicMock(),
