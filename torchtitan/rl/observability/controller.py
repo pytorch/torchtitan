@@ -184,7 +184,7 @@ def compute_policy_age_metrics(
     Args:
         trainer_policy_version: Policy version that will consume this batch.
         min_policy_versions: Oldest sampled policy version for each packed training sample.
-        target_offpolicy_steps: Target steady-state mean offpolicy steps used to size the active buffer.
+        target_offpolicy_steps: Target mean offpolicy steps used to size the active buffer.
         max_offpolicy_steps: Hard consume-time offpolicy step limit, `target + window_batches`;
             None when there is no window.
 
@@ -197,7 +197,7 @@ def compute_policy_age_metrics(
             max_offpolicy_steps=None,
         )
         # -> train_batch/policy_age mean 2.67, train_batch/policy_age_max 5,
-        #    train_batch/num_samples_over_target_age 1, one logger.warning (uncapped, 5 > 3)
+        #    train_batch/pct_samples_over_target_age 33.3, one logger.warning (uncapped, 5 > 3)
         # with max_offpolicy_steps=4 the same batch raises RuntimeError (5 > 4)
     """
     policy_ages = [
@@ -216,22 +216,21 @@ def compute_policy_age_metrics(
     num_samples_over_target_age = sum(
         policy_age > target_offpolicy_steps for policy_age in policy_ages
     )
+    pct_samples_over_target_age = 100.0 * num_samples_over_target_age / len(policy_ages)
     if max_offpolicy_steps is None and num_samples_over_target_age:
         logger.warning(
-            "Training batch contains over-target samples (count=%d, target_offpolicy_steps=%d, "
-            "max_policy_age=%d, trainer_policy_version=%d). Oldest-ready consumption with no cap "
-            "trains these instead of dropping them; frequent hits indicate a heavy generation tail.",
-            num_samples_over_target_age,
-            target_offpolicy_steps,
-            max_policy_age,
-            trainer_policy_version,
+            f"Training batch contains {num_samples_over_target_age} samples "
+            f"({pct_samples_over_target_age:.1f}%) older than target_offpolicy_steps={target_offpolicy_steps} "
+            f"(max_policy_age={max_policy_age}, trainer_policy_version={trainer_policy_version}). "
+            "Oldest-ready consumption with no cap trains these instead of dropping them; "
+            "frequent hits indicate a heavy generation tail."
         )
     return [
         m.Metric("train_batch/policy_age", m.Mean.from_list(policy_ages)),
         m.Metric("train_batch/policy_age_max", m.NoReduce(float(max_policy_age))),
         m.Metric(
-            "train_batch/num_samples_over_target_age",
-            m.NoReduce(float(num_samples_over_target_age)),
+            "train_batch/pct_samples_over_target_age",
+            m.NoReduce(pct_samples_over_target_age),
         ),
     ]
 

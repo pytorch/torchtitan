@@ -364,7 +364,7 @@ def test_compute_policy_age_metrics_raises_beyond_cap() -> None:
     )
     aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
     assert aggregated["train_batch/policy_age_max"] == 4
-    assert aggregated["train_batch/num_samples_over_target_age"] == 1
+    assert aggregated["train_batch/pct_samples_over_target_age"] == 100.0
 
     with pytest.raises(RuntimeError, match="admitted stale training data"):
         compute_policy_age_metrics(
@@ -390,8 +390,10 @@ def test_compute_policy_age_metrics_uncapped_trains_over_target_age_with_warning
     aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
     assert aggregated["train_batch/policy_age/mean"] == 3
     assert aggregated["train_batch/policy_age_max"] == 6
-    assert aggregated["train_batch/num_samples_over_target_age"] == 1
-    assert "over-target samples (count=1, target_offpolicy_steps=3" in caplog.text
+    assert aggregated["train_batch/pct_samples_over_target_age"] == pytest.approx(
+        100 / 3
+    )
+    assert "1 samples (33.3%) older than target_offpolicy_steps=3" in caplog.text
 
 
 def test_compute_policy_age_metrics_uncapped_is_quiet_within_target(
@@ -407,7 +409,7 @@ def test_compute_policy_age_metrics_uncapped_is_quiet_within_target(
 
     aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
     assert aggregated["train_batch/policy_age/mean"] == 2
-    assert aggregated["train_batch/num_samples_over_target_age"] == 0
+    assert aggregated["train_batch/pct_samples_over_target_age"] == 0.0
     assert caplog.text == ""
 
 

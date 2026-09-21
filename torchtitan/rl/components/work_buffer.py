@@ -91,7 +91,6 @@ class RolloutGroupWorkBuffer(Configurable):
         self, config: Config, *, max_active_rollout_groups: int, window_size: int | None
     ) -> None:
         self._max_active_rollout_groups = max_active_rollout_groups
-        # Group ids the batcher may take from, counted from the oldest buffered group; None means all.
         self._window_size = window_size
         self._active_rollout_groups = 0
         # metric: Per-flush peak active slots; reset on `.metrics()` call.
@@ -170,12 +169,15 @@ class RolloutGroupWorkBuffer(Configurable):
     async def take_finalized(self) -> RolloutGroup | None:
         """Batcher loop: return the oldest FINALIZED group the window allows.
 
-        With `window_size=None`, every finalized group is eligible. With a finite
-        window, only group ids `[head, head + window_size - 1]` are eligible. Entries
-        outside the window stay blocked, and taking a non-head group does not move the
-        window past the head.
+        Cases:
+            window_size is None: every finalized group is eligible; the oldest is returned.
+            window_size is W:    only group ids ``[head, head + W - 1]`` are eligible, where head is
+                                 the oldest group still in the buffer. Finalized groups past the
+                                 window stay blocked, and taking a non-head group does not move the
+                                 window past the head.
+            window_size is 1:    only the head is eligible: strict FIFO.
 
-        This anchored-window policy follows MiniMax's rollout scheduling approach; see
+        This anchored window is inspired by MiniMax's rollout scheduling; see
         Section 6.2.4 of https://arxiv.org/pdf/2605.26494.
 
         Example:
