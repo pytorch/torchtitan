@@ -28,7 +28,12 @@ __all__ = ["specialize_lora_linear"]
 
 
 class _LoRALinearMixin:
-    """Add LoRA adapter parameters and computation to a linear module."""
+    """Add a LoRA update to a Linear's local computation."""
+
+    _lora_scaling: float
+    num_linears: int
+    lora_a: Linear
+    lora_b: Linear
 
     def __init__(self, config) -> None:
         super().__init__(config)  # type: ignore[misc]
@@ -75,9 +80,16 @@ class _LoRALinearMixin:
             param_init={"weight": nn.init.zeros_},
         ).build()
 
-    def forward(self, input_XI: torch.Tensor) -> torch.Tensor:
-        base_out_XO = super().forward(input_XI)  # type: ignore[misc]
-        lora_out_XO = self.lora_b(self.lora_a(input_XI))
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        base_out_XO = super()._linear(input, weight, bias)  # type: ignore[misc]
+        lora_out_XO = self.lora_b(self.lora_a(input))
+        if self.num_linears > 1:
+            lora_out_XO = lora_out_XO.flatten(-2)
         return base_out_XO + self._lora_scaling * lora_out_XO
 
     @staticmethod

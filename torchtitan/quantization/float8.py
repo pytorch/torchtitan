@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -56,11 +57,19 @@ try:
                         requires_grad=self.bias.requires_grad,
                     )
 
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
+        def reset_parameters(self) -> None:
+            Linear.reset_parameters(self)
+
+        def _linear(
+            self,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            bias: torch.Tensor | None,
+        ) -> torch.Tensor:
+            # This mirrors TorchAOFloat8Linear.forward while accepting explicit
+            # operands so a TP boundary can substitute a partial bias.
             if torch.is_autocast_enabled():
                 input = input.to(torch.get_autocast_gpu_dtype())
-            weight = self.weight.flatten(0, -2)
-            bias = None if self.bias is None else self.bias.flatten()
             output = matmul_with_hp_or_float8_args.apply(
                 input,
                 weight.t(),
@@ -69,12 +78,16 @@ try:
             )
             if bias is not None:
                 output = output + bias.to(output.dtype)
+            return output
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            weight = cast(torch.Tensor, self.weight).flatten(0, -2)
+            bias = cast(torch.Tensor | None, self.bias)
+            bias = None if bias is None else bias.flatten()
+            output = self._linear(input, weight, bias)
             if self.num_linears == 1:
                 return output
             return output.unflatten(-1, self.weight.shape[:-1])
-
-        def reset_parameters(self) -> None:
-            Linear.reset_parameters(self)
 
 except ImportError:
     Float8Linear = None

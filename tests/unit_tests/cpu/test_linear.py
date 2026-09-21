@@ -6,11 +6,14 @@
 
 import unittest
 from functools import partial
+from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchtitan.models.common.linear as linear_module
+from spmd_types import SpmdType
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -18,9 +21,19 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.linear import Linear, PartialBiasRowwiseLinear
+from torchtitan.distributed.spmd_types import (
+    set_current_module_spmd_types,
+    set_current_spmd_mesh,
+)
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    get_parallel_linear_cls,
+    Linear,
+    PartialBiasRowwiseLinear,
+    RowParallelLinear,
+)
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 class TestLinear(unittest.TestCase):
@@ -139,6 +152,17 @@ class TestLinear(unittest.TestCase):
 
 
 class TestPartialBiasRowwiseLinear(unittest.TestCase):
+    def test_is_row_parallel(self):
+        self.assertTrue(issubclass(PartialBiasRowwiseLinear, RowParallelLinear))
+
+    def test_preserves_concrete_parallel_linear_class(self):
+        config = PartialBiasRowwiseLinear.Config(
+            in_features=4,
+            out_features=2,
+            bias=True,
+        )
+        self.assertIs(get_parallel_linear_cls(config), PartialBiasRowwiseLinear)
+
     def test_requires_bias(self):
         with self.assertRaisesRegex(ValueError, "requires bias=True"):
             PartialBiasRowwiseLinear.Config(
@@ -159,6 +183,51 @@ class TestPartialBiasRowwiseLinear(unittest.TestCase):
         actual = linear(input)
 
         torch.testing.assert_close(actual, expected)
+
+
+class TestTensorParallelLinearContext(unittest.TestCase):
+    def test_collective_types_follow_module_spmd_context(self):
+        input = torch.randn(3, 4)
+        tp_group = object()
+
+        for expected_src, expected_dst in (
+            (spmd.I, spmd.I),
+            (spmd.S(0), spmd.S(0)),
+            (spmd.R, spmd.P),
+        ):
+            with self.subTest(src=expected_src, dst=expected_dst):
+                column = ColumnParallelLinear.Config(
+                    in_features=4,
+                    out_features=2,
+                ).build()
+                row = RowParallelLinear.Config(
+                    in_features=4,
+                    out_features=2,
+                ).build()
+
+                with (
+                    set_current_module_spmd_types(
+                        input_types={"input": SpmdType({"tp": expected_src})},
+                        output_type=SpmdType({"tp": expected_dst}),
+                    ),
+                    patch.object(
+                        linear_module,
+                        "spmd_mesh_group",
+                        return_value=tp_group,
+                    ),
+                    patch.object(
+                        linear_module.spmd,
+                        "redistribute",
+                        side_effect=lambda tensor, *_args, **_kwargs: tensor,
+                    ) as redistribute,
+                ):
+                    column(input)
+                    assert redistribute.call_args.kwargs["src"] == expected_src
+                    assert redistribute.call_args.kwargs["dst"] == spmd.R
+
+                    row(input)
+                    assert redistribute.call_args.kwargs["src"] == spmd.P
+                    assert redistribute.call_args.kwargs["dst"] == expected_dst
 
 
 class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):
@@ -190,6 +259,9 @@ class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):
                 in_features=4,
                 out_features=2,
                 bias=True,
+                sharding_config=ShardingConfig(
+                    out_src_shardings=SpmdType({"tp": spmd.I}),
+                ),
             )
             .build()
             .to(self.device_type)
@@ -197,17 +269,17 @@ class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):
         linear.weight = nn.Parameter(weight_dtensor.to_local())
         linear.bias = nn.Parameter(bias.detach().clone())
 
-        with set_current_spmd_mesh(mesh):
+        with (
+            set_current_spmd_mesh(mesh),
+            set_current_module_spmd_types(
+                input_types=None,
+                output_type=SpmdType({"tp": spmd.I}),
+            ),
+        ):
             linear._parameters["bias"] = spmd.assert_type(
                 linear.bias, {tp_group: spmd.I}
             )
-            local_partial = linear(local_input)
-            actual = spmd.redistribute(
-                local_partial,
-                tp_group,
-                src=spmd.P,
-                dst=spmd.I,
-            )
+            actual = linear(local_input)
             actual.sum().backward()
 
         torch.testing.assert_close(actual, expected)

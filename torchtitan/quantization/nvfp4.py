@@ -26,7 +26,7 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import get_parallel_linear_cls, Linear
 from torchtitan.protocols.module import Module
 
 
@@ -108,15 +108,36 @@ try:
                         )
 
             def build(self, **kwargs):
-                # sharding_config (the stock colwise/rowwise weight placement) is
-                # attached by update_from_config after this Config is built, so it
-                # is available here but not in __post_init__. Fold it into the
-                # local SPMD region for the opaque nvfp4_linear op now, so base
-                # Module.parallelize consumes it directly.
+                # sharding_config is attached by update_from_config before this
+                # Config is built, so it is available here but not in
+                # __post_init__.
                 # slots=True breaks zero-arg super(), so call the parent explicitly.
                 instance = Linear.Config.build(self, **kwargs)
                 if instance._sharding_config is not None:
                     sc = instance._sharding_config
+                    state_shardings = {
+                        **sc.state_shardings,
+                        "_sr_seed": SpmdType(
+                            {
+                                MeshAxisName.DP: spmd.V,
+                                MeshAxisName.CP: spmd.V,
+                                TP: spmd.V,
+                            }
+                        ),
+                    }
+                    if get_parallel_linear_cls(self) is not None:
+                        # The explicit TP classes execute their collective in
+                        # forward(). Turning the whole module into a local SPMD
+                        # region would localize the input before that collective.
+                        instance._sharding_config = replace(
+                            sc,
+                            state_shardings=state_shardings,
+                        )
+                        return instance
+
+                    # Plain NVFP4Linear has no outer collective boundary. Fold
+                    # its sharding contract into a local SPMD region for the
+                    # opaque nvfp4_linear operation.
                     weight_tp = sc.state_shardings["weight"].local_type.get(TP)
                     rowwise = (
                         isinstance(weight_tp, spmd.Shard)
@@ -130,23 +151,14 @@ try:
                         in_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
                     instance._sharding_config = replace(
                         sc,
-                        state_shardings={
-                            **sc.state_shardings,
-                            "_sr_seed": SpmdType(
-                                {
-                                    MeshAxisName.DP: spmd.V,
-                                    MeshAxisName.CP: spmd.V,
-                                    TP: spmd.V,
-                                }
-                            ),
-                        },
+                        state_shardings=state_shardings,
                         in_src_shardings={
                             **(sc.in_src_shardings or {}),
-                            "x": in_layout,
+                            "input": in_layout,
                         },
                         in_dst_shardings={
                             **(sc.in_dst_shardings or {}),
-                            "x": in_layout,
+                            "input": in_layout,
                         },
                         local_spmd=True,
                     )
@@ -243,7 +255,12 @@ try:
             )
             self._refresh_rht_sign_vector_tuple()
 
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
+        def _linear(
+            self,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            bias: torch.Tensor | None,
+        ) -> torch.Tensor:
             local_out_features = self.weight.shape[-2]
             if local_out_features % _NVFP4_BLOCK:
                 raise ValueError(
@@ -252,21 +269,25 @@ try:
                     "Linear out_features or TP degree so quantization blocks "
                     "do not span projection boundaries."
                 )
-            weight = self.weight.flatten(0, -2)
-            bias = None if self.bias is None else self.bias.flatten()
-            output = nvfp4_linear(
+            return nvfp4_linear(
                 input,
                 weight,
                 bias,
                 sr_seed=self._sr_seed,
                 sign_vector=self.rht_sign_vector,
             )
-            if self.num_linears == 1:
-                return output
-            return output.unflatten(-1, self.weight.shape[:-1])
 
         def reset_parameters(self) -> None:
             Linear.reset_parameters(self)
+
+        def forward(self, input: torch.Tensor) -> torch.Tensor:
+            weight = cast(torch.Tensor, self.weight).flatten(0, -2)
+            bias = cast(torch.Tensor | None, self.bias)
+            bias = None if bias is None else bias.flatten()
+            output = self._linear(input, weight, bias)
+            if self.num_linears == 1:
+                return output
+            return output.unflatten(-1, self.weight.shape[:-1])
 
 except ImportError:
     NVFP4Linear = None

@@ -6,7 +6,7 @@
 
 """Numerical parity for the fused TP+SP linear primitives.
 
-These test the autograd Functions in ``torchtitan/models/common/dist_gemm.py``
+These test the autograd Functions in ``torchtitan/models/common/async_linear.py``
 directly, against a single-device reference built from the unsharded weights. No
 model, no DTensor -- just the collective + GEMM math and its gradients.
 
@@ -24,7 +24,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.models.common.dist_gemm import (
+from torchtitan.models.common.async_linear import (
     AsyncAllGatherLinear,
     AsyncLinearReduceScatter,
 )
@@ -79,6 +79,67 @@ class TestDistLinearPrimitives(DTensorTestBase):
         )
         # wgrad involves no cross-rank reduction -> must be exact
         self.assertEqual(ws.grad, ref_dw.chunk(W, 0)[self.rank], atol=0, rtol=0)
+
+    @with_comms
+    def test_all_gather_linear_preserves_stacked_projection_axis(self):
+        """Column-parallel stacked weights shard N without sharding the stack."""
+        W = self.world_size
+        M, N, K = 8 * W, 32, 32
+        group = torch.distributed.group.WORLD
+        dev = self.device_type
+        torch.manual_seed(0)
+        x = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
+        weight = torch.randn(2, N, K, device=dev, dtype=torch.bfloat16)
+        bias = torch.randn(2, N, device=dev, dtype=torch.bfloat16)
+        grad_y = torch.randn(M, 2, N, device=dev, dtype=torch.bfloat16)
+
+        reference_x = x.clone().requires_grad_()
+        reference_weight = weight.clone().requires_grad_()
+        reference_bias = bias.clone().requires_grad_()
+        reference_y = F.linear(
+            reference_x,
+            reference_weight.flatten(0, -2),
+            reference_bias.flatten(),
+        ).unflatten(-1, (2, N))
+        reference_y.backward(grad_y)
+
+        x_shard = x.chunk(W, 0)[self.rank].clone().requires_grad_()
+        weight_shard = weight.chunk(W, 1)[self.rank].clone().requires_grad_()
+        bias_shard = bias.chunk(W, 1)[self.rank].clone().requires_grad_()
+        y_shard_flat = AsyncAllGatherLinear.apply(
+            x_shard,
+            weight_shard.flatten(0, -2),
+            bias_shard.flatten(),
+            group,
+            group.group_name,
+        )
+        y_shard = y_shard_flat.unflatten(-1, weight_shard.shape[:-1])
+        y_shard.backward(grad_y.chunk(W, 2)[self.rank])
+
+        torch.testing.assert_close(
+            y_shard,
+            reference_y.chunk(W, 2)[self.rank],
+            atol=self.TOL,
+            rtol=self.TOL,
+        )
+        torch.testing.assert_close(
+            x_shard.grad,
+            reference_x.grad.chunk(W, 0)[self.rank],
+            atol=2 * self.TOL,
+            rtol=2 * self.TOL,
+        )
+        self.assertEqual(
+            weight_shard.grad,
+            reference_weight.grad.chunk(W, 1)[self.rank],
+            atol=0,
+            rtol=0,
+        )
+        self.assertEqual(
+            bias_shard.grad,
+            reference_bias.grad.chunk(W, 1)[self.rank],
+            atol=0,
+            rtol=0,
+        )
 
     @with_comms
     def test_linear_reduce_scatter_matches_unsharded(self):
