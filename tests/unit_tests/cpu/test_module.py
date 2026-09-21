@@ -452,6 +452,29 @@ class TestModuleRedistribution(unittest.TestCase):
         ):
             current_module_forward_input_spmd_type("x", MeshAxisName.TP)
 
+    def test_parallelized_forward_spmd_context_compiles(self):
+        class CompiledModule(Module):
+            def forward(self, x):
+                return x + 1
+
+        module = CompiledModule()
+        module._sharding_config = ShardingConfig()
+        module.parallelize(
+            ParallelDims(
+                dp_replicate=1,
+                dp_shard=1,
+                cp=1,
+                tp=1,
+                pp=1,
+                ep=1,
+                world_size=1,
+            )
+        )
+        compiled_module = torch.compile(module, backend="eager", fullgraph=True)
+        input = torch.randn(2, 3)
+
+        torch.testing.assert_close(compiled_module(input), input + 1)
+
 
 class TestVerifyModuleProtocol(unittest.TestCase):
     """Tests for BaseModel.verify_module_protocol."""
