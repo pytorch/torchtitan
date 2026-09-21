@@ -402,7 +402,11 @@ class FusedGroupedExperts(GroupedExperts):
             offs=offsets_E,
         )
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
-        h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
+        # Subclasses may change activation semantics, so match supported types exactly.
+        if type(self.activation_fn) in (SwiGLU, FusedSwiGLU):
+            h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
+        else:
+            h_RF = self.activation_fn(gate_RF, up_RF)
         return self._grouped_mm(A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E).type_as(
             x_RD
         )
@@ -458,7 +462,7 @@ def _fuse_grouped_experts_sharding(base: ShardingConfig) -> ShardingConfig:
 
 @override(
     target=GroupedExperts.Config,
-    description="Fuse routed-experts gate/up projection and SwiGLU activation.",
+    description="Fuse routed-experts gate/up projection, preserving the configured activation.",
 )
 def fused_grouped_experts(cfg: GroupedExperts.Config) -> GroupedExperts.Config:
     if type(cfg) is not GroupedExperts.Config:
