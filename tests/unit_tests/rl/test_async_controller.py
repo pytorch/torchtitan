@@ -303,7 +303,7 @@ def test_batcher_splits_bins_with_two_way_lpt() -> None:
     ) == [64, 70]
 
 
-def test_batcher_splits_and_sorts_by_attention_workload() -> None:
+def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
     batcher = Batcher.Config().build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
@@ -324,9 +324,34 @@ def test_batcher_splits_and_sorts_by_attention_workload() -> None:
         for microbatch in assignments
     ]
 
-    # Global workload sorting puts similarly expensive bins in the same outer
-    # accumulation step.
-    assert workloads == [[52, 52], [36, 16]]
+    # Global sorting puts similarly expensive bins in each concurrent DP group.
+    # Reversing the second group pairs its lighter bin with the first rank.
+    assert workloads == [[52, 52], [16, 36]]
+
+
+def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
+    batcher = Batcher.Config(max_num_documents=1).build(
+        num_tokens_per_microbatch_per_dp_rank=10,
+        max_context_length=10,
+        num_prompts_per_train_step=1,
+        dp_degree=2,
+        pad_id=0,
+    )
+    samples = _variable_length_group(
+        0,
+        # Effective lengths are [10, 8, 6, 4]. The document limit forces each
+        # sample into its own bin, with workloads [100, 64, 36, 16].
+        token_lengths=[11, 9, 7, 5],
+    ).training_samples
+
+    assignments = batcher._assign_training_samples_to_microbatches(samples)
+    workloads = [
+        [batcher._attention_workload(rank_samples) for rank_samples in microbatch]
+        for microbatch in assignments
+    ]
+
+    assert workloads == [[100, 64], [16, 36]]
+    assert [sum(rank_workloads) for rank_workloads in zip(*workloads)] == [116, 100]
 
 
 def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> None:

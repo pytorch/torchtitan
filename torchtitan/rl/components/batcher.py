@@ -299,12 +299,13 @@ class Batcher(Configurable):
     def _assign_training_samples_to_microbatches(
         self, training_samples: list[TrainingSample]
     ) -> list[list[list[TrainingSample]]]:
-        """Pack with FFD, align by LPT splitting, then sort by attention work.
+        """Pack with FFD, align by LPT splitting, then schedule by attention work.
 
         FFD first determines the minimum number of fixed-capacity bins. The
         heaviest splittable bins are recursively divided until the bin count is
-        a multiple of the DP degree. Finally, sorting all bins by workload puts
-        similarly expensive bins in the same outer gradient accumulation step.
+        a multiple of the DP degree. Finally, bins are sorted by workload and
+        partitioned into D-wide groups. Reversing every other group pairs heavy
+        and light bins on each DP replica across adjacent groups.
         """
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
         ordered_samples = sorted(
@@ -342,10 +343,15 @@ class Batcher(Configurable):
         bins.sort(key=self._attention_workload, reverse=True)
 
         num_microbatches = len(bins) // self._dp_degree
-        return [
-            bins[microbatch * self._dp_degree : (microbatch + 1) * self._dp_degree]
-            for microbatch in range(num_microbatches)
-        ]
+        assignments = []
+        for microbatch in range(num_microbatches):
+            rank_assignments = bins[
+                microbatch * self._dp_degree : (microbatch + 1) * self._dp_degree
+            ]
+            if microbatch % 2:
+                rank_assignments.reverse()
+            assignments.append(rank_assignments)
+        return assignments
 
     def _attention_workload(self, training_samples: list[TrainingSample]) -> int:
         """Estimate packed full-attention work as the sum of squared lengths."""
