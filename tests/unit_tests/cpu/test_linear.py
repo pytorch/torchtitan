@@ -21,11 +21,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.spmd_types import (
-    register_module_forward_spmd_types,
-    set_current_module_forward_spmd_types,
-    set_current_spmd_mesh,
-)
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     get_parallel_linear_cls,
@@ -187,35 +183,40 @@ class TestPartialBiasRowwiseLinear(unittest.TestCase):
 
 
 class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
-    def test_collective_types_follow_module_forward_types(self):
+    def test_collective_types_follow_dense_sp_state(self):
         input = torch.randn(3, 4)
         tp_group = object()
 
-        for expected_src, expected_dst in (
-            (spmd.I, spmd.I),
-            (spmd.S(0), spmd.S(0)),
-            (spmd.R, spmd.P),
+        for dense_sp_enabled, use_dense_sp, expected_type in (
+            (False, True, spmd.I),
+            (True, True, spmd.S(0)),
+            (True, False, spmd.I),
         ):
-            with self.subTest(src=expected_src, dst=expected_dst):
+            with self.subTest(
+                dense_sp_enabled=dense_sp_enabled,
+                use_dense_sp=use_dense_sp,
+            ):
                 column = ColumnParallelLinear.Config(
                     in_features=4,
                     out_features=2,
+                    use_dense_sp=use_dense_sp,
                 ).build()
                 row = RowParallelLinear.Config(
                     in_features=4,
                     out_features=2,
+                    use_dense_sp=use_dense_sp,
                 ).build()
-                context_id = register_module_forward_spmd_types(
-                    input_types={"input": SpmdType({"tp": expected_src})},
-                    output_type=SpmdType({"tp": expected_dst}),
-                )
 
                 with (
-                    set_current_module_forward_spmd_types(context_id),
                     patch.object(
                         linear_module,
                         "spmd_mesh_group",
                         return_value=tp_group,
+                    ),
+                    patch.object(
+                        linear_module,
+                        "spmd_dense_sp_enabled",
+                        return_value=dense_sp_enabled,
                     ),
                     patch.object(
                         linear_module.spmd,
@@ -224,12 +225,12 @@ class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
                     ) as redistribute,
                 ):
                     column(input)
-                    assert redistribute.call_args.kwargs["src"] == expected_src
+                    assert redistribute.call_args.kwargs["src"] == expected_type
                     assert redistribute.call_args.kwargs["dst"] == spmd.R
 
                     row(input)
                     assert redistribute.call_args.kwargs["src"] == spmd.P
-                    assert redistribute.call_args.kwargs["dst"] == expected_dst
+                    assert redistribute.call_args.kwargs["dst"] == expected_type
 
 
 class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):
@@ -270,14 +271,9 @@ class TestPartialBiasRowwiseLinearDistributed(DTensorTestBase):
         )
         linear.weight = nn.Parameter(weight_dtensor.to_local())
         linear.bias = nn.Parameter(bias.detach().clone())
-        context_id = register_module_forward_spmd_types(
-            input_types=None,
-            output_type=SpmdType({"tp": spmd.I}),
-        )
-
         with (
             set_current_spmd_mesh(mesh),
-            set_current_module_forward_spmd_types(context_id),
+            patch.object(linear_module, "spmd_dense_sp_enabled", return_value=False),
         ):
             linear._parameters["bias"] = spmd.assert_type(
                 linear.bias, {tp_group: spmd.I}

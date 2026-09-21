@@ -302,6 +302,19 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         )
         self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
 
+    def test_non_dense_projection_stays_synchronous(self):
+        config = ColumnParallelLinear.Config(
+            in_features=4,
+            out_features=4,
+            use_dense_sp=False,
+        )
+
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(config)
+
+        self.assertIs(type(transformed), ColumnParallelLinear.Config)
+
     def test_shared_expert_transforms_parallel_projections(self):
         config = make_shared_expert_ffn_config(
             dim=4,

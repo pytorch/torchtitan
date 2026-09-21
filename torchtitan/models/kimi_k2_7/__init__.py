@@ -121,6 +121,7 @@ def _partial_bias_rowwise_linear(
         in_features=in_features,
         out_features=out_features,
         bias=True,
+        use_dense_sp=False,
         param_init=_LINEAR_INIT,
     )
 
@@ -166,6 +167,7 @@ def _vision_encoder_config(
                 in_features=dim,
                 out_features=ffn_dim,
                 bias=True,
+                use_dense_sp=False,
                 param_init=_LINEAR_INIT,
             ),
             fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
@@ -197,6 +199,7 @@ def _vision_encoder_config(
                 in_features=merged_dim,
                 out_features=merged_dim,
                 bias=True,
+                use_dense_sp=False,
                 param_init=_LINEAR_INIT,
             ),
             linear_2=_partial_bias_rowwise_linear(merged_dim, text_hidden_size),

@@ -291,6 +291,7 @@ def _precompile_aot_fx_trace(
     trace_context = dist_utils.get_spmd_context(
         parallel_dims=parallel_dims,
         spmd_typechecking=False,
+        dense_sp_enabled=config.parallelism.enable_sequence_parallel,
     )
 
     maybe_register_blockmask_pytree_node()

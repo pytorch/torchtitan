@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(kw_only=True, slots=True)
 class AsyncTensorParallelTransform(ModelConfigTransform):
-    """Replace synchronous tensor-parallel projections with async versions."""
+    """Replace synchronous dense tensor-parallel projections with async versions."""
 
     enable_sequence_parallel: bool
 
@@ -46,6 +46,8 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
             return model
 
         for fqn, config, parent, attr in list(model.traverse(Linear.Config)):
+            if not config.use_dense_sp:
+                continue
             parallel_cls = get_parallel_linear_cls(config)
             if parallel_cls is None:
                 continue

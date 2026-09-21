@@ -269,6 +269,7 @@ def _vision_partial_bias_rowwise_linear(
         in_features=in_features,
         out_features=out_features,
         bias=True,
+        use_dense_sp=False,
         param_init=_VISION_LINEAR_INIT,
     )
 
@@ -328,6 +329,7 @@ def muse_glimmer_vision_encoder_config(
                     in_features=latent_dim,
                     out_features=mlp_hidden,
                     bias=True,
+                    use_dense_sp=False,
                     param_init=_VISION_LINEAR_INIT,
                 ),
                 fc2=_vision_partial_bias_rowwise_linear(mlp_hidden, latent_dim),

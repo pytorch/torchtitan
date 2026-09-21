@@ -20,10 +20,7 @@ from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
 from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import (
-    current_module_forward_input_spmd_type,
-    spmd_mesh_group,
-)
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import VarlenMetadata
@@ -420,7 +417,7 @@ class GatedDeltaNet(Module):
             x_TD = spmd.redistribute(
                 x_TD,
                 tp_group,
-                src=current_module_forward_input_spmd_type("x_TD", MeshAxisName.TP),
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
                 dst=spmd.R,
                 backward_options={"op_dtype": x_TD.dtype},
             )

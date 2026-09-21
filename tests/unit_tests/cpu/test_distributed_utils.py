@@ -9,19 +9,13 @@ from typing import cast
 from unittest.mock import patch
 
 import pytest
-import spmd_types as spmd
 import torch
-from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh
+from torch.utils.checkpoint import checkpoint
 
 from torchtitan.config import CommConfig
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.spmd_types import (
-    current_module_forward_input_spmd_type,
-    current_module_forward_output_spmd_type,
-    register_module_forward_spmd_types,
-    set_current_module_forward_spmd_types,
-)
+from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_enabled
 from torchtitan.distributed.utils import init_distributed
 
 
@@ -87,20 +81,52 @@ def test_dist_sum_tensor_waits_for_distributed_result():
     wait.assert_called_once_with(reduced)
 
 
-def test_module_spmd_context_exposes_forward_types() -> None:
-    outer_context_id = register_module_forward_spmd_types(
-        input_types={"x": SpmdType({"tp": spmd.S(0)})},
-        output_type=SpmdType({"tp": spmd.S(0)}),
+def test_spmd_context_exposes_dense_sp_state() -> None:
+    dense_mesh = cast(DeviceMesh, object())
+
+    set_spmd_meshes(
+        dense_mesh=dense_mesh,
+        sparse_mesh=None,
+        dense_sp_enabled=True,
     )
-    inner_context_id = register_module_forward_spmd_types(
-        input_types={"input": SpmdType({"tp": spmd.I})},
-        output_type=SpmdType({"tp": spmd.P}),
+    assert spmd_dense_sp_enabled()
+
+    set_spmd_meshes(
+        dense_mesh=dense_mesh,
+        sparse_mesh=None,
+        dense_sp_enabled=False,
+    )
+    assert not spmd_dense_sp_enabled()
+
+
+def test_dense_sp_state_compiles_with_checkpoint() -> None:
+    dense_mesh = cast(DeviceMesh, object())
+    set_spmd_meshes(
+        dense_mesh=dense_mesh,
+        sparse_mesh=None,
+        dense_sp_enabled=True,
     )
 
-    with set_current_module_forward_spmd_types(outer_context_id):
-        assert current_module_forward_input_spmd_type("x", "tp") == spmd.S(0)
-        assert current_module_forward_output_spmd_type("tp") == spmd.S(0)
-        with set_current_module_forward_spmd_types(inner_context_id):
-            assert current_module_forward_input_spmd_type("input", "tp") == spmd.I
-            assert current_module_forward_output_spmd_type("tp") == spmd.P
-        assert current_module_forward_input_spmd_type("x", "tp") == spmd.S(0)
+    def checkpointed_forward(input):
+        def forward(value):
+            assert spmd_dense_sp_enabled()
+            return value + 1
+
+        return checkpoint(forward, input, use_reentrant=False)
+
+    compiled_forward = torch.compile(
+        checkpointed_forward,
+        backend="eager",
+        fullgraph=True,
+    )
+    input = torch.randn(2, 3, requires_grad=True)
+
+    output = compiled_forward(input)
+    output.sum().backward()
+
+    torch.testing.assert_close(output, input + 1)
+    set_spmd_meshes(
+        dense_mesh=dense_mesh,
+        sparse_mesh=None,
+        dense_sp_enabled=False,
+    )

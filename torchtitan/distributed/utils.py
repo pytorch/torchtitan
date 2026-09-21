@@ -366,6 +366,7 @@ def get_spmd_context(
     *,
     parallel_dims: "ParallelDims | None" = None,
     spmd_typechecking: bool = False,
+    dense_sp_enabled: bool = False,
 ) -> SpmdContext:
     @contextlib.contextmanager
     def context():
@@ -382,6 +383,7 @@ def get_spmd_context(
                 set_spmd_meshes(
                     dense_mesh=parallel_dims.spmd_dense_mesh(),
                     sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+                    dense_sp_enabled=dense_sp_enabled,
                 )
 
                 stack.enter_context(set_current_spmd_mesh(spmd_dense_mesh()))

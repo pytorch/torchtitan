@@ -16,7 +16,7 @@ from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
-    current_module_forward_input_spmd_type,
+    spmd_dense_sp_enabled,
     spmd_local_context,
     spmd_mesh_group,
 )
@@ -121,7 +121,7 @@ class KimiMLAAttention(BaseAttention):
             x_TD = spmd.redistribute(
                 x_TD,
                 tp_group,
-                src=current_module_forward_input_spmd_type("x_TD", MeshAxisName.TP),
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
                 dst=spmd.R,
                 backward_options={"op_dtype": x_TD.dtype},
             )

@@ -13,10 +13,7 @@ import torch
 from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import (
-    current_module_forward_input_spmd_type,
-    spmd_mesh_group,
-)
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -114,7 +111,7 @@ class Attention(BaseAttention):
             x = spmd.redistribute(
                 x,
                 tp_group,
-                src=current_module_forward_input_spmd_type("x", MeshAxisName.TP),
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
                 dst=spmd.R,
                 backward_options={"op_dtype": x.dtype},
             )

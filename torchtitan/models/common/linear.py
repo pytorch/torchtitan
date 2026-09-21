@@ -24,11 +24,7 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import (
-    current_module_forward_input_spmd_type,
-    current_module_forward_output_spmd_type,
-    spmd_mesh_group,
-)
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.protocols.module import Module
 
 # Shape suffix legend for the router gate:
@@ -51,6 +47,15 @@ class Linear(nn.Linear, Module):
         out_features: int
         num_linears: int = 1
         bias: bool = False
+        use_dense_sp: bool = True
+        """Whether this projection participates in dense sequence parallelism."""
+
+        def build(self, **kwargs):
+            instance = Module.Config.build(self, **kwargs)
+            instance._use_dense_sp = self.use_dense_sp
+            return instance
+
+    _use_dense_sp: bool = True
 
     def __init__(self, config: Config):
         super().__init__(
@@ -162,7 +167,8 @@ class ColumnParallelLinear(Linear):
     FQNs remain unchanged. The same module handles both tensor-parallel modes.
     With sequence parallelism, ``Shard(0) -> Replicate`` is an input all-gather.
     Without sequence parallelism, ``Invariant -> Replicate`` is a forward no-op
-    whose backward performs the required all-reduce.
+    whose backward performs the required all-reduce. Vision projections opt
+    out because their activations remain TP-invariant independently of dense SP.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -175,7 +181,11 @@ class ColumnParallelLinear(Linear):
             input = spmd.redistribute(
                 input,
                 tp_group,
-                src=current_module_forward_input_spmd_type("input", MeshAxisName.TP),
+                src=(
+                    spmd.S(0)
+                    if self._use_dense_sp and spmd_dense_sp_enabled()
+                    else spmd.I
+                ),
                 dst=spmd.R,
                 backward_options={"op_dtype": input.dtype},
             )
@@ -187,8 +197,9 @@ class RowParallelLinear(Linear):
 
     This is a ``Linear`` rather than a wrapper around one, so its parameter
     FQNs remain unchanged. ``Partial -> Shard(0)`` is a reduce-scatter, while
-    ``Partial -> Invariant`` is an all-reduce without it. The module's output
-    type in the active SPMD context selects between the two.
+    ``Partial -> Invariant`` is an all-reduce without it. Dense SP state selects
+    between the two; vision projections opt out because their outputs remain
+    TP-invariant.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -210,7 +221,9 @@ class RowParallelLinear(Linear):
             output,
             tp_group,
             src=spmd.P,
-            dst=current_module_forward_output_spmd_type(MeshAxisName.TP),
+            dst=(
+                spmd.S(0) if self._use_dense_sp and spmd_dense_sp_enabled() else spmd.I
+            ),
             backward_options={"op_dtype": output.dtype},
         )
 

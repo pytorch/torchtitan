@@ -125,6 +125,7 @@ def _partial_bias_rowwise_linear(
         in_features=in_features,
         out_features=out_features,
         bias=True,
+        use_dense_sp=False,
         param_init=_LINEAR_INIT,
     )
 
@@ -202,6 +203,7 @@ def _qwen35_vision_encoder_config(
                     in_features=dim,
                     out_features=ffn_dim,
                     bias=True,
+                    use_dense_sp=False,
                     param_init=_LINEAR_INIT,
                 ),
                 fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
@@ -218,6 +220,7 @@ def _qwen35_vision_encoder_config(
                 in_features=merged_hidden_size,
                 out_features=merged_hidden_size,
                 bias=True,
+                use_dense_sp=False,
                 param_init=_LINEAR_INIT,
             ),
             fc2=_partial_bias_rowwise_linear(merged_hidden_size, out_hidden_size),
