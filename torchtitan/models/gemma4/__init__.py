@@ -519,8 +519,21 @@ def model_registry(
     tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    """Register Gemma-4 model with TorchTitan."""
-    get_config, max_context_len = gemma4_configs[flavor]
+    """Register Gemma-4 model with TorchTitan.
+
+    Instruction-tuned checkpoints share the exact architecture of their base
+    counterpart, so an ``_it`` / ``-it`` suffix (e.g. ``12b_it``) is normalized
+    to the base size for the architecture lookup while the full flavor label is
+    preserved on the resulting ModelSpec.
+    """
+    arch_flavor = flavor
+    for suffix in ("_it", "-it"):
+        if arch_flavor.lower().endswith(suffix):
+            arch_flavor = arch_flavor[: -len(suffix)]
+            break
+    if arch_flavor not in gemma4_configs:
+        arch_flavor = arch_flavor.lower()
+    get_config, max_context_len = gemma4_configs[arch_flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
         raise ValueError(

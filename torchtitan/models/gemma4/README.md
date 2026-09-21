@@ -13,6 +13,19 @@ Gemma-4 is Google's open-weight model family featuring a hybrid attention archit
 | `gemma4_26b_a4b` | `26b_a4b` | Mixture-of-Experts | 30 | 2,816 | 16 / 8 | 2 | 1,024 | 262,144 |
 | `gemma4_31b` | `31b` | Dense | 60 | 5,376 | 32 / 16 | 4 | 1,024 | 262,144 |
 
+### Instruction-tuned (`-it`) variants
+
+Each flavor also has an instruction-tuned recipe named `gemma4_<flavor>_it`
+(`gemma4_debugmodel_it`, `gemma4_e2b_it`, `gemma4_e4b_it`, `gemma4_12b_it`,
+`gemma4_26b_a4b_it`, `gemma4_31b_it`). The instruction-tuned checkpoints share
+the **exact architecture** of their base counterpart — only the released
+weights, tokenizer, and chat template differ — so the `_it` recipes reuse the
+base recipe and simply re-tag the flavor as `<size>_it`. Point
+`--hf_assets_path` / `--checkpoint.initial_load_path` at the corresponding
+`google/gemma-4-<flavor>-it` weights when training. `model_registry` accepts the
+`_it` / `-it` suffix directly (e.g. `--model_flavor 12b_it` for checkpoint
+conversion).
+
 ## Download Tokenizer
 
 ```bash
@@ -29,6 +42,25 @@ MODULE=gemma4 CONFIG=gemma4_debugmodel ./run_train.sh
 
 # Full training run (e.g. Gemma-4 12B)
 MODULE=gemma4 CONFIG=gemma4_12b ./run_train.sh
+
+# Instruction-tuned (-it) variant (continue from the -it checkpoint)
+MODULE=gemma4 CONFIG=gemma4_12b_it ./run_train.sh \
+  --hf_assets_path <gemma-4-12b-it_dir> \
+  --checkpoint.initial_load_in_hf \
+  --checkpoint.initial_load_path <gemma-4-12b-it_dir>
+```
+
+### CPT pipeline
+
+The end-to-end continued-pretraining smoke test accepts either lineage; pass the
+`-it` suffix to exercise the instruction-tuned checkpoints:
+
+```bash
+# Base
+./development_artifacts/tests/run_gemma4_cpt_pipeline.sh 12b
+
+# Instruction-tuned (resolves gemma-4-12b-it weights + gemma4_12b_it config)
+./development_artifacts/tests/run_gemma4_cpt_pipeline.sh 12b_it
 ```
 
 ## Supported Parallelisms
