@@ -39,7 +39,7 @@ from torchtitan.distributed.spmd_types import (
     plain_tensor_to_dtensor_state_dict,
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
@@ -286,7 +286,7 @@ class VLLMModelWrapper(Module):
     def __init__(
         self,
         *,
-        model_spec: ModelSpec,
+        model_config: Decoder.Config,
         parallelism: InferenceParallelismConfig,
         compile_config: CompileConfig | None,
         checkpointer_config: CheckpointManager.Config | None,
@@ -298,15 +298,11 @@ class VLLMModelWrapper(Module):
 
         assert vllm_config is not None, "vllm_config is required"
 
-        # Store components from model_spec
-        self.state_dict_adapter = model_spec.state_dict_adapter
-        self.parallelize_fn = model_spec.parallelize_fn
-
-        self.config = _replace_vllm_layer_configs(model_spec.model)
+        self.config = _replace_vllm_layer_configs(model_config)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # Translate the inference parallelism into torchtitan's full
-        # ParallelismConfig that ParallelDims / parallelize_fn consume.
+        # ParallelismConfig that ParallelDims and model.parallelize consume.
         training_parallelism = parallelism.to_training()
 
         # Build ParallelDims from the translated ParallelismConfig so TP/EP
@@ -320,10 +316,6 @@ class VLLMModelWrapper(Module):
             pp=training_parallelism.pipeline_parallel_degree,
             ep=training_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
-        )
-        self.spmd_context = dist_utils.get_spmd_context(
-            parallel_dims=self.parallel_dims,
-            spmd_typechecking=False,
         )
 
         # Fill sharding configs on the config BEFORE build so every sub-module
@@ -363,8 +355,7 @@ class VLLMModelWrapper(Module):
         with torch.device("meta"):
             self.model = self.config.build()
 
-        self.model = self.parallelize_fn(
-            model=self.model,
+        self.model = self.model.parallelize(
             parallel_dims=self.parallel_dims,
             training=TrainingConfig(),
             parallelism=training_parallelism,
@@ -394,7 +385,7 @@ class VLLMModelWrapper(Module):
             # TODO: Consider an init_non_persistent_buffers contract on the
             # Decoder / Model class so buffer-only init does not need this
             # spmd context.
-            with self.spmd_context():
+            with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
                 self.model.init_weights(buffer_device=None)
         self._maybe_initial_load_weights()
 
@@ -428,7 +419,7 @@ class VLLMModelWrapper(Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
         Convert input token IDs to embeddings."""
-        with self.spmd_context():
+        with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
             return self.model.tok_embeddings(input_ids)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -462,7 +453,7 @@ class VLLMModelWrapper(Module):
         if input_ids is None:
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
-        with self.spmd_context():
+        with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
             # Get embeddings
             h = self.model.tok_embeddings(input_ids)
 
@@ -486,7 +477,7 @@ class VLLMModelWrapper(Module):
         """vLLM required API.
         Compute logits from hidden states."""
 
-        with self.spmd_context():
+        with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
             logits = self.model.lm_head(hidden_states)
 
             # lm_head returns vocab-sharded logits under TP; gather to the
@@ -514,9 +505,10 @@ class VLLMModelWrapper(Module):
         if cfg is None:
             return
 
+        adapter_cls = type(self.model).state_dict_adapter_cls
         sd_adapter = None
-        if self.state_dict_adapter is not None:
-            sd_adapter = self.state_dict_adapter(
+        if adapter_cls is not None:
+            sd_adapter = adapter_cls(
                 model_config=self.config,
                 hf_assets_path=cfg.initial_load_path,
             )

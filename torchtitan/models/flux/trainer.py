@@ -5,17 +5,24 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field, replace
-from typing import Annotated
+from typing import Annotated, Any
 
 import torch
+import torch.nn as nn
 import tyro
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    enable_fsdp_symm_mem,
+    resolve_fsdp_mesh,
+)
+from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.model import FluxModel
-from torchtitan.models.flux.parallelize import parallelize_encoders
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.validate import FluxValidator
 from torchtitan.trainer import Trainer
@@ -60,8 +67,7 @@ class FluxTrainer(Trainer):
         )
 
         # load components
-        assert config.model_spec is not None
-        model_args = config.model_spec.model
+        model_args = config.model
         assert isinstance(model_args, FluxModel.Config)
 
         self.autoencoder = load_ae(
@@ -97,7 +103,7 @@ class FluxTrainer(Trainer):
         )
 
         # Apply FSDP to the T5 model / CLIP model
-        self.t5_encoder, self.clip_encoder = parallelize_encoders(
+        self.t5_encoder, self.clip_encoder = self._parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
             parallel_dims=self.engine.parallel_dims,
@@ -121,3 +127,27 @@ class FluxTrainer(Trainer):
                 clip_encoder=self.clip_encoder,
                 dump_folder=config.dump_folder,
             )
+
+    def _parallelize_encoders(
+        self, *, t5_model, clip_model, parallel_dims, training, symm_mem_scope
+    ):
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        )
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+        if dp_mesh_dims is not None:
+            fsdp_config["dp_mesh_dims"] = dp_mesh_dims
+        if training.enable_cpu_offload:
+            fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+        hf_module = t5_model.hf_module
+        assert isinstance(hf_module, nn.Module)
+        annotate_replicated_parameters(hf_module, parallel_dims)
+        for block in hf_module.encoder.block:  # pyrefly: ignore [missing-attribute]
+            fully_shard(block, **fsdp_config)
+        fully_shard(hf_module, **fsdp_config)
+        enable_fsdp_symm_mem(hf_module, symm_mem_scope)
+        disable_fsdp_gradient_division(hf_module)
+        return t5_model, clip_model

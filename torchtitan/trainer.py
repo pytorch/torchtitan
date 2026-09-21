@@ -31,7 +31,7 @@ from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.model import BaseModel
 from torchtitan.training_engine import TrainingEngine
 
 
@@ -51,10 +51,10 @@ class Trainer(Configurable):
         Default container for training configuration.
         """
 
-        # model_spec is always set by the registry. The unused string constructor
+        # model is always set by the registry. The unused string constructor
         # keeps Tyro from traversing the model config before applying Suppress.
-        model_spec: Annotated[
-            ModelSpec,
+        model: Annotated[
+            BaseModel.Config,
             tyro.conf.Suppress,
             tyro.conf.arg(constructor=str),
         ]
@@ -99,9 +99,9 @@ class Trainer(Configurable):
                     "pipeline schedule. Disable validation or CUDA graphs."
                 )
 
-            if self.model_spec is not None:
+            if self.model is not None:
                 validate_model_training_config(
-                    self.model_spec.model,
+                    self.model,
                     parallelism=self.parallelism,
                     training=self.training,
                     debug=self.debug,
@@ -113,21 +113,13 @@ class Trainer(Configurable):
         def to_dict(self) -> dict[str, Any]:
             d = {}
             for f in dataclasses.fields(self):
-                if f.name == "model_spec":
-                    # ModelSpec contains callables that can't be serialized
-                    d["model_spec"] = {
-                        "name": self.model_spec.name,
-                        "flavor": self.model_spec.flavor,
-                        "model": self.model_spec.model.to_dict(),
-                    }
+                val = getattr(self, f.name)
+                if hasattr(val, "to_dict"):
+                    d[f.name] = val.to_dict()
+                elif dataclasses.is_dataclass(val):
+                    d[f.name] = asdict(val)
                 else:
-                    val = getattr(self, f.name)
-                    if hasattr(val, "to_dict"):
-                        d[f.name] = val.to_dict()
-                    elif dataclasses.is_dataclass(val):
-                        d[f.name] = asdict(val)
-                    else:
-                        d[f.name] = val
+                    d[f.name] = val
             return d
 
         def maybe_log(self) -> None:
@@ -166,12 +158,11 @@ class Trainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_spec = config.model_spec
-        model_config = model_spec.model
+        model_config = config.model
         model_config.update_from_config(config=config)
 
         # Apply overrides to the full config tree, before any component is
-        # built. The model config is reached via ModelSpec.traverse. Model
+        # built. Model
         # overrides must run after update_from_config above (it sets sharding
         # config on the pre-override modules); all other components (optimizer,
         # loss, dataloader, …) are built later in __init__.
@@ -244,14 +235,9 @@ class Trainer(Configurable):
         )
 
         engine.initialize(
-            model_spec,
             compile_config=config.compile,
             dataloader=self.dataloader,
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
+            hf_assets_path=config.hf_assets_path,
             create_seed_checkpoint=config.create_seed_checkpoint,
         )
 
@@ -294,7 +280,6 @@ class Trainer(Configurable):
                 tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=engine.loss_fn,
-                validation_context=engine.train_context,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.max_context_length,
                 num_tokens_per_microbatch=num_tokens_per_microbatch,

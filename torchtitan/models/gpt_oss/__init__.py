@@ -10,12 +10,10 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     CosSinRoPE,
     Embedding,
@@ -34,14 +32,10 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.linear import PartialBiasRowwiseLinear
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.protocols.model_spec import ModelSpec
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedExperts, GptOssMoE
-from .parallelize import parallelize_gptoss
-from .state_dict_adapter import GptOssStateDictAdapter
 
 __all__ = [
-    "parallelize_gptoss",
     "GptOssModel",
     "gptoss_configs",
 ]
@@ -236,6 +230,7 @@ def _debugmodel(
     hidden_dim = 2880
     n_layers = 4
     return GptOssModel.Config(
+        max_context_length=seq_len,
         vocab_size=2048,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -281,6 +276,7 @@ def _20b(
     hidden_dim = 2880
     n_layers = 24
     return GptOssModel.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=201088,
         tok_embeddings=Embedding.Config(
@@ -326,6 +322,7 @@ def _120b(
     hidden_dim = 2880
     n_layers = 36
     return GptOssModel.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=201088,
         tok_embeddings=Embedding.Config(
@@ -375,7 +372,7 @@ def model_registry(
     moe_comm_backend: str = "standard",
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> GptOssModel.Config:
     get_config, max_context_len = gptoss_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -392,13 +389,4 @@ def model_registry(
         validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
-    return ModelSpec(
-        name="gpt_oss",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_gptoss,
-        pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
-        state_dict_adapter=GptOssStateDictAdapter,
-    )
+    return config

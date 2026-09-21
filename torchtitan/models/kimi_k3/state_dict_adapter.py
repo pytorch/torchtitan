@@ -4,17 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 """HuggingFace checkpoint adapter for unquantized Kimi K3 weights."""
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.utils import MoEStateDictAdapter
 
-from .model import KimiK3Model
+if TYPE_CHECKING:
+    from .model import KimiK3Model
 
 
 _UNUSED_HF_LAYER_ZERO_ATTN_RES_KEYS = {

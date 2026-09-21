@@ -91,7 +91,7 @@ class TestFSDPEmbedding(DTensorTestBase):
                     .to(self.device_type)
                 )
                 embedding.load_state_dict(reference.state_dict())
-                embedding.parallelize(parallel_dims)
+                embedding._parallelize(parallel_dims)
                 fully_shard(
                     embedding,
                     mesh=fsdp_mesh,
