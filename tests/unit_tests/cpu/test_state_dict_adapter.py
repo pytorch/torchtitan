@@ -369,7 +369,13 @@ class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
         self.assertIsInstance(out, DTensor)
         self.assertEqual(out.shape, torch.Size((256, 256)))
 
-    def test_permute_roundtrip_reconstructs_native_dtensor_values(self) -> None:
+        restored = adapter.from_hf(hf_state_dict)
+        native = restored["layers.0.attention.qkv_linear.wqkv.weight"]
+        self.assertIsInstance(native, DTensor)
+        self.assertEqual(native.placements, sharded_weight.placements)
+        self.assertEqual(native.to_local().shape, local_shard.shape)
+
+    def test_permute_roundtrip_preserves_native_dtensor(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             dist.init_process_group(
                 "gloo",
@@ -394,7 +400,7 @@ class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
                 restored = adapter.from_hf(adapter.to_hf({key: weight}))
                 out = restored[key]
                 self.assertIsInstance(out, DTensor)
-                self.assertEqual(out.placements, (Replicate(),))
+                self.assertEqual(out.placements, weight.placements)
                 torch.testing.assert_close(out.to_local(), full, rtol=0, atol=0)
             finally:
                 dist.destroy_process_group()

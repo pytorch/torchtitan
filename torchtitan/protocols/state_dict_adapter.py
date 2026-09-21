@@ -15,7 +15,9 @@ from typing import Any
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor.placement_types import Placement
 
 from .model import BaseModel
 
@@ -124,6 +126,11 @@ class StateDictAdapter(BaseStateDictAdapter):
     ):
         self.model_config = model_config
         self.hf_assets_path = hf_assets_path
+        # HF load calls to_hf on the destination state dict before from_hf.
+        # Remember each native QKV layout so the rebuilt tensor fits that target.
+        self._qkv_linear_sharding: dict[
+            str, tuple[DeviceMesh, tuple[Placement, ...]]
+        ] = {}
         if hf_assets_path:
             mapping_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
             try:
@@ -193,8 +200,8 @@ class StateDictAdapter(BaseStateDictAdapter):
             [state_dict.pop(key) for key in logical_keys], dim=dim
         )
 
-    @staticmethod
     def _split_qkv_linear(
+        self,
         state_dict: dict[str, Any],
         *,
         prefix: str,
@@ -212,6 +219,10 @@ class StateDictAdapter(BaseStateDictAdapter):
             # degree does not divide the KV-head count, so reshape a replicated
             # DTensor and keep the result distributed for HF checkpoint I/O.
             if isinstance(tensor, DTensor):
+                self._qkv_linear_sharding[fused_key] = (
+                    tensor.device_mesh,
+                    tensor.placements,
+                )
                 tensor = tensor.redistribute(
                     tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
                 )
@@ -233,8 +244,8 @@ class StateDictAdapter(BaseStateDictAdapter):
                 packed[:, heads_per_kv + 1].reshape(-1, *tail).contiguous()
             )
 
-    @staticmethod
     def _merge_qkv_linear(
+        self,
         state_dict: dict[str, Any],
         *,
         prefix: str,
@@ -251,8 +262,8 @@ class StateDictAdapter(BaseStateDictAdapter):
                 continue
             wq, wk, wv = (state_dict.pop(key) for key in logical_keys)
             # Loading may provide dim-0-sharded DTensors whose local shapes
-            # cannot express whole QKV groups. Rebuild from replicated inputs;
-            # FSDP subsequently copies the result into its native shard.
+            # cannot express whole QKV groups. Rebuild from replicated inputs,
+            # then restore the native placement captured before HF loading.
             if isinstance(wq, DTensor):
                 wq, wk, wv = (
                     tensor.redistribute(
@@ -266,9 +277,13 @@ class StateDictAdapter(BaseStateDictAdapter):
             q = wq.reshape(num_kv_heads, heads_per_kv, head_dim, *tail)
             k = wk.reshape(num_kv_heads, 1, head_dim, *tail)
             v = wv.reshape(num_kv_heads, 1, head_dim, *tail)
-            state_dict[f"{prefix}wqkv.{param_name}"] = torch.cat(
-                [q, k, v], dim=1
-            ).reshape(-1, *tail)
+            fused_key = f"{prefix}wqkv.{param_name}"
+            fused = torch.cat([q, k, v], dim=1).reshape(-1, *tail)
+            if fused_key in self._qkv_linear_sharding:
+                assert isinstance(fused, DTensor)
+                mesh, placements = self._qkv_linear_sharding[fused_key]
+                fused = fused.redistribute(mesh, placements)
+            state_dict[fused_key] = fused
 
     def _native_fused_linears_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert native fused linear parameters to logical HF-facing keys.

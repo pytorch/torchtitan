@@ -15,7 +15,6 @@ import unittest
 import torch
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import Linear
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 _DIM = 16
 _N_HEADS = 4
@@ -67,8 +66,14 @@ class TestQKVLinearCheckpointInterop(unittest.TestCase):
         fused = _build_qkv_linear(with_bias=True)
         native_state_dict = dict(fused.state_dict())
         state_dict = dict(native_state_dict)
+        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
-        StateDictAdapter._split_qkv_linear(
+        build_config, max_context_length = llama3_configs["debugmodel"]
+        model_config = build_config(attn_backend="flex", seq_len=max_context_length)
+        adapter = Llama3StateDictAdapter(model_config, hf_assets_path=None)
+
+        adapter._split_qkv_linear(
             state_dict,
             prefix="",
             head_dim=_HEAD_DIM,
@@ -91,7 +96,7 @@ class TestQKVLinearCheckpointInterop(unittest.TestCase):
         torch.testing.assert_close(state_dict["wk.bias"], bias[:, _HPK].reshape(-1))
         torch.testing.assert_close(state_dict["wv.bias"], bias[:, _HPK + 1].reshape(-1))
 
-        StateDictAdapter._merge_qkv_linear(
+        adapter._merge_qkv_linear(
             state_dict,
             prefix="",
             head_dim=_HEAD_DIM,
