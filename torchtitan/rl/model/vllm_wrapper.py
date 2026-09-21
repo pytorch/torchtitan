@@ -39,7 +39,6 @@ from torchtitan.distributed.spmd_types import (
     plain_tensor_to_dtensor_state_dict,
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import QKVLinear
 from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -546,10 +545,7 @@ class VLLMModelWrapper(Module):
         torch.cuda.empty_cache()
 
     def get_state_dict_layouts(self) -> dict[str, SpmdType]:
-        """Return SPMD layouts keyed by the model's exposed state-dict names.
-
-        TODO(pianpwk): Remove the fused QKV state-dict glue code.
-        """
+        """Return SPMD layouts keyed by the model's exposed state-dict names."""
         layouts: dict[str, SpmdType] = {}
 
         for module_fqn, module in self.model.named_modules():
@@ -565,23 +561,6 @@ class VLLMModelWrapper(Module):
                 if w13_layout is not None:
                     for state_name in ("w1_EFD", "w3_EFD"):
                         layouts[f"{module_prefix}{state_name}"] = w13_layout
-
-            if isinstance(module, QKVLinear):
-                # QKVLinear exposes split wq/wk/wv state-dict keys while
-                # the layout is declared on the fused wqkv parameter.
-                wqkv_sharding_config = getattr(
-                    module.wqkv,
-                    "_sharding_config",
-                    None,
-                )
-                if wqkv_sharding_config is None:
-                    continue
-                for (
-                    state_name,
-                    layout,
-                ) in wqkv_sharding_config.state_shardings.items():
-                    for proj_name in ("wq", "wk", "wv"):
-                        layouts[f"{module_prefix}{proj_name}.{state_name}"] = layout
 
             if module_fqn.rsplit(".", 1)[-1] == "vllm_attn":
                 for buffer_name, _ in module.named_buffers(recurse=False):
