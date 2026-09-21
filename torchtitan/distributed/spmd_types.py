@@ -54,6 +54,9 @@ __all__ = [
 
 
 _SPMD_TLS = local()
+# Module forwards can enter this context while Dynamo is tracing. Initialize the
+# stack before tracing so the compiled path never creates a thread-local field.
+_SPMD_TLS.module_forward_spmd_type_stack = []
 
 
 def spmd_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
