@@ -1731,20 +1731,11 @@ def _resolve_storage_to_compute_transition(
         target_sharding = normalized_target_sharding_by_storage_mesh_axis[
             redistribution_storage_mesh_axis
         ]
-        uses_native_row_to_batch_redistribution = (
-            compute_view is None
-            and param.ndim == 3
-            and type(source_sharding) is Shard
-            and source_sharding.dim == 1
-            and type(target_sharding) is Shard
-            and target_sharding.dim == 0
-        )
         if (
             type(source_sharding) is not Replicate
             and type(target_sharding) is not BlockShard
             and source_sharding != target_sharding
             and not uses_supported_orthogonal_shard_redistribution
-            and not uses_native_row_to_batch_redistribution
         ):
             axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
             raise NotImplementedError(

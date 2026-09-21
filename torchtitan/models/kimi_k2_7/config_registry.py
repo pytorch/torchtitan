@@ -334,9 +334,6 @@ def _dist_muon_optimizer(
         "wo": owned,
     }
     feed_forward_shardings = {
-        "w13": ComputeLayout(
-            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
-        ),
         "w2": owned,
     }
     num_layers = len(model_config.layers)
@@ -438,8 +435,8 @@ def _dist_muon_optimizer(
                 optimizer_name="DistMuon",
                 optimizer_kwargs=muon_kwargs,
             ),
-            # The remaining parameters are embeddings, norms, biases, LM head,
-            # and the vision tower.
+            # The remaining parameters are fused w13 weights, embeddings,
+            # norms, biases, LM head, and the vision tower.
             ParamGroupConfig(
                 pattern=r".*",
                 optimizer_name="AdamW",

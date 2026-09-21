@@ -37,18 +37,6 @@ Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
 most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
 `Replicate`; every other non-unit storage mesh axis must be replicated.
 
-Native `[M, R, C]` parameters also support `Shard(1)` storage to `Shard(0)`
-compute on one mesh axis, with every other non-unit storage mesh axis
-replicated. Redistribution gathers complete matrices from their row shards
-and returns each computed update to its original storage shard. Uneven row
-shards and ranks with no complete matrices assigned for compute are supported.
-For a stacked `[2, F, D]` weight, use
-`ComputeLayout(shardings_by_mesh_axis={"dp_shard": Shard(0)})` to assign the
-two projections to at most two compute ranks. The matrix view stays unchanged;
-each projection is one `[F, D]` Muon matrix.
-Changing the batch size per compute rank can change floating-point rounding in
-the batched Muon kernels.
-
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,
 outermost axis first. For example, preserving an EP-axis `Shard(0)` while

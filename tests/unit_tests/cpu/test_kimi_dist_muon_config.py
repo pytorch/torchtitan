@@ -19,7 +19,7 @@ from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
     "recipe_name",
     ("kimi_k2_5_debugmodel", "moonlight_16b_a3b", "kimi_vl_a3b", "kimi_k2_5"),
 )
-def test_kimi_dist_muon_selects_stacked_feed_forward(recipe_name):
+def test_kimi_dist_muon_assignments_match_compute_layouts(recipe_name):
     config = getattr(kimi_configs, recipe_name)(seq_len=128)
     with torch.device("meta"):
         model = config.model_spec.model.build()
@@ -56,10 +56,10 @@ def test_kimi_dist_muon_selects_stacked_feed_forward(recipe_name):
             else f"layers.{layer_id}.moe.shared_experts"
         )
         w13_fqn = f"{prefix}.w13.weight"
-        assert w13_fqn in muon_names
+        assert w13_fqn in adamw_names
+        assert w13_fqn not in compute_layouts
         assert named_parameters[w13_fqn].ndim == 3
         assert named_parameters[w13_fqn].shape[0] == 2
-        assert compute_layouts[w13_fqn].shardings_by_mesh_axis == {"dp_shard": Shard(0)}
         w2_fqn = f"{prefix}.w2.weight"
         assert w2_fqn in muon_names
         assert named_parameters[w2_fqn].ndim == 2
@@ -95,9 +95,7 @@ def test_kimi_expert_parallel_override_preserves_feed_forward_compute_layouts():
         "compute_sharding_by_fqn"
     ]
     for prefix in ("layers.0.feed_forward", "layers.1.moe.shared_experts"):
-        assert compute_layouts[f"{prefix}.w13.weight"].shardings_by_mesh_axis == {
-            "dp_shard": Shard(0)
-        }
+        assert f"{prefix}.w13.weight" not in compute_layouts
         assert compute_layouts[f"{prefix}.w2.weight"].shardings_by_mesh_axis == {
             "dp_shard": Owned()
         }
