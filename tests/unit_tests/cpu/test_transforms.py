@@ -4,21 +4,36 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Model transform base class, ordering, and the context-parallel transform."""
+"""Model config transforms."""
 
+import copy
 import unittest
+from dataclasses import dataclass
 
 import torchtitan.config.transform as transform_api
 from torchtitan.config.transform import (
     apply_transforms,
+    AsyncTensorParallelTransform,
     ContextParallelTransform,
     convert_config_type,
+    LinearLoRAHandler,
+    LoRATransform,
     ModelConfigTransform,
     transform_model_config_,
 )
-
+from torchtitan.models.common.async_linear import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.config_utils import make_shared_expert_ffn_config
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    PartialBiasRowwiseLinear,
+    RowParallelLinear,
+)
 
 
 def _llama3_cp_ready():
@@ -71,6 +86,12 @@ class _Boom(ModelConfigTransform):
     def transform(self, model):
         model.layers[0].attention.inner_attention.block_size = (1, 1)
         raise ValueError("boom")
+
+
+class _ConvertedLinear(ColumnParallelLinear):
+    @dataclass(kw_only=True, slots=True)
+    class Config(ColumnParallelLinear.Config):
+        pass
 
 
 class TestConvertConfigType(unittest.TestCase):
@@ -243,6 +264,115 @@ class TestContextParallelTransform(unittest.TestCase):
         }
         self.assertTrue(trainable)
         self.assertTrue(all("lora_a" in name or "lora_b" in name for name in trainable))
+
+
+class TestAsyncTensorParallelTransform(unittest.TestCase):
+    @staticmethod
+    def _model_config():
+        from torchtitan.models.llama3 import model_registry
+
+        return model_registry("debugmodel").model
+
+    def test_replaces_all_parallel_linear_roles(self):
+        model = AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
+            self._model_config()
+        )
+
+        for layer in model.layers:
+            self.assertIsInstance(
+                layer.attention.qkv_linear.wqkv, AsyncColumnParallelLinear.Config
+            )
+            self.assertIsInstance(layer.attention.wo, AsyncRowParallelLinear.Config)
+            self.assertIsInstance(
+                layer.feed_forward.w13, AsyncColumnParallelLinear.Config
+            )
+            self.assertIsInstance(layer.feed_forward.w2, AsyncRowParallelLinear.Config)
+
+    def test_sequence_parallel_disabled_keeps_sync_roles(self):
+        with self.assertLogs(
+            "torchtitan.config.transform.async_tensor_parallel", level="WARNING"
+        ):
+            model = AsyncTensorParallelTransform(
+                enable_sequence_parallel=False
+            ).transform(self._model_config())
+
+        layer = model.layers[0]
+        self.assertIsInstance(
+            layer.attention.qkv_linear.wqkv, ColumnParallelLinear.Config
+        )
+        self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
+
+    def test_shared_expert_transforms_parallel_projections(self):
+        config = make_shared_expert_ffn_config(
+            dim=4,
+            hidden_dim=8,
+            w1_param_init={},
+            w2w3_param_init={},
+        )
+
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(config)
+
+        self.assertIs(type(transformed.w13), AsyncColumnParallelLinear.Config)
+        self.assertIs(type(transformed.w2), AsyncRowParallelLinear.Config)
+
+    def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
+        from torchtitan.models.muse_glimmer import muse_glimmer_configs
+
+        build_config, max_context_length = muse_glimmer_configs["debugmodel"]
+        model = build_config(attn_backend="flex", seq_len=max_context_length)
+        attention = model.layers[0].attention
+
+        self.assertIs(type(attention.qkv_linear.wqkv), Linear.Config)
+        self.assertIs(type(attention.o_gate), Linear.Config)
+        self.assertIsInstance(attention.wo, RowParallelLinear.Config)
+
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(model)
+        attention = transformed.layers[0].attention
+        self.assertIs(type(attention.qkv_linear.wqkv), Linear.Config)
+        self.assertIs(type(attention.o_gate), Linear.Config)
+        self.assertIsInstance(attention.wo, AsyncRowParallelLinear.Config)
+
+    def test_async_transform_rejects_converted_projection(self):
+        config = copy.deepcopy(self._model_config().layers[0].feed_forward)
+        config.w13 = _ConvertedLinear.Config(
+            in_features=config.w13.in_features,
+            out_features=config.w13.out_features,
+            num_linears=config.w13.num_linears,
+            param_init=config.w13.param_init,
+        )
+
+        with self.assertRaisesRegex(ValueError, "converted w13 projections"):
+            AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
+                config
+            )
+
+    def test_async_transform_rejects_partial_bias_rowwise_linear(self):
+        config = PartialBiasRowwiseLinear.Config(
+            in_features=4,
+            out_features=4,
+            bias=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "converted .* projections"):
+            AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
+                config
+            )
+
+    def test_async_transform_conflicts_with_lora(self):
+        config = self._model_config()
+
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            transform_model_config_(
+                config,
+                [
+                    AsyncTensorParallelTransform(enable_sequence_parallel=True),
+                    LoRATransform(handlers=(LinearLoRAHandler(),)),
+                ],
+            )
 
 
 if __name__ == "__main__":

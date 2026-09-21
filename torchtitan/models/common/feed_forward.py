@@ -16,7 +16,7 @@ from torchtitan.protocols.module import Module
 # Shape suffix legend:
 #   T = token dimensions, D = model dimension, F = feed-forward hidden dimension
 
-__all__ = ["FeedForward", "SigmoidGatedFeedForward", "compute_ffn_hidden_dim"]
+__all__ = ["FeedForward", "compute_ffn_hidden_dim"]
 
 
 def compute_ffn_hidden_dim(
@@ -74,29 +74,3 @@ class FeedForward(Module):
         )(self.activation_fn(gate_TF, up_TF))
         remat.recompute_needs_tensor(out_TD)
         return out_TD
-
-
-class SigmoidGatedFeedForward(FeedForward):
-    """SwiGLU feed-forward with a per-token sigmoid gate.
-
-    The output is ``sigmoid(gate(x)) * ffn(x)``. It uses FeedForward's fused
-    ``w13`` and ``w2`` projections and adds a separate ``gate`` projection.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
-        gate: Linear.Config
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.gate = config.gate.build()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out_TD = super().forward(x)
-        gate_out_TD = remat.region(
-            self.gate,
-            self.remat_region_name("gate"),
-            recompute=self.remat_should_recompute("gate"),
-        )(x)
-        remat.recompute_needs_tensor(out_TD, gate_out_TD)
-        return torch.sigmoid(gate_out_TD) * out_TD
