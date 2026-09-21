@@ -47,16 +47,27 @@ __all__ = [
     "spmd_distribute_tensor",
     "spmd_redistribute_per_axis",
     "spmd_validate_redistributions",
+    "register_module_forward_spmd_types",
     "set_current_module_forward_spmd_types",
     "set_current_spmd_mesh",
     "set_spmd_meshes",
 ]
 
 
-_SPMD_TLS = local()
-# Module forwards can enter this context while Dynamo is tracing. Initialize the
-# stack before tracing so the compiled path never creates a thread-local field.
-_SPMD_TLS.module_forward_spmd_type_stack = []
+class _SpmdThreadLocal(local):
+    module_forward_spmd_types_id: int = 0
+
+
+_SPMD_TLS = _SpmdThreadLocal()
+
+_ModuleForwardSpmdTypes = tuple[
+    Mapping[str, spmd.SpmdType] | None,
+    spmd.SpmdType | tuple[spmd.SpmdType, ...] | None,
+]
+# Registration mutates this table only during Module.parallelize(), before
+# Dynamo tracing. Module forwards temporarily swap and restore an integer ID;
+# Dynamo supports that nullified attribute mutation inside checkpoint regions.
+_MODULE_FORWARD_SPMD_TYPES: list[_ModuleForwardSpmdTypes] = [(None, None)]
 
 
 def spmd_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
@@ -143,17 +154,21 @@ def _spmd_mesh_stack() -> list[DeviceMesh | None]:
     return stack
 
 
-def _module_forward_spmd_type_stack() -> list[
-    tuple[
-        Mapping[str, spmd.SpmdType] | None,
-        spmd.SpmdType | tuple[spmd.SpmdType, ...] | None,
-    ]
-]:
-    stack = getattr(_SPMD_TLS, "module_forward_spmd_type_stack", None)
-    if stack is None:
-        stack = []
-        _SPMD_TLS.module_forward_spmd_type_stack = stack
-    return stack
+def register_module_forward_spmd_types(
+    *,
+    input_types: Mapping[str, spmd.SpmdType] | None,
+    output_type: spmd.SpmdType | tuple[spmd.SpmdType, ...] | None,
+) -> int:
+    """Register one module's forward types outside compiled execution."""
+    context_id = len(_MODULE_FORWARD_SPMD_TYPES)
+    _MODULE_FORWARD_SPMD_TYPES.append((input_types, output_type))
+    return context_id
+
+
+def _current_module_forward_spmd_types() -> _ModuleForwardSpmdTypes:
+    context_id = _SPMD_TLS.module_forward_spmd_types_id
+    assert context_id != 0, "No module forward SPMD type context is active"
+    return _MODULE_FORWARD_SPMD_TYPES[context_id]
 
 
 def current_module_forward_input_spmd_type(
@@ -161,9 +176,7 @@ def current_module_forward_input_spmd_type(
     axis_name: MeshAxisName | str,
 ) -> spmd.PerMeshAxisSpmdType:
     """Return an input's type on one axis inside the current module forward."""
-    stack = _module_forward_spmd_type_stack()
-    assert stack, "No module forward SPMD type context is active"
-    input_types, _ = stack[-1]
+    input_types, _ = _current_module_forward_spmd_types()
     assert input_types is not None, "Current module forward has no declared input types"
     assert (
         input_name in input_types
@@ -177,9 +190,7 @@ def current_module_forward_output_spmd_type(
     axis_name: MeshAxisName | str,
 ) -> spmd.PerMeshAxisSpmdType:
     """Return the output type on one axis produced by the current forward."""
-    stack = _module_forward_spmd_type_stack()
-    assert stack, "No module forward SPMD type context is active"
-    _, output_type = stack[-1]
+    _, output_type = _current_module_forward_spmd_types()
     assert output_type is not None, "Current module forward has no declared output type"
     assert not isinstance(
         output_type, tuple
@@ -262,20 +273,14 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def set_current_module_forward_spmd_types(
-    *,
-    input_types: Mapping[str, spmd.SpmdType] | None,
-    output_type: spmd.SpmdType | tuple[spmd.SpmdType, ...] | None,
-) -> Iterator[None]:
-    """Expose the input and output SPMD types visible inside a module forward."""
-    stack = _module_forward_spmd_type_stack()
-    entry = (input_types, output_type)
-    stack.append(entry)
+def set_current_module_forward_spmd_types(context_id: int) -> Iterator[None]:
+    """Set the registered module forward types for the current execution scope."""
+    previous_context_id = _SPMD_TLS.module_forward_spmd_types_id
+    _SPMD_TLS.module_forward_spmd_types_id = context_id
     try:
         yield
     finally:
-        popped = stack.pop()
-        assert popped is entry
+        _SPMD_TLS.module_forward_spmd_types_id = previous_context_id
 
 
 @contextlib.contextmanager
