@@ -11,6 +11,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 from spmd_types import SpmdType
+from torch.utils.checkpoint import checkpoint
 
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -452,13 +453,19 @@ class TestModuleRedistribution(unittest.TestCase):
         ):
             current_module_forward_input_spmd_type("x", MeshAxisName.TP)
 
-    def test_parallelized_forward_spmd_context_compiles(self):
+    def test_parallelized_forward_spmd_context_compiles_with_checkpoint(self):
         class CompiledModule(Module):
             def forward(self, x):
+                assert (
+                    current_module_forward_input_spmd_type("x", MeshAxisName.TP)
+                    == spmd.I
+                )
                 return x + 1
 
         module = CompiledModule()
-        module._sharding_config = ShardingConfig()
+        module._sharding_config = ShardingConfig(
+            in_src_shardings={"x": SpmdType({MeshAxisName.TP: spmd.I})}
+        )
         module.parallelize(
             ParallelDims(
                 dp_replicate=1,
@@ -470,10 +477,25 @@ class TestModuleRedistribution(unittest.TestCase):
                 world_size=1,
             )
         )
-        compiled_module = torch.compile(module, backend="eager", fullgraph=True)
-        input = torch.randn(2, 3)
 
-        torch.testing.assert_close(compiled_module(input), input + 1)
+        def checkpointed_forward(input):
+            return checkpoint(
+                module,
+                input,
+                use_reentrant=False,
+            )
+
+        compiled_forward = torch.compile(
+            checkpointed_forward,
+            backend="eager",
+            fullgraph=True,
+        )
+        input = torch.randn(2, 3, requires_grad=True)
+
+        output = compiled_forward(input)
+        output.sum().backward()
+
+        torch.testing.assert_close(output, input + 1)
 
 
 class TestVerifyModuleProtocol(unittest.TestCase):
