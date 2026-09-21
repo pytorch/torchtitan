@@ -122,6 +122,11 @@ def vision_colwise_config(
                 tp=input_tp, include_cp_axis=include_cp_axis
             ),
         },
+        in_dst_shardings={
+            "input": _vision_activation_placement(
+                tp=spmd.R, include_cp_axis=include_cp_axis
+            ),
+        },
         out_src_shardings=_vision_activation_placement(
             tp=spmd.S(-1), include_cp_axis=include_cp_axis
         ),
@@ -145,11 +150,13 @@ def vision_partial_bias_rowwise_config(
         in_src_shardings={
             "input": input_layout,
         },
-        # PartialBiasRowwiseLinear performs the Partial -> Invariant reduction.
-        out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
-        # The partial-bias matmul consumes physical input and weight shards.
-        # F.linear also cannot typecheck those varying operands together with a
-        # partial bias, so keep the explicit reduction in the same local region.
+        in_dst_shardings={
+            "input": input_layout,
+        },
+        out_src_shardings=_vision_activation_placement(
+            tp=spmd.P, include_cp_axis=include_cp_axis
+        ),
+        out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
         local_spmd=True,
     )
 
@@ -172,6 +179,9 @@ def set_vision_transformer_block_sharding_config(
             ),
         },
         in_dst_shardings={
+            "x": _vision_activation_placement(
+                tp=spmd.R, include_cp_axis=include_cp_axis
+            ),
             "rope_cache": _vision_activation_placement(
                 dp=rope_cache_dp,
                 tp=spmd.R,

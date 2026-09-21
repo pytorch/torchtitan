@@ -47,15 +47,6 @@ class Linear(nn.Linear, Module):
         out_features: int
         num_linears: int = 1
         bias: bool = False
-        use_dense_sp: bool = True
-        """Whether this projection participates in dense sequence parallelism."""
-
-        def build(self, **kwargs):
-            instance = Module.Config.build(self, **kwargs)
-            instance._use_dense_sp = self.use_dense_sp
-            return instance
-
-    _use_dense_sp: bool = True
 
     def __init__(self, config: Config):
         super().__init__(
@@ -167,8 +158,7 @@ class ColumnParallelLinear(Linear):
     FQNs remain unchanged. The same module handles both tensor-parallel modes.
     With sequence parallelism, ``Shard(0) -> Replicate`` is an input all-gather.
     Without sequence parallelism, ``Invariant -> Replicate`` is a forward no-op
-    whose backward performs the required all-reduce. Vision projections opt
-    out because their activations remain TP-invariant independently of dense SP.
+    whose backward performs the required all-reduce.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -181,11 +171,7 @@ class ColumnParallelLinear(Linear):
             input = spmd.redistribute(
                 input,
                 tp_group,
-                src=(
-                    spmd.S(0)
-                    if self._use_dense_sp and spmd_dense_sp_enabled()
-                    else spmd.I
-                ),
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
                 dst=spmd.R,
                 backward_options={"op_dtype": input.dtype},
             )
@@ -198,8 +184,7 @@ class RowParallelLinear(Linear):
     This is a ``Linear`` rather than a wrapper around one, so its parameter
     FQNs remain unchanged. ``Partial -> Shard(0)`` is a reduce-scatter, while
     ``Partial -> Invariant`` is an all-reduce without it. Dense SP state selects
-    between the two; vision projections opt out because their outputs remain
-    TP-invariant.
+    between the two.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -221,9 +206,7 @@ class RowParallelLinear(Linear):
             output,
             tp_group,
             src=spmd.P,
-            dst=(
-                spmd.S(0) if self._use_dense_sp and spmd_dense_sp_enabled() else spmd.I
-            ),
+            dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
             backward_options={"op_dtype": output.dtype},
         )
 
@@ -304,14 +287,14 @@ class RouterGateLinear(Linear):
         return output_TE
 
 
-class PartialBiasRowwiseLinear(RowParallelLinear):
-    """Row-parallel Linear whose invariant bias joins the partial output."""
+class PartialBiasLinear(Linear):
+    """Linear whose invariant bias joins a TP-partial output."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(RowParallelLinear.Config):
+    class Config(Linear.Config):
         def __post_init__(self) -> None:
             if not self.bias:
-                raise ValueError("PartialBiasRowwiseLinear requires bias=True")
+                raise ValueError("PartialBiasLinear requires bias=True")
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
@@ -326,7 +309,18 @@ class PartialBiasRowwiseLinear(RowParallelLinear):
                 expert_mode=True,
             )
         output = self._linear(input, weight, bias)
-        output = self._unflatten_output(output)
+        return self._unflatten_output(output)
+
+
+class PartialBiasRowwiseLinear(PartialBiasLinear, RowParallelLinear):
+    """Partial-bias Linear followed by the dense row-parallel reduction."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(PartialBiasLinear.Config, RowParallelLinear.Config):
+        pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        output = PartialBiasLinear.forward(self, input)
         return self._reduce_output(output)
 
 
@@ -353,6 +347,7 @@ __all__ = [
     "CastLinear",
     "ColumnParallelLinear",
     "Linear",
+    "PartialBiasLinear",
     "RowParallelLinear",
     "PartialBiasRowwiseLinear",
     "RouterGateLinear",

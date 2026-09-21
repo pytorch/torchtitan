@@ -46,8 +46,6 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
             return model
 
         for fqn, config, parent, attr in list(model.traverse(Linear.Config)):
-            if not config.use_dense_sp:
-                continue
             parallel_cls = get_parallel_linear_cls(config)
             if parallel_cls is None:
                 continue

@@ -26,6 +26,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     get_parallel_linear_cls,
     Linear,
+    PartialBiasLinear,
     PartialBiasRowwiseLinear,
     RowParallelLinear,
 )
@@ -160,6 +161,14 @@ class TestPartialBiasRowwiseLinear(unittest.TestCase):
         )
         self.assertIs(get_parallel_linear_cls(config), PartialBiasRowwiseLinear)
 
+    def test_partial_bias_linear_is_not_a_parallel_boundary(self):
+        config = PartialBiasLinear.Config(
+            in_features=4,
+            out_features=2,
+            bias=True,
+        )
+        self.assertIsNone(get_parallel_linear_cls(config))
+
     def test_requires_bias(self):
         with self.assertRaisesRegex(ValueError, "requires bias=True"):
             PartialBiasRowwiseLinear.Config(
@@ -187,24 +196,18 @@ class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
         input = torch.randn(3, 4)
         tp_group = object()
 
-        for dense_sp_enabled, use_dense_sp, expected_type in (
-            (False, True, spmd.I),
-            (True, True, spmd.S(0)),
-            (True, False, spmd.I),
+        for dense_sp_enabled, expected_type in (
+            (False, spmd.I),
+            (True, spmd.S(0)),
         ):
-            with self.subTest(
-                dense_sp_enabled=dense_sp_enabled,
-                use_dense_sp=use_dense_sp,
-            ):
+            with self.subTest(dense_sp_enabled=dense_sp_enabled):
                 column = ColumnParallelLinear.Config(
                     in_features=4,
                     out_features=2,
-                    use_dense_sp=use_dense_sp,
                 ).build()
                 row = RowParallelLinear.Config(
                     in_features=4,
                     out_features=2,
-                    use_dense_sp=use_dense_sp,
                 ).build()
 
                 with (

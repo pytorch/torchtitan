@@ -18,11 +18,10 @@ from torchtitan.config.transform import (
 
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
-    ColumnParallelLinear,
     ComplexRoPE,
     Embedding,
     Linear,
-    PartialBiasRowwiseLinear,
+    PartialBiasLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
@@ -262,14 +261,13 @@ def _vision_linear(in_features: int, out_features: int, *, bias: bool) -> Linear
     )
 
 
-def _vision_partial_bias_rowwise_linear(
+def _vision_partial_bias_linear(
     in_features: int, out_features: int
-) -> PartialBiasRowwiseLinear.Config:
-    return PartialBiasRowwiseLinear.Config(
+) -> PartialBiasLinear.Config:
+    return PartialBiasLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
-        use_dense_sp=False,
         param_init=_VISION_LINEAR_INIT,
     )
 
@@ -319,20 +317,12 @@ def muse_glimmer_vision_encoder_config(
                 wq=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wk=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wv=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
-                proj=_vision_partial_bias_rowwise_linear(
-                    num_heads * head_dim, latent_dim
-                ),
+                proj=_vision_partial_bias_linear(num_heads * head_dim, latent_dim),
             ),
             norm2=_vision_layer_norm(latent_dim),
             mlp=VisionMLP.Config(
-                fc1=ColumnParallelLinear.Config(
-                    in_features=latent_dim,
-                    out_features=mlp_hidden,
-                    bias=True,
-                    use_dense_sp=False,
-                    param_init=_VISION_LINEAR_INIT,
-                ),
-                fc2=_vision_partial_bias_rowwise_linear(mlp_hidden, latent_dim),
+                fc1=_vision_linear(latent_dim, mlp_hidden, bias=True),
+                fc2=_vision_partial_bias_linear(mlp_hidden, latent_dim),
                 act_fn=GELU.Config(approximate="none"),
             ),
         ),

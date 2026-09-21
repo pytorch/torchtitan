@@ -59,6 +59,20 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     )
 
 
+def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
+    from torchtitan.models.common.linear import Linear, PartialBiasLinear
+
+    config = cast(Qwen35Model.Config, model_registry("debugmodel").model)
+    vision_encoder = config.vision_encoder
+    assert vision_encoder is not None
+
+    assert type(vision_encoder.block.mlp.fc1) is Linear.Config
+    assert type(vision_encoder.block.mlp.fc2) is PartialBiasLinear.Config
+    assert type(vision_encoder.block.attn.proj) is PartialBiasLinear.Config
+    assert type(vision_encoder.merger.fc1) is Linear.Config
+    assert type(vision_encoder.merger.fc2) is PartialBiasLinear.Config
+
+
 @pytest.mark.parametrize("enable_sp", [False, True])
 def test_qwen35_attention_output_matches_row_parallel_projection(
     enable_sp: bool,

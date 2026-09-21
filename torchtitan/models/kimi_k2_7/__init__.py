@@ -20,11 +20,10 @@ from torchtitan.config.transform import (
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
-    ColumnParallelLinear,
     ComplexRoPE,
     Embedding,
     Linear,
-    PartialBiasRowwiseLinear,
+    PartialBiasLinear,
     RMSNorm,
     Sigmoid,
     Softmax,
@@ -114,14 +113,13 @@ def _vl_linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _partial_bias_rowwise_linear(
+def _partial_bias_linear(
     in_features: int, out_features: int
-) -> PartialBiasRowwiseLinear.Config:
-    return PartialBiasRowwiseLinear.Config(
+) -> PartialBiasLinear.Config:
+    return PartialBiasLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
-        use_dense_sp=False,
         param_init=_LINEAR_INIT,
     )
 
@@ -160,17 +158,11 @@ def _vision_encoder_config(
             wq=_vl_linear(dim, dim),
             wk=_vl_linear(dim, dim),
             wv=_vl_linear(dim, dim),
-            proj=_partial_bias_rowwise_linear(dim, dim),
+            proj=_partial_bias_linear(dim, dim),
         ),
         mlp=VisionMLP.Config(
-            fc1=ColumnParallelLinear.Config(
-                in_features=dim,
-                out_features=ffn_dim,
-                bias=True,
-                use_dense_sp=False,
-                param_init=_LINEAR_INIT,
-            ),
-            fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
+            fc1=_vl_linear(dim, ffn_dim),
+            fc2=_partial_bias_linear(ffn_dim, dim),
         ),
     )
 
@@ -195,14 +187,8 @@ def _vision_encoder_config(
             vt_hidden_size=dim,
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
-            linear_1=ColumnParallelLinear.Config(
-                in_features=merged_dim,
-                out_features=merged_dim,
-                bias=True,
-                use_dense_sp=False,
-                param_init=_LINEAR_INIT,
-            ),
-            linear_2=_partial_bias_rowwise_linear(merged_dim, text_hidden_size),
+            linear_1=_vl_linear(merged_dim, merged_dim),
+            linear_2=_partial_bias_linear(merged_dim, text_hidden_size),
         ),
     )
 
