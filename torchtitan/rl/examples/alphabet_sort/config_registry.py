@@ -258,8 +258,10 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # Batch invariance requires strict on-policy: the generator must run the
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
+    # window_batches=1 keeps each train batch to the oldest cohort when a filtered
+    # group lets a replacement in early.
     config.async_loop.target_offpolicy_steps = 0
-    config.async_loop.window_fraction = None
+    config.async_loop.window_batches = 1
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -436,9 +438,10 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
             # Batch invariance: strict on-policy so trainer/generator logprobs
-            # stay bitwise-identical every step.
+            # stay bitwise-identical every step; window_batches=1 keeps each
+            # train batch to the oldest cohort.
             target_offpolicy_steps=0,
-            window_fraction=None,
+            window_batches=1,
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
@@ -783,9 +786,10 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             # Batch invariance: strict on-policy so trainer/generator logprobs
-            # stay bitwise-identical every step.
+            # stay bitwise-identical every step; window_batches=1 keeps each
+            # train batch to the oldest cohort.
             target_offpolicy_steps=0,
-            window_fraction=None,
+            window_batches=1,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
@@ -976,9 +980,10 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
             # Batch invariance: strict on-policy so trainer/generator logprobs
-            # stay bitwise-identical every step.
+            # stay bitwise-identical every step; window_batches=1 keeps each
+            # train batch to the oldest cohort.
             target_offpolicy_steps=0,
-            window_fraction=None,
+            window_batches=1,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
@@ -1122,9 +1127,7 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5-9B GRPO with matching TP=2."""
     config = rl_grpo_qwen3_5_9b_varlen()
     config.async_loop = dataclasses.replace(
-        config.async_loop,
-        target_offpolicy_steps=0,
-        window_fraction=None,
+        config.async_loop, target_offpolicy_steps=0, window_batches=1
     )
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -1210,9 +1213,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant() -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5 GRPO config for CI."""
     config = rl_grpo_qwen3_5_debug_varlen()
     config.async_loop = dataclasses.replace(
-        config.async_loop,
-        target_offpolicy_steps=0,
-        window_fraction=None,
+        config.async_loop, target_offpolicy_steps=0, window_batches=1
     )
     config.trainer = dataclasses.replace(
         config.trainer,
