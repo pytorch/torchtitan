@@ -12,6 +12,11 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import (
+    current_module_input_spmd_type,
+    spmd_mesh_group,
+)
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -102,6 +107,18 @@ class Attention(BaseAttention):
         attention_masks: AttentionMasksType,
         positions: torch.Tensor | None = None,
     ):
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # MLA has several branches that consume x. Gather once at the
+            # attention boundary instead of once per projection.
+            x = spmd.redistribute(
+                x,
+                tp_group,
+                src=current_module_input_spmd_type("x", MeshAxisName.TP),
+                dst=spmd.R,
+                backward_options={"op_dtype": x.dtype},
+            )
+
         num_tokens = x.shape[0]
 
         # Query projection

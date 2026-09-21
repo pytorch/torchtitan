@@ -102,8 +102,6 @@ class Attention(BaseAttention):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        num_tokens = x.shape[0]
-
         q, k, v = self.qkv_linear(x)
 
         q, k = self.rope(q, k, positions)
@@ -119,7 +117,7 @@ class Attention(BaseAttention):
         )
 
         # Reshape and project output
-        output = output.reshape(num_tokens, -1).contiguous()
+        output = output.reshape(output.shape[0], -1).contiguous()
         return self.wo(output)
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:

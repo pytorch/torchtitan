@@ -16,7 +16,9 @@ from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    current_module_input_spmd_type,
     spmd_local_context,
+    spmd_mesh_group,
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
@@ -111,6 +113,18 @@ class KimiMLAAttention(BaseAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
+
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # The MLA and gate projections all consume x. Gather once at their
+            # common attention boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=current_module_input_spmd_type("x_TD", MeshAxisName.TP),
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
 
         q_THK = local_head_split(
             self.wq_b(self.q_norm(self.wq_a(x_TD))), self.q_head_dim

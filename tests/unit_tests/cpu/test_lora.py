@@ -25,7 +25,12 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    PartialBiasRowwiseLinear,
+    RowParallelLinear,
+)
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.module import Module
 
@@ -49,6 +54,12 @@ def test_lora_model_builds():
     )
     model = model_spec.model.build()
     model.init_states()
+
+    for layer in model.layers.values():
+        assert isinstance(layer.attention.qkv_linear.wqkv, ColumnParallelLinear)
+        assert isinstance(layer.attention.wo, RowParallelLinear)
+        assert hasattr(layer.attention.qkv_linear.wqkv, "lora_a")
+        assert hasattr(layer.attention.wo, "lora_a")
 
     lora_params = {
         n for n, p in model.named_parameters() if "lora_a" in n or "lora_b" in n
@@ -236,7 +247,7 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
 
 def test_lora_class_is_reused_for_the_same_parent():
-    """Dynamic LoRA class creation is cached per parent class."""
+    """LoRA specialization is cached for each parent Linear class."""
     first = LoRATransform(handlers=LINEAR_LORA_HANDLERS, rank=2, alpha=4.0).transform(
         Linear.Config(in_features=4, out_features=3)
     )
@@ -267,6 +278,26 @@ def test_lora_handler_matches_linear_config_subclass():
     assert not model.weight.requires_grad
     assert model.lora_a.weight.requires_grad
     assert model.lora_b.weight.requires_grad
+
+
+def test_lora_preserves_partial_bias_row_parallel_linear():
+    config = PartialBiasRowwiseLinear.Config(
+        in_features=4,
+        out_features=3,
+        bias=True,
+    )
+    transformed = LoRATransform(
+        handlers=LINEAR_LORA_HANDLERS,
+        rank=2,
+        alpha=4.0,
+    ).transform(config)
+    linear = transformed.build()
+
+    assert isinstance(linear, PartialBiasRowwiseLinear)
+    x = torch.randn(5, 4)
+    expected = F.linear(x, linear.weight, linear.bias)
+    expected += 2 * linear.lora_b(linear.lora_a(x))
+    torch.testing.assert_close(linear(x), expected)
 
 
 def test_lora_transform_rejects_duplicate_handler_type():

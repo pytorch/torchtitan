@@ -18,8 +18,10 @@ from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    current_module_input_spmd_type,
     set_current_spmd_mesh,
     spmd_local_context,
+    spmd_mesh_group,
 )
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -140,6 +142,18 @@ class Qwen35Attention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # The query, key, and value projections all consume x. Gather once
+            # at their common attention boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=current_module_input_spmd_type("x_TD", MeshAxisName.TP),
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
         num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
