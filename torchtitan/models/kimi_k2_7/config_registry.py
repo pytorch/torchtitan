@@ -333,6 +333,12 @@ def _dist_muon_optimizer(
         "wkv_b": per_key_value_head,
         "wo": owned,
     }
+    feed_forward_shardings = {
+        "w13": ComputeLayout(
+            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
+        ),
+        "w2": owned,
+    }
     num_layers = len(model_config.layers)
     muon_kwargs = {
         "lr": muon_lr,
@@ -362,8 +368,8 @@ def _dist_muon_optimizer(
         if not layer_id:
             shardings.update(
                 {
-                    f"{prefix}.feed_forward.{projection}.weight": owned
-                    for projection in ("w13", "w2")
+                    f"{prefix}.feed_forward.{projection}.weight": compute_sharding
+                    for projection, compute_sharding in feed_forward_shardings.items()
                 }
             )
         else:
@@ -376,8 +382,8 @@ def _dist_muon_optimizer(
             shardings[f"{prefix}.moe.router.gate.weight"] = owned
             shardings.update(
                 {
-                    f"{prefix}.moe.shared_experts.{projection}.weight": owned
-                    for projection in ("w13", "w2")
+                    f"{prefix}.moe.shared_experts.{projection}.weight": compute_sharding
+                    for projection, compute_sharding in feed_forward_shardings.items()
                 }
             )
         return shardings
@@ -417,11 +423,11 @@ def _dist_muon_optimizer(
         r"(?:"
         rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
         rf"routed_experts\.inner_experts\.(?:{'|'.join(expert_projections)})|"
-        r"feed_forward\.w[123]\.weight|"
+        r"feed_forward\.(?:w13|w2)\.weight|"
         # Keep the 2D router gate on Muon: Moonlight Figure 4 reports its
         # SVD-entropy gain over AdamW is larger than for other matrix groups.
         r"moe\.router\.gate\.weight|"
-        r"moe\.shared_experts\.w[123]\.weight"
+        r"moe\.shared_experts\.(?:w13|w2)\.weight"
         r")$"
     )
     return OptimizersContainer.Config(
