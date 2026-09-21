@@ -21,7 +21,7 @@ from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E
 from torchtitan.quantization.float8 import Float8Linear  # noqa: E402
 from torchtitan.quantization.float8.tensor import (  # noqa: E402
     _LinearShardedTensorWithFloat8Compute,
-    _LinearShardedTensorWithFloat8GWHPCompute,
+    _LinearShardedTensorWithFloat8HighPrecisionWeightGradient,
 )
 
 
@@ -122,7 +122,11 @@ def test_float8_linear_matches_torchao(recipe_name, input_shape):
     ("recipe_name", "wrapper_cls", "expected_dgrad_scale_shape"),
     [
         ("rowwise", _LinearShardedTensorWithFloat8Compute, (1, 128)),
-        ("rowwise_with_gw_hp", _LinearShardedTensorWithFloat8GWHPCompute, ()),
+        (
+            "rowwise_with_gw_hp",
+            _LinearShardedTensorWithFloat8HighPrecisionWeightGradient,
+            (),
+        ),
     ],
 )
 def test_float8_weight_operands_follow_recipe(

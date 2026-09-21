@@ -22,7 +22,7 @@ from torchtitan.models.common.linear import Linear
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
     _LinearShardedTensorWithFloat8Compute,
-    _LinearShardedTensorWithFloat8GWHPCompute,
+    _LinearShardedTensorWithFloat8HighPrecisionWeightGradient,
     _quantize_float8,
     _quantize_float8_weight,
 )
@@ -154,7 +154,7 @@ class _Float8LinearFunction(torch.autograd.Function):
         weight_scale_fprop_1N: torch.Tensor,
         weight_qdata_dgrad_NK: torch.Tensor,
         weight_scale_dgrad: torch.Tensor,
-        wgrad_in_high_precision: bool,
+        weight_gradient_in_high_precision: bool,
         emulate: bool,
     ) -> torch.Tensor:
         if x.dtype != weight_NK.dtype:
@@ -170,6 +170,7 @@ class _Float8LinearFunction(torch.autograd.Function):
 
         input_shape = x.shape
         x_MK = x.reshape(-1, input_shape[-1])
+        # FPROP activations use one scale per token row: (M, K) -> (M, 1).
         x_qdata_row_MK, x_scale_row_M1 = _quantize_float8(
             x_MK,
             reduction_axis=-1,
@@ -206,7 +207,7 @@ class _Float8LinearFunction(torch.autograd.Function):
         ctx.save_for_backward(x, *saved_weight_tensors)
         ctx.has_unsharded_tensor = has_unsharded_tensor
         ctx.input_shape = input_shape
-        ctx.wgrad_in_high_precision = wgrad_in_high_precision
+        ctx.weight_gradient_in_high_precision = weight_gradient_in_high_precision
         ctx.emulate = emulate
         return output
 
@@ -228,6 +229,7 @@ class _Float8LinearFunction(torch.autograd.Function):
         grad_output_MN = grad_output.reshape(-1, grad_output.shape[-1])
         grad_input = None
         if ctx.needs_input_grad[0]:
+            # DGRAD output gradients use one scale per token row.
             grad_output_qdata_row_MN, grad_output_scale_row_M1 = _quantize_float8(
                 grad_output_MN, reduction_axis=-1
             )
@@ -245,9 +247,11 @@ class _Float8LinearFunction(torch.autograd.Function):
         grad_weight_NK = None
         if ctx.needs_input_grad[1]:
             x_MK = x.reshape(-1, ctx.input_shape[-1])
-            if ctx.wgrad_in_high_precision:
+            if ctx.weight_gradient_in_high_precision:
                 grad_weight_NK = torch.mm(grad_output_MN.t(), x_MK)
             else:
+                # WGRAD quantizes both inputs per feature column. Transposing
+                # dY turns its (1, N) scales into per-row (N, 1) scales.
                 (
                     grad_output_qdata_col_MN,
                     grad_output_scale_col_1N,
@@ -300,7 +304,7 @@ class Float8Linear(Linear):
         self.recipe_name = config.recipe_name
         self.emulate = config.emulate
         wrapper_cls = (
-            _LinearShardedTensorWithFloat8GWHPCompute
+            _LinearShardedTensorWithFloat8HighPrecisionWeightGradient
             if config.recipe_name == "rowwise_with_gw_hp"
             else _LinearShardedTensorWithFloat8Compute
         )
@@ -334,7 +338,9 @@ class Float8Linear(Linear):
                 )
                 operands = _quantize_float8_weight(
                     high_precision_weight.flatten(0, -2),
-                    dgrad_weight_tensorwise=(self.recipe_name == "rowwise_with_gw_hp"),
+                    grad_input_weight_tensorwise=(
+                        self.recipe_name == "rowwise_with_gw_hp"
+                    ),
                 )
 
         output = _Float8LinearFunction.apply(

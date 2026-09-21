@@ -20,16 +20,24 @@ from .._fsdp_tensor import _ShardedFSDPTensor
 
 __all__: list[str] = []
 
-_FLOAT8_ALIGNMENT = 16
+_FLOAT8_GEMM_ALIGNMENT = 16
 
 
+# Quantized operands are derived compute state, not differentiable model state.
+# The custom autograd functions attach gradients to the high-precision weights,
+# so recording scale computation and casting would only retain temporary storage.
 @torch.no_grad()
 def _quantize_float8(
     tensor: torch.Tensor,
     *,
     reduction_axis: int | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Dynamically quantize a tensor with TorchAO's Float8 cast primitives."""
+    """Dynamically quantize with one scale per unreduced index.
+
+    For a 2D tensor, ``reduction_axis=-1`` is rowwise and returns ``(M, 1)``
+    scales, ``reduction_axis=0`` is columnwise and returns ``(1, K)`` scales,
+    and ``None`` is tensorwise and returns one scalar scale.
+    """
     if reduction_axis is None:
         amax = torch.max(torch.abs(tensor))
     else:
@@ -45,7 +53,17 @@ def _quantize_float8(
 
 @dataclass(frozen=True, slots=True)
 class _Float8LinearOperands:
-    """The independent Float8 tensors owned by one FSDP unshard lifetime."""
+    """The independent Float8 tensors owned by one FSDP unshard lifetime.
+
+    FPROP quantizes stored ``weight_NK`` rowwise over K, producing ``(N, 1)``
+    scales. Transposing both for the GEMM RHS gives ``weight_KN`` with one
+    scale per N column, shaped ``(1, N)``.
+
+    DGRAD uses ``weight_NK`` directly as its GEMM RHS. The rowwise recipe
+    reduces over N and therefore has one scale per K column, shaped ``(1, K)``;
+    the high-precision weight-gradient recipe instead uses one tensorwise
+    scalar.
+    """
 
     weight_qdata_fprop_NK: torch.Tensor  # noqa: N815
     weight_scale_fprop_N1: torch.Tensor  # noqa: N815
@@ -64,26 +82,29 @@ class _Float8LinearOperands:
 def _quantize_float8_weight(
     weight_NK: torch.Tensor,
     *,
-    dgrad_weight_tensorwise: bool,
+    grad_input_weight_tensorwise: bool,
 ) -> _Float8LinearOperands:
     """Build the two weight orientations used by Float8 FPROP and DGRAD."""
     if weight_NK.ndim != 2:
         raise ValueError(
             f"Float8 weight quantization requires a 2D weight, got {weight_NK.ndim} dimensions."
         )
-    if any(size % _FLOAT8_ALIGNMENT for size in weight_NK.shape):
+    if any(size % _FLOAT8_GEMM_ALIGNMENT for size in weight_NK.shape):
         raise ValueError(
             "Float8 weight quantization requires both matrix dimensions divisible "
-            f"by {_FLOAT8_ALIGNMENT}, got {tuple(weight_NK.shape)}."
+            f"by {_FLOAT8_GEMM_ALIGNMENT}, got {tuple(weight_NK.shape)}."
         )
 
+    # Stored W[N, K] is quantized per N row for X[M, K] @ W.T[K, N].
     weight_qdata_fprop_NK, weight_scale_fprop_N1 = _quantize_float8(
         weight_NK,
         reduction_axis=-1,
     )
+    # DGRAD is dY[M, N] @ W[N, K], so W needs either one scale per K
+    # output column or one scale for the entire tensor.
     weight_qdata_dgrad_NK, weight_scale_dgrad = _quantize_float8(
         weight_NK,
-        reduction_axis=None if dgrad_weight_tensorwise else 0,
+        reduction_axis=None if grad_input_weight_tensorwise else 0,
     )
     return _Float8LinearOperands(
         weight_qdata_fprop_NK=weight_qdata_fprop_NK,
@@ -96,22 +117,25 @@ def _quantize_float8_weight(
 class _LinearShardedTensorWithFloat8Compute(_ShardedFSDPTensor):
     """Persistent high-precision parameter with rowwise Float8 compute weights."""
 
-    dgrad_weight_tensorwise = False
+    grad_input_weight_tensorwise = False
 
     def _build_operands(
         self,
         logical_tensor: torch.Tensor,
         out: _Float8LinearOperands | None = None,
     ) -> _Float8LinearOperands:
-        if logical_tensor.ndim > 2 and logical_tensor.shape[-2] % _FLOAT8_ALIGNMENT:
+        if (
+            logical_tensor.ndim > 2
+            and logical_tensor.shape[-2] % _FLOAT8_GEMM_ALIGNMENT
+        ):
             raise ValueError(
                 "Float8 requires local matrix out_features divisible by "
-                f"{_FLOAT8_ALIGNMENT}; got {logical_tensor.shape[-2]}. Adjust "
+                f"{_FLOAT8_GEMM_ALIGNMENT}; got {logical_tensor.shape[-2]}. Adjust "
                 "the Linear out_features or TP degree."
             )
         operands = _quantize_float8_weight(
             logical_tensor.flatten(0, -2),
-            dgrad_weight_tensorwise=self.dgrad_weight_tensorwise,
+            grad_input_weight_tensorwise=self.grad_input_weight_tensorwise,
         )
         if out is None:
             return operands
@@ -122,15 +146,23 @@ class _LinearShardedTensorWithFloat8Compute(_ShardedFSDPTensor):
         return out
 
 
-class _LinearShardedTensorWithFloat8GWHPCompute(_LinearShardedTensorWithFloat8Compute):
-    """Float8 weight whose DGRAD operand uses tensorwise scaling."""
+class _LinearShardedTensorWithFloat8HighPrecisionWeightGradient(
+    _LinearShardedTensorWithFloat8Compute
+):
+    """Float8 weight cache for the high-precision weight-gradient recipe."""
 
-    dgrad_weight_tensorwise = True
+    grad_input_weight_tensorwise = True
 
 
 @dataclass(frozen=True, slots=True)
 class _Float8GroupedExpertsOperands:
-    """Float8 expert-weight operands owned by one FSDP unshard lifetime."""
+    """Float8 expert-weight operands owned by one FSDP unshard lifetime.
+
+    FPROP uses transposed expert weights ``(E, I, O)`` with one scale per
+    expert and O column, shaped ``(E, 1, O)``. DGRAD uses ``(E, O, I)`` with
+    one scale per expert and I column, shaped ``(E, I)``. Thus scaling is
+    axiswise within each expert; experts never share a scale.
+    """
 
     weight_qdata_fprop_EIO: torch.Tensor  # noqa: N815
     weight_scale_fprop_E1O: torch.Tensor  # noqa: N815
@@ -153,13 +185,14 @@ def _quantize_float8_grouped_weight(
             "Float8 grouped weight quantization requires a 3D weight, "
             f"got {weight_EOI.ndim} dimensions."
         )
-    if any(size % _FLOAT8_ALIGNMENT for size in weight_EOI.shape[-2:]):
+    if any(size % _FLOAT8_GEMM_ALIGNMENT for size in weight_EOI.shape[-2:]):
         raise ValueError(
             "Float8 grouped weight quantization requires both matrix dimensions "
-            f"divisible by {_FLOAT8_ALIGNMENT}, got {tuple(weight_EOI.shape)}."
+            f"divisible by {_FLOAT8_GEMM_ALIGNMENT}, got {tuple(weight_EOI.shape)}."
         )
 
     weight_EIO = weight_EOI.bfloat16().transpose(-2, -1)
+    # Reduce I independently for every (expert, output-feature) pair.
     (
         weight_qdata_fprop_EIO,
         weight_scale_fprop_E1O,
@@ -168,6 +201,7 @@ def _quantize_float8_grouped_weight(
         output_dtype=e4m3_dtype,
         round_scales_to_power_of_2=True,
     )
+    # Reduce O independently for every (expert, input-feature) pair.
     weight_qdata_dgrad_EOI, weight_scale_dgrad_EI = triton_fp8_rowwise_3d_transpose_rhs(
         weight_EIO,
         output_dtype=e4m3_dtype,

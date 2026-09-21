@@ -28,6 +28,7 @@ from torchao.prototype.moe_training.kernels import (
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
+    _FLOAT8_GEMM_ALIGNMENT,
     _GroupedExpertsShardedTensorWithFloat8Compute,
     _quantize_float8_grouped_weight,
 )
@@ -77,12 +78,15 @@ class _Float8GroupedMMFunction(torch.autograd.Function):
                 f"dimensions must match; got {A_RI.shape[-1]} and "
                 f"{weight_EOI.shape[-1]}."
             )
-        if any(size % 16 for size in weight_EOI.shape[-2:]):
+        if any(size % _FLOAT8_GEMM_ALIGNMENT for size in weight_EOI.shape[-2:]):
             raise ValueError(
                 "Float8 grouped GEMM requires local input and output features "
-                f"divisible by 16; got {tuple(weight_EOI.shape[-2:])}."
+                f"divisible by {_FLOAT8_GEMM_ALIGNMENT}; "
+                f"got {tuple(weight_EOI.shape[-2:])}."
             )
 
+        # FPROP activations use one scale per routed-token row. Expert weights
+        # use one scale per (expert, output-feature) column of the GEMM RHS.
         A_qdata_RI, A_scale_R1 = triton_fp8_rowwise_2d_scale_and_cast(
             A_RI,
             output_dtype=weight_qdata_fprop_EIO.dtype,
@@ -125,6 +129,10 @@ class _Float8GroupedMMFunction(torch.autograd.Function):
             weight_qdata_dgrad_EOI, weight_scale_dgrad_EI = saved_weight_tensors
 
         grad_output_RO = grad_output_RO.contiguous()
+        # DGRAD uses one scale per routed-token row for dY and one scale per
+        # (expert, input-feature) column for the cached weight operand.
+        # WGRAD computes separate columnwise scales inside every expert's
+        # token group; offsets_E defines those group boundaries.
         (
             grad_output_qdata_RO,
             grad_output_scale_R1,
