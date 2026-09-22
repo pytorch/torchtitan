@@ -18,8 +18,8 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.components.checkpointer.base import ModelWrapper
-from torchtitan.components.checkpointer.packed_hf_storage import (
-    PackedPairHuggingFaceStorageReader,
+from torchtitan.components.checkpointer.hf_storage import (
+    HuggingFaceStorageReaderWithViews,
 )
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
@@ -126,9 +126,9 @@ class Qwen3StateDictAdapterTest(unittest.TestCase):
 
 class KimiK3StateDictAdapterTest(unittest.TestCase):
     def setUp(self) -> None:
-        model_spec = kimi_k3_model_registry("debugmodel", seq_len=128)
+        model_config = kimi_k3_model_registry("debugmodel", seq_len=128)
         self.adapter = KimiK3StateDictAdapter(
-            model_spec.model,
+            model_config,
             hf_assets_path=None,
         )
 
@@ -148,7 +148,7 @@ class KimiK3StateDictAdapterTest(unittest.TestCase):
                 from_quantized=True,
             )
 
-        self.assertIsInstance(reader, PackedPairHuggingFaceStorageReader)
+        self.assertIsInstance(reader, HuggingFaceStorageReaderWithViews)
         self.assertEqual(reader.spec.packed_suffix, ".weight_packed")
         self.assertEqual(reader.spec.scale_suffix, ".weight_scale")
         self.assertEqual(reader.spec.virtual_suffix, ".weight")

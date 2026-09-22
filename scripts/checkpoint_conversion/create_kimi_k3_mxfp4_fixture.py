@@ -18,8 +18,9 @@ import torch
 import torchao
 from safetensors.torch import save_file
 from torchao.prototype.mx_formats.mx_tensor import MXTensor
-from torchtitan.models.kimi_k3 import KimiK3StateDictAdapter, model_registry
+from torchtitan.models.kimi_k3 import model_registry
 from torchtitan.models.kimi_k3.quantization import MXFP4_QUANTIZATION_CONFIG
+from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
 
 _DEFAULT_MAX_SHARD_BYTES = 1 << 30
@@ -133,11 +134,11 @@ def create_fixture(
     output.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(seed)
-    model_spec = model_registry("debugmodel", seq_len=128)
-    model = model_spec.model.build()
+    model_config = model_registry("debugmodel", seq_len=128)
+    model = model_config.build()
     model.init_states()
     model.to(dtype=torch.bfloat16)
-    adapter = KimiK3StateDictAdapter(model_spec.model, hf_assets_path=None)
+    adapter = KimiK3StateDictAdapter(model_config, hf_assets_path=None)
     hf_state_dict = adapter.to_hf(model.state_dict())
     policy = MXFP4CheckpointPolicy.from_config(
         MXFP4_QUANTIZATION_CONFIG, adapter.hf_linear_weight_mapping()

@@ -15,6 +15,7 @@ from torchao.quantization.quantize_.common import KernelPreference
 from torchtitan.config import ConfigManager
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel_mx_qat
+from torchtitan.models.kimi_k3.model import KimiK3Model
 
 
 class MXQATRecipeTest(unittest.TestCase):
@@ -29,12 +30,10 @@ class MXQATRecipeTest(unittest.TestCase):
                 "1",
             ]
         )
-        self.assertEqual(config.model_spec.name, "kimi_k3")
+        self.assertIsInstance(config.model, KimiK3Model.Config)
         self.assertEqual(config.training.steps, 1)
         self.assertFalse(config.checkpointer.initial_load_in_hf_quantized)
-        self.assertTrue(
-            type(config.model_spec.model.layers[1].moe.routed_up)._owner._mx_qat
-        )
+        self.assertTrue(type(config.model.layers[1].moe.routed_up)._owner._mx_qat)
 
     def test_custom_recipe_uses_existing_torchao_configs(self):
         def qat():
@@ -60,7 +59,7 @@ class MXQATRecipeTest(unittest.TestCase):
         self.assertEqual(config.checkpointer.initial_load_path, "/tmp/packed-kimi")
         self.assertTrue(config.checkpointer.initial_load_in_hf)
         self.assertTrue(config.checkpointer.initial_load_in_hf_quantized)
-        experts = list(config.model_spec.model.traverse(GroupedExperts.Config))
+        experts = list(config.model.traverse(GroupedExperts.Config))
         self.assertTrue(experts)
         for _, expert, _, _ in experts:
             self.assertEqual(
@@ -71,7 +70,7 @@ class MXQATRecipeTest(unittest.TestCase):
                 KernelPreference.AUTO,
             )
         self.assertEqual(
-            config.model_spec.model.layers[
+            config.model.layers[
                 1
             ].moe.routed_up.weight_fake_quant_config.kernel_preference,
             KernelPreference.AUTO,

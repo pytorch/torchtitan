@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Hugging Face storage reader for paired packed weights and block scales."""
+"""Expose packed weights and checked tensor prefixes as logical DCP tensors."""
 
 import dataclasses
 from collections.abc import Callable
@@ -20,7 +20,23 @@ from torch.distributed.checkpoint.metadata import (
 )
 from torch.distributed.checkpoint.planner import LoadPlanner, ReadItem
 
-__all__ = ["PackedPairHuggingFaceStorageReader", "PackedPairSpec"]
+__all__ = ["HuggingFaceStorageReaderWithViews", "LogicalPrefixSpec", "PackedPairSpec"]
+
+
+@dataclass(frozen=True)
+class LogicalPrefixSpec:
+    """Accept a canonical vector or a known zero-padded physical vector.
+
+    Only the explicitly declared padded length may be truncated. Model adapters
+    own these lengths and the FQNs to which the rule applies.
+    """
+
+    logical_length: int
+    padded_length: int
+
+    def __post_init__(self) -> None:
+        if not 0 < self.logical_length < self.padded_length:
+            raise ValueError("Expected 0 < logical_length < padded_length")
 
 
 @dataclass(frozen=True)
@@ -59,18 +75,76 @@ class _PackedPair:
     scale_path: str
 
 
-class PackedPairHuggingFaceStorageReader(HuggingFaceStorageReader):
-    """Present selected uint8 packed/scale pairs as unquantized DCP tensors."""
+class HuggingFaceStorageReaderWithViews(HuggingFaceStorageReader):
+    """Apply optional packed decoding and checked prefix views before planning."""
 
     def __init__(
         self,
         path: str,
-        spec: PackedPairSpec,
+        spec: PackedPairSpec | None = None,
         thread_count: int = 1,
+        *,
+        logical_prefixes: dict[str, LogicalPrefixSpec] | None = None,
     ) -> None:
         super().__init__(path=path, thread_count=thread_count)
         self.spec = spec
+        self.logical_prefixes = dict(logical_prefixes or {})
         self._pairs: dict[str, _PackedPair] = {}
+
+    def _apply_logical_prefixes(self, metadata: Any) -> Any:
+        if not self.logical_prefixes:
+            return metadata
+        from safetensors import safe_open
+
+        tensors = dict(metadata.state_dict_metadata)
+        storage = dict(metadata.storage_data)
+        prefix_storage: dict[str, list[tuple[Any, Any]]] = {
+            fqn: [] for fqn in self.logical_prefixes
+        }
+        for index, info in storage.items():
+            if index.fqn in prefix_storage:
+                prefix_storage[index.fqn].append((index, info))
+        for fqn, spec in self.logical_prefixes.items():
+            tensor = tensors.get(fqn)
+            if not isinstance(tensor, TensorStorageMetadata):
+                raise ValueError(f"Logical prefix requires tensor {fqn!r}")
+            if tuple(tensor.size) not in (
+                (spec.logical_length,),
+                (spec.padded_length,),
+            ):
+                raise ValueError(
+                    f"{fqn}: expected physical shape [{spec.logical_length}] or "
+                    f"[{spec.padded_length}], got {tuple(tensor.size)}"
+                )
+            if not tensor.properties.dtype.is_floating_point:
+                raise ValueError(f"{fqn}: logical prefix requires floating-point data")
+            if tuple(tensor.size) == (spec.logical_length,):
+                continue
+            # Prefix normalization handles a whole source tensor, not an
+            # independently sharded HF export. DCP destination shards are fine.
+            entries = prefix_storage[fqn]
+            if (
+                len(entries) != 1
+                or len(tensor.chunks) != 1
+                or tuple(tensor.chunks[0].offsets) != (0,)
+                or tuple(tensor.chunks[0].sizes) != (spec.padded_length,)
+            ):
+                raise ValueError(f"{fqn}: padded source must be one complete vector")
+            index, info = entries[0]
+            with safe_open(info.relative_path, framework="pt") as handle:
+                tail = handle.get_slice(fqn)[spec.logical_length : spec.padded_length]
+            if not bool(torch.all(tail == 0)):
+                raise ValueError(f"{fqn}: discarded padding must be exactly zero")
+            logical_shape = torch.Size((spec.logical_length,))
+            tensors[fqn] = dataclasses.replace(
+                tensor,
+                size=logical_shape,
+                chunks=[dataclasses.replace(tensor.chunks[0], sizes=logical_shape)],
+            )
+            storage[index] = dataclasses.replace(info, shape=logical_shape)
+        return dataclasses.replace(
+            metadata, state_dict_metadata=tensors, storage_data=storage
+        )
 
     def _replace_suffix(self, fqn: str, source: str, destination: str) -> str:
         if not fqn.endswith(source):
@@ -83,6 +157,7 @@ class PackedPairHuggingFaceStorageReader(HuggingFaceStorageReader):
         packed_metadata: TensorStorageMetadata,
         scale_metadata: TensorStorageMetadata,
     ) -> None:
+        assert self.spec is not None
         if virtual_fqn not in self.spec.target_fqns:
             raise ValueError(
                 f"Packed tensor {virtual_fqn!r} is outside the packed-weight policy."
@@ -111,6 +186,7 @@ class PackedPairHuggingFaceStorageReader(HuggingFaceStorageReader):
             )
 
     def _virtual_chunk(self, chunk: ChunkStorageMetadata) -> ChunkStorageMetadata:
+        assert self.spec is not None
         offsets = list(chunk.offsets)
         sizes = list(chunk.sizes)
         offsets[-1] *= self.spec.packed_values_per_byte
@@ -124,6 +200,9 @@ class PackedPairHuggingFaceStorageReader(HuggingFaceStorageReader):
     # pyrefly: ignore [bad-override]
     def read_metadata(self) -> Any:
         metadata = super().read_metadata()
+        metadata = self._apply_logical_prefixes(metadata)
+        if self.spec is None:
+            return metadata
         state_dict_metadata = metadata.state_dict_metadata
         storage_paths: dict[str, str] = {}
         for index, storage_info in metadata.storage_data.items():
@@ -250,8 +329,18 @@ class PackedPairHuggingFaceStorageReader(HuggingFaceStorageReader):
         virtual_fqn = req.storage_index.fqn
         pair = self._pairs.get(virtual_fqn)
         if pair is None:
+            prefix = self.logical_prefixes.get(virtual_fqn)
+            if prefix is not None and (
+                len(req.storage_offsets) != 1
+                or len(req.lengths) != 1
+                or req.storage_offsets[0] < 0
+                or req.lengths[0] < 0
+                or req.storage_offsets[0] + req.lengths[0] > prefix.logical_length
+            ):
+                raise ValueError(f"{virtual_fqn}: read exceeds logical prefix")
             super()._process_read_request(f, req, planner)
             return
+        assert self.spec is not None
         if len(req.storage_offsets) != 2 or len(req.lengths) != 2:
             raise ValueError(
                 f"Packed tensor {virtual_fqn!r} requires a two-dimensional read; "
