@@ -14,7 +14,6 @@ these lives in ``models/common/token_dispatcher.py`` and the expert side in
 """
 
 import torch
-import torch.distributed as dist
 
 DEFAULT_NUM_SMS = 32
 """SMs MoonEP's kernels may occupy; MoonEP's own default."""
@@ -31,16 +30,6 @@ def _import_moonep():
             "comm_backend on hardware without that topology."
         ) from err
     return moonep
-
-
-def padded_slot_count(base_slots: int, in_dim: int, out_dim: int) -> int:
-    """``B`` raised to the VMM granularity MoonEP's reduce buffers are cut on."""
-    moonep = _import_moonep()
-    return int(
-        moonep.buffer.pad_dim0_for_alignment(
-            [base_slots, in_dim, out_dim], torch.float32
-        )
-    )
 
 
 # Routing weights ride along as a second output so their gradient reaches the router.
@@ -105,7 +94,7 @@ def combine(buffer, plan, hidden_nvsh):
     return _MoonEPCombine.apply(buffer, plan, hidden_nvsh)
 
 
-def make_buffer(*, S, H, K, E, num_ep_ranks, B, group):
+def make_buffer(*, S, H, K, E, num_ep_ranks, group):
     """MoonEP's persistent buffer, a collective on the EP group."""
     return _import_moonep().Buffer(
         S=S,
@@ -114,62 +103,16 @@ def make_buffer(*, S, H, K, E, num_ep_ranks, B, group):
         E=E,
         num_ep_ranks=num_ep_ranks,
         num_sms=DEFAULT_NUM_SMS,
-        B=B,
         group=group,
     )
 
 
-def barrier_handles(buffer) -> dict:
-    """The barrier handles ``launch_grad_reduce`` needs.
-
-    MoonEP exposes no accessor for them, so they come off the Buffer's
-    context; an upstream accessor would remove this reach.
-    """
-    ctx = buffer._require_ctx()
-    return {
-        "meta_buf": ctx["meta_buf"],
-        "meta_stride": int(ctx["meta_chunk_padded"]),
-        "barrier_off": int(ctx["BARRIER_OFF"]),
-        "grid_sync_bar": ctx["grid_sync_bar"],
-    }
-
-
-class _MappedRows:
-    """Per-owner NVLink mappings of one projection's ``[P + B, in, out]`` rows."""
-
-    def __init__(self, ep_mesh, rank: int, size: int):
-        self.ep_mesh, self.rank, self.size = ep_mesh, rank, size
-        self.group = ep_mesh.get_group()
-        self.owners: dict[str, list[torch.Tensor]] = {}
-
-    def alloc(self, name: str, rows: int, in_dim: int, out_dim: int) -> torch.Tensor:
-        moonep = _import_moonep()
-        padded = moonep.buffer.pad_dim0_for_alignment(
-            [rows, in_dim, out_dim], torch.bfloat16
-        )
-        mapped = []
-        for owner in range(self.size):
-            t = moonep.buffer.create_nvl_single_owner_tensor(
-                [padded, in_dim, out_dim],
-                torch.bfloat16,
-                owner_rank=owner,
-                local_rank=self.rank,
-                group=self.group,
-            )
-            if owner == self.rank:
-                t.zero_()
-            torch.cuda.synchronize()
-            dist.barrier(group=self.group)
-            mapped.append(t[:rows])
-        self.owners[name] = mapped
-        return mapped[self.rank]
-
-
 class MoonEPTableBackendNVLink:
-    """Table backend on MoonEP's ``launch_prefetch`` and ``launch_grad_reduce``.
+    """Expert rows over NVLink through MoonEP's public prefetch and reduce.
 
-    ``plan.experts_to_copy`` is ``[R, B]`` int32: the global expert id in rank
-    r's slot b, negative when unused.
+    Each projection gets one pool, an NVL-distributed ``[R, E / R, in, out]``
+    tensor whose ``rank`` chunk holds this rank's prefetch slots and, for the
+    gradients, the slot gradients its peers read back.
     """
 
     def __init__(self, ep_mesh, dispatcher):
@@ -177,69 +120,75 @@ class MoonEPTableBackendNVLink:
         self.rank, self.size = ep_mesh.get_local_rank(), ep_mesh.size()
         self.group = ep_mesh.get_group()
         self.dispatcher = dispatcher
-        self.num_experts = 0
-        self.num_slots = 0
         self.own_rows = 0
-        self._rows = _MappedRows(ep_mesh, self.rank, self.size)
-        self._full_grads: dict[str, torch.Tensor] = {}
+        self._prefetch: dict[str, torch.Tensor] = {}
         self._reduce: dict[str, torch.Tensor] = {}
 
     def configure(self, *, num_experts: int, num_slots: int) -> None:
-        self.num_experts, self.num_slots = num_experts, num_slots
-        self.own_rows = num_experts // self.size
+        if num_slots != num_experts // self.size:
+            raise ValueError(
+                f"MoonEP gives every rank E / R = {num_experts // self.size} "
+                f"slots; got {num_slots}."
+            )
+        self.own_rows = num_slots
 
-    def alloc_expert_rows(self, name, in_dim, out_dim):
-        return self._rows.alloc(name, self.own_rows + self.num_slots, in_dim, out_dim)
-
-    def alloc_grad_rows(self, name, in_dim, out_dim):
+    def _pool(self, in_dim: int, out_dim: int, dtype) -> torch.Tensor:
         moonep = _import_moonep()
-        device = self._rows.owners[name][self.rank].device
-        # launch_grad_reduce addresses grad rows by global expert id.
-        full = torch.zeros(
-            self.num_experts, in_dim, out_dim, dtype=torch.float32, device=device
+        rows = moonep.buffer.pad_dim0_for_alignment(
+            [self.own_rows, in_dim, out_dim], dtype
         )
-        reduce_full = moonep.buffer.create_nvl_dist_tensor(
-            [self.num_slots, in_dim, out_dim],
-            torch.float32,
+        if rows != self.own_rows:
+            raise ValueError(
+                f"MoonEP wants the pool chunk [{self.own_rows}, {in_dim}, "
+                f"{out_dim}] on its VMM granularity, which pads to {rows}."
+            )
+        pool = moonep.buffer.create_nvl_dist_tensor(
+            [self.own_rows, in_dim, out_dim],
+            dtype,
             self.rank,
             self.size,
             group=self.group,
-        )
-        self._full_grads[name] = full
-        self._reduce[name] = reduce_full.view(
-            self.size, self.num_slots, in_dim, out_dim
-        )
-        lo = self.rank * self.own_rows
-        return full[lo : lo + self.own_rows], self._reduce[name][self.rank]
+        ).view(self.size, self.own_rows, in_dim, out_dim)
+        pool[self.rank].zero_()
+        return pool
 
-    def prefetch(self, plan, tables):
-        moonep = _import_moonep()
-        ids = plan.experts_to_copy[self.rank]
-        # Peers read this rank's rows, which its forward has just refreshed.
-        dist.barrier(group=self.group)
-        for owner in range(self.size):
-            lo = owner * self.own_rows
-            owned = (ids >= lo) & (ids < lo + self.own_rows)
-            local_ids = torch.where(owned, ids - lo, torch.full_like(ids, -1))
-            for name, table in tables.items():
-                moonep.prefetch.launch_prefetch(
-                    self._rows.owners[name][owner][: self.own_rows],
-                    table[self.own_rows :],
-                    local_ids.contiguous(),
-                    num_sms=DEFAULT_NUM_SMS,
-                )
+    def alloc_prefetch_rows(self, name: str, in_dim: int, out_dim: int):
+        """This rank's slot rows, which peers write and the experts read."""
+        self._prefetch[name] = self._pool(in_dim, out_dim, torch.bfloat16)
+        return self._prefetch[name][self.rank]
 
-    def reduce_grad(self, plan, grads):
-        moonep = _import_moonep()
-        handles = barrier_handles(self.dispatcher.buffer)
-        # The kernel fences peers after its reads; the writes need this one.
-        dist.barrier(group=self.group)
-        for name in grads:
-            moonep.grad_reduce.launch_grad_reduce(
-                self._full_grads[name],
-                self._reduce[name],
-                plan.experts_to_copy,
-                rank=self.rank,
-                num_sms=DEFAULT_NUM_SMS,
-                **handles,
-            )
+    def alloc_grad_rows(self, name: str, in_dim: int, out_dim: int):
+        """This rank's own-row gradients and the slot gradients peers read."""
+        self._reduce[name] = self._pool(in_dim, out_dim, torch.float32)
+        own = torch.zeros(
+            self.own_rows,
+            in_dim,
+            out_dim,
+            dtype=torch.float32,
+            device=self._reduce[name].device,
+        )
+        return own, self._reduce[name][self.rank]
+
+    def prefetch(self, plan, local_rows: dict[str, torch.Tensor]) -> None:
+        """Fill the slots for *plan* from the rows their owners hold."""
+        self.dispatcher.buffer.prefetch_weight(
+            plan=plan,
+            local_gate_weight=local_rows["gate"],
+            local_up_weight=local_rows["up"],
+            local_down_weight=local_rows["down"],
+            gate_prefetch_buffer=self._prefetch["gate"],
+            up_prefetch_buffer=self._prefetch["up"],
+            down_prefetch_buffer=self._prefetch["down"],
+        )
+
+    def reduce_grad(self, plan, own_grads: dict[str, torch.Tensor]) -> None:
+        """Send each slot's gradient home and add the ones homed here."""
+        self.dispatcher.buffer.reduce_grad(
+            plan=plan,
+            local_gate_grad=own_grads["gate"],
+            local_up_grad=own_grads["up"],
+            local_down_grad=own_grads["down"],
+            gate_reduce_buffer=self._reduce["gate"],
+            up_reduce_buffer=self._reduce["up"],
+            down_reduce_buffer=self._reduce["down"],
+        )

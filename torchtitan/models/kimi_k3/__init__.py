@@ -289,7 +289,6 @@ def _latent_moe_config(
                 # The routed experts consume the LATENT stream, so the
                 # dispatcher buffers size by latent_dim, not model dim.
                 hidden_dim=latent_dim,
-                expert_hidden_dim=expert_hidden_dim,
             ),
         ),
         routed_norm=_norm(latent_dim),

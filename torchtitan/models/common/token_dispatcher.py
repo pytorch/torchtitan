@@ -1014,18 +1014,10 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         """MoonEP's ``S``, the per-rank token count of every dispatch; filled by
         ``update_ep_token_dispatcher_config``."""
 
-        num_prefetch_slots: int | None = None
-        """MoonEP's ``B``; None derives it, a value set here is taken as it stands."""
-
-        expert_hidden_dim: int | None = None
-        """Expert hidden width, which sizes a row of the reduce buffers."""
-
     def __init__(self, config: "MoonEPTokenDispatcher.Config") -> None:
         super().__init__(config)
         self.hidden_dim = config.hidden_dim
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
-        self.num_prefetch_slots = config.num_prefetch_slots
-        self.expert_hidden_dim = config.expert_hidden_dim
         self._buffer = None
         self._current: tuple[object, torch.Tensor] | None = None
 
@@ -1054,24 +1046,12 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
                 "buffer can be allocated."
             )
         ep_size = self.ep_mesh.size()
-        if self.num_prefetch_slots is None:
-            if self.expert_hidden_dim is None:
-                raise ValueError(
-                    "MoonEPTokenDispatcher.Config needs expert_hidden_dim to "
-                    "derive the prefetch slot count: the slots are cut on the "
-                    "VMM granularity of a reduce-buffer row, which is the "
-                    "expert shape."
-                )
-            self.num_prefetch_slots = moonep.padded_slot_count(
-                self.num_experts // ep_size, self.hidden_dim, self.expert_hidden_dim
-            )
         self._buffer = moonep.make_buffer(
             S=self.num_max_tokens_per_rank,
             H=self.hidden_dim,
             K=self.top_k,
             E=self.num_experts,
             num_ep_ranks=ep_size,
-            B=self.num_prefetch_slots,
             group=self.ep_mesh.get_group(),
         )
 

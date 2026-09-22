@@ -370,7 +370,6 @@ def make_token_dispatcher_config(
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
     cuda_graph_compatible: bool = False,
-    expert_hidden_dim: int | None = None,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -380,8 +379,7 @@ def make_token_dispatcher_config(
     - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
     - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
     - "moonep": Uses MoonEP, which moves expert weights over NVLink so each rank
-      receives a fixed token count whatever the routing does; needs
-      ``expert_hidden_dim`` to size its prefetch slots
+      receives a fixed token count whatever the routing does
 
     DeepEP/HybridEP requires installation:
     https://github.com/deepseek-ai/DeepEP
@@ -420,7 +418,6 @@ def make_token_dispatcher_config(
             top_k=top_k,
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            expert_hidden_dim=expert_hidden_dim,
         )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
