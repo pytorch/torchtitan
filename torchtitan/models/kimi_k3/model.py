@@ -294,6 +294,23 @@ class KimiK3TransformerBlock(Module):
         return prefix_sum_TD + h_TD, block_residual_TND
 
 
+@dataclass(kw_only=True, slots=True)
+class KimiK3VisionDepConfig:
+    """The vision tower on a pipeline stage of its own, with its encodes moved off its
+    own forward and into the intervals the rank would otherwise spend waiting."""
+
+    enabled: bool = False
+    """Give the tower and the embedding the first pipeline stage alone."""
+    prefetch: int = 0
+    """Encode this many micro-batches ahead of the forward that reads them."""
+    bubble: bool = False
+    """Place the encodes in the idle intervals of the schedule's action order."""
+    bubble_cost_ratio: float = 1.0
+    """One encode's cost in units of one text-stage action."""
+    bubble_max_pending: int = 0
+    """How many deferred tower backwards may wait at once; zero is unbounded."""
+
+
 class KimiK3Model(MultimodalModel):
     state_dict_adapter_cls = KimiK3StateDictAdapter
     multimodal_encoder_fqns = ("vision_encoder",)
@@ -319,6 +336,7 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        vision_dep: KimiK3VisionDepConfig = field(default_factory=KimiK3VisionDepConfig)
 
         def update_from_config(self, *, config, **kwargs) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
@@ -492,6 +510,14 @@ class KimiK3Model(MultimodalModel):
             "kda": kda_metadata,
         }
 
+    def encode_images(
+        self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
+    ) -> torch.Tensor:
+        """The tower's forward on one micro-batch's images."""
+        assert self.vision_encoder is not None
+        pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
+        return self.vision_encoder(pixel_values, grid_thw=grid_thw)
+
     def _prepare_multimodal_embeds(
         self,
         tokens: torch.Tensor,
@@ -499,6 +525,7 @@ class KimiK3Model(MultimodalModel):
         pixel_values: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         special_tokens: dict[str, int] | None,
+        vision_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         embeddings_TD = self.tok_embeddings(tokens)
         if (pixel_values is None) != (grid_thw is None):
@@ -514,8 +541,8 @@ class KimiK3Model(MultimodalModel):
         if special_tokens is None:
             raise ValueError("special_tokens are required for multimodal inputs.")
 
-        pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
-        vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        if vision_embeds is None:
+            vision_embeds = self.encode_images(pixel_values, grid_thw)
         # MoonViT collapses time and merges spatially, so the text-side token
         # count per item is (h/kh)*(w/kw), independent of t.
         kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
@@ -546,17 +573,21 @@ class KimiK3Model(MultimodalModel):
         positions: torch.Tensor | None = None,
         attention_masks: KimiK3AttentionMaskDict | None = None,
         padding_mask: torch.Tensor | None = None,
+        vision_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
 
         if self.tok_embeddings is not None:
             with spmd_local_context("dp"):
+                # vision_embeds are the tower's features when the pipeline encoded
+                # this micro-batch ahead of its forward; otherwise the tower runs here.
                 h_TD = self._prepare_multimodal_embeds(
                     tokens,
                     pixel_values=pixel_values,
                     grid_thw=grid_thw,
                     special_tokens=special_tokens,
+                    vision_embeds=vision_embeds,
                 )
         else:
             h_TD = tokens
