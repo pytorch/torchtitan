@@ -134,7 +134,7 @@ def deepseek_v3_debugmodel_float8_grouped(
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.compile = CompileConfig(components=["model"])
-    config.model_spec = model_registry(
+    config.model = model_registry(
         "debugmodel",
         seq_len=seq_len,
         converters=[
