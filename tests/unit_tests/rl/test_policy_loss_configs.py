@@ -50,4 +50,4 @@ def test_policy_loss_vocab_size_matches_model_and_mode(module_name, factory_name
         loss_config = loss_config.loss_fn
     assert isinstance(loss_config, (DAPOLoss.Config, GRPOLoss.Config))
 
-    assert loss_config.global_vocab_size == decoder_vocab_size(config.model_spec)
+    assert loss_config.global_vocab_size == decoder_vocab_size(config.model)

@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, fields
 from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
@@ -14,7 +13,7 @@ from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
-from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.model import BaseModel
 from torchtitan.trainer import Trainer
 
 EpOverlapChunkDim = Literal["batch", "seq"]
@@ -254,34 +253,24 @@ def trace_input_preparer_keys(
 
 def to_graph_trainer_config(
     base_config: Trainer.Config,
-    model_registry: Callable[[str], ModelSpec],
+    model_config_cls: type[BaseModel.Config],
 ) -> "GraphTrainer.Config":
     """Convert a base Trainer.Config to a GraphTrainer.Config.
 
-    Copies all fields from the base config and replaces the model_spec with one
-    from the graph_trainer model_registry. The compile field is removed and
-    left as the GraphTrainer.Config default; callers should explicitly set it.
+    Copies all fields from the base config and converts its model config to the
+    GraphTrainer model config class. The compile field is removed and left as
+    the GraphTrainer.Config default; callers should explicitly set it.
     """
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
-    graph_spec = model_registry(base_config.model_spec.flavor)
-    # Wrap the base model config in the graph_trainer's model config class
-    # (e.g. GraphTrainerQwen3Model.Config) while preserving all field values
-    # (including moe_comm_backend etc.).
-    graph_model_cls = type(graph_spec.model)
-    graph_model = graph_model_cls(
+    graph_model = model_config_cls(
         **{
-            f.name: getattr(base_config.model_spec.model, f.name)
-            for f in fields(base_config.model_spec.model)
+            f.name: getattr(base_config.model, f.name)
+            for f in fields(base_config.model)
         }
     )
-    d["model_spec"] = replace(
-        base_config.model_spec,
-        parallelize_fn=graph_spec.parallelize_fn,
-        pipelining_fn=graph_spec.pipelining_fn,
-        model=graph_model,
-    )
+    d["model"] = graph_model
     d.pop("compile")
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any

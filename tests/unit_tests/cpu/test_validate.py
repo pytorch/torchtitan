@@ -72,7 +72,6 @@ def _generic_validator(loader):
         ntokens_since_last_log=0,
         log_validation=mock.Mock(),
     )
-    validator.validation_context = nullcontext
     validator.loss_fn = lambda predictions, labels: (predictions.sum(), None)
     validator.parallelism = SimpleNamespace()
     return validator
@@ -93,6 +92,9 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
     validator = _generic_validator(loader)
     model = _FailingModel() if raises else _EchoModel()
     monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+    monkeypatch.setattr(
+        validate_module.dist_utils, "get_spmd_context", lambda **kwargs: nullcontext()
+    )
 
     if raises:
         with pytest.raises(RuntimeError, match="validation failed"):
@@ -128,7 +130,6 @@ def _flux_validator(loader):
         ntokens_since_last_log=0,
         log_validation=mock.Mock(),
     )
-    validator.validation_context = nullcontext
     validator.loss_fn = lambda predictions, labels: (predictions.sum(), None)
     validator.all_timesteps = False
     validator.device = torch.device("cpu")
@@ -172,6 +173,11 @@ def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
         lambda *args: torch.zeros(1, 1, 3),
     )
     monkeypatch.setattr(flux_validate_module.dist_utils, "device_type", "cpu")
+    monkeypatch.setattr(
+        flux_validate_module.dist_utils,
+        "get_spmd_context",
+        lambda **kwargs: nullcontext(),
+    )
 
     if raises:
         with pytest.raises(RuntimeError, match="validation failed"):
@@ -199,24 +205,28 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
     validator = _flux_validator(loader)
     validator.config.save_img_count = 1
     generated = {}
-    validation_context_entries = 0
-    validation_context_active = False
+    spmd_context_entries = 0
+    spmd_context_active = False
 
     @contextmanager
-    def validation_context():
-        nonlocal validation_context_active, validation_context_entries
-        assert not validation_context_active
-        validation_context_active = True
-        validation_context_entries += 1
+    def spmd_context():
+        nonlocal spmd_context_active, spmd_context_entries
+        assert not spmd_context_active
+        spmd_context_active = True
+        spmd_context_entries += 1
         try:
             yield
         finally:
-            validation_context_active = False
+            spmd_context_active = False
 
-    validator.validation_context = validation_context
+    monkeypatch.setattr(
+        flux_validate_module.dist_utils,
+        "get_spmd_context",
+        lambda **kwargs: spmd_context(),
+    )
 
     def generate_image(**kwargs):
-        assert validation_context_active
+        assert spmd_context_active
         generated.update(kwargs)
         return torch.zeros(3, kwargs["img_height"], kwargs["img_width"])
 
@@ -245,13 +255,16 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
 
     assert generated["img_height"] == 6
     assert generated["img_width"] == 10
-    assert validation_context_entries == 2
+    assert spmd_context_entries == 2
 
 
 def test_generic_validator_raises_on_zero_validation_batches(monkeypatch):
     loader = _ClosableLoader([])
     validator = _generic_validator(loader)
     monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+    monkeypatch.setattr(
+        validate_module.dist_utils, "get_spmd_context", lambda **kwargs: nullcontext()
+    )
 
     with pytest.raises(ValueError, match="zero batches"):
         validator.validate([_EchoModel()], step=1)
@@ -270,8 +283,37 @@ def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
     loader = _ClosableLoader([microbatch])
     validator = _generic_validator(loader)
     monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+    monkeypatch.setattr(
+        validate_module.dist_utils, "get_spmd_context", lambda **kwargs: nullcontext()
+    )
 
     with pytest.raises(ValueError, match="zero valid tokens"):
         validator.validate([_EchoModel()], step=1)
 
     assert loader.closed
+
+
+def _validator_from_init(*, steps: int, dp_world_size: int) -> Validator:
+    return Validator(
+        Validator.Config(steps=steps),
+        parallelism=mock.Mock(),
+        dp_world_size=dp_world_size,
+        dp_rank=0,
+        tokenizer=mock.Mock(),
+        parallel_dims=mock.Mock(),
+        loss_fn=mock.Mock(),
+        validation_context=nullcontext,
+        metrics_processor=mock.Mock(),
+        seq_len=4,
+        num_tokens_per_microbatch=4,
+    )
+
+
+def test_validator_rejects_steps_neg1_when_dp_gt_1():
+    with pytest.raises(ValueError, match="hang on validation collectives"):
+        _validator_from_init(steps=-1, dp_world_size=2)
+
+
+def test_validator_accepts_finite_pass_or_positive_steps():
+    _validator_from_init(steps=-1, dp_world_size=1)
+    _validator_from_init(steps=10, dp_world_size=8)

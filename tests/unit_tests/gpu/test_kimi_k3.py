@@ -19,6 +19,7 @@ def _small_model_config() -> KimiK3Model.Config:
     """Build a reduced KDA+MLA, dense+MoE, multimodal Kimi K3 config."""
     dim = 64
     return _kimi_k3_config(
+        max_context_length=128,
         dim=dim,
         vocab_size=32,
         num_layers=2,

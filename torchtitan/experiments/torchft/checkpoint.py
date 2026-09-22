@@ -21,7 +21,6 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, cast
 
-import torch
 import torch.distributed as dist
 import torch.nn as nn
 
@@ -29,13 +28,18 @@ from torchtitan.components.checkpointer import (
     AsyncMode,
     CheckpointManager,
     DATALOADER,
+    EMA,
     LR_SCHEDULER,
     MODEL,
     OPTIMIZER,
     TRAIN_STATE,
 )
 from torchtitan.components.data.loader import BaseDataLoader
-from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.components.optimizer import (  # noqa: N811
+    EMA as EMAContainer,
+    LRSchedulersContainer,
+    OptimizersContainer,
+)
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
@@ -82,6 +86,7 @@ class TorchFTCheckpointManager(CheckpointManager):
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
+        ema: EMAContainer | None,
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
@@ -94,6 +99,7 @@ class TorchFTCheckpointManager(CheckpointManager):
             model_parts=model_parts,
             optimizers=optimizers,
             lr_schedulers=lr_schedulers,
+            ema=ema,
             states=states,
             sd_adapter=sd_adapter,
             base_folder=base_folder,
@@ -121,7 +127,7 @@ class TorchFTCheckpointManager(CheckpointManager):
                 optimizers._refresh_cached_state_dict()
                 ret = {}
                 for k, v in self.states.items():
-                    if k in {MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE}:
+                    if k in {MODEL, OPTIMIZER, LR_SCHEDULER, TRAIN_STATE, EMA}:
                         ret[k] = v.state_dict()
                 return ret
 
@@ -168,11 +174,24 @@ class TorchFTCheckpointManager(CheckpointManager):
         # full save reports False.
         return False
 
-    @torch.no_grad()
-    def load(self, step: int = -1) -> bool:
-        if self.enable_ft_dataloader_checkpoints:
-            self._ft_load()
-        return super().load(step)
+    def _load_checkpoint(
+        self,
+        states: dict[str, Any],
+        checkpoint_id: str,
+        *,
+        from_hf: bool,
+        from_quantized: bool,
+    ) -> None:
+        super()._load_checkpoint(
+            states,
+            checkpoint_id,
+            from_hf=from_hf,
+            from_quantized=from_quantized,
+        )
+        if self.enable_ft_dataloader_checkpoints and not from_hf:
+            load_step = self._parse_step(checkpoint_id.rsplit("/", 1)[-1])
+            if load_step is not None:
+                self._ft_load(load_step)
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
         states = super()._states_to_load(model_only)
@@ -217,15 +236,15 @@ class TorchFTCheckpointManager(CheckpointManager):
         self.save_future = result
         logger.info(f"Staging torchft checkpoint took {time.monotonic() - begin} secs.")
 
-    def _ft_load(self) -> None:
-        step = self._find_load_step(folder=self._ft_folder())
+    def _ft_load(self, max_step: int) -> None:
+        step = self._find_load_step(folder=self._ft_folder(), max_step=max_step)
         if step == -1:
             return
 
         begin = time.monotonic()
         logger.info(f"Loading the FT checkpoint at step {step}.")
         checkpoint_id = self._create_checkpoint_id(step, folder=self._ft_folder())
-        self._load_checkpoint(
+        super()._load_checkpoint(
             self.ft_states,
             checkpoint_id=checkpoint_id,
             from_hf=False,

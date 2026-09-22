@@ -21,7 +21,7 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
     context_active = False
 
     @contextlib.contextmanager
-    def train_context():
+    def spmd_context():
         nonlocal context_active
         assert not context_active
         context_active = True
@@ -34,7 +34,8 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
         device=torch.device("cpu"),
         model_parts=[object()],
         load_checkpoint=lambda: None,
-        train_context=train_context,
+        parallel_dims=object(),
+        config=SimpleNamespace(debug=SimpleNamespace(spmd_typechecking=False)),
     )
     trainer = SimpleNamespace(
         engine=engine,
@@ -63,6 +64,11 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
     monkeypatch.setenv("WORLD_SIZE", "1")
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setattr(flux_infer, "FluxTrainer", lambda config: trainer)
+    monkeypatch.setattr(
+        flux_infer.dist_utils,
+        "get_spmd_context",
+        lambda **kwargs: spmd_context(),
+    )
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "destroy_process_group", lambda: None)
     monkeypatch.setattr(flux_infer, "save_image", lambda **kwargs: None)

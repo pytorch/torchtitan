@@ -4,13 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-from typing import Any, cast, TypeAlias
+from typing import Any
 
 import torch
-import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.loader import BaseDataLoader
@@ -24,8 +22,6 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model import BaseModel
 from torchtitan.tools import utils
-
-ValidationContext: TypeAlias = Callable[[], AbstractContextManager[None]]
 
 
 class BaseValidator(Configurable):
@@ -47,7 +43,7 @@ class BaseValidator(Configurable):
     ):
         self.config = config
 
-    def validate(self, model_parts: list[nn.Module], step: int) -> None:
+    def validate(self, model_parts: list[BaseModel], step: int) -> None:
         raise NotImplementedError("validate method not implemented")
 
     def should_validate(self, step: int) -> bool:
@@ -66,7 +62,6 @@ class Validator(BaseValidator):
         tokenizer: Tokenizer
         parallel_dims: Parallel dimensions
         loss_fn: Loss function to use for validation
-        validation_context: Context manager for validation
         metrics_processor: Metrics processor
         pp_schedule: Pipeline schedule (optional)
         pp_has_first_stage: Whether this rank has the first PP stage (optional)
@@ -77,8 +72,11 @@ class Validator(BaseValidator):
     class Config(BaseValidator.Config):
         steps: int = -1
         """
-        Number of validation steps. -1 consumes the finite dataset and therefore
-        requires an effective data-parallel degree of one.
+        Number of validation steps. -1 consumes the finite dataset once
+        (dataloader repeat=False). Ranks then stop independently, so this
+        requires data-parallel degree 1; otherwise validation collectives hang.
+        Use a positive count when DP > 1 so every rank runs the same number of
+        steps with repeat=True.
         """
 
         dataloader: BaseDataLoader.Config = field(
@@ -93,9 +91,10 @@ class Validator(BaseValidator):
 
         def __post_init__(self):
             BaseValidator.Config.__post_init__(self)
-            assert (
-                self.steps > 0 or self.steps == -1
-            ), "validation steps must be positive or -1"
+            if not (self.steps > 0 or self.steps == -1):
+                raise ValueError(
+                    f"validation steps must be positive or -1, got {self.steps}"
+                )
 
     # TODO: improve the constructor signature
     def __init__(
@@ -108,7 +107,6 @@ class Validator(BaseValidator):
         tokenizer: BaseTokenizer,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
-        validation_context: ValidationContext,
         metrics_processor: MetricsProcessor,
         seq_len: int,
         num_tokens_per_microbatch: int,
@@ -126,9 +124,17 @@ class Validator(BaseValidator):
         self.dl_config = replace(config.dataloader, repeat=config.steps != -1)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
+        if config.steps == -1 and self.dp_world_size > 1:
+            raise ValueError(
+                "validation.steps=-1 runs one finite pass (dataloader "
+                "repeat=False). With data-parallel degree > 1, ranks can exhaust "
+                "at different steps and hang on validation collectives. Got "
+                f"dp_world_size={self.dp_world_size}. Set validation.steps to a "
+                "positive count so every rank runs the same number of steps, "
+                "or run with data-parallel degree 1."
+            )
         self.seq_len = seq_len
         self.num_tokens_per_microbatch = num_tokens_per_microbatch
-        self.validation_context = validation_context
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
@@ -138,7 +144,7 @@ class Validator(BaseValidator):
     @torch.no_grad()
     def validate(
         self,
-        model_parts: list[nn.Module],
+        model_parts: list[BaseModel],
         step: int,
     ) -> None:
         sl.add_step_tag("eval")
@@ -210,9 +216,7 @@ class Validator(BaseValidator):
                 )
 
                 for input_dict in microbatch_group:
-                    inputs, labels, extra_kwargs = cast(
-                        BaseModel, model_parts[0]
-                    ).preprocess_inputs(
+                    inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
                         input_dict,
                         parallel_dims=self.parallel_dims,
                         parallelism=self.parallelism,
@@ -223,7 +227,7 @@ class Validator(BaseValidator):
                     if target_mbs is not None:
                         target_mbs.append(labels)  # pyrefly: ignore[bad-argument-type]
 
-                with self.validation_context():
+                with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
                     losses = [] if self.pp_has_last_stage else None
                     self.pp_schedule.eval(
                         arg_mbs=arg_mbs if self.pp_has_first_stage else None,
@@ -243,14 +247,12 @@ class Validator(BaseValidator):
             else:
                 assert len(microbatch_group) == 1
                 input_dict = microbatch_group[0]
-                inputs, labels, extra_kwargs = cast(
-                    BaseModel, model_parts[0]
-                ).preprocess_inputs(
+                inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
                     input_dict,
                     parallel_dims=self.parallel_dims,
                     parallelism=self.parallelism,
                 )
-                with self.validation_context():
+                with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
                     assert len(model_parts) == 1
                     predictions = model_parts[0](inputs, **extra_kwargs)
                     loss_sum, _ = self.loss_fn(predictions, labels)

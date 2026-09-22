@@ -16,7 +16,6 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 
-from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -36,8 +35,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.protocols.model_spec import ModelSpec
-
 from .model import (
     Attention,
     EmbeddingWithNorm,
@@ -46,9 +43,7 @@ from .model import (
     RMSGainCenterNorm,
     SoftCappedLinear,
 )
-from .parallelize import parallelize_muse_glimmer
 from .sharding import set_muse_glimmer_vision_sharding_config
-from .state_dict_adapter import MuseGlimmerStateDictAdapter
 from .vision_encoder import (
     MuseGlimmerVisionAdapter,
     MuseGlimmerVisionEncoder,
@@ -56,7 +51,6 @@ from .vision_encoder import (
 )
 
 __all__ = [
-    "parallelize_muse_glimmer",
     "set_muse_glimmer_vision_sharding_config",
     "MuseGlimmerModel",
     "muse_glimmer_configs",
@@ -393,6 +387,7 @@ def _muse_glimmer_config(
         set_muse_glimmer_vision_sharding_config(vision_encoder, vision_adapter)
 
     return MuseGlimmerModel.Config(
+        max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
         # Token embedding bundled with its scaleless norm so the norm travels
@@ -538,7 +533,7 @@ def model_registry(
     seq_len: int | None = None,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> MuseGlimmerModel.Config:
     get_config, max_context_len = muse_glimmer_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -551,21 +546,4 @@ def model_registry(
         validate_converter_compatibility(converters)
         for c in converters:
             c.build().convert(config)
-    return ModelSpec(
-        name="muse_glimmer",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_muse_glimmer,
-        pipelining_fn=partial(
-            pipeline_with_first_stage_modules,
-            first_stage_module_fqns=(
-                "vision_encoder",
-                "vision_adapter",
-                "vision_projection",
-                "perception_emb_norm",
-            ),
-        ),
-        post_optimizer_build_fn=None,
-        state_dict_adapter=MuseGlimmerStateDictAdapter,
-    )
+    return config

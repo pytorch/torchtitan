@@ -98,6 +98,63 @@ source = HuggingFaceStreamingSource.Config(
 )
 ```
 
+### Hub rate limits on multi-node jobs
+
+Streaming `allenai/c4` from the Hub happens at trainer init: every rank calls
+`datasets.load_dataset`. A large job (for example 48 nodes) can hit Hugging Face
+HTTP 429.
+
+Download the dataset once onto shared storage, then point `path` at that
+directory. `HuggingFaceStreamingSource.Config.path` and
+`HuggingFaceRandomAccessSource.Config.path` accept a Hub id or a local directory
+that `datasets.load_dataset` accepts.
+
+Recipes use the `en` config. Download that subset (plus `README.md`, which
+declares the config) rather than the full multilingual dump.
+
+```bash
+huggingface-cli download allenai/c4 --repo-type dataset --include "en/*" --include "README.md" --local-dir /datasets/c4
+```
+
+```python
+from huggingface_hub import snapshot_download
+
+snapshot_download(
+    repo_id="allenai/c4",
+    repo_type="dataset",
+    allow_patterns=["en/*", "README.md"],
+    local_dir="/datasets/c4",
+)
+```
+
+Recipes such as `llama3_8b` use `ConcatThenSplitPackingConfig(dataset=DATASETS["c4"])`.
+Replace the source path, or construct the source directly:
+
+```python
+from dataclasses import replace
+
+from torchtitan.components.data import HuggingFaceStreamingSource
+from torchtitan.hf_datasets.text_datasets import DATASETS
+
+c4 = DATASETS["c4"]
+c4 = replace(c4, source=replace(c4.source, path="/datasets/c4"))
+
+source = HuggingFaceStreamingSource.Config(
+    path="/datasets/c4",
+    name="en",
+    split="train",
+)
+```
+
+If the corpus is fully materialized, use `HuggingFaceRandomAccessSource` with the
+same `path`, `name`, and `split`.
+
+Optionally export `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN` for authenticated Hub
+quota. A token does not remove the need to pre-download on large clusters.
+
+Debug recipes already use `DATASETS["c4_test"]` (local JSON under
+`tests/assets/c4_test/`) and do not hit the Hub.
+
 ## Adding your own source -- Example: Pretokenized data
 
 This example uses token offsets to expose one pretokenized document per index, then reuses the normal processing and packing configs.

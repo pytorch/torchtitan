@@ -56,3 +56,12 @@ model_spec = model_registry(
 For parallelisms, for float8 with rowwise scaling, all distributed communication is done in high precision.
 
 For scaling strategy, we support rowwise dynamic scaling (alpha).
+
+### FSDP-managed weights
+
+With FSDP, persistent dense and expert parameters and checkpoint state remain
+in high precision. After each all-gather, FSDP builds and owns separate Float8
+weight operands for FPROP and DGRAD, then releases the high-precision all-gather
+output. With `reshard_after_forward=False`, those operands are reused across
+pipeline microbatches. With `reshard_after_forward=True`, FSDP frees them after
+forward and refills the same tensor objects before backward.

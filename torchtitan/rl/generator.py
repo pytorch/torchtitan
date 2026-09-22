@@ -36,9 +36,9 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
@@ -678,7 +678,7 @@ class VLLMGenerator(Configurable):
 
     Args:
         config: Generator-specific configuration.
-        model_spec: TorchTitan model specification.
+        model_config: TorchTitan model configuration.
         model_path: Path to the HF model checkpoint.
         compile_config: Per-layer torch.compile config shared with the
             trainer so both sides compile identically.
@@ -806,7 +806,7 @@ class VLLMGenerator(Configurable):
         self,
         config: Config,
         *,
-        model_spec: ModelSpec,
+        model_config: Decoder.Config,
         model_path: str,
         compile_config: CompileConfig | None,
         max_num_seqs: int,
@@ -827,7 +827,7 @@ class VLLMGenerator(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
-        self.model_spec = model_spec
+        self.model_config = model_config
 
         self._max_num_seqs = max_num_seqs
 
@@ -847,7 +847,7 @@ class VLLMGenerator(Configurable):
 
         # Register TorchTitan model + parser with vLLM
         register_to_vllm(
-            model_spec,
+            model_config,
             parallelism=config.parallelism,
             compile_config=compile_config,
             checkpointer_config=config.checkpointer,
@@ -855,7 +855,7 @@ class VLLMGenerator(Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        attention_backend = model_spec.model.first_full_attention_backend
+        attention_backend = model_config.first_full_attention_backend
         assert isinstance(
             attention_backend,
             (VarlenInnerAttention.Config, FlexInnerAttention.Config),
@@ -876,7 +876,7 @@ class VLLMGenerator(Configurable):
         enable_ep = config.parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
-            # config is sourced from torchtitan's ModelSpec via
+            # config is sourced from TorchTitan's model config via
             # ``config_format=TORCHTITAN_CONFIG_FORMAT`` (no config.json
             # read), but vLLM still uses this path to locate the
             # tokenizer assets and the safetensors weight shards.
@@ -884,7 +884,7 @@ class VLLMGenerator(Configurable):
             trust_remote_code=True,
             # Use the torchtitan custom config parser (registered by
             # register_to_vllm above). It builds PretrainedConfig from
-            # ModelSpec instead of reading config.json from disk.
+            # model config instead of reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,
             tensor_parallel_size=config.parallelism.tensor_parallel_degree,
@@ -911,7 +911,7 @@ class VLLMGenerator(Configurable):
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
         )
-        engine_kwargs["max_model_len"] = model_spec.max_context_length
+        engine_kwargs["max_model_len"] = model_config.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
@@ -1340,11 +1340,10 @@ class VLLMGenerator(Configurable):
         model = self._get_model()
         model_sd = model.model.state_dict()
         await self._get_spmd_state_dict(model_sd, model=model)
-        # QKVLinear's state_dict hook produces wq/wk/wv copies, so the in-place
-        # fill above does not reach wqkv. Re-apply via load_state_dict to run its
-        # merge hook. Other params share storage with model_sd, so reloading them
-        # is a harmless self-copy; only fused wqkv is rebuilt.
-        # TODO: investigate can we avoid the copy and properly load fused qkv weights
+        # Fused grouped experts still expose hook-produced w1/w3 copies, so the
+        # in-place fill above does not reach their physical w13 parameter.
+        # Re-apply the state dict to run that module's merge hook. Other params,
+        # including native QKVLinear.wqkv, share storage with model_sd.
         model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:

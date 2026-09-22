@@ -7,7 +7,7 @@
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -219,7 +219,7 @@ class GraphTrainingEngine(TrainingEngine):
             model = self.model_parts[0]
 
             with sl.log_trace_span("preprocess_inputs"):
-                inputs, labels, extra_kwargs = cast(BaseModel, model).preprocess_inputs(
+                inputs, labels, extra_kwargs = model.preprocess_inputs(
                     microbatch.to_input_dict(self.device, non_blocking=True),
                     parallel_dims=self.parallel_dims,
                     parallelism=self.config.parallelism,
@@ -318,11 +318,10 @@ class GraphTrainingEngine(TrainingEngine):
                     self.loss_fn,
                     accumulate_gradients=gradient_state is not None,
                 )
-                trace_context = dist_utils.get_spmd_context(
+                with dist_utils.get_spmd_context(
                     parallel_dims=self.parallel_dims,
                     spmd_typechecking=False,
-                )
-                with trace_context(), log_timer("minimal_fx_tracer"):
+                ), log_timer("minimal_fx_tracer"):
                     self._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,
@@ -375,7 +374,10 @@ class GraphTrainingEngine(TrainingEngine):
                 ),
                 runtime_meshes=runtime_meshes,
             )
-        with self.train_context():
+        with dist_utils.get_spmd_context(
+            parallel_dims=self.parallel_dims,
+            spmd_typechecking=self.config.debug.spmd_typechecking,
+        ):
             outputs = self._graph_runner(
                 inputs,
                 labels,

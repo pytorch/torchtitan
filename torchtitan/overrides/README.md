@@ -226,20 +226,19 @@ sharding config on the pre-override modules) and before any component is built:
 6. Log every replacement.
 
 ```
-INFO: [Override] fused_swiglu: model_spec.model.layers.0.feed_forward FeedForward.Config -> FeedForward.Config
-INFO: [Override] fused_swiglu: model_spec.model.layers.1.feed_forward FeedForward.Config -> FeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.0.feed_forward FeedForward.Config -> FeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.1.feed_forward FeedForward.Config -> FeedForward.Config
 ...
 INFO: Applied 32 override(s)
 ```
 
-The model config is reached even though it is nested under a non-`Configurable`
-`ModelSpec`: `ModelSpec.traverse` exposes its `model` entry to the traversal.
-FQNs are kept as full paths from the `Trainer.Config` root — the model config is
-`model_spec.model` and a component is `model_spec.model.layers.0.feed_forward`.
-Preserving the full path (rather than resetting to bare model names) is what lets
-per-node conflict detection recognize a whole-model override as an ancestor of a
-component override. (This differs from converter `filter_fqns`, which are bare
-because converters traverse the model config directly.)
+The model config is a `Configurable.Config` nested directly at `model` in the
+trainer config. FQNs are kept as full paths from the `Trainer.Config` root, so a
+component is `model.layers.0.feed_forward`. Preserving the full path (rather
+than resetting to bare model names) lets per-node conflict detection recognize
+a whole-model override as an ancestor of a component override. (This differs
+from converter `filter_fqns`, which are bare because converters traverse the
+model config directly.)
 
 ### External packages
 
@@ -293,7 +292,7 @@ not logged as replacements and can still be handled by a subclass-specific
 override.
 
 The FQN is the full path from the `Trainer.Config` root, e.g. a model component
-is `model_spec.model.layers.0.feed_forward` and the optimizer is `optimizer`.
+is `model.layers.0.feed_forward` and the optimizer is `optimizer`.
 Globs with `*` (which crosses `.`) keep selectors readable.
 
 ```python
@@ -361,10 +360,8 @@ Overrides traverse the whole `Trainer.Config`, so the optimizer, loss,
 dataloader, and validator configs are overridable too — not only model
 components. For example, an emerging or mixed-precision optimizer can be swapped
 in by targeting `OptimizersContainer.Config` without editing a config registry
-function. The model config is reached via `ModelSpec.traverse` (above); the model
-config itself is a valid target (whole-model swap), while `ModelSpec` is not — a
-`target` must be a `Configurable.Config` subclass, so a plain class like
-`ModelSpec` is rejected at registration.
+function. The model config itself is a valid target for a whole-model swap
+because it is a `Configurable.Config` subclass.
 
 ## Interaction with Converters and Transforms
 
@@ -414,7 +411,7 @@ model's physical layout without hook-produced copies.
 
 Parallelism is expressed entirely through the `Module` protocol: a replacement
 satisfies `init_states` and declares a `ShardingConfig` for the states and
-activations it wants sharded. `Module.parallelize()` reads that `ShardingConfig`
+activations it wants sharded. `Module._parallelize()` reads that `ShardingConfig`
 exactly as it does for core modules, so an override composes with TP/FSDP by
 declaring its own sharding — nothing model-specific is required, and the
 mechanism deliberately stays config-driven rather than depending on imperative
@@ -498,7 +495,7 @@ RoPE is an ordinary component override.
 |------|------|
 | `torchtitan/config/override.py` | The mechanism: `OverrideConfig`, `Override`, `override`, `derive`, `apply_overrides`, `clear_overrides`. |
 | `torchtitan/config/__init__.py` | Re-exports the override API. |
-| `torchtitan/protocols/model_spec.py` | `ModelSpec.traverse` exposes the nested model config to the traversal. |
+| `torchtitan/protocols/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field; applies overrides after `update_from_config`, before builds. |
 | `torchtitan/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
 | `tests/unit_tests/cpu/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
