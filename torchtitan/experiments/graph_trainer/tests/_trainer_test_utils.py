@@ -50,6 +50,7 @@ def single_device_parallel_dims() -> Iterator[ParallelDims]:
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
         parallel_dims.build_mesh()
         yield parallel_dims

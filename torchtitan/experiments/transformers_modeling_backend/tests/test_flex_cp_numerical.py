@@ -61,6 +61,7 @@ def main():
         pp=1,
         ep=1,
         world_size=world,
+        enable_sequence_parallel=False,
     )
 
     # Build the job config, tweak for a small deterministic run.

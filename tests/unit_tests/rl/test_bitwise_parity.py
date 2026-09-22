@@ -121,11 +121,11 @@ def build_trainer_model(
         pp=parallelism.pipeline_parallel_degree,
         ep=parallelism.expert_parallel_degree,
         world_size=dist.get_world_size(),
+        enable_sequence_parallel=parallelism.enable_sequence_parallel,
     )
     train_context = dist_utils.get_spmd_context(
         parallel_dims=parallel_dims,
         spmd_typechecking=False,
-        dense_sp_enabled=parallelism.enable_sequence_parallel,
     )
 
     dist_utils.set_determinism(

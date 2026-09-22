@@ -112,7 +112,7 @@ def set_spmd_meshes(
     *,
     dense_mesh: DeviceMesh,
     sparse_mesh: DeviceMesh | None,
-    dense_sp_enabled: bool = False,
+    dense_sp_enabled: bool,
 ) -> None:
     """Register the SPMD meshes for dense and sparse runtime regions."""
     _MESH_TLS.dense_mesh = dense_mesh
