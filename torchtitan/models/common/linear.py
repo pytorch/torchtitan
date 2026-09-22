@@ -307,18 +307,6 @@ class PartialBiasLinear(Linear):
         return self._unflatten_output(output)
 
 
-def get_parallel_linear_cls(
-    config: Linear.Config,
-) -> type[ColumnParallelLinear] | type[RowParallelLinear] | None:
-    """Return the canonical TP boundary class for a linear config."""
-    owner = config._owner
-    if owner is not None and issubclass(owner, ColumnParallelLinear):
-        return ColumnParallelLinear
-    if owner is not None and issubclass(owner, RowParallelLinear):
-        return RowParallelLinear
-    return None
-
-
 __all__ = [
     "CastLinear",
     "ColumnParallelLinear",
@@ -326,5 +314,4 @@ __all__ = [
     "PartialBiasLinear",
     "RowParallelLinear",
     "RouterGateLinear",
-    "get_parallel_linear_cls",
 ]

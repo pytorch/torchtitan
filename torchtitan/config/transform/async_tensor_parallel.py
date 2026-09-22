@@ -16,7 +16,6 @@ from torchtitan.models.common.async_linear import (
 )
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    get_parallel_linear_cls,
     Linear,
     RowParallelLinear,
 )
@@ -45,8 +44,13 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
             return model
 
         for fqn, config, parent, attr in list(model.traverse(Linear.Config)):
-            parallel_cls = get_parallel_linear_cls(config)
-            if parallel_cls is None:
+            owner = config._owner
+            assert owner is not None
+            if issubclass(owner, ColumnParallelLinear):
+                parallel_cls = ColumnParallelLinear
+            elif issubclass(owner, RowParallelLinear):
+                parallel_cls = RowParallelLinear
+            else:
                 continue
             if type(config) is not parallel_cls.Config:
                 projection_name = fqn or type(config).__qualname__

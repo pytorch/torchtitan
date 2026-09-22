@@ -23,7 +23,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    get_parallel_linear_cls,
     Linear,
     PartialBiasLinear,
     RowParallelLinear,
@@ -147,14 +146,6 @@ class TestLinear(unittest.TestCase):
 
 
 class TestPartialBiasLinear(unittest.TestCase):
-    def test_is_not_a_parallel_boundary(self):
-        config = PartialBiasLinear.Config(
-            in_features=4,
-            out_features=2,
-            bias=True,
-        )
-        self.assertIsNone(get_parallel_linear_cls(config))
-
     def test_requires_bias(self):
         with self.assertRaisesRegex(ValueError, "requires bias=True"):
             PartialBiasLinear.Config(

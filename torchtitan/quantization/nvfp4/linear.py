@@ -29,7 +29,11 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import get_parallel_linear_cls, Linear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RowParallelLinear,
+)
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 
@@ -365,7 +369,10 @@ class NVFP4Linear(Linear):
                         }
                     ),
                 }
-                if get_parallel_linear_cls(self) is not None:
+                if isinstance(
+                    instance,
+                    (ColumnParallelLinear, RowParallelLinear),
+                ):
                     # The explicit TP class owns its collective in forward.
                     # Making the entire module local would hide that boundary.
                     instance._sharding_config = replace(
