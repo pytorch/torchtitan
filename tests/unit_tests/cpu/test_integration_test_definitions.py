@@ -117,6 +117,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "deepseek_v3_fsdp+hybridep+compile",
         "dist_gemm",
         "float8",
+        "float8_grouped_experts_fsdp",
         "fsdp+tp+pp+compile+float8",
         "fsdp_symm_mem",
         "hsdp+cp+compile+float8",
@@ -130,6 +131,7 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in build_b200_tests_list()} == {
         "kimi_k3_mm",
         "mxfp8_linear_fsdp",
+        "nvfp4_linear_fsdp",
     }
     assert "kimi_k3_mm" not in {test.test_name for test in build_model_tests_list()}
 
