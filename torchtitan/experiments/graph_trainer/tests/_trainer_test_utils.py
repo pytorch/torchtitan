@@ -133,6 +133,7 @@ def build_minimal_trainer(
             dataloader=SimpleNamespace(max_num_documents=None),
             training=TrainingConfig(),
             parallelism=SimpleNamespace(
+                enable_sequence_parallel=False,
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
             ),
@@ -146,7 +147,7 @@ def build_minimal_trainer(
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
             training=TrainingConfig(),
-            parallelism=SimpleNamespace(),
+            parallelism=SimpleNamespace(enable_sequence_parallel=False),
         )
 
     engine.config = trainer.config
