@@ -44,17 +44,17 @@ def _multimodal_collator_config(
 def qwen35_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_spec = model_registry("debugmodel", seq_len=seq_len)
+    model_config = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
@@ -68,8 +68,8 @@ def qwen35_debugmodel(
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -81,9 +81,7 @@ def qwen35_debugmodel_varlen_attn(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = qwen35_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
-    )
+    config.model = model_registry("debugmodel", seq_len=seq_len, attn_backend="varlen")
     config.training.disable_cuda_graphs = True
     return config
 
@@ -91,19 +89,19 @@ def qwen35_debugmodel_varlen_attn(
 def qwen35_debugmodel_moe(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_spec = model_registry(
+    model_config = model_registry(
         "debugmodel_moe", seq_len=seq_len, moe_comm_backend="standard"
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
@@ -112,8 +110,8 @@ def qwen35_debugmodel_moe(
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -130,16 +128,16 @@ def qwen35_debugmodel_moe(
 
 
 def qwen35_0_8b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("0.8B", seq_len=seq_len)
+    model_config = model_registry("0.8B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Qwen3.5-0.8B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
@@ -148,8 +146,8 @@ def qwen35_0_8b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -161,16 +159,16 @@ def qwen35_0_8b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_2b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("2B", seq_len=seq_len)
+    model_config = model_registry("2B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Qwen3.5-2B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
@@ -179,8 +177,8 @@ def qwen35_2b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=default_adamw(lr=5e-3),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -192,16 +190,16 @@ def qwen35_2b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_4b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("4B", seq_len=seq_len)
+    model_config = model_registry("4B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Qwen3.5-4B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
@@ -210,8 +208,8 @@ def qwen35_4b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -223,16 +221,16 @@ def qwen35_4b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_9b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("9B", seq_len=seq_len)
+    model_config = model_registry("9B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Qwen3.5-9B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
@@ -241,8 +239,8 @@ def qwen35_9b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -255,16 +253,16 @@ def qwen35_9b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_27b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("27B", seq_len=seq_len)
+    model_config = model_registry("27B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Qwen3.5-27B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
@@ -273,8 +271,8 @@ def qwen35_27b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -287,16 +285,18 @@ def qwen35_27b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("35B-A3B", seq_len=seq_len, moe_comm_backend="standard")
+    model_config = model_registry(
+        "35B-A3B", seq_len=seq_len, moe_comm_backend="standard"
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Qwen3.5-35B-A3B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
@@ -305,8 +305,8 @@ def qwen35_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
@@ -321,18 +321,18 @@ def qwen35_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_122b_a10b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry(
+    model_config = model_registry(
         "122B-A10B", seq_len=seq_len, moe_comm_backend="standard"
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Qwen3.5-122B-A10B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
@@ -341,8 +341,8 @@ def qwen35_122b_a10b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
@@ -357,18 +357,18 @@ def qwen35_122b_a10b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_397b_a17b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry(
+    model_config = model_registry(
         "397B-A17B", seq_len=seq_len, moe_comm_backend="standard"
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Qwen3.5-397B-A17B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
             collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
@@ -377,8 +377,8 @@ def qwen35_397b_a17b(seq_len: int | None = None) -> Trainer.Config:
         optimizer=default_adamw(lr=5e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),

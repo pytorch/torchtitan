@@ -98,8 +98,7 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
 def test_llama3_debug_config_defaults_to_short_context() -> None:
     config = llama3_debugmodel()
 
-    assert config.model_spec is not None
-    assert config.model_spec.max_context_length == 2048
+    assert config.model.max_context_length == 2048
     assert config.training.max_context_length == 2048
 
 

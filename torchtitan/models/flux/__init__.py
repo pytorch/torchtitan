@@ -17,8 +17,6 @@ from torchtitan.config.transform import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 
-from torchtitan.protocols.model_spec import ModelSpec
-
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
 from .model.layers import (
@@ -32,13 +30,10 @@ from .model.layers import (
     SingleStreamBlock,
 )
 from .model.model import FluxModel
-from .model.state_dict_adapter import FluxStateDictAdapter
-from .parallelize import parallelize_flux
 
 __all__ = [
     "FluxModel",
     "flux_configs",
-    "parallelize_flux",
 ]
 
 _ZERO_LINEAR = {"weight": nn.init.zeros_, "bias": nn.init.zeros_}
@@ -552,39 +547,19 @@ def _flux_debug() -> FluxModel.Config:
 # The default lengths are ``_flux_seq_len(img_size, max_t5_encoding_len)`` for
 # the img_size / T5 length each shipped trainer config uses.
 flux_configs = {
-    "flux-dev": (_flux_dev, 768),
-    "flux-schnell": (_flux_schnell, 512),
-    "flux-debug": (_flux_debug, 512),
+    "flux-dev": _flux_dev,
+    "flux-schnell": _flux_schnell,
+    "flux-debug": _flux_debug,
 }
 
 
 def model_registry(
     flavor: str,
     converters: list[ModelConfigConverter.Config] | None = None,
-    *,
-    seq_len: int | None = None,
-) -> ModelSpec:
-    # Flux has no RoPE cache to size, so seq_len only reports the context
-    # length (latent patches + T5 encodings) on the ModelSpec.
-    get_config, max_context_len = flux_configs[flavor]
-    context_len = seq_len or max_context_len
-    if context_len > max_context_len:
-        raise ValueError(
-            f"Requested seq_len {context_len} exceeds max context length "
-            f"{max_context_len} for flavor {flavor}"
-        )
-    config = get_config()
+) -> FluxModel.Config:
+    config = flux_configs[flavor]()
     if converters is not None:
         validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
-    return ModelSpec(
-        name="flux",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_flux,
-        pipelining_fn=None,
-        post_optimizer_build_fn=None,
-        state_dict_adapter=FluxStateDictAdapter,
-    )
+    return config

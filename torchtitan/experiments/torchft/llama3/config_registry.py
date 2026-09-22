@@ -26,10 +26,10 @@ from . import model_registry
 def llama3_torchft_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> FaultTolerantTrainer.Config:
-    model_spec = model_registry("debugmodel", seq_len=seq_len)
+    model_config = model_registry("debugmodel", seq_len=seq_len)
     return FaultTolerantTrainer.Config(
         loss=CrossEntropyLoss.Config(
-            global_vocab_size=decoder_vocab_size(model_spec),
+            global_vocab_size=decoder_vocab_size(model_config),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         profiler=Profiler.Config(
@@ -39,7 +39,7 @@ def llama3_torchft_debugmodel(
             profiler_warmup=0,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
+        model=model_config,
         optimizer=TorchFTOptimizersContainer.Config(
             param_groups=default_adamw(lr=8e-4).param_groups
         ),
@@ -50,8 +50,8 @@ def llama3_torchft_debugmodel(
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=100,
         ),
         dataloader=GrainDataLoader.Config(

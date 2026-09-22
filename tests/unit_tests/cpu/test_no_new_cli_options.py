@@ -424,8 +424,8 @@ class TestCliOptionsFrozen(unittest.TestCase):
         """The escape hatch the freeze depends on."""
         hints = typing.get_type_hints(Trainer.Config, include_extras=True)
         self.assertTrue(
-            _is_suppressed(hints["model_spec"]),
-            "Trainer.Config.model_spec must stay tyro.conf.Suppress: it is "
+            _is_suppressed(hints["model"]),
+            "Trainer.Config.model must stay tyro.conf.Suppress: it is "
             "what keeps the model config tree off the command line, and "
             "therefore what makes the frozen CLI workable.",
         )

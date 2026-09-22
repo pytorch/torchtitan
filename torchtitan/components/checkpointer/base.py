@@ -444,11 +444,12 @@ class BaseCheckpointManager(Configurable, ABC):
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
         """Whether automatic loading may select ``checkpoint_dir``."""
 
-    def _find_load_step(self, folder: str = "") -> int:
+    def _find_load_step(self, folder: str = "", max_step: int | None = None) -> int:
         """The highest step in ``folder`` that can actually be loaded.
 
         Args:
             folder: Directory to scan. Defaults to ``self.folder``.
+            max_step: Ignore checkpoints after this step when provided.
 
         Returns:
             The step number, or -1 when the folder holds no loadable checkpointer.
@@ -467,6 +468,8 @@ class BaseCheckpointManager(Configurable, ABC):
         for dirname in self._storage.listdir(folder):
             step = self._parse_step(dirname)
             if step is None:
+                continue
+            if max_step is not None and step > max_step:
                 continue
             if self._is_resumable_checkpoint(filesystem.join(folder, dirname)):
                 resumable_steps.append(step)

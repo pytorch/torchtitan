@@ -13,10 +13,9 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.config import TrainingConfig
+from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.distributed.utils import get_spmd_context
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
@@ -86,7 +85,6 @@ def build_minimal_trainer(
     engine.model_parts = [model]
     engine.loss_fn = CrossEntropyLoss.Config().build()
     engine.parallel_dims = parallel_dims
-    engine.train_context = get_spmd_context(parallel_dims=parallel_dims)
     engine.forward_backward_body_fn = engine._non_pp_forward_backward_body
     engine.model_config = model_config
     engine.device = torch.device("cuda")
@@ -124,13 +122,14 @@ def build_minimal_trainer(
                     ),
                 ),
             ),
-            model_spec=SimpleNamespace(model=model_config),
+            model=model_config,
             activation_checkpoint={
                 "none": None,
                 "selective": SelectiveAC.Config(),
                 "full": FullAC.Config(),
             }[activation_checkpoint_mode],
             dataloader=SimpleNamespace(max_num_documents=None),
+            debug=DebugConfig(),
             training=TrainingConfig(),
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,

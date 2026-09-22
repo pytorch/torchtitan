@@ -16,7 +16,7 @@ class TestDeepSeekV4Flops(unittest.TestCase):
         model_config = model_registry(
             "deepseek_v4_flash",
             n_mtp_layers=1,
-        ).model
+        )
 
         with torch.device("meta"):
             model = model_config.build()

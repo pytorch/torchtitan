@@ -33,9 +33,6 @@ from torchtitan.config import (
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.muse_glimmer import model_registry as muse_glimmer_model_registry
-from torchtitan.models.muse_glimmer.state_dict_adapter import (
-    MuseGlimmerStateDictAdapter,
-)
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
@@ -88,9 +85,9 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
     data; see ``README.md``.
     """
     seq_len = 4096
-    model_spec = model_registry("1.7B", seq_len=seq_len, attn_backend="varlen")
+    model_config = model_registry("1.7B", seq_len=seq_len, attn_backend="varlen")
     return Controller.Config(
-        model_spec=model_spec,
+        model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
@@ -130,7 +127,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
-                    global_vocab_size=decoder_vocab_size(model_spec),
+                    global_vocab_size=decoder_vocab_size(model_config),
                 ),
             ),
         ),
@@ -160,7 +157,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
     # TODO: use mixed precision (fp32 master + bf16 compute) via FSDP + activation
     # checkpointing, which is more memory-efficient and could keep the split generator-heavy.
     config = rl_grpo_qwen3_1_7b_search_r1()
-    config.model_spec = model_registry(
+    config.model = model_registry(
         "8B",
         seq_len=config.trainer.training.max_context_length,
         attn_backend="varlen",
@@ -175,7 +172,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
             loss_config,
             loss_fn=dataclasses.replace(
                 loss_config.loss_fn,
-                global_vocab_size=decoder_vocab_size(config.model_spec),
+                global_vocab_size=decoder_vocab_size(config.model),
             ),
         ),
         parallelism=dataclasses.replace(
@@ -208,7 +205,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
     """
     seq_len = 4096
-    model_spec = model_registry(
+    model_config = model_registry(
         "30B-A3B",
         seq_len=seq_len,
         attn_backend="varlen",
@@ -223,7 +220,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     ]
 
     config = Controller.Config(
-        model_spec=model_spec,
+        model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-30B-A3B",
         num_generators=2,  # TODO: TBD -- number of generator proc meshes to spawn
         async_loop=AsyncLoopConfig(
@@ -261,7 +258,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             loss=DAPOLoss.Config(
                 ratio_clip_low=0.2,
                 ratio_clip_high=0.28,
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
             override=OverrideConfig(imports=list(perf_imports)),
         ),
@@ -311,17 +308,13 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
       headroom it needs.
 
     varlen attention is used for both roles so the trainer and the vLLM generator run
-    one ModelSpec. The state-dict adapter handles the HF checkpoint's Q/K RoPE layout
+    one model config. The state-dict adapter handles the HF checkpoint's Q/K RoPE layout
     on load, and the renderer handles Muse Glimmer's harmony chat
     format and ATEM tool calls.
     """
-    model_spec = muse_glimmer_model_registry("30B", attn_backend="varlen")
-    model_spec = dataclasses.replace(
-        model_spec, state_dict_adapter=MuseGlimmerStateDictAdapter
-    )
-
+    model_config = muse_glimmer_model_registry("30B", attn_backend="varlen")
     return Controller.Config(
-        model_spec=model_spec,
+        model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Muse-Glimmer-30B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
@@ -359,7 +352,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
-                    global_vocab_size=decoder_vocab_size(model_spec),
+                    global_vocab_size=decoder_vocab_size(model_config),
                 ),
             ),
         ),

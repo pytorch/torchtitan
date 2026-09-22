@@ -34,6 +34,7 @@ from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward, SigmoidGatedFeedForward
 from .linear import CastLinear, Linear, PartialBiasRowwiseLinear, RouterGateLinear
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
+from .multimodal import MultimodalModel
 from .nn_modules import (
     Conv1d,
     Conv2d,
@@ -74,6 +75,7 @@ __all__ = [
     "Linear",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
+    "MultimodalModel",
     "PartialBiasRowwiseLinear",
     "RMSNorm",
     "RoPE",

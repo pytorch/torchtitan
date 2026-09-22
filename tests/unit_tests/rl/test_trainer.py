@@ -64,7 +64,6 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
 
     config = Trainer.Config(training=TrainingConfig(disable_cuda_graphs=True))
     model_config = MagicMock()
-    model_spec = SimpleNamespace(model=model_config)
 
     with patch(
         "torchtitan.rl.trainer.validate_model_training_config",
@@ -73,7 +72,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
         with pytest.raises(ValidationReachedError):
             Trainer(
                 config,
-                model_spec=model_spec,
+                model_config=model_config,
                 compile_config=CompileConfig(),
                 max_num_documents=None,
                 output_dir="",
