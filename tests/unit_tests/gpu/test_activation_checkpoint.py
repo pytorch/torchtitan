@@ -84,16 +84,22 @@ class TestApplyAC(unittest.TestCase):
         ).build().apply(model_with_force_last)
         flops_with_force_last = get_bw_flops(model_with_force_last)
 
-        # 5. Full AC
+        # 5. Full AC stops recomputation once backward has all needed tensors.
         model_with_full_ac = ToyModule()
         FullAC.Config().build().apply(model_with_full_ac)
         flops_full_ac = get_bw_flops(model_with_full_ac)
+
+        # 6. Disabling early-stop recomputes the entire checkpointed function.
+        model_with_full_ac_no_early_stop = ToyModule()
+        FullAC.Config(early_stop=False).build().apply(model_with_full_ac_no_early_stop)
+        flops_full_ac_no_early_stop = get_bw_flops(model_with_full_ac_no_early_stop)
 
         self.assertEqual(flops_no_ac, 8.0)
         self.assertEqual(flops_selective_ac, 9.0)
         self.assertEqual(flops_with_force_first, 10.0)
         self.assertEqual(flops_with_force_last, 11.0)
-        self.assertEqual(flops_full_ac, 12.0)
+        self.assertEqual(flops_full_ac, 10.0)
+        self.assertEqual(flops_full_ac_no_early_stop, 12.0)
 
     def test_mem(self):
         if not torch.cuda.is_available():

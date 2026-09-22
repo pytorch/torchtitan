@@ -170,21 +170,28 @@ class ActivationCheckpointing(Configurable):
 
 
 class FullAC(ActivationCheckpointing):
-    """Recompute the entire transformer block during the backward pass."""
+    """Checkpoint each transformer block and recompute it during backward."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
-        pass
+        early_stop: bool = True
+        """
+        Stop recomputation once all tensors needed by backward are available.
+
+        Disable this when a checkpointed region contains asynchronous effects that
+        must finish before recomputation returns.
+        """
 
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
+        config = cast("FullAC.Config", self.config)
         return ptd_checkpoint_wrapper(
             module,
-            preserve_rng_state=self.config.preserve_rng_state,
-            determinism_check=self.config.determinism_check,
-            early_stop=False,
-            debug=self.config.debug,
+            preserve_rng_state=config.preserve_rng_state,
+            determinism_check=config.determinism_check,
+            early_stop=config.early_stop,
+            debug=config.debug,
         )
 
 
