@@ -35,9 +35,10 @@ dispatch and computation.
   disabled and routed-expert activations remain replicated.
 - **Router gate**: weights `Replicate`, output stays DTensor.
 - **Shared experts** (w13/w2): dense-family TP plan. `ColumnParallelLinear`
-  gathers the w13 input. The local w2 projection produces `Partial`, and its
-  declarative boundary reduces to the routed-expert output layout before the
-  two paths are added.
+  gathers the w13 input. The local w2 projection produces `Partial`. With EP
+  and SP off, it stays `Partial` until the shared and routed paths are added,
+  then the MoE boundary performs the single all-reduce. With SP on, the w2
+  boundary reduces `Partial` to `Shard(0)` before the paths are added.
 - **Routed experts** (`RoutedExperts`): the local SPMD region runs
   dispatch/compute/combine on local tensors while checking its input and
   output layout contracts. The expert-weight `state_shardings` live on its
