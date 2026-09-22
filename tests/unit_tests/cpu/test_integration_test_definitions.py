@@ -131,6 +131,7 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in build_b200_tests_list()} == {
         "kimi_k3_mm",
         "kimi_k3_mm_muon",
+        "kimi_k3_pp4_vp4",
         "mxfp8_linear_fsdp",
         "nvfp4_linear_fsdp",
     }
