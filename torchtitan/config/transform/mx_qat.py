@@ -93,6 +93,15 @@ class MXQATTransform(ModelConfigTransform):
             for fqn, config, parent, attr in model.traverse(config_type):
                 if targets is not None and fqn not in targets:
                     continue
+                if (
+                    config_type is GroupedExperts.Config
+                    and self.activation_fake_quant_config.kernel_preference
+                    != self.weight_fake_quant_config.kernel_preference
+                ):
+                    raise ValueError(
+                        "MX QAT grouped experts require matching activation and weight "
+                        "kernel_preference. Set both TorchAO configs to the same preference."
+                    )
                 replacement = factory(type(config)._owner)
                 new_config = convert_config_type(config, replacement)
                 deltas = {"weight_fake_quant_config": self.weight_fake_quant_config}
