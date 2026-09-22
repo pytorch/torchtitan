@@ -15,7 +15,7 @@ import torch.nn as nn
 from torchtitan.components import validate as validate_module
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.validate import check_steps_compatible_with_dp, Validator
+from torchtitan.components.validate import Validator
 from torchtitan.models.flux import validate as flux_validate_module
 from torchtitan.models.flux.flux_datasets import FluxTrainingMicrobatch
 from torchtitan.models.flux.validate import FluxValidator
@@ -277,11 +277,27 @@ def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
     assert loader.closed
 
 
-def test_check_steps_incompatible_with_dp():
+def _validator_from_init(*, steps: int, dp_world_size: int) -> Validator:
+    return Validator(
+        Validator.Config(steps=steps),
+        parallelism=mock.Mock(),
+        dp_world_size=dp_world_size,
+        dp_rank=0,
+        tokenizer=mock.Mock(),
+        parallel_dims=mock.Mock(),
+        loss_fn=mock.Mock(),
+        validation_context=nullcontext,
+        metrics_processor=mock.Mock(),
+        seq_len=4,
+        num_tokens_per_microbatch=4,
+    )
+
+
+def test_validator_rejects_steps_neg1_when_dp_gt_1():
     with pytest.raises(ValueError, match="hang on validation collectives"):
-        check_steps_compatible_with_dp(-1, dp_world_size=2)
+        _validator_from_init(steps=-1, dp_world_size=2)
 
 
-def test_check_steps_compatible_with_dp():
-    check_steps_compatible_with_dp(-1, dp_world_size=1)
-    check_steps_compatible_with_dp(10, dp_world_size=8)
+def test_validator_accepts_finite_pass_or_positive_steps():
+    _validator_from_init(steps=-1, dp_world_size=1)
+    _validator_from_init(steps=10, dp_world_size=8)

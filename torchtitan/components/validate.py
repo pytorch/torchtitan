@@ -130,7 +130,15 @@ class Validator(BaseValidator):
         self.dl_config = replace(config.dataloader, repeat=config.steps != -1)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
-        check_steps_compatible_with_dp(config.steps, dp_world_size=self.dp_world_size)
+        if config.steps == -1 and self.dp_world_size > 1:
+            raise ValueError(
+                "validation.steps=-1 runs one finite pass (dataloader "
+                "repeat=False). With data-parallel degree > 1, ranks can exhaust "
+                "at different steps and hang on validation collectives. Got "
+                f"dp_world_size={self.dp_world_size}. Set validation.steps to a "
+                "positive count so every rank runs the same number of steps, "
+                "or run with data-parallel degree 1."
+            )
         self.seq_len = seq_len
         self.num_tokens_per_microbatch = num_tokens_per_microbatch
         self.validation_context = validation_context
@@ -297,25 +305,6 @@ class Validator(BaseValidator):
         # Set model back to train mode
         for model in model_parts:
             model.train()
-
-
-def check_steps_compatible_with_dp(steps: int, *, dp_world_size: int) -> None:
-    """Raise if validation.steps=-1 is used with data-parallel degree > 1.
-
-    steps=-1 sets the validation loader to repeat=False. Grain already rejects
-    that under DP (ranks can exhaust at different steps; see
-    TODO(data-finite-dp) in loader.py). The validation loop then all-reduces
-    token counts and loss on the DP mesh every step, so uneven exhaustion hangs.
-    """
-    if steps == -1 and dp_world_size > 1:
-        raise ValueError(
-            "validation.steps=-1 runs one finite pass (dataloader "
-            "repeat=False). With data-parallel degree > 1, ranks can exhaust "
-            "at different steps and hang on validation collectives. Got "
-            f"dp_world_size={dp_world_size}. Set validation.steps to a "
-            "positive count so every rank runs the same number of steps, "
-            "or run with data-parallel degree 1."
-        )
 
 
 def iterate_and_close_dataloader(

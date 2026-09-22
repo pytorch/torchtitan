@@ -21,11 +21,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
-from torchtitan.components.validate import (
-    BaseValidator,
-    check_steps_compatible_with_dp,
-    Validator,
-)
+from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable
 from torchtitan.config.configs import CompileConfig
 from torchtitan.config.override import apply_overrides
@@ -202,13 +198,6 @@ class Trainer(Configurable):
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
             dp_degree, dp_rank = 1, 0
-
-        # Fail before model build: Config cannot check this because
-        # data_parallel_shard_degree defaults to leftover (-1).
-        if config.validator is not None and hasattr(config.validator, "steps"):
-            check_steps_compatible_with_dp(
-                config.validator.steps, dp_world_size=dp_degree
-            )
 
         # metrics logging
         self.metrics_processor = config.metrics.build(
