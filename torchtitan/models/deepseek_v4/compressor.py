@@ -189,50 +189,38 @@ class Indexer(Module):
         seqlen: int,
         ratio: int,
         topk: int,
-    ) -> torch.Tensor:
-        """Select top-k compressed positions per folded query token.
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Select top-k compressed positions and return their live scores.
 
-        Selection is discrete, hence carries no gradient; the full ``[S, Hi, N]``
-        score tensor never enters the autograd graph.  The student logits the
-        indexer distillation loss trains are recomputed with gradient at the
-        selected entries by :meth:`score_selected`.
+        ``topk_indices`` is the discrete routing decision; ``topk_scores`` stays
+        in the autograd graph and is the student input for sparse indexer loss.
+        Causal-invalid slots are returned as ``-1`` indices and ``-inf`` scores.
         """
-        with torch.no_grad():
-            index_score = torch.einsum("shd,td->sht", idx_q, idx_k)
-            index_score = index_score.relu_() * idx_w.unsqueeze(-1)
-            index_score = index_score.sum(dim=1)
-
-            compress_causal_limit = (
-                torch.arange(1, seqlen + 1, device=idx_q.device).unsqueeze(1) // ratio
+        n_compressed = seqlen // ratio
+        topk = min(topk, n_compressed)
+        if topk == 0:
+            shape = (seqlen, 0)
+            return (
+                torch.empty(shape, dtype=torch.int64, device=idx_q.device),
+                idx_q.new_empty(shape),
             )
-            compress_causal_mask = (
-                torch.arange(seqlen // ratio, device=idx_q.device).repeat(seqlen, 1)
-                >= compress_causal_limit
-            )
-            index_score = index_score + torch.where(
-                compress_causal_mask, torch.finfo(idx_q.dtype).min, 0
-            )
-            _, topk_indices = index_score.topk(min(topk, seqlen // ratio), dim=-1)
-            return topk_indices
 
-    @staticmethod
-    def score_selected(
-        idx_q: torch.Tensor,
-        idx_k: torch.Tensor,
-        idx_w: torch.Tensor,
-        topk_indices: torch.Tensor,
-    ) -> torch.Tensor:
-        """Return live indexer scores for the selected compressed positions.
+        index_score = torch.einsum("shd,td->sht", idx_q, idx_k)
+        index_score = index_score.relu() * idx_w.unsqueeze(-1)
+        index_score = index_score.sum(dim=1)
 
-        Unlike :meth:`select`, this runs inside the autograd graph: the returned
-        logits are the student the distillation loss scores, so gradient flows
-        back into the indexer projections.  Slots whose ``topk_indices`` are
-        ``-1`` (not selectable) are marked ``-inf`` and dropped by the loss.
-        """
-        selected_TKD = idx_k[topk_indices.clamp_min(0)]
-        logits_THK = torch.einsum("thd,tkd->thk", idx_q, selected_TKD)
-        scores_TK = (logits_THK.relu() * idx_w.unsqueeze(-1)).sum(dim=1)
-        return scores_TK.masked_fill(topk_indices < 0, -torch.inf)
+        compress_causal_limit = (
+            torch.arange(1, seqlen + 1, device=idx_q.device).unsqueeze(1) // ratio
+        )
+        compress_positions = torch.arange(n_compressed, device=idx_q.device)
+        compress_causal_valid = compress_positions < compress_causal_limit
+        index_score = index_score.masked_fill(~compress_causal_valid, -torch.inf)
+
+        topk_scores, topk_indices = index_score.topk(topk, dim=-1)
+        topk_valid = compress_causal_valid.gather(1, topk_indices)
+        topk_indices = torch.where(topk_valid, topk_indices, -1)
+        topk_scores = topk_scores.masked_fill(~topk_valid, -torch.inf)
+        return topk_indices, topk_scores
 
 
 class SparseIndexerLoss(AuxLoss):

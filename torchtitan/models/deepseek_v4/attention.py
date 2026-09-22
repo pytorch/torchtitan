@@ -234,7 +234,7 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
                         "DSV4FlexInnerAttention requires idx_q, idx_k, "
                         "and idx_w when compress_ratio=4"
                     )
-                cmp_topk = Indexer.select(
+                cmp_topk, topk_scores = Indexer.select(
                     idx_q,
                     idx_k,
                     idx_w,
@@ -242,22 +242,10 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
                     ratio=self.compress_ratio,
                     topk=self.index_topk,
                 )
-                causal_limit = (
-                    torch.arange(1, seqlen + 1, device=q.device).unsqueeze(1)
-                    // self.compress_ratio
-                )
-                # ``select`` keeps raw indices, so non-causal picks become -1 here.
-                cmp_topk = torch.where(cmp_topk < causal_limit, cmp_topk, -1)
                 selected_indices.append(
                     torch.where(cmp_topk >= 0, seqlen + cmp_topk, -1).unsqueeze(0)
                 )
                 if self.training and self.aux_loss is not None and cmp_k is not None:
-                    topk_scores = Indexer.score_selected(
-                        idx_q,
-                        idx_k,
-                        idx_w,
-                        cmp_topk,
-                    )
                     out_transform = self._indexer_loss_transform(
                         q, cmp_k, cmp_topk, topk_scores
                     )

@@ -138,8 +138,8 @@ class TestSparseIndexerLoss(unittest.TestCase):
         )
 
 
-class TestIndexerScoreSelected(unittest.TestCase):
-    def test_score_selected_gives_live_logits_at_selected_entries(self):
+class TestIndexerSelect(unittest.TestCase):
+    def test_select_returns_live_logits_and_masked_indices(self):
         torch.manual_seed(0)
         T, Hi, Di, K = 6, 3, 4, 3
         N = T // 2  # compressed entries for ratio=2
@@ -148,18 +148,21 @@ class TestIndexerScoreSelected(unittest.TestCase):
         idx_k = torch.randn(N, Di, generator=rng)
         idx_w = torch.randn(T, Hi, generator=rng)
 
-        # Mirror DSV4FlexInnerAttention: select raw indices, then pad
-        # causal-invalid picks to -1 before scoring.
-        topk_indices = Indexer.select(idx_q, idx_k, idx_w, seqlen=T, ratio=2, topk=K)
-        causal_limit = torch.arange(1, T + 1).unsqueeze(1) // 2
-        topk_indices = torch.where(topk_indices < causal_limit, topk_indices, -1)
-
-        scores_TK = Indexer.score_selected(idx_q, idx_k, idx_w, topk_indices)
+        topk_indices, scores_TK = Indexer.select(
+            idx_q, idx_k, idx_w, seqlen=T, ratio=2, topk=K
+        )
+        self.assertEqual(topk_indices.shape, (T, K))
         self.assertEqual(scores_TK.shape, (T, K))
-        # An unused slot is -inf in the student logits, so the loss drops it.
+
+        # Invalid causal slots are already represented as -1 / -inf by select.
         self.assertTrue((scores_TK[topk_indices < 0] == -torch.inf).all())
         self.assertTrue(torch.isfinite(scores_TK[topk_indices >= 0]).all())
-        # The student logits carry gradient into the indexer query projection.
+        causal_limit = torch.arange(1, T + 1).unsqueeze(1) // 2
+        valid = topk_indices >= 0
+        expanded_limit = causal_limit.expand_as(topk_indices)
+        self.assertTrue((topk_indices[valid] < expanded_limit[valid]).all())
+
+        # The returned student logits carry gradient into the indexer query path.
         scores_TK[topk_indices >= 0].sum().backward()
         self.assertIsNotNone(idx_q.grad)
         self.assertTrue(torch.isfinite(idx_q.grad).all())
