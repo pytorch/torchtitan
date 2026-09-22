@@ -9,7 +9,7 @@ from torchtitan.models.llama3 import model_registry
 
 
 def test_batch_invariant_flex_converter_pins_kernel_options():
-    model = model_registry("debugmodel", attn_backend="flex").model
+    model = model_registry("debugmodel", attn_backend="flex")
 
     converted = BatchInvariantFlexConverter.Config().build().convert(model)
 

@@ -108,13 +108,6 @@ def _conv_weight_sharding() -> ShardingConfig:
     )
 
 
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
-    "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
-}
-
-
 def set_qwen35_sharding_config(
     config: "Qwen35Model.Config",
     *,
@@ -203,7 +196,6 @@ def _set_qwen35_layer_sharding(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
         _set_shared_expert_gate_sharding(
             # pyrefly: ignore [missing-attribute]
@@ -223,7 +215,7 @@ def _set_shared_expert_gate_sharding(
     module-boundary gather that feeds the gate a Replicate ``x``. Here we only
     add the gate: its weight and local output are Replicate. With SP, the output
     is sliced into the sequence-sharded layout produced by the shared FFN. With
-    SP disabled, it remains Replicate and scales the shared FFN's Partial output.
+    SP disabled, it remains Replicate and scales the shared FFN output.
     ``getattr`` keeps this a no-op when the MoE has no shared expert (``None``);
     Qwen3.5's shared expert always carries the gate.
     """

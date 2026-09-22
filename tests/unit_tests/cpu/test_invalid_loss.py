@@ -45,6 +45,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config.training.disable_cuda_graphs = True
         trainer.config.training.enable_optimizer_cuda_graph = False
         trainer.sdc_replayer = None
+        trainer.ema = None
         trainer.device = torch.device("cpu")
         trainer.num_completed_steps = 1
         trainer.ntokens_seen = 0
@@ -68,7 +69,7 @@ class TestInvalidLoss(unittest.TestCase):
         loop.metrics_processor = MagicMock()
         loop.metrics_processor.should_log.return_value = should_log
 
-        trainer._run_gradient_accumulation = MagicMock(
+        trainer._run_forward_backward = MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(loss_value), [{}])
         )
         trainer._run_optimizer_step = lambda loss_is_finite: (

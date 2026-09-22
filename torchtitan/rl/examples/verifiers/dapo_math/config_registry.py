@@ -28,6 +28,7 @@ from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrategy
 from torchtitan.rl.examples.verifiers import (
+    GenerationServer,
     RewardFromVerifiers,
     VerifiersEnvServer,
     VerifiersRollouter,
@@ -52,7 +53,9 @@ def _math_taskset_config(
     return VerifiersMathTasksetConfig(id=taskset_id, dataset=dataset)
 
 
-def _verifiers_math_rollouter_config() -> VerifiersRollouter.Config:
+def _verifiers_math_rollouter_config(
+    *, max_rollout_tokens: int
+) -> VerifiersRollouter.Config:
     return VerifiersRollouter.Config(
         train_dataset=VerifiersTaskDataset.Config(
             verifiers_taskset=_math_taskset_config("dapo_math"),
@@ -80,6 +83,9 @@ def _verifiers_math_rollouter_config() -> VerifiersRollouter.Config:
             reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
             error_reward=0.0,
         ),
+        generation_server=GenerationServer.Config(
+            max_rollout_tokens=max_rollout_tokens
+        ),
     )
 
 
@@ -91,14 +97,14 @@ def _qwen3_4b_verifiers_config(
 ) -> Controller.Config:
     """Build the Qwen3-4B DAPO-Math configuration using Verifiers."""
     num_validation_samples = 30
-    model_spec = model_registry(
+    model_config = model_registry(
         "4B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
         converters=[LMHeadCastConverter.Config()],
     )
     return Controller.Config(
-        model_spec=model_spec,
+        model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-4B-Base",
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
@@ -109,7 +115,7 @@ def _qwen3_4b_verifiers_config(
             validation=ValidationConfig(num_samples=num_validation_samples),
         ),
         compile=CompileConfig(backend="aot_eager"),
-        rollouter=_verifiers_math_rollouter_config(),
+        rollouter=_verifiers_math_rollouter_config(max_rollout_tokens=max_total_tokens),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
         generator_router=InterGeneratorRouter.Config(
@@ -155,7 +161,7 @@ def _qwen3_4b_verifiers_config(
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
-                    global_vocab_size=decoder_vocab_size(model_spec),
+                    global_vocab_size=decoder_vocab_size(model_config),
                 ),
             ),
         ),

@@ -19,7 +19,6 @@ from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
     spmd_local_context,
     spmd_mesh_size,
-    spmd_sparse_mesh,
 )
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
@@ -79,10 +78,9 @@ class GroupedExperts(Module):
         """Raw expert computation without dispatch/combine.
 
         Shape suffixes here describe logical grouped-mm inputs, not physical
-        sharding. Under EP, E may be a local shard of experts; under TP,
-        expert weights shard hidden dimensions instead; under SP, R may be a
-        local token shard. Keep logical capital suffixes here to avoid encoding
-        a specific parallel layout in these local tensor names.
+        sharding. Under EP, E may be a local shard of experts; under SP, R may
+        be a local token shard. Keep logical capital suffixes here to avoid
+        encoding a specific parallel layout in these local tensor names.
         """
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
         if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
@@ -137,6 +135,10 @@ class RoutedExperts(Module):
         self.inner_experts = config.inner_experts.build()
         self.token_dispatcher = config.token_dispatcher.build()
 
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        del buffer_device
+        self.token_dispatcher.init_buffer()
+
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -169,17 +171,6 @@ class RoutedExperts(Module):
             x_TD,
         )
         return out_TD
-
-    def parallelize(self, parallel_dims) -> None:
-        """Parallelize the grouped experts, then wire the EP mesh on the
-        dispatcher so dispatch/combine see the right mesh at runtime."""
-        super().parallelize(parallel_dims)
-        # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
-        # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
-        # DeepEPTokenDispatcher.
-        self.token_dispatcher.wire_meshes(
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-        )
 
 
 class TokenChoiceTopKRouter(Module):
@@ -613,7 +604,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # gate computes and emits dense_sequence_parallel_placement
             # whenever EP is on, and tokens_per_expert_E is TP-Partial for the
             # same reason).
-            axes = ("cp", "tp") if spmd_sparse_mesh() is not None else ("cp",)
+            axes = ("cp", "tp")
 
             # Eq. 18: per-expert routing frequency counts_i over the forward's
             # tokens, then f_i = E * counts_i / sum_j counts_j (so

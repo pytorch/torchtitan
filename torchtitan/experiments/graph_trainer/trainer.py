@@ -7,6 +7,7 @@
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 
 import torch
@@ -166,7 +167,29 @@ class GraphTrainingEngine(TrainingEngine):
         self._pinned_pool_ctx = None
 
     def _initialize_forward_backward(self) -> None:
-        super()._initialize_forward_backward()
+        if self.config.parallelism.fsdp_defer_gradient_reduction:
+            raise ValueError(
+                "GraphTrainer does not support fsdp_defer_gradient_reduction."
+            )
+
+        sdc_config = self.config.sdc_replayer
+        self.sdc_replayer = None
+        if sdc_config is not None:
+            self.sdc_replayer = sdc_config.build(
+                modules=self.model_parts,
+                device=self.device,
+            )
+
+        self._num_optimizer_steps_since_cuda_graph_init = 0
+        if self.parallel_dims.pp_enabled:
+            self._pp_loss_sentinel_on_non_last_stage = torch.full(
+                (1,), -1.0, device=self.device
+            )
+        self._run_forward_backward = partial(
+            self._forward_backward_microbatch_groups,
+            defer_fsdp_gradient_reduction=False,
+        )
+
         _maybe_apply_numa_binding(self.device.index, self.device.type)
         self._validate_inplace_graph_gradient_accumulation_config()
         if self.config.compile.enable_inplace_graph_gradient_accumulation:
@@ -182,11 +205,7 @@ class GraphTrainingEngine(TrainingEngine):
         else:
             self._pinned_pool_ctx = None
 
-    def _initialize_gradient_accumulation(self) -> None:
-        """Keep CUDA graph ownership in GraphTrainingEngine."""
-        self._run_gradient_accumulation = self._gradient_accumulation_body
-
-    def _non_pp_forward_backward_body(
+    def _non_pp_forward_backward_microbatch(
         self,
         *,
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
@@ -195,7 +214,7 @@ class GraphTrainingEngine(TrainingEngine):
         loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         if self.config.compile.mode != "aot_fx_trace":
-            return super()._non_pp_forward_backward_body(
+            return super()._non_pp_forward_backward_microbatch(
                 inputs=inputs,
                 labels=labels,
                 model_kwargs=model_kwargs,
@@ -285,11 +304,10 @@ class GraphTrainingEngine(TrainingEngine):
                     self.loss_fn,
                     accumulate_gradients=gradient_state is not None,
                 )
-                trace_context = dist_utils.get_spmd_context(
+                with dist_utils.get_spmd_context(
                     parallel_dims=self.parallel_dims,
                     spmd_typechecking=False,
-                )
-                with trace_context(), log_timer("minimal_fx_tracer"):
+                ), log_timer("minimal_fx_tracer"):
                     self._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,
@@ -342,7 +360,10 @@ class GraphTrainingEngine(TrainingEngine):
                 ),
                 runtime_meshes=runtime_meshes,
             )
-        with self.train_context():
+        with dist_utils.get_spmd_context(
+            parallel_dims=self.parallel_dims,
+            spmd_typechecking=self.config.debug.spmd_typechecking,
+        ):
             outputs = self._graph_runner(
                 inputs,
                 labels,
