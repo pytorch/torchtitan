@@ -50,6 +50,20 @@ MODULE=graph_trainer.qwen3 CONFIG=graph_trainer_qwen3_14b ./run_train.sh
 
 ### Configuring Parallelism
 
+#### Coalescing chunked-loss gradient reduce-scatter
+
+With `ChunkedLossWrapper`, sum LM-head chunk gradients locally before a single
+reduce-scatter per microbatch:
+
+```bash
+--compile.numerics_changing_optim --compile.coalesce_chunked_loss_rs
+```
+
+Disabled by default because this changes floating-point reduction order;
+bitwise agreement is not guaranteed. Supports matching FP32/FP64 SUM chains
+with static layouts; unsupported patterns are left unchanged.
+Cross-microbatch gradient accumulation is unchanged.
+
 #### Training Llama3-8B with 2D parallelism (FSDP and TP)
 ```bash
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --parallelism.data_parallel_shard_degree=4 --parallelism.tensor_parallel_degree=2
