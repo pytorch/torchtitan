@@ -5,7 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Full text+image logit parity: TorchTitan Kimi K3 vs HuggingFace Kimi K3.
+"""Pinned BF16 forward parity: TorchTitan Kimi K3 vs HuggingFace Kimi K3.
 
 Runs the released HuggingFace model code and TorchTitan in one process on the
 same text+image prompt. Each side performs its own image preprocessing, so the
@@ -17,16 +17,20 @@ TorchTitan, and strictly transfers its state dict to HuggingFace.
 
 The script downloads the config, modeling, processor, and tokenizer assets from
 a pinned HuggingFace revision without downloading the released weight shards.
-The released code requires ``transformers==4.56.2`` and ``tiktoken``.
+Install the pinned reference dependencies with::
+
+    pip install -r scripts/checkpoint_conversion/requirements_kimi_k3.txt
 
 Usage:
     CUDA_VISIBLE_DEVICES=0 python -m \
         scripts.checkpoint_conversion.numerical_tests_kimi_k3
 
-Add ``--force-hf-routing`` for the routing-fixed diagnostic.
+Add ``--force-hf-routing`` to isolate arithmetic after imposing Moonshot's
+expert IDs.
 """
 
 import argparse
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, cast
 
 import torch
@@ -40,6 +44,7 @@ from torchtitan.hf_datasets.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.models.kimi_k3 import model_registry
+from torchtitan.models.kimi_k3.kda import InnerKDA
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
@@ -48,7 +53,12 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
 _HF_REPO_ID = "moonshotai/Kimi-K3"
 _HF_REVISION = "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
 _DTYPE = torch.bfloat16
-_HF_ATTN_BACKEND = "flash_attention_2"
+_HF_ATTN_BACKEND = "eager"
+_REQUIRED_PACKAGES = {
+    "fla-core": "0.5.2",
+    "tiktoken": "0.14.0",
+    "transformers": "4.56.2",
+}
 _MEDIA_TOKEN_ID = 163605
 _PATCH_SIZE = 14
 _MERGE_SIZE = 2
@@ -57,6 +67,22 @@ _MAX_PATCHES_PER_SIDE = 512
 _PROMPT = (
     "<|kimi_image_placeholder|>\n" "What is shown in this image? Describe it briefly."
 )
+
+
+def _check_reference_versions() -> None:
+    mismatches = []
+    for package, expected in _REQUIRED_PACKAGES.items():
+        try:
+            actual = version(package)
+        except PackageNotFoundError:
+            actual = "not installed"
+        if actual != expected:
+            mismatches.append(f"{package}=={expected} (found {actual})")
+    if mismatches:
+        raise RuntimeError(
+            "Kimi K3 parity requires pinned reference packages: "
+            + ", ".join(mismatches)
+        )
 
 
 def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
@@ -76,6 +102,7 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     kda = next(
         layer.delta_attention for layer in tt_config.layers if layer.delta_attention
     )
+    inner_kda = cast(InnerKDA.Config, kda.inner_kda)
     dense_ffn = next(
         layer.feed_forward for layer in tt_config.layers if layer.feed_forward
     )
@@ -117,7 +144,7 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
             "head_dim": kda.head_dim,
             "num_heads": kda.num_heads,
             "short_conv_kernel_size": kda.conv_kernel_size,
-            "gate_lower_bound": kda.kernel.lower_bound,
+            "gate_lower_bound": inner_kda.kernel.lower_bound,
             "use_full_rank_gate": True,
         },
     }
@@ -175,7 +202,19 @@ def _build_hf_model(
     hf_config.text_config._attn_implementation = _HF_ATTN_BACKEND
     hf_config.vision_config._attn_implementation = _HF_ATTN_BACKEND
     model = AutoModelForCausalLM.from_config(hf_config, trust_remote_code=True)
+    # Moonshot's decoder constructor forces FlashAttention 2. Reset the shared
+    # decoder config after construction so MLA uses the pinned eager backend.
     model.language_model.config._attn_implementation = _HF_ATTN_BACKEND
+    model.language_model._use_flash_attention_2 = False
+    vision_backends = {
+        block.attn_implementation for block in model.vision_tower.encoder.blocks
+    }
+    if vision_backends != {_HF_ATTN_BACKEND}:
+        raise RuntimeError(
+            f"Expected Moonshot vision backend {_HF_ATTN_BACKEND}, "
+            f"found {sorted(vision_backends)}."
+        )
+    print(f"Moonshot decoder and vision backends: {_HF_ATTN_BACKEND}")
     model.to(dtype=dtype)
     model.load_state_dict(hf_state_dict, strict=True)
     return model.eval()
@@ -322,7 +361,12 @@ def _force_hf_routing(model, expert_indices, device) -> None:
             weights = scores_TE.gather(dim=-1, index=_ids)
             if _router.route_norm:
                 weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-20)
-            return weights * _router.route_scale, _ids, scores_TE
+            routing_map_TE = torch.zeros_like(scores_TE, dtype=torch.bool).scatter_(
+                -1,
+                _ids,
+                True,
+            )
+            return weights * _router.route_scale, _ids, routing_map_TE
 
         router.forward = forced_forward
 
@@ -398,8 +442,9 @@ def run_tt(
 
     hf_pixels = ref["pixel_values"].flatten(1)
     pixel_diff = (hf_pixels - patches.float()).abs()
+    pixel_max_diff = pixel_diff.max().item()
     print(
-        f"pixel values: max_diff={pixel_diff.max().item():.3e} "
+        f"pixel values: max_diff={pixel_max_diff:.3e} "
         f"num_differ={(pixel_diff > 1e-6).sum().item()}/{pixel_diff.numel()}"
     )
 
@@ -427,7 +472,10 @@ def run_tt(
     return logits[-1].float().cpu()
 
 
-def compare(ref_logits: torch.Tensor, tt_logits: torch.Tensor) -> None:
+def compare(
+    ref_logits: torch.Tensor,
+    tt_logits: torch.Tensor,
+) -> None:
     """Print last-token parity metrics."""
     ref = ref_logits.squeeze()
     tt = tt_logits.squeeze()
@@ -462,6 +510,8 @@ def main() -> None:
 
     if not torch.cuda.is_available():
         parser.error("Kimi K3 numerical parity requires a CUDA GPU.")
+    _check_reference_versions()
+    torch.use_deterministic_algorithms(True)
 
     hf_model_path = snapshot_download(
         repo_id=_HF_REPO_ID,
@@ -470,7 +520,10 @@ def main() -> None:
     )
     device = torch.device("cuda")
     dtype = _DTYPE
-    print(f"dtype={dtype} hf_attn={_HF_ATTN_BACKEND}")
+    print(
+        f"revision={_HF_REVISION} seed={args.seed} dtype={dtype} "
+        f"hf_attn={_HF_ATTN_BACKEND}"
+    )
 
     tt_config = model_registry(args.model_flavor)
     torch.manual_seed(args.seed)
