@@ -97,26 +97,28 @@ class _FakeConfigManager:
 def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
     default_loop = AsyncLoopConfig()
     assert default_loop.target_offpolicy_steps == 3
-    assert default_loop.window_batches is None
+    assert default_loop.windowed_fifo_batches is None
 
-    # P=8, S=3: window_batches=1 -> 8 ids, cap 4; 3 -> 24 ids, cap 6; None -> no window, no cap
-    one_batch = AsyncLoopConfig(num_prompts_per_train_step=8, window_batches=1)
+    # P=8, S=3: windowed_fifo_batches=1 -> 8 ids, cap 4; 3 -> 24 ids, cap 6; None -> no window, no cap
+    one_batch = AsyncLoopConfig(num_prompts_per_train_step=8, windowed_fifo_batches=1)
     assert (one_batch.window_size, one_batch.max_offpolicy_steps) == (8, 4)
-    three_batches = AsyncLoopConfig(num_prompts_per_train_step=8, window_batches=3)
+    three_batches = AsyncLoopConfig(
+        num_prompts_per_train_step=8, windowed_fifo_batches=3
+    )
     assert (three_batches.window_size, three_batches.max_offpolicy_steps) == (24, 6)
-    uncapped = AsyncLoopConfig(num_prompts_per_train_step=8, window_batches=None)
+    uncapped = AsyncLoopConfig(num_prompts_per_train_step=8, windowed_fifo_batches=None)
     assert (uncapped.window_size, uncapped.max_offpolicy_steps) == (None, None)
 
     # a window larger than the buffer is allowed: P=8, S=1 (16 slots), 5 batches -> 40 ids, cap 6
     wide = AsyncLoopConfig(
-        num_prompts_per_train_step=8, target_offpolicy_steps=1, window_batches=5
+        num_prompts_per_train_step=8, target_offpolicy_steps=1, windowed_fifo_batches=5
     )
     assert (wide.window_size, wide.max_offpolicy_steps) == (40, 6)
 
 
-def test_async_loop_config_rejects_bad_window_batches() -> None:
-    with pytest.raises(ValueError, match="window_batches"):
-        AsyncLoopConfig(window_batches=0)
+def test_async_loop_config_rejects_bad_windowed_fifo_batches() -> None:
+    with pytest.raises(ValueError, match="windowed_fifo_batches"):
+        AsyncLoopConfig(windowed_fifo_batches=0)
     with pytest.raises(TypeError, match="window_fraction"):
         AsyncLoopConfig(window_fraction=0.3)  # type: ignore[call-arg]
 

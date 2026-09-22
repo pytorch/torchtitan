@@ -76,7 +76,7 @@ _rollout_loop[N]
 
 _batcher_loop
   consumes: the oldest FINALIZED group inside the window (group_buffer.take_finalized)
-    waits for:    a group inside the window becoming FINALIZED (any group when window_batches is None)
+    waits for:    a group inside the window becoming FINALIZED (any group when windowed_fifo_batches is None)
     unblocked by: _rollout_loop[N] group_buffer.finalize_work()
   produces: TrainerStepBatch (training_batch_queue.put)
     waits for:    a free training_batch_queue slot (maxsize=1)
@@ -164,11 +164,11 @@ class AsyncLoopConfig(Configurable.Config):
     """Target steady-state offpolicy steps used to set the active buffer size to
     `(S + 1) * P`. Observed offpolicy steps are not guaranteed to equal this
     target: when rollout generation is the bottleneck, the buffer may not fill
-    and observed offpolicy steps will be lower. A finite `window_batches` bounds
+    and observed offpolicy steps will be lower. A finite `windowed_fifo_batches` bounds
     how far a slow group may exceed this target; None leaves it unbounded. See
     ``torchtitan/rl/docs/windowed_fifo.md`` for details."""
 
-    window_batches: int | None = None
+    windowed_fifo_batches: int | None = None
     """FIFO look-ahead window in train batches.
 
     None (the default) is greedy: the batcher takes the oldest finished group
@@ -199,9 +199,9 @@ class AsyncLoopConfig(Configurable.Config):
             raise ValueError(
                 f"target_offpolicy_steps must be >= 0, got {self.target_offpolicy_steps}"
             )
-        if self.window_batches is not None and self.window_batches < 1:
+        if self.windowed_fifo_batches is not None and self.windowed_fifo_batches < 1:
             raise ValueError(
-                f"window_batches must be None or >= 1, got {self.window_batches}"
+                f"windowed_fifo_batches must be None or >= 1, got {self.windowed_fifo_batches}"
             )
 
     @property
@@ -210,17 +210,17 @@ class AsyncLoopConfig(Configurable.Config):
 
     @property
     def window_size(self) -> int | None:
-        """FIFO look-ahead window in group ids, `window_batches * P`; None means no window."""
-        if self.window_batches is None:
+        """FIFO look-ahead window in group ids, `windowed_fifo_batches * P`; None means no window."""
+        if self.windowed_fifo_batches is None:
             return None
-        return self.window_batches * self.num_prompts_per_train_step
+        return self.windowed_fifo_batches * self.num_prompts_per_train_step
 
     @property
     def max_offpolicy_steps(self) -> int | None:
         """Return the worst case consume-time offpolicy bound, or None without a window.
 
         For active buffer size `B`, window size `W`, and prompts per train step
-        `P`, the bound is `(B + W - 2) // P`, which is `S + window_batches`.
+        `P`, the bound is `(B + W - 2) // P`, which is `S + windowed_fifo_batches`.
         """
         if self.window_size is None:
             return None
@@ -760,7 +760,7 @@ class Controller(Configurable):
         logger.info(
             f"max_active_rollout_groups={max_active_rollout_groups}, "
             f"target_offpolicy_steps={async_loop.target_offpolicy_steps}, "
-            f"window_batches={async_loop.window_batches}, "
+            f"windowed_fifo_batches={async_loop.windowed_fifo_batches}, "
             f"max_offpolicy_steps={async_loop.max_offpolicy_steps}"
         )
 
@@ -983,7 +983,7 @@ class Controller(Configurable):
         so the trainer stops.
 
         consumes: the oldest FINALIZED group inside the window (group_buffer.take_finalized)
-            waits for:    a group inside the window becoming FINALIZED (any group when window_batches is None)
+            waits for:    a group inside the window becoming FINALIZED (any group when windowed_fifo_batches is None)
             unblocked by: _rollout_loop[N] group_buffer.finalize_work()
         produces: TrainerStepBatch (training_batch_queue.put)
             waits for:    a free training_batch_queue slot (maxsize=1)

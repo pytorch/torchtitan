@@ -370,7 +370,7 @@ def test_untrainable_group_releases_before_training() -> None:
 
 
 def test_compute_policy_age_metrics_raises_beyond_cap() -> None:
-    # cap 4 (S=3, window_batches=1): age 4 passes, age 5 raises
+    # cap 4 (S=3, windowed_fifo_batches=1): age 4 passes, age 5 raises
     metrics = compute_policy_age_metrics(
         trainer_policy_version=4,
         min_policy_versions=[0],
@@ -446,7 +446,7 @@ async def _finalize(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
 
 def test_windowed_fifo_takes_within_anchored_window() -> None:
     async def run() -> None:
-        # P=4, window_batches=1 -> window of 4 ids [g0, g3]: g1/g2/g3 may bypass stuck g0; g4 waits.
+        # P=4, windowed_fifo_batches=1 -> window of 4 ids [g0, g3]: g1/g2/g3 may bypass stuck g0; g4 waits.
         buffer = _buffer(capacity=8, window_size=4)
         for group_id in range(5):
             await _admit(buffer, group_id)
