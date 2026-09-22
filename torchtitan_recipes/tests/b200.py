@@ -92,3 +92,20 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     # keeps AdamW the way kimi_k3_debugmodel_mm does.
     config.optimizer = default_adamw(lr=8e-4)
     return config
+
+
+def kimi_k3_debugmodel_pp4_vp2_vit_dep() -> Trainer.Config:
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+
+    config = kimi_k3_debugmodel()
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 4
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    # More micro-batches than pipeline ranks: the first four encodes run upfront,
+    # as the design prescribes, and the rest are the ones the plan places.
+    config.parallelism.num_pp_microbatches = 8
+    # No split is spelled out: vision_dep derives it, which is the code the cell
+    # is here to run. The tower and the embedding take the first of the 8 stages.
+    config.model.vision_dep.enabled = True
+    config.model.vision_dep.bubble = True
+    return config

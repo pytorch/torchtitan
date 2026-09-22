@@ -132,6 +132,7 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         "kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
         "kimi_k3_mm",
         "kimi_k3_mm_muon",
+        "kimi_k3_pp4_vp2_vit_dep",
         "mxfp8_linear_fsdp",
         "nvfp4_linear_fsdp",
     }
