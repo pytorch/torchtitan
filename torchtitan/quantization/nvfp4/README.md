@@ -5,13 +5,11 @@ gradients to NVFP4 through TorchAO's training prototype. The model weights and
 distributed collectives remain in bf16. This reduces memory use and can improve
 throughput on NVIDIA Blackwell GPUs.
 
-TorchTitan owns the dense `NVFP4Linear` module, autograd function, stochastic
-rounding state, and FSDP weight-cache lifecycle. TorchAO supplies the low-level
-RHT, quantization, scale-layout, and NVFP4 kernels. FSDP creates the packed `W`
-and `W.T` operands after its BF16 all-gather and releases the gathered BF16
-weight. With `reshard_after_forward=False`, the packed operands are reused
-across pipeline microbatches; with `reshard_after_forward=True`, FSDP frees and
-refills them according to its normal parameter lifecycle.
+FSDP creates the packed `W` and `W.T` operands after its BF16 all-gather and
+releases the gathered BF16 weight. With `reshard_after_forward=False`, the
+packed operands are reused across pipeline microbatches; with
+`reshard_after_forward=True`, FSDP frees and refills them according to its
+normal parameter lifecycle.
 
 > [!WARNING]
 > NVFP4 training is experimental. It depends on a TorchAO prototype and has no

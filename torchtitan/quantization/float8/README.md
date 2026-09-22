@@ -57,12 +57,7 @@ For parallelisms, for float8 with rowwise scaling, all distributed communication
 
 For scaling strategy, we support rowwise dynamic scaling (alpha).
 
-### TorchAO and TorchTitan boundary
-
-TorchTitan owns the dense `Float8Linear` and grouped-expert modules, their
-autograd functions, recipe selection, and the lifetime of quantized weights.
-TorchAO supplies only the low-level Float8 quantization and matrix-multiplication
-kernels.
+### FSDP-managed weights
 
 With FSDP, persistent dense and expert parameters and checkpoint state remain
 in high precision. After each all-gather, FSDP builds and owns separate Float8
