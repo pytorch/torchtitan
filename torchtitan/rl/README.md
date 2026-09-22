@@ -117,7 +117,7 @@ That's it. Wire the rollouter into a config registry function:
 # my_project/my_experiment/config_registry.py
 def my_experiment() -> Controller.Config:
     return Controller.Config(
-        model_spec=...,
+        model=...,
         rollouter=rollouter,
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         trainer=Trainer.Config(loss=..., ...),

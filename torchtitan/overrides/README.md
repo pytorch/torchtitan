@@ -292,7 +292,7 @@ not logged as replacements and can still be handled by a subclass-specific
 override.
 
 The FQN is the full path from the `Trainer.Config` root, e.g. a model component
-is `model_spec.model.layers.0.feed_forward` and the optimizer is `optimizer`.
+is `model.layers.0.feed_forward` and the optimizer is `optimizer`.
 Globs with `*` (which crosses `.`) keep selectors readable.
 
 ```python
