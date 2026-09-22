@@ -44,6 +44,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config.training.max_norm = 1.0
         trainer.config.training.disable_cuda_graphs = True
         trainer.sdc_replayer = None
+        trainer.ema = None
         trainer.device = torch.device("cpu")
         trainer.num_completed_steps = 1
         trainer.ntokens_seen = 0
