@@ -15,15 +15,17 @@ from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
-from torchtitan.components.checkpointer.packed_hf_storage import (
-    PackedPairHuggingFaceStorageReader,
+from torchtitan.components.checkpointer.hf_storage import (
+    HuggingFaceStorageReaderWithViews,
+    LogicalPrefixSpec,
     PackedPairSpec,
 )
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.utils import MoEStateDictAdapter
+from torchtitan.protocols.state_dict_adapter import dtensor_safe
 from torchtitan.quantization.mx_qat.checkpoint import (
     decode_mxfp4,
     MXFP4CheckpointPolicy,
@@ -266,19 +268,48 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 f"missing={sorted(expected - selected)}, unexpected={sorted(selected - expected)}"
             )
 
+    def _reshape_dt_bias(
+        self, value: torch.Tensor, shape: tuple[int, ...]
+    ) -> torch.Tensor:
+        """Preserve leading-axis FSDP shards, including ranks with no heads."""
+        if isinstance(value, DTensor) and any(
+            not isinstance(p, Replicate) and not (type(p) is Shard and p.dim == 0)
+            for p in value.placements
+        ):
+            raise ValueError("KDA dt_bias reshape supports only Replicate and Shard(0)")
+        return self._reshape_dt_bias_replicated(value, shape)
+
+    @dtensor_safe
+    def _reshape_dt_bias_replicated(
+        self, value: torch.Tensor, shape: tuple[int, ...]
+    ) -> torch.Tensor:
+        # Reuse the adapter's gather/restore helper only for this small bias.
+        return value.reshape(shape)
+
     def get_hf_storage_reader(
         self,
         path: str,
         from_quantized: bool = False,
     ) -> HuggingFaceStorageReader:
-        if not from_quantized:
+        # The released 96-head KDA stores A_log in a 128-element vector.
+        # Other architectures must not inherit this checkpoint-specific rule.
+        prefixes = {
+            f"language_model.model.layers.{index}.self_attn.A_log": LogicalPrefixSpec(
+                logical_length=layer.delta_attention.num_heads,
+                padded_length=128,
+            )
+            for index, layer in enumerate(self.kimi_config.layers)
+            if layer.delta_attention is not None
+            and layer.delta_attention.num_heads == 96
+            and layer.delta_attention.head_dim == 128
+        }
+        if not from_quantized and not prefixes:
             return super().get_hf_storage_reader(path, from_quantized=False)
-        policy = self.mxfp4_policy(path)
-        self._validate_qat_policy(policy)
-        return PackedPairHuggingFaceStorageReader(
-            path=path,
-            thread_count=4,
-            spec=PackedPairSpec(
+        spec = None
+        if from_quantized:
+            policy = self.mxfp4_policy(path)
+            self._validate_qat_policy(policy)
+            spec = PackedPairSpec(
                 packed_suffix=".weight_packed",
                 scale_suffix=".weight_scale",
                 virtual_suffix=".weight",
@@ -287,7 +318,11 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 target_dtype=torch.bfloat16,
                 target_fqns=policy.weight_fqns,
                 decode=decode_mxfp4,
-            ),
+            )
+        return HuggingFaceStorageReaderWithViews(
+            path=path,
+            spec=spec,
+            logical_prefixes=prefixes,
         )
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -367,7 +402,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                     unmapped.append(key)
                     continue
                 if abstract_key == "layers.{}.delta_attention.dt_bias":
-                    value = value.reshape(-1)
+                    value = self._reshape_dt_bias(value, (-1,))
                 hf_state_dict[hf_abstract_key.format(layer_num)] = value
                 continue
 
@@ -515,9 +550,8 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                     ].delta_attention
                     if delta_config is None:
                         raise ValueError(f"HF key '{key}' targets a non-KDA layer.")
-                    value = value.reshape(
-                        delta_config.num_heads,
-                        delta_config.head_dim,
+                    value = self._reshape_dt_bias(
+                        value, (delta_config.num_heads, delta_config.head_dim)
                     )
                 state_dict[new_abstract_key.format(layer_num)] = value
                 continue

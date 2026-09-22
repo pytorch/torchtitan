@@ -30,6 +30,41 @@ def _config():
 
 
 class MXQATTransformTest(unittest.TestCase):
+    def test_stacked_linear_preserves_forward_shape_and_gradients(self):
+        from torchao.prototype.qat import mx_fake_quantize
+
+        config = _config()
+        config.projection = Linear.Config(
+            in_features=64, out_features=32, num_linears=2, bias=True
+        )
+        transform = MXQATTransform(grouped_expert_fqns=(), linear_fqns=("projection",))
+        transform.transform(config)
+        module = config.projection.build()
+        x = torch.randn(3, 64, requires_grad=True)
+        expected_weight = module.weight.detach().clone().requires_grad_()
+        expected_bias = module.bias.detach().clone().requires_grad_()
+        expected_x = x.detach().clone().requires_grad_()
+        expected = torch.nn.functional.linear(
+            expected_x,
+            mx_fake_quantize(
+                expected_weight, transform.weight_fake_quant_config
+            ).flatten(0, 1),
+            expected_bias.flatten(),
+        ).unflatten(-1, (2, 32))
+        actual = module(x)
+        self.assertEqual(actual.shape, (3, 2, 32))
+        self.assertIs(type(module).forward, Linear.forward)
+        torch.testing.assert_close(actual, expected)
+        grad = torch.randn_like(actual)
+        actual.backward(grad)
+        expected.backward(grad)
+        for actual_grad, expected_grad in (
+            (module.weight.grad, expected_weight.grad),
+            (module.bias.grad, expected_bias.grad),
+            (x.grad, expected_x.grad),
+        ):
+            torch.testing.assert_close(actual_grad, expected_grad)
+
     def test_configuration_types_are_resolvable_for_cli(self):
         from typing import get_type_hints
 

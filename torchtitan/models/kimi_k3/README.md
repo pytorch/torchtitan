@@ -124,3 +124,29 @@ config = kimi_k3_debugmodel_mx_qat(
 `AUTO` requires supported SM100 CUDA kernels and currently at most 32 local
 experts. `EMULATED` uses dequantized operands for GEMM. Backend configuration
 changes belong in the recipe; the model launch command stays the same.
+
+## Released checkpoint preflight
+
+Before allocating a training job, check the safetensors headers against the
+model's HF tensor shapes, including ordinary non-quantized tensors:
+
+```bash
+python -m scripts.checkpoint_conversion.validate_kimi_k3_mxfp4_checkpoint \
+  --checkpoint /absolute/path/to/Kimi-K3 --model-flavor Kimi-K3
+```
+
+The preflight constructs the model on the meta device and uses the same storage
+reader as training. It validates packed/scale pairs and every expected logical
+tensor shape. It reads only headers and the small padding tails, not full model
+weights. Use `--model-flavor debugmodel` for a matching synthetic fixture, or
+`--unquantized` for ordinary HF weights.
+
+The released 96-head KDA checkpoint stores `A_log` as a 128-element vector.
+Loading accepts either the canonical 96-element vector or that exact padded
+shape, and requires all 32 discarded values to be zero. The reader exposes 96
+elements before DCP planning; model parameters and HF export remain canonical.
+This rule also applies to unquantized HF imports. Other unexpected shapes or
+nonzero padding are errors. See the [release inspection](https://huggingface.co/moonshotai/Kimi-K3/discussions/150).
+
+Shape preflight does not establish numerical equivalence or successful
+released-model training. Those require separate evaluation runs.

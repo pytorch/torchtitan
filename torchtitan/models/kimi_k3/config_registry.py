@@ -113,11 +113,11 @@ def kimi_k3_debugmodel_mx_qat(
     model-specific parameter selection stays inside the recipe.
     """
     config = kimi_k3_debugmodel(seq_len=seq_len)
-    adapter = KimiK3StateDictAdapter(config.model_spec.model, hf_assets_path=None)
+    adapter = KimiK3StateDictAdapter(config.model, hf_assets_path=None)
     mapping = adapter.hf_linear_weight_mapping()
     policy = MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
     weights = {mapping[key] for key in policy.weight_fqns if mapping[key] is not None}
-    transform = MXQATTransform.from_weight_fqns(config.model_spec.model, weights)
+    transform = MXQATTransform.from_weight_fqns(config.model, weights)
     if weight_fake_quant_config is not None:
         transform.weight_fake_quant_config = weight_fake_quant_config
     if activation_fake_quant_config is not None:

@@ -9,7 +9,8 @@
 from dataclasses import dataclass, field
 
 import torch
-import torch.nn.functional as F
+
+from torchtitan.models.common.linear import Linear
 
 from .experts import MXFakeQuantizeConfig, weight_config
 
@@ -21,7 +22,7 @@ def _get_mx_qat_linear_cls(parent_cls: type) -> type:
         return parent_cls
     if parent_cls in _linear_cache:
         return _linear_cache[parent_cls]
-    if parent_cls.forward is not torch.nn.Linear.forward:
+    if parent_cls.forward is not Linear.forward:
         raise ValueError(
             f"MX QAT cannot replace custom forward of {parent_cls.__name__}"
         )
@@ -40,14 +41,13 @@ def _get_mx_qat_linear_cls(parent_cls: type) -> type:
             super().__init__(config)
             self._weight_fake_quant_config = config.weight_fake_quant_config
 
-        def forward(self, input: torch.Tensor) -> torch.Tensor:
+        def _flatten_weight_and_bias(
+            self,
+        ) -> tuple[torch.Tensor, torch.Tensor | None]:
             from torchao.prototype.qat import mx_fake_quantize
 
-            return F.linear(
-                input,
-                mx_fake_quantize(self.weight, self._weight_fake_quant_config),
-                self.bias,
-            )
+            weight, bias = super()._flatten_weight_and_bias()
+            return mx_fake_quantize(weight, self._weight_fake_quant_config), bias
 
     MXQATLinear.__name__ = f"MXQAT{parent_cls.__name__}"
     MXQATLinear.__qualname__ = MXQATLinear.__name__
