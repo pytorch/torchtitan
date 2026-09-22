@@ -34,9 +34,9 @@ A different cluster usually means a different sharding layout, and therefore a d
 ```python
 # torchtitan_recipes/llama3.py
 def llama3_8b_fsdp8_tp2_h200() -> Trainer.Config:
-    model_spec = model_registry("8B", attn_backend="flex")
+    model_config = model_registry("8B", attn_backend="flex")
     return Trainer.Config(
-        model=model_spec,
+        model=model_config,
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=8,
             tensor_parallel_degree=2,
