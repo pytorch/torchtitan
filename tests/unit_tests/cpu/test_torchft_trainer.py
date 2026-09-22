@@ -12,6 +12,9 @@ import pytest
 import torch
 
 import torchtitan.experiments.torchft.trainer as ft
+from torchtitan.components.data.collators import TextCollator
+from torchtitan.components.data.load_balancing.loader import LoadBalancingDataLoader
+from torchtitan.components.data.loader import GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import override
 from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
@@ -83,6 +86,23 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
 def test_ft_trainer_composes_specialized_training_engine() -> None:
     assert not issubclass(ft.FaultTolerantTrainer, TrainingEngine)
     assert issubclass(ft.FaultTolerantTrainingEngine, TrainingEngine)
+
+
+def test_ft_rejects_load_balancing_dataloader() -> None:
+    dataloader = LoadBalancingDataLoader.Config(
+        dataloader=GrainDataLoader.Config(
+            dataset=object(),
+            collator=TextCollator.Config(),
+        )
+    )
+
+    with pytest.raises(ValueError, match="TorchFT does not support"):
+        ft.FaultTolerantTrainer.Config(
+            model=model_registry("debugmodel"),
+            tokenizer=None,
+            loss=CrossEntropyLoss.Config(),
+            dataloader=dataloader,
+        )
 
 
 def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):

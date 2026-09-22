@@ -16,6 +16,8 @@ import torch
 import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
+from torchtitan.components.data.load_balancing.loader import LoadBalancingDataLoader
+
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, CompileConfig, Configurable
@@ -162,6 +164,14 @@ class FaultTolerantTrainer(Configurable):
             TorchFTCheckpointManager.Config | None, tyro.conf.AvoidSubcommands
         ] = None
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
+
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if isinstance(self.dataloader, LoadBalancingDataLoader.Config):
+                raise ValueError(
+                    "TorchFT does not support LoadBalancingDataLoader because "
+                    "dynamic DP membership changes replicated input ownership"
+                )
 
     engine: FaultTolerantTrainingEngine
 

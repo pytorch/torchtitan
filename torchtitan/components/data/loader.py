@@ -21,6 +21,8 @@ from torchtitan.components.data.dataset import DatasetConfig
 from torchtitan.components.data.types import (
     DatasetBuildContext,
     DatasetIterationPolicy,
+    OptimizerStepBatch,
+    OptimizerStepLayout,
     TrainingMicrobatch,
 )
 from torchtitan.components.tokenizer import BaseTokenizer
@@ -57,6 +59,24 @@ class BaseDataLoader(Stateful, ABC, Configurable):
     @abstractmethod
     def __iter__(self) -> Iterator[TrainingMicrobatch]:
         ...
+
+    def iter_optimizer_steps(
+        self, layout: OptimizerStepLayout
+    ) -> Iterator[OptimizerStepBatch]:
+        """Group the flat microbatch stream into complete optimizer steps."""
+        iterator = iter(self)
+        while True:
+            microbatches = []
+            for _ in range(layout.num_microbatches):
+                try:
+                    microbatches.append(next(iterator))
+                except StopIteration as ex:
+                    raise DataloaderExhaustedError() from ex
+            yield layout.group_microbatches(microbatches)
+
+    def drain_metrics(self) -> dict[str, float]:
+        """Return and reset dataloader metrics accumulated since the last call."""
+        return {}
 
     def close(self) -> None:
         pass

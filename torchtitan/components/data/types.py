@@ -7,6 +7,7 @@
 """Shared data-pipeline types."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -58,6 +59,77 @@ class TrainingMicrobatch(ABC):
             )
             for key, value in self.loss_kwargs().items()
         }
+
+
+@dataclass(kw_only=True, slots=True)
+class OptimizerStepBatch:
+    """Microbatches for one optimizer step, grouped by accumulation iteration."""
+
+    microbatch_groups: list[list[TrainingMicrobatch]]
+
+    def __post_init__(self) -> None:
+        if not self.microbatch_groups:
+            raise ValueError(
+                "an optimizer step must contain at least one microbatch group"
+            )
+        num_pp_microbatches = len(self.microbatch_groups[0])
+        if num_pp_microbatches == 0 or any(
+            len(group) != num_pp_microbatches for group in self.microbatch_groups
+        ):
+            raise ValueError(
+                "all optimizer-step groups must contain the same positive number "
+                "of microbatches"
+            )
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class OptimizerStepLayout:
+    """Shape of the microbatch grid consumed by one optimizer step."""
+
+    num_accumulation_steps: int
+    num_pp_microbatches: int
+
+    def __post_init__(self) -> None:
+        if self.num_accumulation_steps <= 0:
+            raise ValueError("num_accumulation_steps must be greater than 0")
+        if self.num_pp_microbatches <= 0:
+            raise ValueError("num_pp_microbatches must be greater than 0")
+
+    @property
+    def num_microbatches(self) -> int:
+        """Return the number of microbatches in one optimizer step."""
+        return self.num_accumulation_steps * self.num_pp_microbatches
+
+    def group_microbatches(
+        self, microbatches: Sequence[TrainingMicrobatch]
+    ) -> OptimizerStepBatch:
+        """Arrange a flat stream in accumulation-major, PP-minor order."""
+        if len(microbatches) != self.num_microbatches:
+            raise ValueError(
+                f"expected {self.num_microbatches} microbatches, "
+                f"got {len(microbatches)}"
+            )
+        return OptimizerStepBatch(
+            microbatch_groups=[
+                list(microbatches[start : start + self.num_pp_microbatches])
+                for start in range(0, len(microbatches), self.num_pp_microbatches)
+            ]
+        )
+
+    def validate_batch(self, batch: OptimizerStepBatch) -> None:
+        """Validate that a batch has exactly this optimizer-step shape."""
+        actual_num_accumulation_steps = len(batch.microbatch_groups)
+        actual_num_pp_microbatches = len(batch.microbatch_groups[0])
+        if (
+            actual_num_accumulation_steps != self.num_accumulation_steps
+            or actual_num_pp_microbatches != self.num_pp_microbatches
+        ):
+            raise ValueError(
+                "expected optimizer-step shape "
+                f"{self.num_accumulation_steps} x {self.num_pp_microbatches}, "
+                "got "
+                f"{actual_num_accumulation_steps} x {actual_num_pp_microbatches}"
+            )
 
 
 @dataclass(kw_only=True, slots=True)

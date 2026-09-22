@@ -14,6 +14,10 @@ from torchtitan.components.data.dataset import (
     TextSequence,
     WeightedDataset,
 )
+from torchtitan.components.data.load_balancing import (
+    LoadBalancingDataLoader,
+    ReplicatedInputCoordinator,
+)
 from torchtitan.components.data.loader import GrainDataLoader
 from torchtitan.components.data.packing import (
     ConcatThenSplitPackingConfig,
@@ -29,6 +33,8 @@ from torchtitan.components.data.sources import (
 from torchtitan.components.data.types import (
     DatasetBuildContext,
     DatasetIterationPolicy,
+    OptimizerStepBatch,
+    OptimizerStepLayout,
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
 )
@@ -46,7 +52,11 @@ __all__ = [
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",
+    "LoadBalancingDataLoader",
+    "OptimizerStepBatch",
+    "OptimizerStepLayout",
     "RandomAccessDataSource",
+    "ReplicatedInputCoordinator",
     "SampleProcessor",
     "SingleDatasetConfig",
     "SourceConfig",

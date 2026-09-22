@@ -9,7 +9,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+from torchtitan.components.data.types import (
+    OptimizerStepBatch,
+    TokenizedTrainingMicrobatch,
+)
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -74,16 +77,21 @@ class TestInvalidLoss(unittest.TestCase):
 
         return loop
 
-    def _data_iterator(self):
+    def _step_batch(self) -> OptimizerStepBatch:
         labels = torch.tensor([1, 2, IGNORE_INDEX])
-        while True:
-            yield TokenizedTrainingMicrobatch(
-                input=torch.tensor([1, 2, 3]),
-                labels=labels,
-                positions=torch.arange(3),
-                padding_mask=torch.zeros(3, dtype=torch.bool),
-                num_valid_tokens=2,
-            )
+        return OptimizerStepBatch(
+            microbatch_groups=[
+                [
+                    TokenizedTrainingMicrobatch(
+                        input=torch.tensor([1, 2, 3]),
+                        labels=labels,
+                        positions=torch.arange(3),
+                        padding_mask=torch.zeros(3, dtype=torch.bool),
+                        num_valid_tokens=2,
+                    )
+                ]
+            ]
+        )
 
     def _run_step(self, loss_value: float, should_log: bool) -> Trainer:
         trainer = self._make_trainer(loss_value, should_log)
@@ -92,7 +100,7 @@ class TestInvalidLoss(unittest.TestCase):
             "torchtitan.training_engine.dist_utils.clip_grad_norm_",
             return_value=torch.tensor(1.0),
         ):
-            trainer.train_step(self._data_iterator())
+            trainer.train_step(self._step_batch())
         return trainer
 
     def test_nan_loss_raises_on_log_step(self):

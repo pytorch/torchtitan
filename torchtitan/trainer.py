@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any
@@ -19,7 +19,7 @@ import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.data.types import OptimizerStepBatch, OptimizerStepLayout
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable
@@ -199,6 +199,7 @@ class Trainer(Configurable):
             config_dict=config.to_dict(),
             has_quantization=engine.has_quantization,
         )
+        self._dataloader_metrics: dict[str, float] = {}
         color = self.metrics_processor.color
 
         self.num_pp_microbatches = (
@@ -298,37 +299,48 @@ class Trainer(Configurable):
             f"(warmup {config.lr_scheduler.warmup_steps})"
         )
 
-    def microbatch_generator(
-        self, data_iterable: Iterable[TrainingMicrobatch]
-    ) -> Iterator[TrainingMicrobatch]:
-        """Return microbatches while recording data-loading metrics.
+    def optimizer_step_generator(
+        self, dataloader: BaseDataLoader
+    ) -> Iterator[OptimizerStepBatch]:
+        """Return complete optimizer-step batches and record loading metrics.
 
         Note: Tensors are yielded on CPU. The caller is responsible for moving
         them to GPU when needed. This allows for more efficient memory usage
         when doing gradient accumulation.
         """
-        data_iterator = iter(data_iterable)
+        layout = OptimizerStepLayout(
+            num_accumulation_steps=self.gradient_accumulation_steps,
+            num_pp_microbatches=self.num_pp_microbatches,
+        )
+        step_iterator = dataloader.iter_optimizer_steps(layout)
 
         while True:
             data_load_start = time.perf_counter()
             try:
-                microbatch = next(data_iterator)
+                with sl.log_trace_span("fetching_batch"):
+                    step_batch = next(step_iterator)
             except StopIteration as ex:
-                # If data runs out during gradient accumulation, that
-                # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
-            ntokens_microbatch = (
+            layout.validate_batch(step_batch)
+            dataloader_metrics = dataloader.drain_metrics()
+            if not hasattr(self, "_dataloader_metrics"):
+                self._dataloader_metrics = {}
+            for name, value in dataloader_metrics.items():
+                self._dataloader_metrics[name] = (
+                    self._dataloader_metrics.get(name, 0.0) + value
+                )
+            ntokens_step = (
                 self.config.training.num_tokens_per_microbatch_per_dp_rank
+                * layout.num_microbatches
             )
-            self.metrics_processor.ntokens_since_last_log += ntokens_microbatch
+            self.metrics_processor.ntokens_since_last_log += ntokens_step
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )
 
-            # Tensors stay on CPU; moved to GPU per-microbatch during training
-            yield microbatch
+            yield step_batch
 
-    def train_step(self, data_iterator: Iterator[TrainingMicrobatch]):
+    def train_step(self, step_batch: OptimizerStepBatch):
         engine = self.engine
         current_step = engine.num_completed_steps + 1
         should_log = self.metrics_processor.should_log(current_step)
@@ -338,16 +350,12 @@ class Trainer(Configurable):
         parallel_dims = engine.parallel_dims
         # All groups form one optimizer step. Each microbatch group forms one
         # complete PP step, or one local forward/backward when PP is disabled.
-        microbatch_groups: list[list[TrainingMicrobatch]] = []
-        local_valid_tokens = 0
-        for _ in range(self.gradient_accumulation_steps):
-            microbatch_group = []
-            for _ in range(self.num_pp_microbatches):
-                with sl.log_trace_span("fetching_batch"):
-                    microbatch = next(data_iterator)
-                local_valid_tokens += microbatch.num_valid_tokens
-                microbatch_group.append(microbatch)
-            microbatch_groups.append(microbatch_group)
+        microbatch_groups = step_batch.microbatch_groups
+        local_valid_tokens = sum(
+            microbatch.num_valid_tokens
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        )
         sl.log_trace_scalar({"local_valid_tokens": local_valid_tokens})
 
         # Keep the global token count on device so loss normalization does not
@@ -433,10 +441,12 @@ class Trainer(Configurable):
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
 
+        dataloader_metrics = getattr(self, "_dataloader_metrics", {})
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
             **collect_aux_loss_metrics(parallel_dims),
+            **dataloader_metrics,
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
@@ -445,6 +455,7 @@ class Trainer(Configurable):
             float(grad_norm.item()),
             extra_metrics=extra_metrics,
         )
+        dataloader_metrics.clear()
 
     @record
     def train(self):
@@ -463,14 +474,14 @@ class Trainer(Configurable):
 
         engine.start_profiler()
         try:
-            data_iterator = self.microbatch_generator(self.dataloader)
+            step_iterator = self.optimizer_step_generator(self.dataloader)
             while self.should_continue_training():
                 current_step = engine.num_completed_steps + 1
                 sl.set_step(current_step, relative_step=current_step - loaded_step)
 
                 with sl.log_trace_span("step"):
                     try:
-                        self.train_step(data_iterator)
+                        self.train_step(next(step_iterator))
                     except DataloaderExhaustedError:
                         logger.warning("Ran out of data; last step was canceled.")
                         break
