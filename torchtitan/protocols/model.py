@@ -4,19 +4,29 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from abc import abstractmethod
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 from .module import Module
 
+if TYPE_CHECKING:
+    from torchtitan.components.optimizer import OptimizersContainer
+    from torchtitan.distributed.activation_checkpoint import (
+        ActivationCheckpointingConfig,
+    )
 
-class BaseModel(Module):
+    from .state_dict_adapter import BaseStateDictAdapter
+
+
+class BaseModel(Module, ABC):
     """Base class for all model classes.
 
     Models inherit from BaseModel (which is Module = nn.Module + Configurable).
@@ -62,33 +72,12 @@ class BaseModel(Module):
 
         Additional keyword arguments may provide model-specific preprocessing
         dependencies that are owned outside the trainable model. The trainer
-        calls this via ``cast(BaseModel, model).preprocess_inputs``,
-        so the declaration lives here for typing. There is no meaningful default;
+        calls this through the ``BaseModel`` interface. There is no meaningful default;
         every model used by the training engine must implement it.
         """
         raise NotImplementedError(
             f"{type(self).__name__} must implement preprocess_inputs()."
         )
-
-    def verify_module_protocol(self) -> None:
-        """Verify all submodules satisfy the ``Module`` protocol.
-
-        Catches non-``Module`` submodules early with a clear error message,
-        preventing obscure failures when the ``Module`` protocol is being
-        used later.
-
-        Override in models where some internal ``nn.Module`` submodules
-        cannot conform to the ``Module`` protocol.
-        """
-        failures: list[tuple[str, str]] = []
-        for fqn, mod in self.named_modules():
-            if not isinstance(mod, Module):
-                failures.append((fqn, type(mod).__name__))
-        if failures:
-            details = ", ".join(f"'{fqn}' ({cls})" for fqn, cls in failures)
-            raise RuntimeError(
-                f"The following modules do not satisfy the Module protocol: {details}"
-            )
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -111,3 +100,80 @@ class BaseModel(Module):
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             pass
+
+    state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None
+    pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
+    supports_pipeline_parallel: ClassVar[bool] = True
+
+    def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
+        """Partition the model and build its pipeline schedule."""
+        if not self.supports_pipeline_parallel:
+            raise RuntimeError(
+                f"{type(self).__name__} does not support pipeline parallelism."
+            )
+
+        from torchtitan.distributed.pipeline_parallel import (
+            pipeline_llm,
+            pipeline_with_first_stage_modules,
+        )
+
+        if self.pipeline_first_stage_module_fqns:
+            return pipeline_with_first_stage_modules(
+                self,
+                first_stage_module_fqns=self.pipeline_first_stage_module_fqns,
+                **kwargs,
+            )
+        return pipeline_llm(self, **kwargs)
+
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> Self:
+        """Apply the ordered model-level parallelization lifecycle."""
+        from torchtitan.distributed.utils import get_spmd_context
+
+        with get_spmd_context(parallel_dims=parallel_dims):
+            self._parallelize(parallel_dims)
+            if ac_config is not None:
+                ac_config.build(dump_folder=dump_folder).apply(self)
+            if compile_config is not None and "model" in compile_config.components:
+                from torchtitan.distributed.compile import apply_compile
+
+                apply_compile(
+                    self,
+                    compile_config=compile_config,
+                    parallel_dims=parallel_dims,
+                )
+            if not skip_dp:
+                self._apply_fsdp(
+                    parallel_dims=parallel_dims,
+                    training=training,
+                    parallelism=parallelism,
+                )
+        return self
+
+    @abstractmethod
+    def _apply_fsdp(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        pass
+
+    @classmethod
+    def _register_optimizer_hooks(
+        cls,
+        optimizers: OptimizersContainer,
+        model_parts: list[BaseModel],
+        parallel_dims: ParallelDims,
+    ) -> None:
+        del optimizers, model_parts, parallel_dims

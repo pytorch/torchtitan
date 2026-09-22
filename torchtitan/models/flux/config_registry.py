@@ -71,7 +71,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_registry("flux-debug"),
+        model=model_registry("flux-debug"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=1,
@@ -125,7 +125,7 @@ def flux_dev() -> FluxTrainer.Config:
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
-        model_spec=model_registry("flux-dev"),
+        model=model_registry("flux-dev"),
         optimizer=default_adamw(lr=1e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=3000,
@@ -164,7 +164,7 @@ def flux_schnell() -> FluxTrainer.Config:
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
-        model_spec=model_registry("flux-schnell"),
+        model=model_registry("flux-schnell"),
         optimizer=default_adamw(lr=1e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=3000,
@@ -195,7 +195,7 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
     model_compile_enabled = (
         config.compile is not None and "model" in config.compile.components
     )
-    config.model_spec = model_registry(
+    config.model = model_registry(
         "flux-schnell",
         converters=[
             MXFP8LinearConverter.Config(
@@ -223,7 +223,7 @@ def flux_dev_mxfp8() -> FluxTrainer.Config:
     model_compile_enabled = (
         config.compile is not None and "model" in config.compile.components
     )
-    config.model_spec = model_registry(
+    config.model = model_registry(
         "flux-dev",
         converters=[
             MXFP8LinearConverter.Config(

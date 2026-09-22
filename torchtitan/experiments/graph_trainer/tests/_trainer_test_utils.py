@@ -6,6 +6,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from types import SimpleNamespace
 
 import torch
@@ -13,10 +14,9 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.config import TrainingConfig
+from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.distributed.utils import get_spmd_context
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
@@ -86,8 +86,7 @@ def build_minimal_trainer(
     engine.model_parts = [model]
     engine.loss_fn = CrossEntropyLoss.Config().build()
     engine.parallel_dims = parallel_dims
-    engine.train_context = get_spmd_context(parallel_dims=parallel_dims)
-    engine.forward_backward_body_fn = engine._non_pp_forward_backward_body
+    engine.forward_backward_body_fn = engine._non_pp_forward_backward_microbatch
     engine.model_config = model_config
     engine.device = torch.device("cuda")
     engine.preprocess_inputs_kwargs = {}
@@ -100,7 +99,6 @@ def build_minimal_trainer(
     engine.gc_handler = SimpleNamespace(run=lambda _step: False)
     engine.optimizers = SimpleNamespace(zero_grad=model.zero_grad)
     engine.loss_metrics = {}
-    engine._fsdp_root = None
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
@@ -128,13 +126,14 @@ def build_minimal_trainer(
                     ),
                 ),
             ),
-            model_spec=SimpleNamespace(model=model_config),
+            model=model_config,
             activation_checkpoint={
                 "none": None,
                 "selective": SelectiveAC.Config(),
                 "full": FullAC.Config(),
             }[activation_checkpoint_mode],
             dataloader=SimpleNamespace(max_num_documents=None),
+            debug=DebugConfig(),
             training=TrainingConfig(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(
                 pipeline_parallel_degree=1,
@@ -150,10 +149,16 @@ def build_minimal_trainer(
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
             training=TrainingConfig(disable_cuda_graphs=True),
-            parallelism=SimpleNamespace(fsdp_reshard_after_forward="default"),
+            parallelism=SimpleNamespace(
+                fsdp_defer_gradient_reduction=False,
+                fsdp_reshard_after_forward="default",
+            ),
         )
 
     engine.config = trainer.config
-    engine._run_gradient_accumulation = engine._gradient_accumulation_body
+    engine._run_forward_backward = partial(
+        engine._forward_backward_microbatch_groups,
+        defer_fsdp_gradient_reduction=False,
+    )
 
     return trainer

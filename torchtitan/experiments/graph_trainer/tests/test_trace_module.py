@@ -162,6 +162,21 @@ class _TraceableWrapper(torch.Tensor):
 
 
 class TestGraphGradientAccumulation(unittest.TestCase):
+    def test_rejects_fsdp2_deferred_gradient_reduction(self):
+        from types import SimpleNamespace
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(
+            parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=True)
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "does not support fsdp_defer_gradient_reduction"
+        ):
+            engine._initialize_forward_backward()
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_cuda_graph_numerics_match_external_accumulation(self):
         from types import SimpleNamespace
@@ -2616,7 +2631,7 @@ class TestTraceContextParallel(FSDPTest):
                 config.compile.mode = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
-                config.model_spec.model.layers = config.model_spec.model.layers[:1]
+                config.model.layers = config.model.layers[:1]
 
                 trainer = GraphTrainer(config)
                 num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
@@ -2642,8 +2657,8 @@ class TestTraceContextParallel(FSDPTest):
                     )
                     % config.training.max_context_length
                 )
-                trainer.engine.forward_backward_step(
-                    accumulation_step_inputs=[
+                trainer.engine.forward_backward(
+                    microbatch_groups=[
                         [
                             TokenizedTrainingMicrobatch(
                                 input=tokens,

@@ -24,4 +24,10 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
             test_name="mxfp8_linear_fsdp",
             ngpu=2,
         ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_nvfp4_fsdp2],
+            test_descr="NVFP4 linear with an FSDP-managed weight cache",
+            test_name="nvfp4_linear_fsdp",
+            ngpu=2,
+        ),
     ]
