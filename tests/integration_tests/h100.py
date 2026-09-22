@@ -70,4 +70,12 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
+        OverrideDefinitions(
+            configs=[recipes.kimi_k3_moonep_fsdp4_ep4],
+            test_descr="Kimi K3 FSDP+MoonEP",
+            test_name="kimi_k3_fsdp+moonep",
+            ngpu=4,
+            # MoonEP's kernels are CUDA-only and need NVLink multicast.
+            skip_rocm_test=True,
+        ),
     ]
