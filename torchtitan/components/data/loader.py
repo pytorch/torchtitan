@@ -6,6 +6,7 @@
 
 """Grain-backed TorchTitan dataloader."""
 
+import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -161,16 +162,31 @@ class GrainDataLoader(BaseDataLoader):
         return self._iterator
 
     def state_dict(self) -> dict[str, Any]:
+        # The iterator state is pickled to one ``bytes`` value per rank rather
+        # than stored as the nested dict Grain returns. DCP flattens a nested
+        # dict into one storage key per leaf, and the leaves here are not
+        # stable: a Hugging Face streaming cursor grows and drops keys such as
+        # ``examples_iterable.previous_state`` depending on where in the shard
+        # it stopped. A load whose in-memory state has a key the checkpoint
+        # lacks fails the load plan outright with
+        #
+        #     RuntimeError: Missing key in checkpoint state_dict:
+        #     dataloader.dp_rank_0.parent_state.parent.
+        #     parent_window_start_state.hf.examples_iterable.previous_state.
+        #
+        # One opaque value per rank keeps the key set fixed for the life of the
+        # run, so any cursor position loads into any other. ``bytes`` is a
+        # builtin, so DCP's ``weights_only=True`` read accepts it.
         return {
-            "version": 1,
+            "version": 2,
             "dp_world_size": self._dp_world_size,
-            self._rank_id: self._iterator.get_state(),
+            self._rank_id: pickle.dumps(self._iterator.get_state()),
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         if not state_dict:
             return
-        if state_dict["version"] != 1:
+        if state_dict["version"] != 2:
             raise ValueError(
                 f"unsupported GrainDataLoader state version {state_dict['version']}"
             )
@@ -183,7 +199,18 @@ class GrainDataLoader(BaseDataLoader):
                 f"checkpoint is missing dataloader state for {self._rank_id}"
             )
         try:
-            self._iterator.set_state(state_dict[self._rank_id])
+            iterator_state = pickle.loads(state_dict[self._rank_id])
+        except Exception as exc:
+            # The payload embeds whatever the source library put in its state,
+            # so an incompatible `datasets` version fails here rather than at a
+            # key comparison. Say so; the bare unpickling error does not.
+            raise ValueError(
+                "cannot unpickle the dataloader iterator state; the checkpoint "
+                "was probably written with a different version of the dataset "
+                "library backing this source"
+            ) from exc
+        try:
+            self._iterator.set_state(iterator_state)
         except Exception:
             self.close()
             raise
