@@ -41,6 +41,7 @@ from .linear import (
     RowParallelLinear,
 )
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
+from .multimodal import MultimodalModel
 from .nn_modules import (
     Conv1d,
     Conv2d,
@@ -81,6 +82,7 @@ __all__ = [
     "Linear",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
+    "MultimodalModel",
     "PartialBiasLinear",
     "RMSNorm",
     "RoPE",

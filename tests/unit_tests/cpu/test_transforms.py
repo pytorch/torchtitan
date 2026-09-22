@@ -41,7 +41,7 @@ def _llama3_cp_ready():
     from torchtitan.models.llama3.config_registry import llama3_debugmodel
 
     config = llama3_debugmodel()
-    config.model_spec = model_registry("debugmodel", attn_backend="flex")
+    config.model = model_registry("debugmodel", attn_backend="flex")
     config.parallelism.context_parallel_degree = 2
     config.training.max_context_length = 512
     return config
@@ -150,7 +150,7 @@ class TestAtomicApplication(unittest.TestCase):
     def test_a_failure_leaves_the_caller_config_untouched(self):
         config = _llama3_cp_ready()
         config.parallelism.context_parallel_degree = 1
-        attention = config.model_spec.model.layers[0].attention
+        attention = config.model.layers[0].attention
         before = attention.inner_attention.block_size
 
         with self.assertRaisesRegex(ValueError, "boom"):
@@ -165,7 +165,7 @@ class TestAtomicApplication(unittest.TestCase):
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
         self.assertIsNot(result, config)
-        original = config.model_spec.model.layers[0].attention.inner_attention
+        original = config.model.layers[0].attention.inner_attention
         self.assertNotIsInstance(original, KVAllGatherCPFlexInnerAttention.Config)
 
 
@@ -178,31 +178,31 @@ class TestTransformModel(unittest.TestCase):
 
         return model_registry("debugmodel", attn_backend="flex")
 
-    def test_rewrites_a_bare_model_spec(self):
-        spec = self._spec()
-        spec.model = transform_model_config_(
-            spec.model,
+    def test_rewrites_a_bare_model_config(self):
+        model_config = self._spec()
+        model_config = transform_model_config_(
+            model_config,
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
-        inner = spec.model.layers[0].attention.inner_attention
+        inner = model_config.layers[0].attention.inner_attention
         self.assertIsInstance(inner, KVAllGatherCPFlexInnerAttention.Config)
 
     def test_does_not_validate(self):
         """A CP kernel without a CP degree passes here and fails in the trainer.
 
         Validation is the caller's job, so RL and ``model_registry`` can rewrite
-        a spec that no ``Trainer.Config`` owns yet.
+        a model config that no ``Trainer.Config`` owns yet.
         """
-        spec = self._spec()
+        model_config = self._spec()
         transform_model_config_(
-            spec.model,
+            model_config,
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
 
     def test_orders_transforms(self):
         _Record.order = []
         transform_model_config_(
-            self._spec().model,
+            self._spec(),
             [_Third(), _First(), _Second()],
         )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
@@ -215,7 +215,7 @@ class TestContextParallelTransform(unittest.TestCase):
 
     def test_swap_keeps_the_tuning_of_the_kernel_it_replaces(self):
         config = _llama3_cp_ready()
-        tuned = config.model_spec.model.layers[0].attention.inner_attention
+        tuned = config.model.layers[0].attention.inner_attention
         tuned.block_size = (256, 128)
         tuned.kernel_options = {"BACKEND": "FLASH"}
 
@@ -224,7 +224,7 @@ class TestContextParallelTransform(unittest.TestCase):
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
         )
 
-        swapped = result.model_spec.model.layers[0].attention.inner_attention
+        swapped = result.model.layers[0].attention.inner_attention
         self.assertIsInstance(swapped, KVAllGatherCPFlexInnerAttention.Config)
         self.assertEqual(swapped.block_size, (256, 128))
         self.assertEqual(swapped.kernel_options, {"BACKEND": "FLASH"})
@@ -255,10 +255,10 @@ class TestContextParallelTransform(unittest.TestCase):
             ],
         )
 
-        inner = result.model_spec.model.layers[0].attention.inner_attention
+        inner = result.model.layers[0].attention.inner_attention
         self.assertIsInstance(inner, KVAllGatherCPFlexInnerAttention.Config)
 
-        model = result.model_spec.model.build()
+        model = result.model.build()
         trainable = {
             name for name, param in model.named_parameters() if param.requires_grad
         }
@@ -271,7 +271,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
     def _model_config():
         from torchtitan.models.llama3 import model_registry
 
-        return model_registry("debugmodel").model
+        return model_registry("debugmodel")
 
     def test_replaces_all_parallel_linear_roles(self):
         model = AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(

@@ -6,73 +6,29 @@
 
 import functools
 from dataclasses import dataclass
+from typing import cast
 
-import torch
-
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    Linear,
-    PartialBiasLinear,
-    RowParallelLinear,
-)
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     HybridEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
-from torchtitan.protocols.module import Module
-
-
-class _QuantizedLinearMixin:
-    """Add quantized local compute while preserving specialized Linear behavior.
-
-    This follows the same composition pattern as ``_LoRALinearMixin``: the
-    The mixin overrides ``_linear`` while the selected Linear subclass keeps
-    ownership of its bias handling or communication in ``forward``.
-
-    Unlike LoRA, some quantized implementations are complete TorchAO modules
-    rather than cooperative TorchTitan mixins. In particular, Float8 and
-    NVFP4 own their parameter and buffer initialization. Keeping the selected
-    backend in ``_quantized_linear_cls`` lets this mixin explicitly delegate
-    both initialization and local compute across that TorchAO boundary.
-    """
-
-    _quantized_linear_cls: type[Module]
-
-    def __init__(self, config) -> None:
-        self._quantized_linear_cls.__init__(
-            self, config  # pyrefly: ignore [bad-argument-type]
-        )
-
-    def _linear(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        bias: torch.Tensor | None,
-    ) -> torch.Tensor:
-        return self._quantized_linear_cls._linear(  # type: ignore[attr-defined]
-            self, input, weight, bias
-        )
 
 
 @functools.cache
 def specialize_quantized_linear(
-    quantized_cls: type[Module],
-    specialization_cls: type[
-        ColumnParallelLinear | PartialBiasLinear | RowParallelLinear
-    ],
-) -> type[Module]:
-    """Compose quantized local compute with specialized Linear behavior."""
+    quantized_cls: type[Linear],
+    specialization_cls: type[Linear],
+) -> type[Linear]:
+    """Compose quantized compute with specialized Linear behavior."""
     quantized_config_cls = quantized_cls.Config
 
-    class QuantizedSpecializedLinear(
-        _QuantizedLinearMixin,
-        specialization_cls,  # pyrefly: ignore [invalid-inheritance]
+    class QuantizedSpecializedLinear(  # pyrefly: ignore [invalid-inheritance]
+        specialization_cls,
         quantized_cls,
     ):
-        _quantized_linear_cls = quantized_cls
-
         @dataclass(kw_only=True, slots=True)
         class Config(quantized_config_cls):  # type: ignore[misc]
             pass
@@ -84,7 +40,7 @@ def specialize_quantized_linear(
     QuantizedSpecializedLinear.__module__ = quantized_cls.__module__
     QuantizedSpecializedLinear.Config.__qualname__ = f"{specialized_name}.Config"
     QuantizedSpecializedLinear.Config.__module__ = quantized_cls.__module__
-    return QuantizedSpecializedLinear
+    return cast(type[Linear], QuantizedSpecializedLinear)
 
 
 def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) -> bool:

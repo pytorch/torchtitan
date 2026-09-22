@@ -27,7 +27,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
 
     config = cast(
         Qwen35Model.Config,
-        model_registry("debugmodel_moe", moe_comm_backend="standard").model,
+        model_registry("debugmodel_moe", moe_comm_backend="standard"),
     )
     moe = config.layers[0].moe
     assert moe is not None
@@ -62,7 +62,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
 def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     from torchtitan.models.common.linear import Linear, PartialBiasLinear
 
-    config = cast(Qwen35Model.Config, model_registry("debugmodel").model)
+    config = cast(Qwen35Model.Config, model_registry("debugmodel"))
     vision_encoder = config.vision_encoder
     assert vision_encoder is not None
 
@@ -79,7 +79,7 @@ def test_qwen35_attention_output_matches_row_parallel_projection(
 ) -> None:
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
-    config = cast(Qwen35Model.Config, model_registry("debugmodel").model)
+    config = cast(Qwen35Model.Config, model_registry("debugmodel"))
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=False)
 
     for layer in config.layers:
@@ -115,34 +115,30 @@ def test_qwen35_registry_keeps_released_flavors() -> None:
 
 @pytest.mark.parametrize("flavor", sorted(qwen3_5_configs))
 def test_qwen35_registry_builds_every_flavor(flavor: str) -> None:
-    model_spec = model_registry(
+    config = model_registry(
         flavor,
         moe_comm_backend=(
             "standard" if flavor == "debugmodel_moe" or "-A" in flavor else None
         ),
     )
 
-    assert model_spec.name == "qwen3_5"
-    assert model_spec.flavor == flavor
+    assert isinstance(config, Qwen35Model.Config)
 
 
 def test_qwen35_is_the_shared_model_implementation() -> None:
-    model_spec = model_registry("0.8B")
-    config = cast(Qwen35Model.Config, model_spec.model)
-    qwen38_config = qwen3_8_model_registry("27B").model
+    config = cast(Qwen35Model.Config, model_registry("0.8B"))
+    qwen38_config = qwen3_8_model_registry("27B")
 
-    assert model_spec.name == "qwen3_5"
-    assert model_spec.flavor == "0.8B"
     assert config.dim == 1024
     assert len(config.layers) == 24
     assert isinstance(qwen38_config, Qwen35Model.Config)
 
 
 def test_qwen35_keeps_small_dense_and_moe_models() -> None:
-    dense_config = cast(Qwen35Model.Config, model_registry("0.8B").model)
+    dense_config = cast(Qwen35Model.Config, model_registry("0.8B"))
     moe_config = cast(
         Qwen35Model.Config,
-        model_registry("35B-A3B", moe_comm_backend="standard").model,
+        model_registry("35B-A3B", moe_comm_backend="standard"),
     )
 
     assert dense_config.dim == 1024
@@ -157,8 +153,6 @@ def test_qwen35_recipes_keep_versioned_hugging_face_paths() -> None:
     large_config = qwen35_27b()
 
     assert small_config.hf_assets_path.endswith("Qwen3.5-0.8B")
-    assert small_config.model_spec is not None
-    assert small_config.model_spec.name == "qwen3_5"
+    assert isinstance(small_config.model, Qwen35Model.Config)
     assert large_config.hf_assets_path.endswith("Qwen3.5-27B")
-    assert large_config.model_spec is not None
-    assert large_config.model_spec.name == "qwen3_5"
+    assert isinstance(large_config.model, Qwen35Model.Config)

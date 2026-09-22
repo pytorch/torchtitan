@@ -108,8 +108,8 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.rl.components.batcher import Batcher
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.components.work_buffer import (
@@ -278,8 +278,8 @@ class Controller(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
-        """Model spec for the trainer and the generator. Set programmatically via
+        model: Annotated[Decoder.Config | None, tyro.conf.Suppress] = None
+        """Model config for the trainer and the generator. Set programmatically via
         config_registry (not from CLI)."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
@@ -603,7 +603,7 @@ class Controller(Configurable):
                 "trainer",
                 TrainerActor,
                 config.trainer,
-                model_spec=config.model_spec,
+                model_config=config.model,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
                 compile_config=config.compile,
@@ -621,7 +621,7 @@ class Controller(Configurable):
                     actor_name,
                     VLLMGeneratorActor,
                     config.generator,
-                    model_spec=config.model_spec,
+                    model_config=config.model,
                     model_path=config.hf_assets_path,
                     compile_config=config.compile,
                     max_num_seqs=max_num_seqs,

@@ -267,9 +267,9 @@ def _tp_group_from_context() -> dist.ProcessGroup | None:
     """The TP process group from the current spmd_types mesh context, or None.
 
     Resolved per forward rather than captured at parallelize time. The mesh
-    context is only entered inside the trainer's ``train_context``, so it is
-    unavailable during ``__init__`` and ``parallelize``. Resolving it here keeps
-    process-group state out of the modules.
+    context is entered around each training forward/backward, so it is
+    unavailable during ``__init__`` and ``parallelize`` -- and reading it here
+    means these modules need no ``parallelize`` override and hold no group state.
 
     None means "run the stock projection": either no mesh context or TP is degree
     1, in which case there is no collective to fuse.

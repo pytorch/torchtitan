@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 """
 This script is adapted from torchtitan/models/llama3/state_dict_adapter.py.
 
@@ -14,13 +16,15 @@ aligned with the HF implementation.
 """
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
-from .model import Qwen3Model
+
+if TYPE_CHECKING:
+    from .model import Qwen3Model
 
 
 class Qwen3StateDictAdapter(MoEStateDictAdapter):

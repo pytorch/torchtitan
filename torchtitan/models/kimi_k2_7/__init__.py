@@ -9,16 +9,10 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import (
-    OptimizersContainer,
-    register_moe_load_balancing_hook,
-)
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -37,12 +31,8 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.deepseek_v3 import build_mla_moe_layers
-from torchtitan.protocols.model_spec import ModelSpec
-
 from .model import KimiK25Model
-from .parallelize import parallelize_kimi_k2_5
-from .qk_clip import QKClipFlexInnerAttention, register_qk_clip_hook
-from .state_dict_adapter import KimiK25StateDictAdapter
+from .qk_clip import QKClipFlexInnerAttention
 
 from .vision_encoder import (
     KimiK25VisionEncoder,
@@ -51,9 +41,7 @@ from .vision_encoder import (
 )
 
 __all__ = [
-    "parallelize_kimi_k2_5",
     "KimiK25Model",
-    "KimiK25StateDictAdapter",
     "KimiK25VisionEncoder",
     "VisionProjector",
     "VisionRotaryEmbedding2D",
@@ -199,15 +187,6 @@ def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexInnerAttention.Con
     return QKClipFlexInnerAttention.Config()
 
 
-def _register_optimizer_hooks(
-    optimizers: OptimizersContainer,
-    model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
-) -> None:
-    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
-    register_qk_clip_hook(optimizers, model_parts, parallel_dims)
-
-
 def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
     """Build MLA/MoE layers with the Kimi-family parameter initializers."""
     return build_mla_moe_layers(
@@ -270,6 +249,7 @@ def _debugmodel(
         ),
     )
     config = KimiK25Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -342,6 +322,7 @@ def _moonlight_16b_a3b_config(
         ),
     )
     return KimiK25Model.Config(
+        max_context_length=max_context_length,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -470,6 +451,7 @@ def _kimi_k2_5(
         ),
     )
     return KimiK25Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -511,7 +493,7 @@ def model_registry(
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> KimiK25Model.Config:
     get_config, max_context_len = kimi_k2_5_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -529,16 +511,4 @@ def model_registry(
         validate_converter_compatibility(converters)
         for c in converters:
             c.build().convert(config)
-    return ModelSpec(
-        name="kimi_k2_5",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_kimi_k2_5,
-        pipelining_fn=partial(
-            pipeline_with_first_stage_modules,
-            first_stage_module_fqns=("vision_encoder",),
-        ),
-        post_optimizer_build_fn=_register_optimizer_hooks,
-        state_dict_adapter=KimiK25StateDictAdapter,
-    )
+    return config

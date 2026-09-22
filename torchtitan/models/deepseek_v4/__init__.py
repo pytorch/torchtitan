@@ -11,12 +11,10 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -36,10 +34,6 @@ from torchtitan.models.common.config_utils import (
     make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.deepseek_v3.parallelize import (
-    parallelize_deepseekv3 as parallelize_deepseek_v4,
-)
-from torchtitan.protocols.model_spec import ModelSpec
 
 from .attention import (
     Attention,
@@ -52,10 +46,8 @@ from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4Router
 from .mtp import MTPBlock
-from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 __all__ = [
-    "parallelize_deepseek_v4",
     "DeepSeekV4Model",
     "deepseek_v4_configs",
     "model_registry",
@@ -707,6 +699,7 @@ def _debugmodel(
     )
 
     return DeepSeekV4Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
@@ -839,6 +832,7 @@ def _deepseek_v4_flash(
     )
 
     return DeepSeekV4Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
@@ -971,6 +965,7 @@ def _deepseek_v4_pro(
     )
 
     return DeepSeekV4Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
@@ -1029,7 +1024,7 @@ def model_registry(
     non_blocking_capacity_factor: float | None = None,
     n_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> DeepSeekV4Model.Config:
     if flavor not in deepseek_v4_configs:
         raise ValueError(
             f"Unknown deepseek_v4 flavor: {flavor}. "
@@ -1052,13 +1047,4 @@ def model_registry(
         validate_converter_compatibility(converters)
         for converter_cfg in converters:
             config = converter_cfg.build().convert(config)
-    return ModelSpec(
-        name="deepseek_v4",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_deepseek_v4,
-        pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
-        state_dict_adapter=DeepSeekV4StateDictAdapter,
-    )
+    return config

@@ -65,7 +65,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
     def _model_config():
         from torchtitan.models.llama3 import model_registry
 
-        return model_registry("debugmodel").model
+        return model_registry("debugmodel")
 
     def test_sharding_setup_declares_common_communication_contracts(self):
         """Async attention and FFN implementations own their collectives."""
@@ -175,11 +175,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 
         parallel_dims = self._parallel_dims()
-        attn_cfg = (
-            llama3_debugmodel_dist_gemm(seq_len=2048)
-            .model_spec.model.layers[0]
-            .attention
-        )
+        attn_cfg = llama3_debugmodel_dist_gemm(seq_len=2048).model.layers[0].attention
         set_gqa_attention_sharding(attn_cfg, enable_sp=True)
         attn = attn_cfg.build().to(self.device_type)
         attn.parallelize(parallel_dims)
@@ -280,7 +276,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
                 lse = torch.zeros(q.shape[:2], device=q.device, dtype=q.dtype)
                 return out_transform(q, lse)
 
-        config = model_registry("debugmodel", seq_len=128, attn_backend="flex").model
+        config = model_registry("debugmodel", seq_len=128, attn_backend="flex")
         set_gpt_oss_sharding_config(config, enable_sp=True, enable_ep=False)
         attention = config.layers[0].attention.build().to(self.device_type)
         attention.rope = _IdentityRope()

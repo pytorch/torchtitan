@@ -11,12 +11,10 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -30,7 +28,6 @@ from torchtitan.models.common import (
     TransformerBlock,
     UnaryActivationFn,
 )
-from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -41,17 +38,13 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
-from .parallelize import parallelize_deepseekv3
-from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 __all__ = [
-    "parallelize_deepseekv3",
     "DeepSeekV3Model",
     "DeepSeekV3Router",
     "MTPLoss",
@@ -433,6 +426,7 @@ def _debugmodel(
         ),
     )
     return DeepSeekV3Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -507,6 +501,7 @@ def _16b(
         ),
     )
     return DeepSeekV3Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -584,6 +579,7 @@ def _236b(
         ),
     )
     return DeepSeekV3Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -662,6 +658,7 @@ def _671b(
         ),
     )
     return DeepSeekV3Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -691,12 +688,6 @@ deepseekv3_configs = {
 }
 
 
-def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
-    """Register step pre-hooks for load balancing and aux-loss accumulators."""
-    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
-    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
-
-
 def model_registry(
     flavor: str,
     *,
@@ -706,7 +697,7 @@ def model_registry(
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
-) -> ModelSpec:
+) -> DeepSeekV3Model.Config:
     get_config, max_context_len = deepseekv3_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -725,13 +716,4 @@ def model_registry(
         validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
-    return ModelSpec(
-        name="deepseek_v3",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_deepseekv3,
-        pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=_post_optimizer_build_fn,
-        state_dict_adapter=DeepSeekV3StateDictAdapter,
-    )
+    return config

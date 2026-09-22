@@ -157,8 +157,8 @@ def get_fsdp_reshard_after_forward_policy(
             )
 
 
-def apply_fsdp_to_vision_encoder(
-    vision_encoder: nn.Module,
+def apply_fsdp_to_multimodal_encoder(
+    encoder: nn.Module,
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
@@ -168,15 +168,15 @@ def apply_fsdp_to_vision_encoder(
     *,
     dp_mesh_dims: DataParallelMeshDims | None = None,
 ) -> None:
-    """FSDP a VLM vision encoder as a single unit.
+    """Apply FSDP to a multimodal encoder as a single unit.
 
-    One all-gather for all vision params is more efficient than per-layer sharding
-    (the vision encoder is small relative to the decoder). Call before
+    One all-gather for all encoder parameters is more efficient than per-layer
+    sharding for the relatively small modality tower. Call before
     ``apply_fsdp_to_decoder`` so the encoder is already sharded.
 
     ``cpu_offload`` must match what the caller passes to ``apply_fsdp_to_decoder``.
     Under ``training.enable_cpu_offload`` the trainer materializes the whole model
-    on CPU, so a vision encoder sharded without ``CPUOffloadPolicy`` keeps CPU
+    on CPU, so an encoder sharded without ``CPUOffloadPolicy`` keeps CPU
     parameters while FSDP produces CUDA gradients for them, and backward dies with
     "attempting to assign a gradient with device type 'cuda' to a tensor with
     device type 'cpu'".
@@ -193,7 +193,7 @@ def apply_fsdp_to_vision_encoder(
     }
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
-    fully_shard(vision_encoder, **fsdp_config)
+    fully_shard(encoder, **fsdp_config)
 
 
 def apply_fsdp_to_decoder(

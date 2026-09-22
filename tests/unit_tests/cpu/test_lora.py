@@ -40,9 +40,9 @@ LINEAR_LORA_HANDLERS = (LinearLoRAHandler(),)
 
 def test_lora_model_builds():
     """LoRA debug model builds, has trainable adapters and frozen base."""
-    model_spec = model_registry("debugmodel")
-    model_spec.model = transform_model_config_(
-        model_spec.model,
+    model_config = model_registry("debugmodel")
+    model_config = transform_model_config_(
+        model_config,
         [
             LoRATransform(
                 handlers=LINEAR_LORA_HANDLERS,
@@ -52,7 +52,7 @@ def test_lora_model_builds():
             )
         ],
     )
-    model = model_spec.model.build()
+    model = model_config.build()
     model.init_states()
 
     for layer in model.layers.values():
@@ -92,9 +92,9 @@ def test_lora_model_builds():
 
 def test_lora_forward():
     """LoRA model forward produces correct output shape."""
-    model_spec = model_registry("debugmodel")
-    model_spec.model = transform_model_config_(
-        model_spec.model,
+    model_config = model_registry("debugmodel")
+    model_config = transform_model_config_(
+        model_config,
         [
             LoRATransform(
                 handlers=LINEAR_LORA_HANDLERS,
@@ -104,10 +104,10 @@ def test_lora_forward():
             )
         ],
     )
-    model = model_spec.model.build()
+    model = model_config.build()
     model.init_states()
 
-    vocab_size = model_spec.model.vocab_size
+    vocab_size = model_config.vocab_size
     num_documents, seq_len = 2, 16
     num_tokens = num_documents * seq_len
     tokens = torch.randint(0, vocab_size, (num_tokens,))
@@ -356,11 +356,11 @@ def test_lora_rank_validation():
 
 
 def test_multiple_lora_transforms_conflict():
-    model_spec = model_registry("debugmodel")
+    model_config = model_registry("debugmodel")
 
     with pytest.raises(ValueError, match="cannot be combined"):
         transform_model_config_(
-            model_spec.model,
+            model_config,
             [
                 LoRATransform(
                     handlers=LINEAR_LORA_HANDLERS,
