@@ -194,7 +194,7 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
             with self.subTest(num_mtp_layers=num_mtp_layers):
                 config = deepseek_v4_model_registry(
                     "debugmodel", seq_len=128, n_mtp_layers=num_mtp_layers
-                ).model
+                )
                 assert isinstance(config, DeepSeekV4Model.Config)
                 model = config.build()
                 model.init_states()
@@ -240,7 +240,7 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
             try:
                 config = deepseek_v4_model_registry(
                     "debugmodel", seq_len=128, n_mtp_layers=1
-                ).model
+                )
                 assert isinstance(config, DeepSeekV4Model.Config)
                 model = config.build()
                 model.init_states()

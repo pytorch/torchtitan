@@ -45,6 +45,7 @@ class TestLoss(unittest.TestCase):
         logprobs, entropy = compute_logprobs(
             logits,
             labels,
+            vocab_parallel_group=None,
             return_entropy=True,
             global_vocab_size=logits.shape[-1],
         )
@@ -557,6 +558,7 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                             logprobs, entropy = compute_logprobs(
                                 local_logits,
                                 local_labels,
+                                vocab_parallel_group=tp_group,
                                 return_entropy=True,
                                 global_vocab_size=vocab_size,
                             )

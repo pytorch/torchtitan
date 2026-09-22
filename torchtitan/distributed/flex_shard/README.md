@@ -37,6 +37,10 @@ Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
 most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
 `Replicate`; every other non-unit storage mesh axis must be replicated.
 
+Native `[M, R, C]` parameters can redistribute `Replicate()`, `Shard(1)`,
+or `Shard(2)` storage to `Shard(0)` compute on one mesh axis, with every
+other non-unit storage mesh axis replicated.
+
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,
 outermost axis first. For example, preserving an EP-axis `Shard(0)` while

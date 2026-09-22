@@ -68,7 +68,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         model_registry, ParallelDims, ParallelismConfig = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex
         # compile) so the pipeline runs on CPU.
-        model = model_registry("debugmodel", attn_backend="varlen").model.build()
+        model = model_registry("debugmodel", attn_backend="varlen").build()
         sink: dict = {}
         for key in list(model.layers.keys()):
             model.layers[key] = _RecordingLayer(sink)
@@ -90,12 +90,10 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             "torchtitan.models.qwen3_5.model.annotate_input_spmd_types",
             side_effect=lambda _parallel_dims, batch, _input_sharding: batch,
         ), patch(
-            "torchtitan.models.qwen3_5.model.set_current_spmd_mesh",
-            side_effect=lambda _mesh: contextlib.nullcontext(),
+            "torchtitan.models.qwen3_5.model.dist_utils.get_spmd_context",
+            side_effect=lambda **kwargs: contextlib.nullcontext(),
         ), patch(
             "torchtitan.models.qwen3_5.model.annotate_deltanet_cu_seqlens"
-        ), patch.object(
-            parallel_dims, "spmd_dense_mesh", return_value=None
         ):
             inputs, _labels, batch = model.preprocess_inputs(
                 input_dict,

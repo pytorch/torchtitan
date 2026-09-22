@@ -268,7 +268,7 @@ def annotate_replicated_parameters(
 ) -> None:
     """Annotate undistributed model parameters as replicated.
 
-    Call this before state-sharding modules with ``Module.parallelize``. That
+    Call this before state-sharding modules with ``Module._parallelize``. That
     replaces declared parameters with their model-parallel shards, while these
     annotations remain on parameters without a ``ShardingConfig`` for FSDP.
     """

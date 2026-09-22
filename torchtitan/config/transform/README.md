@@ -29,13 +29,13 @@ all model config transforms. In particular, apply quantization in
 `model_registry` before applying `LoRATransform`; running a converter over a
 LoRA-transformed tree can replace an adapter config.
 
-Use `transform_model_config_` when there is no trainer config, such as with a bare
-`ModelSpec`. It rewrites the model config in place and returns the root. It does
-not copy or validate the config.
+Use `transform_model_config_` when there is no trainer config. It rewrites the
+model config in place and returns the root. It does not copy or validate the
+config.
 
 ```python
-spec = model_registry("0.6B", attn_backend="varlen")
-spec.model = transform_model_config_(spec.model, [LMHeadCastTransform()])
+model_config = model_registry("0.6B", attn_backend="varlen")
+model_config = transform_model_config_(model_config, [LMHeadCastTransform()])
 ```
 
 ## What belongs here

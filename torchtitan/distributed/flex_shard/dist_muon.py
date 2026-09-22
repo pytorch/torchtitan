@@ -71,6 +71,8 @@ def build_dist_muon(
     one independent ``[R, C]`` matrix for local Muon compute. A native
     batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
     complete matrices, or ``Owned`` to assign the complete batch to one rank.
+    Replicated storage and storage shards along either matrix dimension can
+    redistribute to ``Shard(0)`` compute on one mesh axis.
     A single 2D matrix without ``BlockShard`` uses whole-matrix compute such as
     ``Owned``.
     """
@@ -1722,28 +1724,6 @@ def _resolve_storage_to_compute_transition(
     else:
         raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
 
-    if redistribution_storage_mesh_axis is not None and type(compute_sharding) is Shard:
-        source_sharding = _normalize_storage_placement(
-            param.placements[redistribution_storage_mesh_axis],
-            ndim=param.ndim,
-            mesh_axis_size=param.device_mesh.size(redistribution_storage_mesh_axis),
-        )
-        target_sharding = normalized_target_sharding_by_storage_mesh_axis[
-            redistribution_storage_mesh_axis
-        ]
-        if (
-            type(source_sharding) is not Replicate
-            and type(target_sharding) is not BlockShard
-            and source_sharding != target_sharding
-            and not uses_supported_orthogonal_shard_redistribution
-        ):
-            axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
-            raise NotImplementedError(
-                f"Muon parameter {fqn!r} cannot yet change tensor sharding "
-                f"from {source_sharding} to {target_sharding} on mesh axis "
-                f"{axis_name!r}"
-            )
-
     if redistribution_storage_mesh_axis is None:
         return _ResolvedStorageToComputeTransition(
             compute_sharding=compute_sharding,
@@ -1965,12 +1945,14 @@ def _local_storage_signature(tensor: Tensor) -> tuple[Any, ...]:
 
 def _storage_layout_signature(tensor: DTensor) -> tuple[Any, ...]:
     local = tensor.to_local()
+    # Empty shards address no elements, and autograd can choose different strides.
+    local_strides = tuple(local.stride()) if local.numel() else ()
     return (
         tuple(tensor.shape),
         tuple(tensor.stride()),
         tensor.placements,
         tuple(local.shape),
-        tuple(local.stride()),
+        local_strides,
         local.dtype,
         local.device,
         local.is_contiguous(),

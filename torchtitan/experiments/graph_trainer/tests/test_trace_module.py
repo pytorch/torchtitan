@@ -2617,7 +2617,7 @@ class TestTraceContextParallel(FSDPTest):
                 config.compile.mode = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
-                config.model_spec.model.layers = config.model_spec.model.layers[:1]
+                config.model.layers = config.model.layers[:1]
 
                 trainer = GraphTrainer(config)
                 num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank

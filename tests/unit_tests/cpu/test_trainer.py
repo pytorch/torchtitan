@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import weakref
-from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -134,7 +134,9 @@ def test_microbatch_generator_preserves_labels() -> None:
     assert trainer.metrics_processor.ntokens_since_last_log == 1
 
 
-def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage():
+def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage(
+    monkeypatch,
+):
     sentinel = torch.full((1,), -1.0)
     trainer = cast(
         TrainingEngine,
@@ -142,7 +144,6 @@ def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage():
             pp_has_first_stage=False,
             pp_has_last_stage=False,
             pp_schedule=SimpleNamespace(step=lambda **kwargs: None),
-            train_context=nullcontext,
             model_parts=[
                 SimpleNamespace(
                     preprocess_inputs=lambda input_dict, **kw: (
@@ -160,6 +161,7 @@ def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage():
             config=SimpleNamespace(
                 parallelism="PARA",
                 dataloader=SimpleNamespace(max_num_documents=None),
+                debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
                     disable_cuda_graphs=True,
                     max_context_length=2048,
@@ -175,6 +177,10 @@ def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage():
         ),
     )
     _bind_pp_forward_backward_body(trainer)
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        lambda **kwargs: contextlib.nullcontext(),
+    )
 
     loss = TrainingEngine.forward_backward_microbatch(
         trainer,
@@ -187,7 +193,9 @@ def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage():
     torch.testing.assert_close(loss, sentinel)
 
 
-def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs() -> None:
+def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs(
+    monkeypatch,
+) -> None:
     activation_refs: list[weakref.ReferenceType[torch.Tensor]] = []
     loss_refs: list[weakref.ReferenceType[torch.Tensor]] = []
     loss_containers: list[list[torch.Tensor]] = []
@@ -211,7 +219,6 @@ def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs() -> None:
             pp_has_first_stage=True,
             pp_has_last_stage=True,
             pp_schedule=SimpleNamespace(step=schedule_step),
-            train_context=nullcontext,
             model_parts=[
                 SimpleNamespace(
                     preprocess_inputs=lambda input_dict, **kw: (
@@ -228,6 +235,7 @@ def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs() -> None:
             preprocess_inputs_kwargs={},
             config=SimpleNamespace(
                 parallelism="PARA",
+                debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
                     disable_cuda_graphs=True,
                     max_context_length=2048,
@@ -242,6 +250,10 @@ def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs() -> None:
         ),
     )
     _bind_pp_forward_backward_body(trainer)
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        lambda **kwargs: contextlib.nullcontext(),
+    )
 
     reporting_loss = TrainingEngine.forward_backward_microbatch(
         trainer,
@@ -633,6 +645,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
                 ),
             ),
             optimizers=MagicMock(),
+            ema=None,
             lr_schedulers=SimpleNamespace(
                 get_metrics=MagicMock(return_value={}),
                 step=MagicMock(),
@@ -821,16 +834,13 @@ def test_initialize_preserves_phase_order():
             _initialize_forward_backward=MagicMock(
                 side_effect=lambda: events.append("forward_backward")
             ),
+            state_dict_adapter=None,
         ),
     )
-    model_spec = MagicMock()
-    sd_adapter = MagicMock()
-
     TrainingEngine.initialize(
         engine,
-        model_spec,
         compile_config=None,
-        sd_adapter=sd_adapter,
+        hf_assets_path="",
         create_seed_checkpoint=True,
     )
 
@@ -843,14 +853,14 @@ def test_initialize_preserves_phase_order():
     ]
     assert engine.model_device_mem_stats is model_mem_stats
     engine._initialize_model.assert_called_once_with(
-        model_spec,
         compile_config=None,
+        hf_assets_path="",
         create_seed_checkpoint=True,
     )
-    engine._initialize_optimizer.assert_called_once_with(model_spec)
+    engine._initialize_optimizer.assert_called_once_with()
     engine._initialize_checkpointer.assert_called_once_with(
         dataloader=None,
-        sd_adapter=sd_adapter,
+        sd_adapter=engine.state_dict_adapter,
     )
     engine._initialize_forward_backward.assert_called_once_with()
 

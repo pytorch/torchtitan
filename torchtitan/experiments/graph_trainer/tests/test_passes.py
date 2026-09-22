@@ -154,7 +154,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             return SimpleNamespace(
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
-                model_spec=SimpleNamespace(model=SimpleNamespace(layers=[0, 1])),
+                model=SimpleNamespace(layers=[0, 1]),
                 parallelism=SimpleNamespace(),
             )
 
@@ -2655,11 +2655,11 @@ class TestBucketingPrefetchOrder(FSDPTest):
     def _run_and_get_layer_ids(self, fsdp_reshard_after_forward: str):
         """Run a single forward+backward step and return bucketed AG layer ids."""
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            annotate_graph_trainer_model,
+        )
         from torchtitan.experiments.graph_trainer.llama3 import (
             model_registry as llama3_model_registry,
-        )
-        from torchtitan.experiments.graph_trainer.llama3.parallelize import (
-            annotate_llama,
         )
         from torchtitan.experiments.graph_trainer.simple_fsdp import (
             data_parallel,
@@ -2681,14 +2681,13 @@ class TestBucketingPrefetchOrder(FSDPTest):
             enable_sequence_parallel=False,
         )
 
-        model_spec = llama3_model_registry("debugmodel")
-        model_config = model_spec.model
+        model_config = llama3_model_registry("debugmodel")
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):
             model = model_config.build()
 
-        annotate_llama(model)
+        annotate_graph_trainer_model(model)
         from torchtitan.experiments.graph_trainer.common_utils import (
             get_simple_fsdp_mesh,
         )
@@ -4228,7 +4227,7 @@ class TestChunkPasses(TestCase):
             graph_state=GraphStateSpec(),
         )
         config = SimpleNamespace(
-            model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
+            model=SimpleNamespace(layers=[object()]),
             parallelism=SimpleNamespace(
                 expert_parallel_degree=1,
                 fsdp_reshard_after_forward="default",

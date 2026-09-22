@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, cast
@@ -14,11 +15,12 @@ from spmd_types import SpmdType
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
-    set_current_spmd_mesh,
     spmd_local_context,
 )
 from torchtitan.models.common import Linear
@@ -34,6 +36,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    MultimodalModel,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -47,6 +50,7 @@ from torchtitan.protocols.module import Module
 from .gdn import GatedDeltaNet
 from .rope import MRoPE
 from .sharding import annotate_deltanet_cu_seqlens, set_qwen35_sharding_config
+from .state_dict_adapter import Qwen35StateDictAdapter
 from .vision_encoder import Qwen35VisionEncoder
 
 # Shape suffixes:
@@ -246,7 +250,18 @@ class Qwen35TransformerBlock(Module):
         return x_TD
 
 
-class Qwen35Model(Decoder):
+class Qwen35Model(MultimodalModel):
+    state_dict_adapter_cls = Qwen35StateDictAdapter
+    multimodal_encoder_fqns = ("vision_encoder",)
+
+    @classmethod
+    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+
+    pipeline_first_stage_module_fqns = ("vision_encoder",)
+
     """Qwen3.5: Multimodal model with hybrid attention.
 
     Combines a hybrid decoder (GatedDeltaNet linear attention + full
@@ -374,6 +389,34 @@ class Qwen35Model(Decoder):
             else None
         )
 
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> Qwen35Model:
+        if parallel_dims.cp_enabled:
+            raise NotImplementedError(
+                "Context Parallel is not yet supported for Qwen3.5. "
+                "GatedDeltaNet requires full-sequence allgather, and multimodal "
+                "CP needs vision scatter before CP sharding."
+            )
+
+        return super().parallelize(
+            parallel_dims=parallel_dims,
+            training=training,
+            parallelism=parallelism,
+            compile_config=compile_config,
+            ac_config=ac_config,
+            dump_folder=dump_folder,
+            skip_dp=skip_dp,
+        )
+
     def preprocess_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
@@ -447,7 +490,7 @@ class Qwen35Model(Decoder):
         # nested inside attention_masks, must be annotated at its container.
         attention_masks = batch.get("attention_masks")
         if attention_masks is not None:
-            with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+            with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
                 annotate_deltanet_cu_seqlens(attention_masks)
 
         inputs = batch.pop("input")

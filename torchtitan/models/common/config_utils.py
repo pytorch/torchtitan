@@ -47,7 +47,6 @@ from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
 )
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 
 
@@ -64,9 +63,8 @@ def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
     return _init
 
 
-def decoder_vocab_size(model_spec: ModelSpec) -> int:
+def decoder_vocab_size(model_config: Module.Config) -> int:
     """Assert Decoder.Config type so lint is not annoyed."""
-    model_config = model_spec.model
     assert isinstance(model_config, Decoder.Config)
     return model_config.vocab_size
 

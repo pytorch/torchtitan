@@ -57,6 +57,7 @@ from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
+    spmd_mesh_group,
 )
 from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
@@ -101,12 +102,13 @@ logger = logging.getLogger(__name__)
 # TODO: directly testing against Trainer with debug model to avoid OOM
 def build_trainer_model(
     config: Controller.Config,
-) -> tuple[torch.nn.Module, torch.device, dist_utils.SpmdContext]:
+) -> tuple[torch.nn.Module, torch.device, ParallelDims]:
     """Build, parallelize, and load weights for the trainer model.
 
     Mirrors Trainer._build_model() without the Monarch actor framework.
     """
-    model_spec = config.model_spec
+    model_config = config.model
+    assert model_config is not None
     hf_assets_path = config.hf_assets_path
 
     device = utils.get_local_device()
@@ -123,11 +125,6 @@ def build_trainer_model(
         world_size=dist.get_world_size(),
         enable_sequence_parallel=parallelism.enable_sequence_parallel,
     )
-    train_context = dist_utils.get_spmd_context(
-        parallel_dims=parallel_dims,
-        spmd_typechecking=False,
-    )
-
     dist_utils.set_determinism(
         parallel_dims,
         device,
@@ -142,16 +139,15 @@ def build_trainer_model(
     # so each Module is constructed with its ShardingConfig.
     # Without this the trainer side would run un-parallelized while the vLLM
     # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
-    model_spec.model.update_from_config(
+    model_config.update_from_config(
         config=trainer_config,
     )
 
     with torch.device("meta"):
         with utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]):
-            model = model_spec.model.build()
+            model = model_config.build()
 
-    model = model_spec.parallelize_fn(
-        model,
+    model = model.parallelize(
         parallel_dims=parallel_dims,
         training=trainer_config.training,
         parallelism=parallelism,
@@ -159,16 +155,18 @@ def build_trainer_model(
         ac_config=trainer_config.activation_checkpoint,
         dump_folder=config.dump_folder,
     )
-    model.to_empty(device=device)
-    with torch.no_grad():
-        model.init_weights(buffer_device=None)
+    with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+        model.to_empty(device=device)
+        with torch.no_grad():
+            model.init_weights(buffer_device=None)
 
     # Load HF checkpoint if available
-    if model_spec.state_dict_adapter is not None and hf_assets_path:
+    adapter_cls = type(model).state_dict_adapter_cls
+    if adapter_cls is not None and hf_assets_path:
         index_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
         single_path = os.path.join(hf_assets_path, "model.safetensors")
         if os.path.exists(index_path) or os.path.exists(single_path):
-            sd_adapter = model_spec.state_dict_adapter(model_spec.model, hf_assets_path)
+            sd_adapter = adapter_cls(model_config, hf_assets_path)
             storage_reader = sd_adapter.get_hf_storage_reader(hf_assets_path)
             hf_state_dict = sd_adapter.to_hf(model.state_dict())
             dcp.load(hf_state_dict, storage_reader=storage_reader)
@@ -180,7 +178,7 @@ def build_trainer_model(
             )
 
     model.eval()
-    return model, device, train_context
+    return model, device, parallel_dims
 
 
 # TODO: directly testing against VLLMGenerator with debug model to avoid OOM
@@ -206,7 +204,8 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     """Create a vLLM LLMEngine with torchtitan model from the RL config."""
     gen_config = config.generator
 
-    attention_backend = config.model_spec.model.first_full_attention_backend
+    assert config.model is not None
+    attention_backend = config.model.first_full_attention_backend
     use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
@@ -234,7 +233,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     engine_kwargs = dict(
         model=config.hf_assets_path,
         trust_remote_code=True,
-        # Build the model config from torchtitan's ModelSpec via the custom
+        # Build the model config from torchtitan's model config via the custom
         # parser registered by register_to_vllm, instead of reading config.json.
         config_format=TORCHTITAN_CONFIG_FORMAT,
         dtype=gen_config.model_dtype,
@@ -255,8 +254,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     if not has_cuda_capability(9, 0) and not use_flex:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
-    assert config.model_spec is not None
-    engine_kwargs["max_model_len"] = config.model_spec.max_context_length
+    engine_kwargs["max_model_len"] = config.model.max_context_length
     # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
     # (the active-buffer capacity num_group_workers, or the validation pass).
     async_loop = config.async_loop
@@ -382,7 +380,12 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
         labels[offset : offset + sl - 1] = packed_ids[offset + 1 : offset + sl]
         offset += psl
 
-    logprobs = compute_logprobs(logits, labels)
+    logprobs = compute_logprobs(
+        logits,
+        labels,
+        vocab_parallel_group=spmd_mesh_group("tp"),
+        global_vocab_size=model.config.lm_head.out_features,
+    )
 
     results = []
     offset = 0
@@ -415,7 +418,12 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
         labels[offset : offset + seq_len - 1] = t[1:seq_len]
         offset += seq_len
 
-    logprobs = compute_logprobs(logits, labels)
+    logprobs = compute_logprobs(
+        logits,
+        labels,
+        vocab_parallel_group=spmd_mesh_group("tp"),
+        global_vocab_size=model.config.lm_head.out_features,
+    )
 
     results = []
     offset = 0
@@ -667,7 +675,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
         register_to_vllm(
-            config.model_spec,
+            config.model,
             parallelism=config.generator.parallelism,
             compile_config=config.compile,
             checkpointer_config=generator_checkpointer,
@@ -678,7 +686,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         # GPU memory for vLLM to leave room for the trainer model.
         config.generator.gpu_memory_limit = 0.5
 
-        cls.model, cls.device, cls.train_context = build_trainer_model(config)
+        cls.model, cls.device, cls.parallel_dims = build_trainer_model(config)
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
@@ -748,7 +756,9 @@ class BitwiseParityTestBase(unittest.TestCase):
         n = len(self.prompt_ids)
         mid = max(1, n // 2)
 
-        with type(self).train_context(), torch.no_grad():
+        with dist_utils.get_spmd_context(
+            parallel_dims=type(self).parallel_dims
+        ), torch.no_grad():
             lps_partial = compute_trainer_prefill_logprobs(
                 model,
                 self.prompt_ids[:mid],
@@ -782,7 +792,9 @@ class BitwiseParityTestBase(unittest.TestCase):
         model = self.model
         engine = self.engine
 
-        with type(self).train_context(), torch.no_grad():
+        with dist_utils.get_spmd_context(
+            parallel_dims=type(self).parallel_dims
+        ), torch.no_grad():
             trainer_lps = compute_trainer_prefill_logprobs(
                 model, self.prompt_ids, self.device, attn_backend=self.attn_backend
             )

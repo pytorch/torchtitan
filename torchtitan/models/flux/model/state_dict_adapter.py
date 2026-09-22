@@ -4,17 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import re
 from collections import defaultdict
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
-from .model import FluxModel
+if TYPE_CHECKING:
+    from .model import FluxModel
 
 logger = logging.getLogger(__name__)
 
