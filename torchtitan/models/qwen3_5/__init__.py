@@ -9,12 +9,10 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
     Conv1d,
@@ -39,19 +37,13 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 
-from torchtitan.protocols.model_spec import ModelSpec
-
 from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet, RMSNormGated
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
-
-from .parallelize import parallelize_qwen3_5
 from .rope import MRoPE
-from .state_dict_adapter import Qwen35StateDictAdapter
 
 from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
 
 __all__ = [
-    "parallelize_qwen3_5",
     "Qwen35Model",
     "qwen3_5_configs",
     "QWEN3_5_SPECIAL_TOKENS",
@@ -478,6 +470,7 @@ def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     # mrope_section sum must equal rotary_dim / 2 (8 for rotary_dim=16).
     # Real models use [11, 11, 10] with rotary_dim=64.
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -540,6 +533,7 @@ def _debugmodel_moe(
     n_layers = 4
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -605,6 +599,7 @@ def _0_8b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 24
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -666,6 +661,7 @@ def _2b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 24
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -726,6 +722,7 @@ def _4b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 32
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -782,6 +779,7 @@ def _9b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 32
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -838,6 +836,7 @@ def _27b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 64
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -899,6 +898,7 @@ def _35b_a3b(
     n_layers = 40
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -964,6 +964,7 @@ def _122b_a10b(
     n_layers = 48
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -1029,6 +1030,7 @@ def _397b_a17b(
     n_layers = 60
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -1102,7 +1104,7 @@ def model_registry(
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> Qwen35Model.Config:
     get_config, max_context_len = qwen3_5_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -1124,16 +1126,4 @@ def model_registry(
         for c in converters:
             config = c.build().convert(config)
 
-    return ModelSpec(
-        name="qwen3_5",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_qwen3_5,
-        pipelining_fn=partial(
-            pipeline_with_first_stage_modules,
-            first_stage_module_fqns=("vision_encoder",),
-        ),
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
-        state_dict_adapter=Qwen35StateDictAdapter,
-    )
+    return config

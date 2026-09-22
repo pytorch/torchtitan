@@ -10,7 +10,7 @@ import pytest
 import torch.nn as nn
 
 from torchtitan.config import CompileConfig
-from torchtitan.models.muse_glimmer.parallelize import parallelize_muse_glimmer
+from torchtitan.models.common.multimodal import MultimodalModel
 
 
 class _DummyVisionEncoder(nn.Module):
@@ -29,13 +29,15 @@ class _DummyVisionAdapter(nn.Module):
 
 
 class _DummyMuseGlimmer(nn.Module):
+    multimodal_encoder_fqns = ("vision_encoder",)
+
     def __init__(self) -> None:
         super().__init__()
         self.layers = nn.ModuleList()
         self.vision_encoder = _DummyVisionEncoder()
         self.vision_adapter = _DummyVisionAdapter()
 
-    def parallelize(self, parallel_dims) -> None:
+    def _parallelize(self, parallel_dims) -> None:
         del parallel_dims
 
 
@@ -47,7 +49,7 @@ def test_compile_skips_vision_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
         compiled.append(model)
 
     monkeypatch.setattr(
-        "torchtitan.models.muse_glimmer.parallelize.apply_compile",
+        "torchtitan.distributed.compile.apply_compile",
         fake_apply_compile,
     )
 
@@ -55,7 +57,7 @@ def test_compile_skips_vision_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     parallel_dims = MagicMock()
     parallel_dims.tp_enabled = False
 
-    parallelize_muse_glimmer(
+    MultimodalModel.parallelize(
         model,
         parallel_dims=parallel_dims,
         training=MagicMock(),

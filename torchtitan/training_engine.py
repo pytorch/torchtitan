@@ -23,7 +23,11 @@ from torchtitan.components.checkpointer import BaseCheckpointManager, Checkpoint
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
+from torchtitan.components.optimizer import (
+    EMA,
+    LRSchedulersContainer,
+    OptimizersContainer,
+)
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     CommConfig,
@@ -54,7 +58,6 @@ from torchtitan.observability.metrics import (
 from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import ScalarStateAccessor, SDCReplayer
 from torchtitan.protocols import BaseModel
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
 
@@ -82,6 +85,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         lr_scheduler: LRSchedulersContainer.Config = field(
             default_factory=LRSchedulersContainer.Config
         )
+        ema: EMA.Config | None = None
+        """Online EMA of model weights, e.g. for cheap mid-WSD-training eval
+        without a full LR decay. Unset (None) means EMA is disabled."""
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         checkpointer: Annotated[
@@ -168,12 +174,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     config: Config
     device: torch.device
     parallel_dims: ParallelDims
-    model_parts: list[torch.nn.Module]
+    model_parts: list[BaseModel]
     model_config: BaseModel.Config
     output_dir: str
     loss_fn: BaseLoss
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
+    ema: EMA | None
     checkpointer: BaseCheckpointManager
     pp_has_last_stage: bool
     max_num_documents: int | None
@@ -244,29 +251,31 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     @sl.log_trace_span("initialize")
     def initialize(
         self,
-        model_spec: ModelSpec,
         *,
         compile_config: CompileConfig | None,
-        sd_adapter: Any | None,
+        hf_assets_path: str,
         dataloader: BaseDataLoader | None = None,
         create_seed_checkpoint: bool = False,
     ) -> None:
         """Initialize model execution and the state required to train it."""
         self._initialize_model(
-            model_spec,
             compile_config=compile_config,
+            hf_assets_path=hf_assets_path,
             create_seed_checkpoint=create_seed_checkpoint,
         )
         self.model_device_mem_stats = self.device_memory_monitor.get_peak_stats()
-        self._initialize_optimizer(model_spec)
-        self._initialize_checkpointer(dataloader=dataloader, sd_adapter=sd_adapter)
+        self._initialize_optimizer()
+        self._initialize_checkpointer(
+            dataloader=dataloader,
+            sd_adapter=self.state_dict_adapter,
+        )
         self._initialize_forward_backward()
 
     def _initialize_model(
         self,
-        model_spec: ModelSpec,
         *,
         compile_config: CompileConfig | None,
+        hf_assets_path: str,
         create_seed_checkpoint: bool = False,
     ) -> None:
         """Build the loss and model execution state."""
@@ -286,7 +295,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             utils.set_default_dtype(TORCH_DTYPE_MAP[self.config.training.dtype]),
         ):
             model = self.model_config.build()
-        model.verify_module_protocol()
+        self.model_cls = type(model)
+        adapter_cls = type(model).state_dict_adapter_cls
+        self.state_dict_adapter = (
+            adapter_cls(self.model_config, hf_assets_path)
+            if adapter_cls is not None
+            else None
+        )
         (
             self.model_param_count,
             self.num_flops_per_token,
@@ -295,18 +310,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         config = self.config
         if self.parallel_dims.pp_enabled:
-            if model_spec.pipelining_fn is None:
-                raise RuntimeError(
-                    f"Pipeline Parallel is enabled but {model_spec.name} "
-                    "does not support pipelining"
-                )
             (
                 self.pp_schedule,
                 self.model_parts,
                 self.pp_has_first_stage,
                 self.pp_has_last_stage,
-            ) = model_spec.pipelining_fn(
-                model,
+            ) = model.pipeline(
                 parallel_dims=self.parallel_dims,
                 training=config.training,
                 parallelism=config.parallelism,
@@ -315,14 +324,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 dump_folder=self.output_dir,
                 device=self.device,
                 model_config=self.model_config,
-                parallelize_fn=model_spec.parallelize_fn,
                 loss_fn=self.loss_fn,
             )
             del model
         else:
             if not create_seed_checkpoint:
-                model = model_spec.parallelize_fn(
-                    model,
+                model = model.parallelize(
                     parallel_dims=self.parallel_dims,
                     training=config.training,
                     parallelism=config.parallelism,
@@ -334,11 +341,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.pp_has_first_stage = True
             self.pp_has_last_stage = True
 
-        for model_part in self.model_parts:
-            model_part.to_empty(device=init_device)
-            with torch.no_grad():
-                cast(BaseModel, model_part).init_weights(buffer_device=buffer_device)
-            model_part.train()
+        with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
+            for model_part in self.model_parts:
+                model_part.to_empty(device=init_device)
+                with torch.no_grad():
+                    model_part.init_weights(buffer_device=buffer_device)
+                model_part.train()
 
         if isinstance(self.loss_fn, ChunkedLossWrapper) and (
             not self.parallel_dims.pp_enabled or self.pp_has_last_stage
@@ -358,20 +366,26 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             model_with_lm_head._skip_lm_head = True
 
         logger.info(
-            f"Model {model_spec.name} {model_spec.flavor} size: "
+            f"Model {type(self.model_config).__qualname__} size: "
             f"{self.model_param_count:,} total parameters"
         )
 
-    def _initialize_optimizer(self, model_spec: ModelSpec) -> None:
-        """Construct optimizers and learning-rate schedulers."""
+    def _initialize_optimizer(self) -> None:
+        """Construct optimizers, learning-rate schedulers and the weight EMA."""
         self.optimizers = self.config.optimizer.build(model_parts=self.model_parts)
-        if model_spec.post_optimizer_build_fn is not None:
-            model_spec.post_optimizer_build_fn(
-                self.optimizers, self.model_parts, self.parallel_dims
-            )
+        self.model_cls._register_optimizer_hooks(
+            self.optimizers,
+            self.model_parts,
+            self.parallel_dims,
+        )
         self.lr_schedulers = self.config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=self.config.training.steps,
+        )
+        self.ema = (
+            self.config.ema.build(model_parts=self.model_parts)
+            if self.config.ema is not None
+            else None
         )
 
     def _initialize_checkpointer(
@@ -389,6 +403,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states={"train_state": self},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
@@ -411,10 +426,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             )
 
         self._num_optimizer_steps_since_cuda_graph_init = 0
-        self.train_context = dist_utils.get_spmd_context(
-            parallel_dims=self.parallel_dims,
-            spmd_typechecking=self.config.debug.spmd_typechecking,
-        )
         if self.parallel_dims.pp_enabled:
             self.forward_backward_body_fn = cast(
                 Callable[..., torch.Tensor], self._pp_forward_backward_body
@@ -529,9 +540,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         self.device, non_blocking=True
                     )
                     with sl.log_trace_span("preprocess_inputs"):
-                        inputs_mb, labels_mb, extra_kwargs_mb = cast(
-                            BaseModel, self.model_parts[0]
-                        ).preprocess_inputs(
+                        inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
+                            0
+                        ].preprocess_inputs(
                             input_dict,
                             parallel_dims=self.parallel_dims,
                             parallelism=self.config.parallelism,
@@ -567,9 +578,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             microbatch = microbatch_group[0]
             input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
             with sl.log_trace_span("preprocess_inputs"):
-                inputs, labels, extra_kwargs = cast(
-                    BaseModel, self.model_parts[0]
-                ).preprocess_inputs(
+                inputs, labels, extra_kwargs = self.model_parts[0].preprocess_inputs(
                     input_dict,
                     parallel_dims=self.parallel_dims,
                     parallelism=self.config.parallelism,
@@ -613,7 +622,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         model_kwargs: dict[str, Any],
         loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        with self.train_context():
+        with dist_utils.get_spmd_context(
+            parallel_dims=self.parallel_dims,
+            spmd_typechecking=self.config.debug.spmd_typechecking,
+        ):
             pred = self.model_parts[0](inputs, **model_kwargs)
             loss, self.loss_metrics = self.loss_fn(
                 pred,
@@ -633,7 +645,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         model_kwargs: list[dict[str, Any]],
         loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        with self.train_context():
+        with dist_utils.get_spmd_context(
+            parallel_dims=self.parallel_dims,
+            spmd_typechecking=self.config.debug.spmd_typechecking,
+        ):
             losses = [] if self.pp_has_last_stage else None
             self.pp_schedule.step(
                 arg_mbs=inputs,
@@ -689,6 +704,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.checkpointer.maybe_wait_for_staging()
         self.optimizers.step()
         self.lr_schedulers.step()
+        if self.ema is not None:
+            # current_step is the step just optimized, which is what the EMA
+            # schedule's start_step/update_every_n_steps are defined against.
+            self.ema.step(current_step)
         self.num_completed_steps = current_step
         self._num_optimizer_steps_since_cuda_graph_init += 1
         return grad_norm

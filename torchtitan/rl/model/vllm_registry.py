@@ -7,7 +7,7 @@
 """
 Single entry point that registers the TorchTitan model class and the
 TorchTitan custom ConfigParser with vLLM, plus the HF-shaped config-dict
-helper they share. All per-engine torchtitan config (``model_spec``,
+helper they share. All per-engine torchtitan config (``model_config``,
 ``parallelism``, ``compile_config``) is captured via closure on dynamic
 subclasses — vLLM's ``hf_config`` only carries HF-shaped fields.
 
@@ -18,7 +18,7 @@ Usage:
     )
 
     register_to_vllm(
-        model_spec,
+        model_config,
         parallelism=parallelism_config,
         compile_config=compile_config,
     )
@@ -31,7 +31,7 @@ from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, OverrideConfig
-from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 
 
@@ -46,7 +46,7 @@ TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 TORCHTITAN_WORKER_CLS = "torchtitan.rl.model.vllm_worker.TorchTitanGPUWorker"
 
 
-def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
+def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     """Build the HF-shaped config dict that vLLM's engine init reads.
 
     Field names match HF conventions because vLLM's engine reads them by
@@ -63,9 +63,8 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
          consumed in our flow (V1 engine, ``TorchTitanCausalLM`` model
          class, no KV transfer, no MFU metrics, no multimodal).
     """
-    cfg = spec.model
     if not cfg.layers:
-        raise ValueError(f"ModelSpec {spec.name!r} has no layers")
+        raise ValueError(f"Model config {type(cfg).__qualname__} has no layers")
     attn = cfg.first_attention
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe
@@ -84,7 +83,7 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
         "num_attention_heads": n_heads,  # TP divisibility + FA3 num_heads_q
         "num_key_value_heads": n_kv_heads,  # DCP divisibility + FA3 num_heads_kv
         "head_dim": head_dim,  # FA3 scheduler headdim
-        "max_position_embeddings": spec.max_context_length,  # caps max_model_len
+        "max_position_embeddings": cfg.max_context_length,  # caps max_model_len
         # Presence required
         "model_type": "torchtitan",  # any non-empty string
         "num_hidden_layers": len(
@@ -116,7 +115,7 @@ def model_spec_to_hf_config_dict(spec: ModelSpec) -> dict[str, Any]:
     return hf
 
 
-def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
+def _configure_gdn_hybrid_model(model_cls: type, model_config: Decoder.Config) -> None:
     """Attach vLLM's hybrid-state interface when the model contains GDN layers.
 
     vLLM exposes one model-level recurrent-state shape. GDN layers may differ
@@ -124,7 +123,7 @@ def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
     """
     gdn_configs = [
         layer.delta_net
-        for layer in model_spec.model.layers
+        for layer in model_config.layers
         if getattr(layer, "delta_net", None) is not None
     ]
     if not gdn_configs:
@@ -193,7 +192,7 @@ def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
 
 
 def register_to_vllm(
-    model_spec: ModelSpec,
+    model_config: Decoder.Config,
     *,
     parallelism: InferenceParallelismConfig,
     compile_config: CompileConfig | None,
@@ -208,11 +207,11 @@ def register_to_vllm(
       1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
-         ``model_spec``/``parallelism``/``compile_config``/``checkpointer_config``
+         ``model_config``/``parallelism``/``compile_config``/``checkpointer_config``
          and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
-         produces the HF-shaped ``PretrainedConfig`` from ``model_spec``.
+         produces the HF-shaped ``PretrainedConfig`` from ``model_config``.
 
     Per-engine torchtitan config (parallelism, compile, checkpoint) is
     delivered to the wrapper via closure rather than via vLLM's
@@ -220,7 +219,7 @@ def register_to_vllm(
     and isolates vLLM-specific plumbing from torchtitan-specific config.
 
     Args:
-        model_spec: TorchTitan ModelSpec containing model config and components.
+        model_config: TorchTitan decoder model config.
         parallelism: Inference parallelism configuration. The wrapper
             translates it to a full ``ParallelismConfig`` to build
             ``ParallelDims``; the caller is responsible for translating the
@@ -231,7 +230,7 @@ def register_to_vllm(
         checkpointer_config: Optional CheckpointManager configuration for
             initial weight loading. Pass ``None`` for the RL loop, where
             weights arrive from TorchStore.
-        override: Config overrides applied to the generator's model spec after
+        override: Config overrides applied to the generator's model config after
             ``update_from_config`` and before build (empty ``OverrideConfig`` for
             no overrides).
     """
@@ -253,7 +252,7 @@ def register_to_vllm(
     class VLLMModelFromSpec(VLLMModelWrapper):
         def __init__(self, *, vllm_config, prefix=""):
             super().__init__(
-                model_spec=model_spec,
+                model_config=model_config,
                 parallelism=parallelism,
                 compile_config=compile_config,
                 checkpointer_config=checkpointer_config,
@@ -266,11 +265,11 @@ def register_to_vllm(
     VLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
     # vLLM needs a model-level state contract to allocate shared attention/GDN
     # cache pages before individual layers are constructed.
-    _configure_gdn_hybrid_model(VLLMModelFromSpec, model_spec)
+    _configure_gdn_hybrid_model(VLLMModelFromSpec, model_config)
 
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
-    # Dynamic config parser class capturing ModelSpec in the closure. This
+    # Dynamic config parser class capturing the model config in the closure. This
     # parser only produces HF-shaped fields; torchtitan-specific config is
     # delivered through the model-class closure above.
     @register_config_parser(TORCHTITAN_CONFIG_FORMAT)
@@ -283,10 +282,10 @@ def register_to_vllm(
             code_revision=None,
             **kwargs,
         ):
-            config_dict = model_spec_to_hf_config_dict(model_spec)
+            config_dict = model_config_to_hf_config_dict(model_config)
             return config_dict, PretrainedConfig.from_dict(config_dict)
 
     logger.info(
         f"Registered {VLLM_MODEL_NAME} + ConfigParser({TORCHTITAN_CONFIG_FORMAT!r}) "
-        f"with vLLM (model={model_spec.name}, flavor={model_spec.flavor})"
+        f"with vLLM (model={type(model_config).__qualname__})"
     )

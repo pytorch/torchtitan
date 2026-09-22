@@ -30,7 +30,6 @@ from torchtitan.observability.metrics import (
     ensure_pp_loss_visible,
 )
 from torchtitan.protocols import BaseModel
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.tools import utils
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -99,19 +98,19 @@ class FaultTolerantTrainingEngine(TrainingEngine):
 
     def _initialize_model(
         self,
-        model_spec: ModelSpec,
         *,
         compile_config: CompileConfig | None,
+        hf_assets_path: str,
         create_seed_checkpoint: bool = False,
     ) -> None:
         super()._initialize_model(
-            model_spec,
             compile_config=compile_config,
+            hf_assets_path=hf_assets_path,
             create_seed_checkpoint=create_seed_checkpoint,
         )
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
-    def _initialize_optimizer(self, model_spec: ModelSpec) -> None:
+    def _initialize_optimizer(self) -> None:
         if isinstance(self.config.optimizer, TorchFTOptimizersContainer.Config):
             self.optimizers = self.config.optimizer.build(
                 model_parts=self.model_parts,
@@ -119,15 +118,19 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             )
         else:
             self.optimizers = self.config.optimizer.build(model_parts=self.model_parts)
-        if model_spec.post_optimizer_build_fn is not None:
-            model_spec.post_optimizer_build_fn(
-                self.optimizers,
-                self.model_parts,
-                self.parallel_dims,
-            )
+        self.model_cls._register_optimizer_hooks(
+            self.optimizers,
+            self.model_parts,
+            self.parallel_dims,
+        )
         self.lr_schedulers = self.config.lr_scheduler.build(
             optimizers=self.optimizers,
             training_steps=self.config.training.steps,
+        )
+        self.ema = (
+            self.config.ema.build(model_parts=self.model_parts)
+            if self.config.ema is not None
+            else None
         )
 
     def _initialize_checkpointer(
@@ -144,6 +147,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states={"train_state": self},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
@@ -164,8 +168,7 @@ class FaultTolerantTrainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_spec = config.model_spec
-        model_config = model_spec.model
+        model_config = config.model
         model_config.update_from_config(config=config)
         if config.override.imports:
             apply_overrides(config.override, config)
@@ -245,14 +248,9 @@ class FaultTolerantTrainer(Configurable):
         )
 
         engine.initialize(
-            model_spec,
             compile_config=config.compile,
             dataloader=self.dataloader,
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, config.hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
+            hf_assets_path=config.hf_assets_path,
             create_seed_checkpoint=config.create_seed_checkpoint,
         )
 
@@ -297,7 +295,6 @@ class FaultTolerantTrainer(Configurable):
                 tokenizer=self.tokenizer,
                 parallel_dims=parallel_dims,
                 loss_fn=engine.loss_fn,
-                validation_context=engine.train_context,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.max_context_length,
                 num_tokens_per_microbatch=num_tokens_per_microbatch,
@@ -478,11 +475,7 @@ class FaultTolerantTrainer(Configurable):
                     else 0
                 ),
                 optimizer=engine.optimizers,
-                fragment_fn=(
-                    config.model_spec.fragment_fn
-                    if hasattr(config.model_spec, "fragment_fn")
-                    else None
-                ),
+                fragment_fn=getattr(engine.model_cls, "_fragment", None),
             ),
         ):
             data_iterator = self.microbatch_generator(self.dataloader)

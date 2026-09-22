@@ -37,6 +37,7 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
     vocab_size = 2048
 
     config = Qwen3Model.Config(
+        max_context_length=4096,
         vocab_size=vocab_size,
         dim=dim,
         norm=RMSNorm.Config(normalized_shape=dim),
@@ -185,7 +186,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         from torchtitan.models.llama3 import model_registry
         from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
-        config = model_registry("debugmodel").model
+        config = model_registry("debugmodel")
         model = config.build().to(self.device_type)
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
         apply_fsdp_to_decoder(
@@ -250,7 +251,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         parallel_dims.build_mesh()
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
 
-        sharded_config = model_registry("debugmodel").model
+        sharded_config = model_registry("debugmodel")
         sharded_config.layers[0].feed_forward.w13.param_init = fused_gate_up_param_init(
             {"weight": lambda tensor: torch.nn.init.constant_(tensor, 1)},
             {"weight": lambda tensor: torch.nn.init.constant_(tensor, 3)},
@@ -258,7 +259,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         set_llama3_sharding_config(sharded_config, enable_sp=True)
         with torch.device("meta"):
             sharded = sharded_config.build()
-        sharded.parallelize(parallel_dims)
+        sharded._parallelize(parallel_dims)
         apply_fsdp_to_decoder(
             sharded,
             dp_mesh,
@@ -297,11 +298,11 @@ class TestLinearStackingDistributed(DTensorTestBase):
             world_size=self.world_size,
         )
         parallel_dims.build_mesh()
-        config = model_registry("debugmodel").model
+        config = model_registry("debugmodel")
         set_deepseek_v4_sharding_config(config, enable_sp=True, enable_ep=True)
         model = config.build().to(self.device_type)
 
-        model.parallelize(parallel_dims)
+        model._parallelize(parallel_dims)
 
         self.assertEqual(model.layers["0"].attention.attn_sink.weight.ndim, 2)
 
@@ -310,7 +311,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         from torchtitan.models.qwen3 import model_registry
         from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 
-        config = model_registry("debugmodel").model
+        config = model_registry("debugmodel")
         model = config.build().to(self.device_type)
         model.init_states()
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))

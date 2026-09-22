@@ -17,7 +17,7 @@ from torchtitan.models.qwen3 import model_registry
 class TestExpertParallelConfigValidation(unittest.TestCase):
     @staticmethod
     def _config(ep: int, tp: int = 1):
-        model_config = model_registry("debugmodel_moe").model
+        model_config = model_registry("debugmodel_moe")
         runtime_config = SimpleNamespace(
             parallelism=ParallelismConfig(
                 expert_parallel_degree=ep,
@@ -66,7 +66,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         self.assertTrue(runtime_config.parallelism.enable_sequence_parallel)
 
     def test_dense_tensor_parallel_does_not_require_expert_parallel(self):
-        model_config = model_registry("debugmodel").model
+        model_config = model_registry("debugmodel")
         runtime_config = SimpleNamespace(
             parallelism=ParallelismConfig(tensor_parallel_degree=2)
         )
@@ -83,24 +83,27 @@ class TestPermute(unittest.TestCase):
     Output layout: (e0,r0), (e0,r1), ..., (e1,r0), (e1,r1), ...  (expert-major)
     """
 
-    def _make_dispatcher(self, num_ranks: int) -> AllToAllTokenDispatcher:
+    def _make_dispatcher(self) -> AllToAllTokenDispatcher:
         """Create a minimal AllToAllTokenDispatcher for testing _permute."""
         cfg = AllToAllTokenDispatcher.Config(num_experts=1, top_k=1)
-        dispatcher = AllToAllTokenDispatcher(cfg)
-        # Mock ep_mesh with a simple object that has .size() returning num_ranks
-        mock_mesh = unittest.mock.MagicMock()
-        mock_mesh.size.return_value = num_ranks
-        dispatcher.ep_mesh = mock_mesh
-        return dispatcher
+        return AllToAllTokenDispatcher(cfg)
 
     def _permute(self, tokens_per_expert_group, experts_per_rank, num_ranks):
         """Helper that calls _permute and returns (permuted_indices, num_tokens_per_expert)."""
-        dispatcher = self._make_dispatcher(num_ranks)
+        dispatcher = self._make_dispatcher()
+        mock_mesh = unittest.mock.MagicMock()
+        mock_mesh.size.return_value = num_ranks
         total = tokens_per_expert_group.sum().item()
         dummy_input = torch.zeros(total, 1)
-        _, _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
-            dummy_input, tokens_per_expert_group
-        )
+        with unittest.mock.patch.object(
+            AllToAllTokenDispatcher,
+            "ep_mesh",
+            new_callable=unittest.mock.PropertyMock,
+            return_value=mock_mesh,
+        ):
+            _, _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
+                dummy_input, tokens_per_expert_group
+            )
         return permuted_indices, num_tokens_per_expert
 
     def test_basic_2ranks_2experts(self):

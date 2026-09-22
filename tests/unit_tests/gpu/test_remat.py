@@ -231,7 +231,7 @@ class TestRematRegions(unittest.TestCase):
         from torchtitan.models.llama3 import model_registry
 
         with torch.device("meta"):
-            model = model_registry("debugmodel").model.build()
+            model = model_registry("debugmodel").build()
         state_keys = list(model.state_dict())
 
         RegionAC.Config(save_regions=["attention.*"]).build().apply(model)

@@ -13,7 +13,7 @@ Two-phase replacement:
   Phase 2 (parallelize time): ``build_and_swap_native_moe`` calls
       ``set_moe_sharding_config`` on each stored config, builds the Titan MoE,
       initializes it, and swaps it into the layer. Actual parallelization
-      happens later via ``model.parallelize(parallel_dims)``.
+      happens later via ``model._parallelize(parallel_dims)``.
 """
 
 import logging

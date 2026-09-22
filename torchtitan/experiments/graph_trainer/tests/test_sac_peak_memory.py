@@ -36,9 +36,9 @@ def _set_deterministic() -> None:
 
 
 def _build_model(model_flavor: str, attn_backend: str = "flex") -> nn.Module:
-    model_spec = llama3_registry(model_flavor, attn_backend=attn_backend)
+    model_config = llama3_registry(model_flavor, attn_backend=attn_backend)
     with torch.device("meta"):
-        model = model_spec.model.build()
+        model = model_config.build()
     model.to_empty(device="cuda")
     with torch.no_grad():
         model.init_states(buffer_device=None)
@@ -117,7 +117,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         SelectiveAC.Config().build().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
-            llama3_registry(DEBUGMODEL).model,
+            llama3_registry(DEBUGMODEL),
             Trainer,
             parallel_dims=self.parallel_dims,
         )
@@ -126,7 +126,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         traced_model.load_state_dict(copy.deepcopy(self.state_dict))
         traced_trainer = build_minimal_trainer(
             traced_model,
-            llama3_registry(DEBUGMODEL).model,
+            llama3_registry(DEBUGMODEL),
             GraphTrainer,
             activation_checkpoint_mode="selective",
             parallel_dims=self.parallel_dims,
@@ -181,7 +181,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         FullAC.Config().build().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
-            llama3_registry(DEBUGMODEL).model,
+            llama3_registry(DEBUGMODEL),
             Trainer,
             parallel_dims=self.parallel_dims,
         )
@@ -190,7 +190,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         traced_model.load_state_dict(copy.deepcopy(self.state_dict))
         traced_trainer = build_minimal_trainer(
             traced_model,
-            llama3_registry(DEBUGMODEL).model,
+            llama3_registry(DEBUGMODEL),
             GraphTrainer,
             activation_checkpoint_mode="selective",
             parallel_dims=self.parallel_dims,
