@@ -130,7 +130,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
 
         for save_regions, expected_replay_collectives in (
             ([], 3),
-            (["routed_experts.ep_communication"], 0),
+            (["routed_experts.token_dispatcher.ep_communication"], 0),
         ):
             with (
                 self.subTest(save_regions=save_regions),

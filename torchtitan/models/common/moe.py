@@ -31,7 +31,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import RouterGateLinear
 from torchtitan.protocols.module import Module
 
-from .token_dispatcher import AllToAllTokenDispatcher, LocalTokenDispatcher
+from .token_dispatcher import LocalTokenDispatcher
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -151,60 +151,27 @@ class RoutedExperts(Module):
         When parallelized, ``local_spmd`` (from ``sharding_config``) establishes
         the local SPMD types for the forward body.
         """
-        dispatcher = self.token_dispatcher
-        # TorchAOTokenDispatcher inherits from AllToAllTokenDispatcher but its
-        # padded dispatch path has not been audited for rematerialization.
-        if (
-            type(dispatcher) is AllToAllTokenDispatcher
-            and dispatcher.ep_mesh is not None
-        ):
-            recompute_ep_communication = self.remat_should_recompute("ep_communication")
-            dispatch_output = dispatcher.dispatch_region(
-                x_TD,
-                topk_scores_TK,
-                topk_expert_ids_TK,
-                num_local_tokens_per_expert_E,
-                region_name=self.remat_region_name("ep_communication.dispatch"),
-                recompute=recompute_ep_communication,
-            )
-            remat.recompute_needs_tensor(
-                dispatch_output.routed_input_RD,
-                dispatch_output.num_tokens_per_local_expert_e,
-            )
-            with maybe_set_sparse_mesh():
-                routed_output_RD = self.inner_experts(
-                    dispatch_output.routed_input_RD,
-                    dispatch_output.num_tokens_per_local_expert_e,
-                )
-            out_TD = dispatcher.combine_region(
-                routed_output_RD,
-                dispatch_output,
-                x_TD,
-                region_name=self.remat_region_name("ep_communication.combine"),
-                recompute=recompute_ep_communication,
-            )
-            remat.recompute_needs_tensor(out_TD)
-            return out_TD
-
-        (
-            routed_input_RD,
-            num_global_tokens_per_local_expert_e,
-            metadata,
-        ) = self.token_dispatcher.dispatch(
+        dispatch_output = self.token_dispatcher.dispatch(
             x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
+        remat.recompute_needs_tensor(
+            dispatch_output.routed_input_RD,
+            dispatch_output.num_tokens_per_local_expert_e,
+        )
         with maybe_set_sparse_mesh():
             routed_output_RD = self.inner_experts(
-                routed_input_RD, num_global_tokens_per_local_expert_e
+                dispatch_output.routed_input_RD,
+                dispatch_output.num_tokens_per_local_expert_e,
             )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
-            metadata,
+            dispatch_output,
             x_TD,
         )
+        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
 
