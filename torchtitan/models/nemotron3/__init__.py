@@ -21,18 +21,21 @@ from torchtitan.models.common import (
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_gqa_config,
+    make_ffn_config,
     make_moe_config,
-    make_routed_experts_config,
     make_router_config,
+    make_token_dispatcher_config,
     TpGemmBackend,
 )
+from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 from torchtitan.models.utils import validate_converter_order
 
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .model import Nemotron3Model, NemotronTransformerBlock
+from .model import Nemotron3Model, NemotronMLP, NemotronTransformerBlock, NoRoPE
+from .moe import NemotronGroupedExperts
 from .parallelize import parallelize_nemotron
 from .state_dict_adapter import NemotronStateDictAdapter
 
@@ -66,6 +69,22 @@ def _depth_init(layer_id: int) -> dict[str, Callable]:
     }
 
 
+# Nemotron-H hybrid pattern characters -> block type.
+# M = Mamba-2 mixer, * = self-attention, - = (ungated) MLP, E = MoE.
+_PATTERN_TO_BLOCK_TYPE = {"M": "mamba", "*": "attention", "-": "mlp", "E": "moe"}
+
+
+def parse_hybrid_pattern(pattern: str) -> list[str]:
+    """Expand a ``hybrid_override_pattern`` string into per-layer block types."""
+    unknown = sorted(set(pattern) - set(_PATTERN_TO_BLOCK_TYPE))
+    if unknown:
+        raise ValueError(
+            f"Unknown hybrid_override_pattern character(s): {unknown}. "
+            f"Valid characters are {sorted(_PATTERN_TO_BLOCK_TYPE)}."
+        )
+    return [_PATTERN_TO_BLOCK_TYPE[c] for c in pattern]
+
+
 def _build_nemotron_layers(
     *,
     n_layers: int,
@@ -82,13 +101,48 @@ def _build_nemotron_layers(
     fuse_qkv: bool = True,
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
+    hybrid_pattern: str | None = None,
+    head_dim: int | None = None,
+    mamba_n_groups: int = 8,
+    mamba_state_dim: int = 128,
+    mamba_conv_kernel: int = 4,
+    mamba_chunk_size: int = 128,
+    moe_intermediate_dim: int | None = None,
+    shared_expert_dim: int | None = None,
+    route_norm: bool = True,
+    route_scale: float = 1.0,
 ) -> list[NemotronTransformerBlock.Config]:
     inner_attention = get_attention_config(attn_backend)
+
+    # Routed experts have their own width (moe_intermediate_size), which differs
+    # from the dense MLP width; fall back to the dense width when unspecified.
+    if moe_intermediate_dim is None:
+        moe_intermediate_dim = hidden_dim
+
+    if hybrid_pattern is not None:
+        block_types = parse_hybrid_pattern(hybrid_pattern)
+        if len(block_types) != n_layers:
+            raise ValueError(
+                f"hybrid_override_pattern length {len(block_types)} != n_layers {n_layers}"
+            )
+    else:
+        # No pattern supplied (debug/synthetic flavors): alternate Mamba and
+        # attention. Real flavors always pass the published pattern.
+        block_types = [
+            "mamba" if layer_id % 2 == 0 else "attention" for layer_id in range(n_layers)
+        ]
+
     layers = []
     for layer_id in range(n_layers):
-        is_mamba = layer_id % 2 == 0
+        block_type = block_types[layer_id]
+        is_mamba = block_type == "mamba"
         layers.append(
             NemotronTransformerBlock.Config(
+                block_type=block_type,
+                mamba_n_groups=mamba_n_groups,
+                mamba_state_dim=mamba_state_dim,
+                mamba_conv_kernel=mamba_conv_kernel,
+                mamba_chunk_size=mamba_chunk_size,
                 is_mamba_block=is_mamba,
                 mamba_num_heads=mamba_num_heads,
                 mamba_head_dim=mamba_head_dim,
@@ -112,13 +166,14 @@ def _build_nemotron_layers(
                 ),
                 # pyre-ignore[6]
                 ffn_norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT)
-                if not is_mamba
+                if block_type in ("mlp", "moe")
                 else None,
                 # pyre-ignore[6]
                 attention=make_gqa_config(
                     dim=dim,
                     n_heads=n_heads,
                     n_kv_heads=n_kv_heads,
+                    head_dim=head_dim,
                     wqkv_param_init=_LINEAR_INIT,
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
@@ -126,7 +181,7 @@ def _build_nemotron_layers(
                     rope=rope,
                     tp_gemm_backend=tp_gemm_backend,
                 )
-                if not is_mamba
+                if block_type == "attention"
                 else None,
                 moe=make_moe_config(
                     num_experts=num_experts,
@@ -135,21 +190,68 @@ def _build_nemotron_layers(
                         num_experts=num_experts,
                         gate_param_init=_LINEAR_INIT,
                         top_k=top_k_experts,
+                        # Nemotron-H routes on sigmoid scores, renormalizes the
+                        # top-k probabilities and rescales by
+                        # routed_scaling_factor. n_group/topk_group are both 1
+                        # in the released config, i.e. no group-limited
+                        # routing, so the group args stay None.
+                        score_func="sigmoid",
+                        route_norm=route_norm,
+                        route_scale=route_scale,
                     ),
-                    routed_experts=make_routed_experts_config(
+                    routed_experts=RoutedExperts.Config(
+                        # UNGATED experts: up/down only, no w3 gate branch.
+                        inner_experts=NemotronGroupedExperts.Config(
+                            dim=dim,
+                            hidden_dim=moe_intermediate_dim,
+                            num_experts=num_experts,
+                            param_init={
+                                "w1_EFD": _LINEAR_INIT["weight"],
+                                "w2_EDF": _depth_init(layer_id)["weight"],
+                            },
+                        ),
+                        token_dispatcher=make_token_dispatcher_config(
+                            num_experts=num_experts,
+                            top_k=top_k_experts,
+                            comm_backend="standard",
+                            hidden_dim=dim,
+                        ),
+                    ),
+                    # One shared expert, also ungated, with its own width.
+                    shared_experts=NemotronMLP.Config(
                         dim=dim,
-                        hidden_dim=hidden_dim,
-                        num_experts=num_experts,
-                        top_k=top_k_experts,
-                        param_init={
-                            "w1_EFD": _LINEAR_INIT["weight"],
-                            "w2_EDF": _depth_init(layer_id)["weight"],
-                            "w3_EFD": _LINEAR_INIT["weight"],
-                        },
-                        comm_backend="standard",
+                        hidden_dim=shared_expert_dim,
+                        up_proj=Linear.Config(
+                            in_features=dim,
+                            out_features=shared_expert_dim,
+                            param_init=_LINEAR_INIT,
+                        ),
+                        down_proj=Linear.Config(
+                            in_features=shared_expert_dim,
+                            out_features=dim,
+                            param_init=_depth_init(layer_id),
+                        ),
+                    )
+                    if shared_expert_dim
+                    else None,
+                )
+                if block_type == "moe"
+                else None,
+                feed_forward=NemotronMLP.Config(
+                    dim=dim,
+                    hidden_dim=hidden_dim,
+                    up_proj=Linear.Config(
+                        in_features=dim,
+                        out_features=hidden_dim,
+                        param_init=_LINEAR_INIT,
+                    ),
+                    down_proj=Linear.Config(
+                        in_features=hidden_dim,
+                        out_features=dim,
+                        param_init=_depth_init(layer_id),
                     ),
                 )
-                if not is_mamba
+                if block_type == "mlp"
                 else None,
             )
         )
@@ -208,16 +310,20 @@ def _4b(
     *,
     seq_len: int,
 ) -> Nemotron3Model.Config:
-    dim = 2048
-    n_heads = 16
+    # NVIDIA-Nemotron-3-Nano-4B-BF16 config.json (dense: no MoE layers).
+    # 42 layers = 21 Mamba / 17 MLP / 4 attention.
+    dim = 3136
+    n_heads = 40
     n_kv_heads = 8
-    n_layers = 24
-    vocab_size = 262144
-    num_experts = 32
-    top_k_experts = 4
-    mamba_num_heads = 32
-    mamba_head_dim = 64
-    mamba_conv_dim = 2048
+    n_layers = 42
+    vocab_size = 131072
+    hidden_dim = 12544
+    hybrid_pattern = "M-M-M-MM-M-M*-M-M*-M-M-M*-M-M-MM*-MMM-M-M-"
+    num_experts = 0
+    top_k_experts = 0
+    mamba_num_heads = 96
+    mamba_head_dim = 80
+    mamba_conv_dim = mamba_num_heads * mamba_head_dim
     return Nemotron3Model.Config(
         dim=dim,
         vocab_size=vocab_size,
@@ -241,13 +347,11 @@ def _4b(
             dim=dim,
             n_heads=n_heads,
             n_kv_heads=n_kv_heads,
-            hidden_dim=1024,
-            rope=ComplexRoPE.Config(
-                dim=dim // n_heads,
-                max_context_length=seq_len,
-                theta=500000,
-                scaling="llama",
-            ),
+            hidden_dim=hidden_dim,
+            hybrid_pattern=hybrid_pattern,
+            head_dim=128,
+            # Nemotron-H attention layers use NO positional embedding.
+            rope=NoRoPE.Config(dim=128, max_context_length=seq_len),
             num_experts=num_experts,
             top_k_experts=top_k_experts,
             mamba_num_heads=mamba_num_heads,
@@ -265,16 +369,25 @@ def _31b(
     *,
     seq_len: int,
 ) -> Nemotron3Model.Config:
-    dim = 4096
+    # NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 config.json.
+    # 52 layers = 23 Mamba / 23 MoE / 6 attention.
+    dim = 2688
     n_heads = 32
-    n_kv_heads = 8
-    n_layers = 32
-    vocab_size = 262144
+    n_kv_heads = 2
+    n_layers = 52
+    vocab_size = 131072
+    hidden_dim = 1856
+    hybrid_pattern = (
+        "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
+    )
     num_experts = 128
     top_k_experts = 6
+    moe_intermediate_dim = 1856
+    shared_expert_dim = 3712  # moe_shared_expert_intermediate_size
+    route_scale = 2.5  # routed_scaling_factor
     mamba_num_heads = 64
     mamba_head_dim = 64
-    mamba_conv_dim = 4096
+    mamba_conv_dim = mamba_num_heads * mamba_head_dim
     return Nemotron3Model.Config(
         dim=dim,
         vocab_size=vocab_size,
@@ -298,15 +411,17 @@ def _31b(
             dim=dim,
             n_heads=n_heads,
             n_kv_heads=n_kv_heads,
-            hidden_dim=1152,
-            rope=ComplexRoPE.Config(
-                dim=dim // n_heads,
-                max_context_length=seq_len,
-                theta=500000,
-                scaling="llama",
-            ),
+            hidden_dim=hidden_dim,
+            hybrid_pattern=hybrid_pattern,
+            head_dim=128,
+            # Nemotron-H attention layers use no positional embedding.
+            rope=NoRoPE.Config(dim=128, max_context_length=seq_len),
             num_experts=num_experts,
             top_k_experts=top_k_experts,
+            moe_intermediate_dim=moe_intermediate_dim,
+            shared_expert_dim=shared_expert_dim,
+            route_norm=True,  # norm_topk_prob
+            route_scale=route_scale,
             mamba_num_heads=mamba_num_heads,
             mamba_head_dim=mamba_head_dim,
             mamba_conv_dim=mamba_conv_dim,

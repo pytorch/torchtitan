@@ -24,10 +24,13 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 
+# Nemotron-H's grouped experts are UNGATED: only an up projection (``w1_EFD``,
+# ``[E, hidden, dim]``) and a down projection (``w2_EDF``, ``[E, dim, hidden]``).
+# There is no ``w3_EFD`` gate, so the hidden dim is sharded on axis 1 of w1 and
+# axis 2 of w2 -- the same column/row pair a SwiGLU expert uses for w3/w2.
 _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
     "w1_EFD": spmd.S(1),
     "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
 }
 
 if TYPE_CHECKING:
@@ -35,6 +38,30 @@ if TYPE_CHECKING:
         Nemotron3Model,
         NemotronTransformerBlock,
     )
+
+
+def _set_nemotron_mlp_sharding(
+    feed_forward_cfg,
+    *,
+    attn_x_layout: spmd.SpmdType,
+    enable_sp: bool,
+) -> None:
+    """TP sharding for the ungated Nemotron-H MLP (``up_proj``/``down_proj``).
+
+    The dense FFN is ``down_proj(relu(up_proj(x)) ** 2)`` -- there is no gate
+    projection, so ``set_dense_ffn_sharding``'s ``w1``/``w2``/``w3`` layout does
+    not apply. The two matrices map onto the SwiGLU case as ``up_proj`` -> ``w3``
+    (column-parallel, hidden dim sharded on the output axis) and ``down_proj``
+    -> ``w2`` (row-parallel, hidden dim sharded on the input axis), which keeps
+    the hidden dimension sharded end to end and leaves a single reduction on the
+    down projection.
+    """
+    feed_forward_cfg.sharding_config = ShardingConfig(
+        in_src_shardings={"x": attn_x_layout},
+        in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
+    )
+    feed_forward_cfg.up_proj.sharding_config = colwise_config()
+    feed_forward_cfg.down_proj.sharding_config = rowwise_config(output_sp=enable_sp)
 
 
 def set_nemotron_sharding_config(
@@ -70,43 +97,53 @@ def _set_nemotron_layer_sharding(
 
     For Transformer blocks (GQA):
     ``enable_sp=True``  -> SP norms and Shard(0) activations around attention/FFN;
-    ``attention.wo`` and ``feed_forward.w2`` reduce-scatter to Shard(0).
+    ``attention.wo`` and ``feed_forward.down_proj`` reduce-scatter to Shard(0).
     ``enable_sp=False`` -> norms stay Replicate (no parallelism), activations
-    stay Replicate; ``attention.wo`` and ``feed_forward.w2`` all-reduce to Replicate.
+    stay Replicate; ``attention.wo`` and ``feed_forward.down_proj`` all-reduce to
+    Replicate.
 
-    For Mamba blocks: No attention sharding; FFN sharding follows same pattern.
+    Layers are typed by ``block_type`` ("mamba" | "attention" | "mlp" | "moe")
+    and hold exactly one mixer each, so each mixer below is applied only when
+    that layer actually owns it.
     """
     norm = norm_config(enable_sp=enable_sp)
 
-    if layer_cfg.is_mamba_block:
-        # Mamba block sharding: norm + mamba projections + state_matrix
-        layer_cfg.attention_norm.sharding_config = norm
-        if (
-            hasattr(layer_cfg, "mamba_input_projection")
-            and layer_cfg.mamba_input_projection is not None
-        ):
-            mamba_in_cfg = colwise_config()
-            mamba_x_layout = (
-                dense_sequence_parallel_placement()
-                if enable_sp
-                else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-            )
-            mamba_in_cfg.in_src_shardings = {"input": mamba_x_layout}
-            mamba_in_cfg.in_dst_shardings = {
-                "input": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-            }
-            layer_cfg.mamba_input_projection.sharding_config = mamba_in_cfg
-        if (
-            hasattr(layer_cfg, "mamba_output_projection")
-            and layer_cfg.mamba_output_projection is not None
-        ):
-            layer_cfg.mamba_output_projection.sharding_config = rowwise_config(
-                output_sp=enable_sp
-            )
+    # ``block_type`` is authoritative (see NemotronTransformerBlock.__init__);
+    # ``is_mamba_block`` is only a fallback for configs predating it. Exactly one
+    # mixer is non-None per layer, so every mixer below stays guarded.
+    block_type = getattr(layer_cfg, "block_type", None)
+    is_mamba = (
+        block_type == "mamba"
+        if block_type is not None
+        else bool(getattr(layer_cfg, "is_mamba_block", False))
+    )
+
+    if is_mamba:
+        # Mamba block sharding: norm + mamba projections + state_matrix.
+        # NOTE: the block builds raw nn.Linear/nn.Conv1d/nn.Parameter members
+        # (in_proj, conv1d, out_proj, A_log, D, dt_bias) rather than these
+        # configs; they are Replicated over the dense mesh by
+        # NemotronTransformerBlock.parallelize, so nothing is left unannotated,
+        # but the mamba mixer is NOT tensor-parallel today.
+        if layer_cfg.attention_norm is not None:
+            layer_cfg.attention_norm.sharding_config = norm
+        # Deliberately no sharding_config is written onto
+        # ``mamba_input_projection`` / ``mamba_output_projection``: model.py
+        # reads only ``.in_features`` off those configs to derive the model
+        # dim and never builds a Linear from them, so any sharding set here
+        # would be silently discarded while implying mamba is tensor-parallel.
+        # Implementing real mamba TP means head-sharding in_proj over the
+        # fused (z | x,B,C | dt) layout, grouping conv1d by channel, sharding
+        # the per-head A_log/D/dt_bias to match, and aligning mamba_norm's
+        # groups -- a deliberate scheme, not a default.
     else:
-        # Transformer block sharding: attention + FFN/MoE
-        layer_cfg.attention_norm.sharding_config = norm
-        layer_cfg.ffn_norm.sharding_config = norm
+        # Transformer block sharding: attention + FFN/MoE. Attention layers carry
+        # only ``attention_norm``; mlp/moe layers carry only ``ffn_norm``, so both
+        # are guarded rather than assumed present.
+        if layer_cfg.attention_norm is not None:
+            layer_cfg.attention_norm.sharding_config = norm
+        if layer_cfg.ffn_norm is not None:
+            layer_cfg.ffn_norm.sharding_config = norm
 
         attn_x_layout = (
             dense_sequence_parallel_placement()
@@ -119,13 +156,23 @@ def _set_nemotron_layer_sharding(
             set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
             set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
 
-        # Set FFN sharding (MoE handled by expert parallel)
+        # Set FFN sharding (MoE handled by expert parallel). Nemotron-H's dense
+        # FFN is the ungated NemotronMLP (up_proj/down_proj); fall back to the
+        # shared w1/w2/w3 helper only for a genuinely gated SwiGLU config.
         if hasattr(layer_cfg, "feed_forward") and layer_cfg.feed_forward is not None:
-            set_dense_ffn_sharding(
-                layer_cfg.feed_forward,
-                attn_x_layout=attn_x_layout,
-                enable_sp=enable_sp,
-            )
+            ffn_cfg = layer_cfg.feed_forward
+            if hasattr(ffn_cfg, "up_proj") and hasattr(ffn_cfg, "down_proj"):
+                _set_nemotron_mlp_sharding(
+                    ffn_cfg,
+                    attn_x_layout=attn_x_layout,
+                    enable_sp=enable_sp,
+                )
+            else:
+                set_dense_ffn_sharding(
+                    ffn_cfg,
+                    attn_x_layout=attn_x_layout,
+                    enable_sp=enable_sp,
+                )
 
         if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
             set_moe_sharding_config(
