@@ -291,3 +291,29 @@ def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
         validator.validate([_EchoModel()], step=1)
 
     assert loader.closed
+
+
+def _validator_from_init(*, steps: int, dp_world_size: int) -> Validator:
+    return Validator(
+        Validator.Config(steps=steps),
+        parallelism=mock.Mock(),
+        dp_world_size=dp_world_size,
+        dp_rank=0,
+        tokenizer=mock.Mock(),
+        parallel_dims=mock.Mock(),
+        loss_fn=mock.Mock(),
+        validation_context=nullcontext,
+        metrics_processor=mock.Mock(),
+        seq_len=4,
+        num_tokens_per_microbatch=4,
+    )
+
+
+def test_validator_rejects_steps_neg1_when_dp_gt_1():
+    with pytest.raises(ValueError, match="hang on validation collectives"):
+        _validator_from_init(steps=-1, dp_world_size=2)
+
+
+def test_validator_accepts_finite_pass_or_positive_steps():
+    _validator_from_init(steps=-1, dp_world_size=1)
+    _validator_from_init(steps=10, dp_world_size=8)
