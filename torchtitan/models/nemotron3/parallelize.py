@@ -20,11 +20,11 @@ from torchtitan.distributed.fsdp import (
     resolve_fsdp_mesh,
     resolve_sparse_fsdp_mesh,
 )
-from torchtitan.models.nemotron_nano.model import Nemotron3NanoModel
+from torchtitan.models.nemotron3.model import Nemotron3Model
 
 
 def parallelize_nemotron(
-    model: Nemotron3NanoModel,
+    model: Nemotron3Model,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,

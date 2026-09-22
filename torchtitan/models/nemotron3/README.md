@@ -20,19 +20,19 @@ python scripts/download_hf_assets.py --repo_id nvidia/nemotron-3-nano --assets t
 
 ```bash
 # Debug model (used for CI and testing)
-MODULE=nemotron_nano CONFIG=nemotron_debugmodel ./run_train.sh
+MODULE=nemotron3 CONFIG=nemotron_debugmodel ./run_train.sh
 
 # Nemotron-3 4B
-MODULE=nemotron_nano CONFIG=nemotron_4b ./run_train.sh
+MODULE=nemotron3 CONFIG=nemotron_4b ./run_train.sh
 
 # Nemotron-3 Nano 31B
-MODULE=nemotron_nano CONFIG=nemotron_31b ./run_train.sh
+MODULE=nemotron3 CONFIG=nemotron_31b ./run_train.sh
 
 # Nemotron-3 Super 120B
-MODULE=nemotron_nano CONFIG=nemotron_120b ./run_train.sh
+MODULE=nemotron3 CONFIG=nemotron_120b ./run_train.sh
 
 # Nemotron-3 Ultra 550B
-MODULE=nemotron_nano CONFIG=nemotron_550b ./run_train.sh
+MODULE=nemotron3 CONFIG=nemotron_550b ./run_train.sh
 ```
 
 See [`config_registry.py`](./config_registry.py) for available configuration options.

@@ -31,14 +31,14 @@ _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 }
 
 if TYPE_CHECKING:
-    from torchtitan.models.nemotron_nano.model import (
-        Nemotron3NanoModel,
+    from torchtitan.models.nemotron3.model import (
+        Nemotron3Model,
         NemotronTransformerBlock,
     )
 
 
 def set_nemotron_sharding_config(
-    config: "Nemotron3NanoModel.Config",
+    config: "Nemotron3Model.Config",
     *,
     enable_sp: bool,
     enable_ep: bool = False,

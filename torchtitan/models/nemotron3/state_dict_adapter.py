@@ -14,7 +14,7 @@ logger = logging.getLogger()
 
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-from .model import Nemotron3NanoModel
+from .model import Nemotron3Model
 
 
 class NemotronStateDictAdapter(StateDictAdapter):
@@ -25,7 +25,7 @@ class NemotronStateDictAdapter(StateDictAdapter):
 
     def __init__(
         self,
-        model_config: Nemotron3NanoModel.Config,
+        model_config: Nemotron3Model.Config,
         hf_assets_path: str | None,
     ):
         super().__init__(model_config, hf_assets_path)

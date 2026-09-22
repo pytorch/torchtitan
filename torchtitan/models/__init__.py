@@ -17,6 +17,6 @@ _supported_models = frozenset(
         "qwen3",
         "qwen3_5",
         "qwen3_8",
-        "nemotron_nano",
+        "nemotron3",
     ]
 )

@@ -32,13 +32,13 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .model import Nemotron3NanoModel, NemotronTransformerBlock
+from .model import Nemotron3Model, NemotronTransformerBlock
 from .parallelize import parallelize_nemotron
 from .state_dict_adapter import NemotronStateDictAdapter
 
 __all__ = [
     "parallelize_nemotron",
-    "Nemotron3NanoModel",
+    "Nemotron3Model",
     "nemotron_configs",
 ]
 
@@ -161,13 +161,13 @@ def _debugmodel(
     tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
-) -> Nemotron3NanoModel.Config:
+) -> Nemotron3Model.Config:
     dim = 256
     n_heads = 16
     n_layers = 4
     num_experts = 4
     top_k_experts = 2
-    return Nemotron3NanoModel.Config(
+    return Nemotron3Model.Config(
         dim=dim,
         vocab_size=262144,
         num_experts=num_experts,
@@ -207,7 +207,7 @@ def _4b(
     tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
-) -> Nemotron3NanoModel.Config:
+) -> Nemotron3Model.Config:
     dim = 2048
     n_heads = 16
     n_kv_heads = 8
@@ -218,7 +218,7 @@ def _4b(
     mamba_num_heads = 32
     mamba_head_dim = 64
     mamba_conv_dim = 2048
-    return Nemotron3NanoModel.Config(
+    return Nemotron3Model.Config(
         dim=dim,
         vocab_size=vocab_size,
         num_experts=num_experts,
@@ -264,7 +264,7 @@ def _31b(
     tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
-) -> Nemotron3NanoModel.Config:
+) -> Nemotron3Model.Config:
     dim = 4096
     n_heads = 32
     n_kv_heads = 8
@@ -275,7 +275,7 @@ def _31b(
     mamba_num_heads = 64
     mamba_head_dim = 64
     mamba_conv_dim = 4096
-    return Nemotron3NanoModel.Config(
+    return Nemotron3Model.Config(
         dim=dim,
         vocab_size=vocab_size,
         num_experts=num_experts,
@@ -321,7 +321,7 @@ def _120b(
     tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
-) -> Nemotron3NanoModel.Config:
+) -> Nemotron3Model.Config:
     dim = 6144
     n_heads = 48
     n_kv_heads = 8
@@ -332,7 +332,7 @@ def _120b(
     mamba_num_heads = 96
     mamba_head_dim = 64
     mamba_conv_dim = 6144
-    return Nemotron3NanoModel.Config(
+    return Nemotron3Model.Config(
         dim=dim,
         vocab_size=vocab_size,
         num_experts=num_experts,
@@ -378,7 +378,7 @@ def _550b(
     tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
-) -> Nemotron3NanoModel.Config:
+) -> Nemotron3Model.Config:
     dim = 8192
     n_heads = 64
     n_kv_heads = 8
@@ -389,7 +389,7 @@ def _550b(
     mamba_num_heads = 128
     mamba_head_dim = 64
     mamba_conv_dim = 8192
-    return Nemotron3NanoModel.Config(
+    return Nemotron3Model.Config(
         dim=dim,
         vocab_size=vocab_size,
         num_experts=num_experts,
@@ -468,7 +468,7 @@ def model_registry(
         for c in converters:
             config = c.build().convert(config)
     return ModelSpec(
-        name="nemotron_nano",
+        name="nemotron3",
         flavor=flavor,
         model=config,
         max_context_length=context_len,

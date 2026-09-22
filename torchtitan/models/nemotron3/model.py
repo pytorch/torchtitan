@@ -310,7 +310,7 @@ class NemotronTransformerBlock(TransformerBlock):
             # Distribute direct parameters (A_log, D) and raw PyTorch layers
             _distribute_and_annotate(self)
 
-class Nemotron3NanoModel(Decoder):
+class Nemotron3Model(Decoder):
     """
     Nemotron-3 Nano: Hybrid Mamba-Transformer Mixture-of-Experts model.
     """
@@ -330,7 +330,7 @@ class Nemotron3NanoModel(Decoder):
             Decoder.Config.update_from_config(self, config=config, **kwargs)
             parallelism = config.parallelism
 
-            from torchtitan.models.nemotron_nano.sharding import (
+            from torchtitan.models.nemotron3.sharding import (
                 set_nemotron_sharding_config,
             )
 
