@@ -91,3 +91,12 @@ def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 4
     return config
+
+
+def kimi_k3_moonep_fsdp4_ep4() -> Trainer.Config:
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel_moonep
+
+    config = kimi_k3_debugmodel_moonep(seq_len=512)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 4
+    return config

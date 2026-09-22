@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import spmd_types as spmd
 import torch
@@ -166,7 +166,9 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(LocalTokenDispatcher.Config):
-        pass
+        # Persistent backends fill num_max_tokens_per_rank; some also run without EP.
+        static_token_capacity: ClassVar[bool] = False
+        requires_ep: ClassVar[bool] = True
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -752,6 +754,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
+        static_token_capacity: ClassVar[bool] = True
         # Select the dispatch layout. False (default, also forced under autograd): compact,
         # host-synced, backward-able path for training. True: static, no-host-sync expand
         # layout so the MoE forward is CUDA-graph-capturable -- inference only (covers BOTH
@@ -886,6 +889,8 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
                 ``num_max_tokens_per_rank``.
         """
 
+        static_token_capacity: ClassVar[bool] = True
+
         non_blocking_capacity_factor: float | None = None
         pad_multiple: int | None = None
         hidden_dim: int | None = None
@@ -975,20 +980,164 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
         return combined_TD
 
 
+@dataclass
+class MoonEPDispatchMetadata:
+    """What ``combine`` needs to invert the routing."""
+
+    plan: object
+    weights_nvs: torch.Tensor
+    input_dtype: torch.dtype
+
+
+class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
+    """EP token dispatch through MoonEP; local dispatch when the EP mesh is None."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseEPTokenDispatcher.Config):
+        static_token_capacity: ClassVar[bool] = True
+        requires_ep: ClassVar[bool] = False
+
+        hidden_dim: int | None = None
+        """Feature width of the tokens entering dispatch (sizes the buffer)."""
+
+        num_max_tokens_per_rank: int | None = None
+        """MoonEP's ``S``, the per-rank token count of every dispatch; filled by
+        ``update_ep_token_dispatcher_config``."""
+
+    def __init__(self, config: "MoonEPTokenDispatcher.Config") -> None:
+        super().__init__(config)
+        self.hidden_dim = config.hidden_dim
+        self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
+        self._buffer = None
+        self._current: tuple[object, torch.Tensor] | None = None
+
+    @property
+    def buffer(self):
+        """MoonEP's persistent buffer, or None before ``wire_meshes``."""
+        return self._buffer
+
+    def current_plan(self) -> tuple[object, torch.Tensor]:
+        """The plan and ``cu_seqlens`` of the dispatch in flight."""
+        if self._current is None:
+            raise RuntimeError("MoonEP experts ran before a dispatch in this step.")
+        return self._current
+
+    def init_buffer(self) -> None:
+        """Allocate MoonEP's persistent buffer on the EP group (a collective)."""
+        from torchtitan.distributed.moonep import moonep
+
+        if self.ep_mesh is None:
+            return
+        if self.hidden_dim is None or self.num_max_tokens_per_rank is None:
+            raise ValueError(
+                "MoonEPTokenDispatcher.Config needs hidden_dim (the dispatched "
+                "feature width) and num_max_tokens_per_rank (MoonEP's static "
+                "S, the per-rank token count of every dispatch) before the "
+                "buffer can be allocated."
+            )
+        ep_size = self.ep_mesh.size()
+        self._buffer = moonep.make_buffer(
+            S=self.num_max_tokens_per_rank,
+            H=self.hidden_dim,
+            K=self.top_k,
+            E=self.num_experts,
+            num_ep_ranks=ep_size,
+            group=self.ep_mesh.get_group(),
+        )
+
+    def dispatch(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, object]:
+        """Return the routed tokens, their count per ``E + B`` row, and metadata."""
+        from torchtitan.distributed.moonep import moonep
+
+        if self.ep_mesh is None:
+            return LocalTokenDispatcher.dispatch(
+                self,
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+            )
+        if self._buffer is None:
+            raise RuntimeError(
+                "MoonEP dispatcher used before wire_meshes(); the buffer is "
+                "allocated collectively on the EP group first."
+            )
+        if x_TD.shape[0] != self.num_max_tokens_per_rank:
+            raise ValueError(
+                f"MoonEP's S is a static shape: the buffer was sized for "
+                f"{self.num_max_tokens_per_rank} tokens per rank and this "
+                f"dispatch carries {x_TD.shape[0]}. Set "
+                "num_max_tokens_per_rank to the per-rank micro-batch token "
+                "count."
+            )
+        # api.py asserts bf16 hidden; weights fp32, ids and counts int32.
+        plan_box: list = []
+        hidden_nvsh, weights_nvs, cu_seqlens = moonep.dispatch(
+            self._buffer,
+            plan_box,
+            x_TD.to(torch.bfloat16),
+            topk_scores_TK.to(torch.float32),
+            topk_expert_ids_TK.to(torch.int32),
+            num_local_tokens_per_expert_E.to(torch.int32),
+        )
+        num_tokens_per_row = torch.diff(cu_seqlens, prepend=cu_seqlens.new_zeros(1))
+        metadata = MoonEPDispatchMetadata(
+            plan=plan_box[0],
+            weights_nvs=weights_nvs,
+            input_dtype=x_TD.dtype,
+        )
+        self._current = (plan_box[0], cu_seqlens)
+        return hidden_nvsh, num_tokens_per_row, metadata
+
+    def combine(
+        self,
+        routed_output_RD: torch.Tensor,
+        metadata: object,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the routing weights here; MoonEP's combine only sums the copies."""
+        from torchtitan.distributed.moonep import moonep
+
+        if self.ep_mesh is None:
+            if not isinstance(metadata, LocalDispatchMetadata):
+                raise TypeError(f"expected LocalDispatchMetadata, got {type(metadata)}")
+            return LocalTokenDispatcher.combine(self, routed_output_RD, metadata, x_TD)
+        if not isinstance(metadata, MoonEPDispatchMetadata):
+            raise TypeError(f"expected MoonEPDispatchMetadata, got {type(metadata)}")
+        weighted_nvsh = (
+            routed_output_RD.to(torch.float32) * metadata.weights_nvs[:, None]
+        ).to(torch.bfloat16)
+        out_TD = moonep.combine(self._buffer, metadata.plan, weighted_nvsh)
+        if out_TD.shape != x_TD.shape:
+            raise RuntimeError(
+                f"MoonEP combine returned {tuple(out_TD.shape)} for input "
+                f"{tuple(x_TD.shape)}; token conservation is broken."
+            )
+        return out_TD.to(metadata.input_dtype)
+
+
 def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
     """Validate and fill EP token dispatcher configs from runtime config."""
     from torchtitan.models.common.moe import MoE
 
     parallelism = config.parallelism
-    dispatcher_cfgs = []
+    dispatcher_cfgs: list[Any] = []
     for _, moe_cfg, _, _ in model_config.traverse(MoE.Config):
         token_dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
-        if not isinstance(
-            token_dispatcher_cfg,
-            (
-                DeepEPTokenDispatcher.Config,
-                HybridEPTokenDispatcher.Config,
-            ),
+        if not (
+            isinstance(token_dispatcher_cfg, BaseEPTokenDispatcher.Config)
+            and token_dispatcher_cfg.static_token_capacity
+        ):
+            continue
+        if (
+            parallelism.expert_parallel_degree == 1
+            and not token_dispatcher_cfg.requires_ep
         ):
             continue
         dispatcher_cfgs.append(token_dispatcher_cfg)
@@ -1017,6 +1166,7 @@ def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
     for token_dispatcher_cfg in dispatcher_cfgs:
         assert required_num_max_tokens_per_rank is not None
         if parallelism.expert_parallel_degree == 1:
+            assert token_dispatcher_cfg.requires_ep
             raise ValueError(
                 f"{type(token_dispatcher_cfg).__qualname__} requires expert "
                 "parallelism (expert_parallel_degree > 1)."

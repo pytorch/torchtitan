@@ -31,6 +31,7 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.moe import (
     GroupedExperts,
+    MoonEPGroupedExperts,
     QuantileBalancedTopKRouter,
     RoutedExperts,
 )
@@ -255,7 +256,12 @@ def _latent_moe_config(
         ),
         routed_down=_linear(dim, latent_dim),
         routed_experts=RoutedExperts.Config(
-            inner_experts=GroupedExperts.Config(
+            # MoonEP's experts compute over its [E + B] tables.
+            inner_experts=(
+                MoonEPGroupedExperts.Config
+                if moe_comm_backend == "moonep"
+                else GroupedExperts.Config
+            )(
                 dim=latent_dim,
                 hidden_dim=expert_hidden_dim,
                 num_experts=num_experts,
