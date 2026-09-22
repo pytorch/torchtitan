@@ -155,6 +155,7 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
         with patch(
             "torchtitan.distributed.parallel_dims.device_type", self.device_type

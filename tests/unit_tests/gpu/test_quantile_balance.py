@@ -56,6 +56,7 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
             pp=1,
             ep=self.world_size,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
         parallel_dims.build_mesh()
         dense_mesh = parallel_dims.spmd_dense_mesh()
