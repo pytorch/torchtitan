@@ -32,9 +32,6 @@ EP is not a factor because it does not add GPUs. The dense product already
 covers every rank. EP is a second unflatten of that same 1D world mesh so
 routed experts can regroup those ranks.
 
-The older design factored `dp_shard` into extra axes instead of giving EP its
-own sparse view; see [pytorch/torchtitan#1977](https://github.com/pytorch/torchtitan/issues/1977).
-
 ## How EP is carved
 
 `build_mesh` starts from a 1D world mesh and unflattens three views (last axis
@@ -104,18 +101,3 @@ On a Transformer block those views mean:
   unchanged; only the sparse view regroups.
 
 Same eight GPUs in every case. Raising EP does not grow `world_size`.
-
-## Historical names
-
-Before the DeviceMesh unflatten rewrite, the inner dense region was stored as
-one mesh with axes `dp_shard_mod_ep`, `dp_shard_in_ep`, `cp`, `tp`. The
-original `dp_shard` group was split: part of it plus another subgroup (CP,
-and TP when expert-TP was 1) formed the EP group ("in"); leftover shard
-ranks were "mod" and used for FSDP on experts.
-
-| Old axis | Current |
-|----------|---------|
-| `dp_shard_in_ep` | not a mesh axis; those ranks, with CP/TP, are the `ep` group |
-| `dp_shard_mod_ep` | `efsdp` |
-
-Those old names no longer exist in the tree.

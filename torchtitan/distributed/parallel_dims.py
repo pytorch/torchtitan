@@ -6,7 +6,7 @@
 
 """Device mesh construction for training parallelisms.
 
-See ``torchtitan/distributed/README.md`` for axis names, the world_size
+See ``torchtitan/distributed/PARALLEL_DIMS.md`` for axis names, the world_size
 product, and how EP reuses ranks from the dense mesh.
 """
 

@@ -3,7 +3,7 @@
 Config-based sharding for MoE submodules, implemented in
 [`moe_sharding.py`](moe_sharding.py). Mesh axis names (`ep`, `efsdp`) and how
 EP reuses ranks from the dense world mesh are in
-[`torchtitan/distributed/README.md`](../../distributed/README.md).
+[`torchtitan/distributed/PARALLEL_DIMS.md`](../../distributed/PARALLEL_DIMS.md).
 
 ## Overview
 
