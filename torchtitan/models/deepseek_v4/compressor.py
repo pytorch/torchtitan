@@ -12,6 +12,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
 
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -189,20 +190,140 @@ class Indexer(Module):
         ratio: int,
         topk: int,
     ) -> torch.Tensor:
-        """Select top-k compressed positions per folded query token."""
-        index_score = torch.einsum("shd,td->sht", idx_q, idx_k)
-        index_score = index_score.relu_() * idx_w.unsqueeze(-1)
-        index_score = index_score.sum(dim=1)
+        """Select top-k compressed positions per folded query token.
 
-        compress_causal_limit = (
-            torch.arange(1, seqlen + 1, device=idx_q.device).unsqueeze(1) // ratio
+        Selection is discrete, hence carries no gradient; the full ``[S, Hi, N]``
+        score tensor never enters the autograd graph.  The student logits the
+        indexer distillation loss trains are recomputed with gradient at the
+        selected entries by :meth:`score_selected`.
+        """
+        with torch.no_grad():
+            index_score = torch.einsum("shd,td->sht", idx_q, idx_k)
+            index_score = index_score.relu_() * idx_w.unsqueeze(-1)
+            index_score = index_score.sum(dim=1)
+
+            compress_causal_limit = (
+                torch.arange(1, seqlen + 1, device=idx_q.device).unsqueeze(1) // ratio
+            )
+            compress_causal_mask = (
+                torch.arange(seqlen // ratio, device=idx_q.device).repeat(seqlen, 1)
+                >= compress_causal_limit
+            )
+            index_score = index_score + torch.where(
+                compress_causal_mask, torch.finfo(idx_q.dtype).min, 0
+            )
+            _, topk_indices = index_score.topk(min(topk, seqlen // ratio), dim=-1)
+            return topk_indices
+
+    @staticmethod
+    def score_selected(
+        idx_q: torch.Tensor,
+        idx_k: torch.Tensor,
+        idx_w: torch.Tensor,
+        topk_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return live indexer scores for the selected compressed positions.
+
+        Unlike :meth:`select`, this runs inside the autograd graph: the returned
+        logits are the student the distillation loss scores, so gradient flows
+        back into the indexer projections.  Slots whose ``topk_indices`` are
+        ``-1`` (not selectable) are marked ``-inf`` and dropped by the loss.
+        """
+        selected_TKD = idx_k[topk_indices.clamp_min(0)]
+        logits_THK = torch.einsum("thd,tkd->thk", idx_q, selected_TKD)
+        scores_TK = (logits_THK.relu() * idx_w.unsqueeze(-1)).sum(dim=1)
+        return scores_TK.masked_fill(topk_indices < 0, -torch.inf)
+
+
+class SparseIndexerLoss(AuxLoss):
+    """Train sparse indexer scores from compressed-attention mass.
+
+    The teacher is the attention probability mass on the compressed entries
+    selected by the indexer, using the full sparse-attention softmax
+    denominator supplied by FlexAttention's log-sum-exp. The selected-entry
+    mass is intentionally not normalized before weighting: rows with little
+    compressed attention mass contribute little loss.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(AuxLoss.Config):
+        """Aux-loss fields plus the attention softmax scale."""
+
+        softmax_scale: float
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.softmax_scale = config.softmax_scale
+
+    def _teacher(
+        self,
+        q_THK: torch.Tensor,
+        cmp_k_NK: torch.Tensor,
+        topk_indices_TJ: torch.Tensor,
+        lse_TH: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return head-averaged attention mass on selected compressed entries."""
+        valid_TJ = topk_indices_TJ >= 0
+        row_valid_T = valid_TJ.any(dim=-1)
+
+        selected_TJK = cmp_k_NK[topk_indices_TJ.clamp_min(0)]
+        # In fp32: the mass ``exp(comp_lse - lse)`` is exponent-of-a-difference and
+        # would lose precision (or underflow) if kept in bf16.
+        logits_THJ = (
+            torch.einsum("thk,tjk->thj", q_THK, selected_TJK).float()
+            * self.softmax_scale
         )
-        compress_causal_mask = (
-            torch.arange(seqlen // ratio, device=idx_q.device).repeat(seqlen, 1)
-            >= compress_causal_limit
+        logits_THJ = logits_THJ.masked_fill(~valid_TJ.unsqueeze(1), -torch.inf)
+
+        comp_lse_TH = torch.logsumexp(logits_THJ, dim=-1)
+        mass_TH = torch.exp(comp_lse_TH - lse_TH.float())
+        conditional_THJ = torch.softmax(
+            logits_THJ.masked_fill(~row_valid_T[:, None, None], 0.0),
+            dim=-1,
         )
-        index_score = index_score + torch.where(
-            compress_causal_mask, torch.finfo(idx_q.dtype).min, 0
+        return (mass_TH.unsqueeze(-1) * conditional_THJ).sum(dim=1) / q_THK.size(1)
+
+    def _logged_kl(
+        self,
+        p_TJ: torch.Tensor,
+        t_TJ: torch.Tensor,
+        logits_TJ: torch.Tensor,
+        slot_valid_TJ: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return the per-slot weighted KL values used for metrics and gradient."""
+        log_student_TJ = F.log_softmax(
+            logits_TJ.masked_fill(~slot_valid_TJ, -torch.inf).masked_fill(
+                ~slot_valid_TJ.any(dim=-1, keepdim=True), 0.0
+            ),
+            dim=-1,
         )
-        _, topk_indices = index_score.topk(min(topk, seqlen // ratio), dim=-1)
-        return topk_indices
+        weighted_TJ = torch.special.xlogy(p_TJ, t_TJ) - p_TJ * log_student_TJ
+        return weighted_TJ.masked_fill(~slot_valid_TJ, 0.0)
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        cmp_k_NK: torch.Tensor,
+        topk_indices_TJ: torch.Tensor,
+        lse_TH: torch.Tensor,
+        topk_scores_TJ: torch.Tensor,
+        *,
+        carrier: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute distillation loss and inject its gradient on ``carrier``.
+
+        ``q_THK``, ``cmp_k_NK`` and ``lse_TH`` are teacher sources and should be
+        detached by the caller. ``topk_scores_TJ`` is the live student input.
+        """
+        if topk_scores_TJ.numel() == 0:
+            return carrier
+
+        p_TJ = self._teacher(q_THK, cmp_k_NK, topk_indices_TJ, lse_TH)
+        tiny = torch.finfo(torch.float32).tiny
+        t_TJ = p_TJ / p_TJ.sum(dim=-1, keepdim=True).clamp_min(tiny)
+
+        row_valid_T = torch.isfinite(topk_scores_TJ).any(dim=-1)
+        logits_TJ = topk_scores_TJ.float().masked_fill(~row_valid_T.unsqueeze(-1), 0.0)
+        slot_valid_TJ = torch.isfinite(topk_scores_TJ) & row_valid_T.unsqueeze(-1)
+        raw_sum = self._logged_kl(p_TJ, t_TJ, logits_TJ, slot_valid_TJ).sum()
+        return self.inject(raw_sum, carrier=carrier)

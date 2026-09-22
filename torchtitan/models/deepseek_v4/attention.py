@@ -15,7 +15,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 
-from .compressor import Compressor, Indexer
+from .compressor import Compressor, Indexer, SparseIndexerLoss
 
 
 def _assert_spmd_attention_type(tensor, *, tp):
@@ -52,9 +52,9 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
     parallelism, all-gathering ``idx_k`` and ``cmp_k`` at this module boundary
     enables global sparse selection.
 
-    TODO: the indexer auxiliary loss is intentionally dropped for now; it will
-    be re-added as a carrier-injected aux loss (see the NPU fork) once the
-    general aux-loss mechanism lands.
+    The indexer distillation loss is implemented as a carrier-injected
+    auxiliary loss: this module requests FlexAttention's LSE only while
+    training and only on CSA layers that have the loss configured.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -63,6 +63,7 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
         compress_ratio: int
         softmax_scale: float
         index_topk: int
+        aux_loss: SparseIndexerLoss.Config | None = None
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -71,6 +72,7 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
         self.softmax_scale = config.softmax_scale
         self.index_topk = config.index_topk
         self.block_size = config.block_size
+        self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
 
     def get_window_topk_idxs(
         self,
@@ -225,6 +227,7 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
             selected_indices = [
                 self.get_window_topk_idxs(bsz=1, seqlen=seqlen, device=q.device)
             ]
+            out_transform = None
             if self.compress_ratio == 4:
                 if idx_q is None or idx_k is None or idx_w is None:
                     raise ValueError(
@@ -238,15 +241,26 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
                     seqlen=seqlen,
                     ratio=self.compress_ratio,
                     topk=self.index_topk,
-                ).unsqueeze(0)
+                )
                 causal_limit = (
                     torch.arange(1, seqlen + 1, device=q.device).unsqueeze(1)
                     // self.compress_ratio
                 )
-                cmp_topk = torch.where(
-                    cmp_topk < causal_limit.unsqueeze(0), seqlen + cmp_topk, -1
+                # ``select`` keeps raw indices, so non-causal picks become -1 here.
+                cmp_topk = torch.where(cmp_topk < causal_limit, cmp_topk, -1)
+                selected_indices.append(
+                    torch.where(cmp_topk >= 0, seqlen + cmp_topk, -1).unsqueeze(0)
                 )
-                selected_indices.append(cmp_topk)
+                if self.training and self.aux_loss is not None and cmp_k is not None:
+                    topk_scores = Indexer.score_selected(
+                        idx_q,
+                        idx_k,
+                        idx_w,
+                        cmp_topk,
+                    )
+                    out_transform = self._indexer_loss_transform(
+                        q, cmp_k, cmp_topk, topk_scores
+                    )
             elif self.compress_ratio > 1:
                 selected_indices.append(
                     self.get_compress_topk_idxs(
@@ -273,7 +287,31 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
                 attention_masks=block_mask,
                 score_mod=v4_sink_score_mod,
                 scale=self.softmax_scale,
+                out_transform=out_transform,
             )
+
+    def _indexer_loss_transform(self, q, cmp_k, cmp_topk, topk_scores):
+        """Return an epilogue that injects the indexer distillation loss into ``out``.
+
+        The teacher sources (``q``, ``cmp_k`` and FlexAttention's ``lse``) are
+        detached here, leaving ``topk_scores`` as the only live tensor: the
+        injected gradient trains exactly the indexer parameters.
+        """
+
+        aux_loss = self.aux_loss
+        assert aux_loss is not None
+
+        def inject_indexer_loss(out, lse):
+            return aux_loss(
+                q.detach(),
+                cmp_k.detach(),
+                cmp_topk,
+                lse.detach(),
+                topk_scores,
+                carrier=out,
+            )
+
+        return inject_indexer_loss
 
 
 class SlidingWindowAttention(DSV4FlexInnerAttention):

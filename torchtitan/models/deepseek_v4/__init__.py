@@ -33,6 +33,7 @@ from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_routed_experts_config,
 )
+from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.deepseek_v3.parallelize import (
     parallelize_deepseekv3 as parallelize_deepseek_v4,
@@ -45,7 +46,7 @@ from .attention import (
     HeavilyCompressedAttention,
     SlidingWindowAttention,
 )
-from .compressor import Compressor, Indexer
+from .compressor import Compressor, Indexer, SparseIndexerLoss
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4Router
@@ -245,6 +246,15 @@ def _make_v4_attn_config(
         compress_ratio=compress_ratio,
         softmax_scale=softmax_scale,
         index_topk=index_topk,
+        aux_loss=(
+            SparseIndexerLoss.Config(
+                coeff=0.01,
+                reduce_mesh="loss",
+                softmax_scale=softmax_scale,
+            )
+            if compress_ratio == 4
+            else None
+        ),
     )
 
     return Attention.Config(
@@ -1019,6 +1029,12 @@ deepseek_v4_configs = {
 }
 
 
+def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
+    """Register step pre-hooks for load balancing and aux-loss accumulators."""
+    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
+
+
 def model_registry(
     flavor: str,
     *,
@@ -1057,6 +1073,6 @@ def model_registry(
         max_context_length=context_len,
         parallelize_fn=parallelize_deepseek_v4,
         pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
+        post_optimizer_build_fn=_post_optimizer_build_fn,
         state_dict_adapter=DeepSeekV4StateDictAdapter,
     )
