@@ -79,7 +79,7 @@ def main():
     cfg.debug.deterministic = True
 
     def build_model(swap_moe=False):
-        model_config = cfg.model_spec.model
+        model_config = cfg.model
         model_config.update_from_config(config=cfg)
         with torch.device(device):
             m = model_config.build()
@@ -161,8 +161,7 @@ def main():
         f"full_mask={_fm} loc_mask={_lm}"
     )
 
-    train_context = dist_utils.get_spmd_context(parallel_dims=parallel_dims)
-    with torch.no_grad(), train_context():
+    with torch.no_grad(), dist_utils.get_spmd_context(parallel_dims=parallel_dims):
         loc_logits = cp_model(loc_input, positions=loc_pos, attention_masks=loc_mask)
 
     # Reconstruct full logits in global order via all-gather + index scatter.

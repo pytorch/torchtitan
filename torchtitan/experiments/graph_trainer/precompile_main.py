@@ -118,16 +118,9 @@ def _common_setup(config):
     )
     parallel_dims.build_mesh()
 
-    model_spec = config.model_spec
-    if model_spec is None:
-        raise ValueError(
-            "model_spec must be set. Pass --module to specify the model "
-            "(e.g. --module graph_trainer.llama3)."
-        )
-
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
-    model_config = model_spec.model
+    model_config = config.model
     # Auxiliary losses normalize by the step's global valid-token count, which
     # the training loop derives from the data; precompile has no batches, so
     # use the configured budget.  TODO: the traced graph bakes this value, so
@@ -148,19 +141,16 @@ def _common_setup(config):
     )
     model_config.update_from_config(config=config)
 
-    logger.info(f"Building {model_spec.name} {model_spec.flavor} on meta device")
+    logger.info(f"Building {type(model_config).__qualname__} on meta device")
     with (
         torch.device("meta"),
         utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
     ):
         model = model_config.build()
 
-    model.verify_module_protocol()
-
-    # For aot_fx_trace, apply_compile inside parallelize_fn is a no-op
+    # For aot_fx_trace, apply_compile inside model.parallelize is a no-op
     # (returns model unchanged), so we pass the real compile_config.
-    model = model_spec.parallelize_fn(
-        model,
+    model = model.parallelize(
         parallel_dims=parallel_dims,
         training=config.training,
         parallelism=parallelism,
@@ -189,7 +179,6 @@ def _common_setup(config):
     return (
         model,
         model_config,
-        model_spec,
         compile_config,
         parallel_dims,
         device,
@@ -214,7 +203,6 @@ def _precompile_aot_fx_trace(
     config,
     model,
     model_config,
-    model_spec,
     compile_config,
     parallel_dims,
     device,
@@ -288,10 +276,6 @@ def _precompile_aot_fx_trace(
         if parallel_dims.tp_enabled
         else contextlib.nullcontext()
     )
-    trace_context = dist_utils.get_spmd_context(
-        parallel_dims=parallel_dims,
-        spmd_typechecking=False,
-    )
 
     maybe_register_blockmask_pytree_node()
 
@@ -318,7 +302,10 @@ def _precompile_aot_fx_trace(
         return args, kwargs
 
     logger.info("Tracing fwd+loss+bwd via make_fx...")
-    with trace_context(), loss_parallel_ctx:
+    with dist_utils.get_spmd_context(
+        parallel_dims=parallel_dims,
+        spmd_typechecking=False,
+    ), loss_parallel_ctx:
         traced_result = minimal_fx_tracer(
             fwd_bwd_fn,
             module=model,
@@ -381,7 +368,6 @@ def main():
     (
         model,
         model_config,
-        model_spec,
         compile_config,
         parallel_dims,
         device,
@@ -393,7 +379,6 @@ def main():
         config,
         model,
         model_config,
-        model_spec,
         compile_config,
         parallel_dims,
         device,

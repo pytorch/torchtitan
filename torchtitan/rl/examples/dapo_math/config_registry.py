@@ -69,7 +69,7 @@ def _qwen3_4b_dapo_math_config(
     validation_dataset = AIME2025Dataset.Config(
         num_samples=num_validation_samples,
     )
-    model_spec = model_registry(
+    model_config = model_registry(
         "4B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
@@ -77,7 +77,7 @@ def _qwen3_4b_dapo_math_config(
         converters=[LMHeadCastConverter.Config()],
     )
     return Controller.Config(
-        model_spec=model_spec,
+        model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-4B-Base",
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
@@ -143,7 +143,7 @@ def _qwen3_4b_dapo_math_config(
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
-                    global_vocab_size=decoder_vocab_size(model_spec),
+                    global_vocab_size=decoder_vocab_size(model_config),
                 ),
             ),
         ),

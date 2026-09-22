@@ -31,6 +31,7 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_graph_trainer_model,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import (
@@ -40,20 +41,15 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
-from torchtitan.experiments.graph_trainer.deepseek_v3.parallelize import (
-    annotate_deepseekv3,
-)
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
 )
 from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_model_registry,
 )
-from torchtitan.experiments.graph_trainer.llama3.parallelize import annotate_llama
 from torchtitan.experiments.graph_trainer.qwen3 import (
     model_registry as qwen3_model_registry,
 )
-from torchtitan.experiments.graph_trainer.qwen3.parallelize import annotate_qwen3
 from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
     build_minimal_trainer,
     single_device_parallel_dims,
@@ -135,14 +131,13 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
 
         _set_deterministic()
-        model_spec = self.model_registry(
+        self.model_config = self.model_registry(
             self.model_flavor, attn_backend=self.attn_backend
         )
-        self.model_config = model_spec.model
         # Match Trainer.__init__: model configs consume runtime settings before
         # build. DSv3 uses the synced RoPE length to decide YaRN scaling.
         runtime_config = Trainer.Config(
-            model_spec=model_spec,
+            model=self.model_config,
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=NUM_TOKENS,
                 max_context_length=SEQ_LEN,
@@ -301,7 +296,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # before saving, so compiled Triton kernels are baked in
         if enable_passes:
             config = SimpleNamespace(
-                model_spec=SimpleNamespace(model=self.model_config),
+                model=self.model_config,
                 compile=GraphTrainerCompileConfig(
                     mode="aot_fx_trace",
                 ),
@@ -336,7 +331,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # Step 4: Apply load-time passes (CUDA graph)
         if enable_passes:
             load_config = SimpleNamespace(
-                model_spec=SimpleNamespace(model=self.model_config),
+                model=self.model_config,
                 compile=GraphTrainerCompileConfig(
                     mode="aot_fx_trace",
                     precompile_artifact_dir="precompiled",
@@ -396,7 +391,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
     model_registry = staticmethod(llama3_model_registry)
     model_flavor = "debugmodel"
-    annotate_model = staticmethod(annotate_llama)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
@@ -463,7 +458,7 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
 
     model_registry = staticmethod(dsv3_model_registry)
     model_flavor = "debugmodel"
-    annotate_model = staticmethod(annotate_deepseekv3)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
@@ -532,7 +527,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     model_registry = staticmethod(llama3_model_registry)
     model_flavor = "debugmodel"
     attn_backend = "flex"
-    annotate_model = staticmethod(annotate_llama)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
@@ -600,7 +595,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     model_registry = staticmethod(dsv3_model_registry)
     model_flavor = "debugmodel"
     attn_backend = "flex"
-    annotate_model = staticmethod(annotate_deepseekv3)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     def _wrap_ep_chunk_eager_baseline(self, model: nn.Module) -> None:
         maybe_apply_ep_overlap_eager_chunking(
@@ -724,7 +719,7 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
 
     model_registry = staticmethod(qwen3_model_registry)
     model_flavor = "debugmodel_moe"
-    annotate_model = staticmethod(annotate_qwen3)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
@@ -793,7 +788,7 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     model_registry = staticmethod(qwen3_model_registry)
     model_flavor = "debugmodel_moe"
     attn_backend = "flex"
-    annotate_model = staticmethod(annotate_qwen3)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(

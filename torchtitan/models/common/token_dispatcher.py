@@ -14,7 +14,7 @@ from torch.distributed._functional_collectives import all_to_all_single
 from torch.distributed.tensor import DeviceMesh
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh
+from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_sparse_mesh
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
@@ -51,13 +51,8 @@ class LocalTokenDispatcher(Configurable):
         self.num_experts = config.num_experts
         self.top_k = config.top_k
 
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-    ) -> None:
-        """No-op for the EP=1 dispatcher. Subclasses override."""
-        del ep_mesh
+    def init_buffer(self) -> None:
+        """Initialize backend communication buffers, if any."""
 
     def _local_reorder(
         self,
@@ -164,7 +159,7 @@ class LocalTokenDispatcher(Configurable):
 class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
     """Base class for EP token dispatchers.
 
-    Owns EP mesh wiring and SP coordinate helpers shared by EP implementations.
+    Resolves the EP mesh from the ambient SPMD runtime.
     LocalTokenDispatcher intentionally does not know about SP: local dispatch is
     used when EP is off, and expert activations are replicated for expert TP.
     """
@@ -175,16 +170,12 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.ep_mesh: DeviceMesh | None = None
 
-    def wire_meshes(
-        self,
-        *,
-        ep_mesh: DeviceMesh | None,
-    ) -> None:
-        """Install the EP mesh used by dispatch / combine."""
-        self.ep_mesh = ep_mesh
-        self.init_buffer()
+    @property
+    def ep_mesh(self) -> DeviceMesh | None:
+        """Return the active one-dimensional EP mesh, if EP is enabled."""
+        mesh = spmd_sparse_mesh()
+        return None if mesh is None else mesh["ep"]
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
@@ -223,8 +214,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     Handles the full token routing lifecycle:
     dispatch (reorder + EP all-to-all) and combine (reverse).
 
-    ``ep_mesh`` is wired by the owning ``RoutedExperts.parallelize`` override
-    via ``wire_meshes``.
+    The EP mesh is resolved from the ambient SPMD runtime.
     """
 
     @dataclass(kw_only=True, slots=True)

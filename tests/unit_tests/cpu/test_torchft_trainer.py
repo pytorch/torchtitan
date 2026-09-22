@@ -32,7 +32,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         ).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
-        model_spec=model_registry("debugmodel"),
+        model=model_registry("debugmodel"),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
     )
@@ -72,7 +72,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         "build",
         lambda self, **kwargs: SimpleNamespace(color=""),
     )
-    monkeypatch.setattr(type(config.model_spec.model), "build", build_model)
+    monkeypatch.setattr(type(config.model), "build", build_model)
 
     with pytest.raises(ModelBuildReachedError):
         ft.FaultTolerantTrainer(config)
@@ -130,8 +130,8 @@ def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None
     with patch.object(TrainingEngine, "_initialize_model") as initialize_model:
         ft.FaultTolerantTrainingEngine._initialize_model(
             engine,
-            SimpleNamespace(),
             compile_config=SimpleNamespace(),
+            hf_assets_path="",
         )
 
     initialize_model.assert_called_once()

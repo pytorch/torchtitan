@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -14,7 +15,9 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
-from .model import DeepSeekV3Model
+
+if TYPE_CHECKING:
+    from .model import DeepSeekV3Model
 
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):

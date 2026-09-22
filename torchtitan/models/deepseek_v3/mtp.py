@@ -15,7 +15,13 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
-from torchtitan.config import CompileConfig, FSDPSymmMemScope, ParallelismConfig
+from torchtitan.config import (
+    CompileConfig,
+    FSDPSymmMemScope,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -238,6 +244,35 @@ class MTPDecoder(Decoder):
                     "MTPTransformerBlock.Config instances."
                 )
             self.mtp_layers.append(layer_config.build())
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            resolve_fsdp_mesh,
+            resolve_sparse_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+        apply_fsdp_to_mtp_decoder(
+            self,
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallel_dims.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallel_dims.ep,
+            edp_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+        )
 
     def preprocess_inputs(
         self,

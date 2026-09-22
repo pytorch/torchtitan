@@ -5,13 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, cast, Self
 
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import (
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
@@ -35,8 +42,13 @@ from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.module import ModuleList
 
+from .state_dict_adapter import FluxStateDictAdapter
+
 
 class FluxModel(BaseModel):
+    state_dict_adapter_cls = FluxStateDictAdapter
+    supports_pipeline_parallel = False
+
     """
     Transformer model for flow matching on sequences.
     """
@@ -173,6 +185,89 @@ class FluxModel(BaseModel):
         self.single_blocks = ModuleList([cfg.build() for cfg in config.single_blocks])
 
         self.final_layer = config.final_layer_config.build()
+
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> Self:
+        """Apply Flux's AC-before-SPMD parallelization lifecycle."""
+        from torchtitan.distributed.utils import get_spmd_context
+
+        with get_spmd_context(parallel_dims=parallel_dims):
+            if ac_config is not None:
+                from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                    checkpoint_wrapper,
+                )
+
+                for blocks in (self.double_blocks, self.single_blocks):
+                    for layer_id, block in blocks.named_children():
+                        blocks.register_module(
+                            layer_id,
+                            checkpoint_wrapper(block, preserve_rng_state=True),
+                        )
+
+            self._parallelize(parallel_dims)
+            annotate_replicated_parameters(self, parallel_dims)
+
+            if compile_config is not None and "model" in compile_config.components:
+                for block in (*self.double_blocks, *self.single_blocks):
+                    block.compile(backend=compile_config.backend, fullgraph=True)
+
+            if not skip_dp:
+                self._apply_fsdp(
+                    parallel_dims=parallel_dims,
+                    training=training,
+                    parallelism=parallelism,
+                )
+        return self
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torch.distributed.fsdp import (
+            CPUOffloadPolicy,
+            fully_shard,
+            MixedPrecisionPolicy,
+        )
+
+        from torchtitan.distributed.fsdp import (
+            disable_fsdp_gradient_division,
+            enable_fsdp_symm_mem,
+            resolve_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        fsdp_config: dict[str, Any] = {
+            "mesh": dp_mesh,
+            "mp_policy": MixedPrecisionPolicy(
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            ),
+        }
+        if dp_mesh_dims is not None:
+            fsdp_config["dp_mesh_dims"] = dp_mesh_dims
+        if training.enable_cpu_offload:
+            fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+        for module in (self.img_in, self.time_in, self.vector_in, self.txt_in):
+            fully_shard(module, **fsdp_config)
+        for block in (*self.double_blocks, *self.single_blocks):
+            fully_shard(block, **fsdp_config)
+        fully_shard(self.final_layer, **fsdp_config, reshard_after_forward=False)
+        fully_shard(self, **fsdp_config)
+        enable_fsdp_symm_mem(self, parallelism.fsdp_symm_mem_scope)
+        disable_fsdp_gradient_division(self)
 
     def preprocess_inputs(
         self,

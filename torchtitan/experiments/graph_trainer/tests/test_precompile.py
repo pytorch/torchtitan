@@ -133,7 +133,6 @@ class TestPrecompileMain(unittest.TestCase):
         setup_result = (
             object(),
             object(),
-            object(),
             compile_config,
             object(),
             object(),

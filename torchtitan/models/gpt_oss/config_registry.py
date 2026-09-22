@@ -24,18 +24,18 @@ def _gpt_oss_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     attn_backend: str = "varlen",
 ) -> Trainer.Config:
-    model_spec = model_registry(
+    model_config = model_registry(
         "debugmodel", seq_len=seq_len, attn_backend=attn_backend
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             max_num_documents=128 if attn_backend == "varlen" else None,
@@ -48,8 +48,8 @@ def _gpt_oss_debugmodel(
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -74,15 +74,15 @@ def gpt_oss_debugmodel_flex(
 
 
 def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("20b", seq_len=seq_len)
+    model_config = model_registry("20b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/gpt-oss-20b",
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
             max_num_documents=64,
@@ -95,8 +95,8 @@ def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10000,
         ),
         parallelism=ParallelismConfig(
@@ -108,15 +108,15 @@ def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def gpt_oss_120b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("120b", seq_len=seq_len)
+    model_config = model_registry("120b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/gpt-oss-120b",
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
             max_num_documents=64,
@@ -129,8 +129,8 @@ def gpt_oss_120b(seq_len: int | None = None) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10000,
         ),
         parallelism=ParallelismConfig(
