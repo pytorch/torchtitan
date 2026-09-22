@@ -188,12 +188,12 @@ def compile_time_passes(
         get_default_transformer_block_buckets,
     )
 
-    n_layers = len(config.model_spec.model.layers)
+    n_layers = len(config.model.layers)
     loss_config = getattr(config, "loss", None)
     uses_chunked_loss = isinstance(loss_config, ChunkedLossWrapper.Config)
     moe_layer_ids = frozenset(
         i
-        for i, layer_cfg in enumerate(config.model_spec.model.layers)
+        for i, layer_cfg in enumerate(config.model.layers)
         if getattr(layer_cfg, "moe", None) is not None
     )
     ep_overlap_enabled = config.compile.ep_overlap.enabled

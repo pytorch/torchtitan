@@ -25,7 +25,7 @@ from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
-from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.model import BaseModel
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
 from torchtitan.rl.types import OptimizerStepOutput, TrainingMicrobatch
 from torchtitan.tools import utils
@@ -42,7 +42,7 @@ class Trainer(Configurable):
 
     Args:
         config: Trainer.Config with all model/optimizer/parallelism settings.
-        model_spec: TorchTitan model specification.
+        model_config: TorchTitan model configuration.
         max_num_documents: Fixed varlen metadata capacity configured by the batcher.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
             Shared with the generator (both load from the same HF checkpoint).
@@ -67,7 +67,7 @@ class Trainer(Configurable):
         self,
         config: Config,
         *,
-        model_spec: ModelSpec,
+        model_config: BaseModel.Config,
         compile_config: CompileConfig | None,
         max_num_documents: int | None,
         hf_assets_path: str = "",
@@ -87,7 +87,6 @@ class Trainer(Configurable):
 
         self.config = config
 
-        model_config = model_spec.model
         model_config.update_from_config(config=config)
         if config.override.imports:
             apply_overrides(config.override, model_config)
@@ -121,13 +120,8 @@ class Trainer(Configurable):
             engine.device_memory_monitor.device_name
         )
         engine.initialize(
-            model_spec,
             compile_config=compile_config,
-            sd_adapter=(
-                model_spec.state_dict_adapter(model_config, hf_assets_path)
-                if model_spec.state_dict_adapter
-                else None
-            ),
+            hf_assets_path=hf_assets_path,
         )
 
         logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")

@@ -135,6 +135,10 @@ class RoutedExperts(Module):
         self.inner_experts = config.inner_experts.build()
         self.token_dispatcher = config.token_dispatcher.build()
 
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        del buffer_device
+        self.token_dispatcher.init_buffer()
+
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -167,17 +171,6 @@ class RoutedExperts(Module):
             x_TD,
         )
         return out_TD
-
-    def parallelize(self, parallel_dims) -> None:
-        """Parallelize the grouped experts, then wire the EP mesh on the
-        dispatcher so dispatch/combine see the right mesh at runtime."""
-        super().parallelize(parallel_dims)
-        # TODO(@pianpwk): With spmd_types and set_current_spmd_mesh, replace wire_meshes
-        # with current_spmd_mesh calls inside AllToAllTokenDispatcher and
-        # DeepEPTokenDispatcher.
-        self.token_dispatcher.wire_meshes(
-            ep_mesh=parallel_dims.get_optional_mesh("ep"),
-        )
 
 
 class TokenChoiceTopKRouter(Module):

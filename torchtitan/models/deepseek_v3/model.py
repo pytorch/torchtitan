@@ -28,6 +28,8 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import Module
 
+from .state_dict_adapter import DeepSeekV3StateDictAdapter
+
 
 class Attention(BaseAttention):
     """
@@ -232,6 +234,8 @@ def get_deepseek_v3_nparams_and_flops(
 
 
 class DeepSeekV3Model(MTPDecoder):
+    state_dict_adapter_cls = DeepSeekV3StateDictAdapter
+
     """
     DeepSeek-V3 Transformer model with attention and feed-forward layers.
     """
@@ -264,3 +268,11 @@ class DeepSeekV3Model(MTPDecoder):
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
             return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
+
+    @classmethod
+    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+        from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)

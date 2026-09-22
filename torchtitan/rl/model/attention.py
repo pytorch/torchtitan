@@ -268,6 +268,7 @@ class VLLMAttentionWrapper(Module):
     # global counter. The counter breaks with pipeline parallelism
     # where layers are built on different ranks.
     _layer_counter: itertools.count = itertools.count()
+    _module_protocol_exempt_children = frozenset({"vllm_attn"})
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):

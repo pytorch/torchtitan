@@ -20,7 +20,6 @@ Flat calling convention and wrapping contract:
 """
 
 import dataclasses
-import types
 import warnings
 from collections.abc import Callable
 from typing import Any, cast
@@ -97,13 +96,13 @@ class _GraphTrainerPassConfigView:
     GraphPP is entered through TorchTitan's generic pipelining function API,
     which passes decomposed config fields instead of the full
     ``GraphTrainer.Config``. The pre-partition GraphTrainer passes read only
-    ``compile``, ``parallelism``, and ``model_spec.model``, so GraphPP exposes
+    ``compile``, ``parallelism``, and ``model``, so GraphPP exposes
     exactly those fields instead of synthesizing a fake full trainer config.
     """
 
     compile: GraphTrainerCompileConfig
     parallelism: ParallelismConfig
-    model_spec: types.SimpleNamespace
+    model: BaseModel.Config
 
 
 @dataclasses.dataclass(slots=True)
@@ -826,7 +825,7 @@ def _apply_graph_pp_pre_partition_passes(
         _GraphTrainerPassConfigView(
             compile=compile_config,
             parallelism=parallelism,
-            model_spec=types.SimpleNamespace(model=model_config),
+            model=model_config,
         ),
         use_cuda_graph=False,
         include_inductor=False,

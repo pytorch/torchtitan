@@ -6,15 +6,13 @@
 
 from dataclasses import dataclass
 
-from torchtitan.models.qwen3 import Qwen3Model
+from torchtitan.experiments.torchft.diloco import fragment_llm
+from torchtitan.models.llama3 import Llama3Model
 
-from ..model import GraphTrainerModel
 
-
-class GraphTrainerQwen3Model(GraphTrainerModel, Qwen3Model):
+class FaultTolerantLlama3Model(Llama3Model):
     @dataclass(kw_only=True, slots=True)
-    class Config(Qwen3Model.Config):
+    class Config(Llama3Model.Config):
         pass
 
-    def __init__(self, config: Config):
-        super().__init__(config)
+    _fragment = staticmethod(fragment_llm)
