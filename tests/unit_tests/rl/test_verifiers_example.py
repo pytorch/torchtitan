@@ -78,7 +78,7 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
 
 
 def test_verifiers_environment_uses_no_sandbox() -> None:
-    rollouter_config = _verifiers_math_rollouter_config()
+    rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
     config = rollouter_config.verifiers_env_server
 
     assert isinstance(config.environment, vf.SingleAgentEnvConfig)
@@ -103,6 +103,7 @@ def test_verifiers_config_keeps_dapo_training_recipe() -> None:
     )
     assert isinstance(config.rollouter, VerifiersRollouter.Config)
     assert config.generator.sampling.max_tokens == 8192
+    assert config.rollouter.generation_server.max_rollout_tokens == 10240
     assert config.dump_folder == "outputs/rl/qwen3_4b_verifiers_8k"
     assert isinstance(config.renderer, RenderersConfigAdapter)
     assert config.renderer.renderers_config.name == "qwen3"

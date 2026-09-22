@@ -11,7 +11,6 @@ from functools import partial
 import torch
 import torch.nn as nn
 
-from torchtitan.components.optimizer import register_moe_quantile_balancing_hook
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
@@ -42,23 +41,17 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from torchtitan.protocols.model_spec import ModelSpec
-
 from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
-from .parallelize import parallelize_kimi_k3
-from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
 __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
     "KimiK3Model",
-    "KimiK3StateDictAdapter",
     "KimiK3VisionEncoder",
     "kimi_k3_configs",
     "model_registry",
-    "parallelize_kimi_k3",
 ]
 
 
@@ -381,6 +374,7 @@ def _vision_encoder_config(
 
 def _kimi_k3_config(
     *,
+    max_context_length: int,
     dim: int,
     vocab_size: int,
     num_layers: int,
@@ -469,6 +463,7 @@ def _kimi_k3_config(
         )
 
     return KimiK3Model.Config(
+        max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
@@ -489,9 +484,15 @@ def _kimi_k3_config(
     )
 
 
-def _debugmodel(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
+def _debugmodel(
+    attn_backend: str,
+    moe_comm_backend: str,
+    *,
+    seq_len: int,
+) -> KimiK3Model.Config:
     dim = 1024
     return _kimi_k3_config(
+        max_context_length=seq_len,
         dim=dim,
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
@@ -526,9 +527,15 @@ def _debugmodel(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
     )
 
 
-def _kimi_k3(attn_backend: str, moe_comm_backend: str) -> KimiK3Model.Config:
+def _kimi_k3(
+    attn_backend: str,
+    moe_comm_backend: str,
+    *,
+    seq_len: int,
+) -> KimiK3Model.Config:
     dim = 7168
     return _kimi_k3_config(
+        max_context_length=seq_len,
         dim=dim,
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
@@ -576,9 +583,7 @@ def model_registry(
     moe_comm_backend: str = "standard",
     *,
     seq_len: int | None = None,
-) -> ModelSpec:
-    # The KDA / MLA layers build their own RoPE, so seq_len is not a builder
-    # argument here -- it only reports the context length on the ModelSpec.
+) -> KimiK3Model.Config:
     get_config, max_context_len = kimi_k3_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -586,18 +591,13 @@ def model_registry(
             f"Requested seq_len {context_len} exceeds max context length "
             f"{max_context_len} for flavor {flavor}"
         )
-    config = get_config(attn_backend=attn_backend, moe_comm_backend=moe_comm_backend)
+    config = get_config(
+        attn_backend=attn_backend,
+        moe_comm_backend=moe_comm_backend,
+        seq_len=context_len,
+    )
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter in converters:
             config = converter.build().convert(config)
-    return ModelSpec(
-        name="kimi_k3",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_kimi_k3,
-        pipelining_fn=None,
-        post_optimizer_build_fn=register_moe_quantile_balancing_hook,
-        state_dict_adapter=KimiK3StateDictAdapter,
-    )
+    return config

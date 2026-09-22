@@ -22,7 +22,7 @@ have no suitable home, e.g. the training token-budget settings, and those can
 be placed here. Discuss with the maintainers first if you intend to add one.
 
 The command-line surface is frozen either way, so annotate a new field with
-``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
+``tyro.conf.Suppress``, as ``Trainer.Config.model`` does. See
 ``torchtitan/config/README.md``.
 """
 
@@ -301,6 +301,7 @@ class ParallelismConfig:
     expert_parallel_degree: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+    For MoE models, this must be at least tensor_parallel_degree.
 
     Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
     (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.

@@ -106,6 +106,13 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "encoder.clip_encoder",
         "encoder.random_init",
         "encoder.t5_encoder",
+        "ema.buffer_patterns",
+        "ema.decay",
+        "ema.half_life_fraction",
+        "ema.offload_to_cpu",
+        "ema.start_step",
+        "ema.step_bias",
+        "ema.update_every_n_steps",
         "hf_assets_path",
         "inference.img_size",
         "inference.local_batch_size",
@@ -424,8 +431,8 @@ class TestCliOptionsFrozen(unittest.TestCase):
         """The escape hatch the freeze depends on."""
         hints = typing.get_type_hints(Trainer.Config, include_extras=True)
         self.assertTrue(
-            _is_suppressed(hints["model_spec"]),
-            "Trainer.Config.model_spec must stay tyro.conf.Suppress: it is "
+            _is_suppressed(hints["model"]),
+            "Trainer.Config.model must stay tyro.conf.Suppress: it is "
             "what keeps the model config tree off the command line, and "
             "therefore what makes the frozen CLI workable.",
         )
