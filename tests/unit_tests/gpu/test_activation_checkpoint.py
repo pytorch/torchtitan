@@ -6,6 +6,7 @@
 
 import unittest
 from copy import deepcopy
+from unittest import mock
 
 import torch
 from torch.utils.flop_counter import FlopCounterMode
@@ -44,6 +45,29 @@ class TransformerBlock(Module):
 
 
 class TestApplyAC(unittest.TestCase):
+    def test_early_stop_config(self):
+        def return_module(module, **kwargs):
+            return module
+
+        with mock.patch(
+            "torchtitan.distributed.activation_checkpoint.ptd_checkpoint_wrapper",
+            side_effect=return_module,
+        ) as checkpoint_wrapper:
+            for policy_config in (
+                FullAC.Config(),
+                SelectiveAC.Config(),
+                FullAC.Config(early_stop=False),
+                SelectiveAC.Config(early_stop=False),
+            ):
+                with self.subTest(policy_config=policy_config):
+                    checkpoint_wrapper.reset_mock()
+                    policy_config.build().apply(ToyModule())
+                    checkpoint_wrapper.assert_called_once()
+                    self.assertEqual(
+                        checkpoint_wrapper.call_args.kwargs["early_stop"],
+                        policy_config.early_stop,
+                    )
+
     def test_flops(self):
         def get_bw_flops(model_fn):
             x = torch.randn(512, 512, requires_grad=True)
@@ -77,29 +101,34 @@ class TestApplyAC(unittest.TestCase):
         ).build().apply(model_with_force_first)
         flops_with_force_first = get_bw_flops(model_with_force_first)
 
-        # 4. Per-op SAC with force recompute "output"
+        # 4. Per-op SAC early-stop skips the terminal output recomputation.
         model_with_force_last = ToyModule()
         SelectiveAC.Config(
             force_recompute_mm_shapes_by_fqns=["output"],
         ).build().apply(model_with_force_last)
         flops_with_force_last = get_bw_flops(model_with_force_last)
 
-        # 5. Full AC stops recomputation once backward has all needed tensors.
+        # 5. Disabling early-stop recomputes the terminal output.
+        model_with_force_last_no_early_stop = ToyModule()
+        SelectiveAC.Config(
+            early_stop=False,
+            force_recompute_mm_shapes_by_fqns=["output"],
+        ).build().apply(model_with_force_last_no_early_stop)
+        flops_with_force_last_no_early_stop = get_bw_flops(
+            model_with_force_last_no_early_stop
+        )
+
+        # 6. Full AC
         model_with_full_ac = ToyModule()
         FullAC.Config().build().apply(model_with_full_ac)
         flops_full_ac = get_bw_flops(model_with_full_ac)
 
-        # 6. Disabling early-stop recomputes the entire checkpointed function.
-        model_with_full_ac_no_early_stop = ToyModule()
-        FullAC.Config(early_stop=False).build().apply(model_with_full_ac_no_early_stop)
-        flops_full_ac_no_early_stop = get_bw_flops(model_with_full_ac_no_early_stop)
-
         self.assertEqual(flops_no_ac, 8.0)
         self.assertEqual(flops_selective_ac, 9.0)
         self.assertEqual(flops_with_force_first, 10.0)
-        self.assertEqual(flops_with_force_last, 11.0)
+        self.assertEqual(flops_with_force_last, 9.0)
+        self.assertEqual(flops_with_force_last_no_early_stop, 11.0)
         self.assertEqual(flops_full_ac, 10.0)
-        self.assertEqual(flops_full_ac_no_early_stop, 12.0)
 
     def test_mem(self):
         if not torch.cuda.is_available():
@@ -246,9 +275,10 @@ class TestApplyAC(unittest.TestCase):
                             break
                 return func(*args, **(kwargs or {}))
 
-        def get_recomputed(force_recompute_fqns):
+        def get_recomputed(force_recompute_fqns, *, early_stop=True):
             m = ToyModule()
             SelectiveAC.Config(
+                early_stop=early_stop,
                 force_recompute_mm_shapes_by_fqns=force_recompute_fqns,
             ).build().apply(m)
             ptr_to_name = {
@@ -268,9 +298,10 @@ class TestApplyAC(unittest.TestCase):
         # force_recompute="moe.router.gate": shape (512,512) also matches wq,
         # so both are force-recomputed; output is 1st in alternation → saved
         self.assertEqual(get_recomputed(["moe.router.gate"]), {"gate", "wq"})
-        # force_recompute="output": shape (512,1024) is unique to output,
-        # gate and wq still alternate (gate saved, wq recomputed)
-        self.assertEqual(get_recomputed(["output"]), {"wq", "output"})
+        # Early-stop skips the terminal output once backward has all its tensors.
+        self.assertEqual(get_recomputed(["output"]), {"wq"})
+        # Without early-stop, the terminal output is also recomputed.
+        self.assertEqual(get_recomputed(["output"], early_stop=False), {"wq", "output"})
 
 
 if __name__ == "__main__":

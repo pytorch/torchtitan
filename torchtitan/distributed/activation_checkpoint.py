@@ -170,25 +170,22 @@ class ActivationCheckpointing(Configurable):
 
 
 class FullAC(ActivationCheckpointing):
-    """Checkpoint each transformer block and recompute it during backward."""
+    """Recompute the entire transformer block during the backward pass."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
         early_stop: bool = True
-        """
-        Stop recomputation once all tensors needed by backward are available.
-        """
+        """Stop recomputation once all tensors needed by backward are available."""
 
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
-        config = cast("FullAC.Config", self.config)
         return ptd_checkpoint_wrapper(
             module,
-            preserve_rng_state=config.preserve_rng_state,
-            determinism_check=config.determinism_check,
-            early_stop=config.early_stop,
-            debug=config.debug,
+            preserve_rng_state=self.config.preserve_rng_state,
+            determinism_check=self.config.determinism_check,
+            early_stop=self.config.early_stop,  # pyrefly: ignore [missing-attribute]
+            debug=self.config.debug,
         )
 
 
@@ -203,6 +200,9 @@ class SelectiveAC(ActivationCheckpointing):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
+        early_stop: bool = True
+        """Stop recomputation once all tensors needed by backward are available."""
+
         force_recompute_mm_shapes_by_fqns: list[str] = field(
             default_factory=lambda: ["moe.router.gate"]
         )
@@ -297,7 +297,7 @@ class SelectiveAC(ActivationCheckpointing):
             ),
             preserve_rng_state=config.preserve_rng_state,
             determinism_check=config.determinism_check,
-            early_stop=False,
+            early_stop=config.early_stop,
             debug=config.debug,
         )
 
