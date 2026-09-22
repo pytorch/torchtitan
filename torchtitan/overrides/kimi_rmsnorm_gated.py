@@ -6,10 +6,12 @@
 
 """Fused Triton RMSNorm-gate override for Kimi K3.
 
-The stock module computes ``rmsnorm(input, weight) * sigmoid(gate)`` with
-separate PyTorch operations. This override fuses the normalization, weight
-scaling, and sigmoid gate in one forward kernel. The backward uses Triton
-kernels for the input, gate, and weight gradients.
+For each token and attention head, the stock module casts the input, weight,
+and gate to FP32 and computes
+``input * rsqrt(mean(input**2, dim=-1) + eps) * weight * sigmoid(gate)``.
+The result is then cast back to the input dtype. This override fuses those
+operations in one forward kernel. The backward uses Triton kernels for the
+input, gate, and weight gradients.
 """
 
 from __future__ import annotations
@@ -323,7 +325,7 @@ def triton_kimi_rms_norm_gated(
     weight: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
-    """Compute ``rmsnorm(input, weight) * sigmoid(gate)`` with Triton."""
+    """Apply per-row RMS normalization, weight scaling, and sigmoid gating."""
     output, _inverse_rms = _triton_kimi_rms_norm_gated_op(
         input.contiguous(),
         gate.contiguous(),
