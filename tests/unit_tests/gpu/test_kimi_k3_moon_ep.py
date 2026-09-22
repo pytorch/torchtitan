@@ -88,7 +88,6 @@ class TestMoonEPOnDevice(DTensorTestBase):
                 top_k=K,
                 hidden_dim=D,
                 num_max_tokens_per_rank=S,
-                expert_hidden_dim=F,
             )
         )
         dispatcher.wire_meshes(ep_mesh=mesh)

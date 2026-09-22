@@ -111,10 +111,10 @@ class _Plan:
 
 
 class _StubDispatcher:
-    """What the experts read off the dispatcher: the slot count and the plan in flight."""
+    """What the experts read off the dispatcher: the plan in flight and the
+    token ends of this rank's experts followed by its slots."""
 
-    def __init__(self, num_prefetch_slots: int, cu_seqlens: torch.Tensor) -> None:
-        self.num_prefetch_slots = num_prefetch_slots
+    def __init__(self, cu_seqlens: torch.Tensor) -> None:
         self.cu_seqlens = cu_seqlens
         self.plan = None
 
@@ -123,37 +123,38 @@ class _StubDispatcher:
 
 
 class _StubBackend:
-    """MoonEP's table backend in plain memory: prefetch copies the planned rows
-    into the slots, which is the behaviour the interleaving test turns on."""
+    """MoonEP's pools in plain memory: prefetch fills this rank's slots from
+    the rows their owners hold, which is the behaviour the interleaving test
+    turns on."""
 
-    def __init__(self, rows_by_name: dict[str, torch.Tensor]) -> None:
+    def __init__(self, rows_by_name: dict[str, torch.Tensor], rank: int = 0) -> None:
         self.rows_by_name = rows_by_name
-        self.num_experts = 0
-        self.num_slots = 0
+        self.rank = rank
         self.own_rows = 0
+        self.slots: dict[str, torch.Tensor] = {}
 
     def configure(self, *, num_experts: int, num_slots: int) -> None:
-        self.num_experts, self.num_slots = num_experts, num_slots
-        self.own_rows = num_experts // 2
+        self.own_rows = num_slots
 
-    def alloc_expert_rows(self, name, in_dim, out_dim):
-        return torch.zeros(self.own_rows + self.num_slots, in_dim, out_dim)
+    def alloc_prefetch_rows(self, name, in_dim, out_dim):
+        self.slots[name] = torch.zeros(self.own_rows, in_dim, out_dim)
+        return self.slots[name]
 
     def alloc_grad_rows(self, name, in_dim, out_dim):
         return (
             torch.zeros(self.own_rows, in_dim, out_dim),
-            torch.zeros(self.num_slots, in_dim, out_dim),
+            torch.zeros(self.own_rows, in_dim, out_dim),
         )
 
-    def prefetch(self, plan, tables) -> None:
-        ids = plan.experts_to_copy[0]
+    def prefetch(self, plan, local_rows) -> None:
+        ids = plan.experts_to_copy[self.rank]
         for slot, expert in enumerate(ids.tolist()):
             if expert < 0:
                 continue
-            for name, table in tables.items():
-                table[self.own_rows + slot] = self.rows_by_name[name][expert]
+            for name, pool in self.slots.items():
+                pool[slot] = self.rows_by_name[name][expert]
 
-    def reduce_grad(self, plan, grads) -> None:
+    def reduce_grad(self, plan, own_grads) -> None:
         pass
 
 
@@ -168,20 +169,21 @@ def _interleaving_case():
         "down": torch.randn(num_experts, hidden, dim),
     }
     experts = MoonEPGroupedExperts(
-        MoonEPGroupedExperts.Config(dim=dim, hidden_dim=hidden, num_experts=num_experts)
+        MoonEPGroupedExperts.Config(
+            dim=dim, hidden_dim=hidden, num_experts=num_experts
+        )
     )
     experts.w1_EFD = torch.nn.Parameter(rows["gate"][:2].transpose(-2, -1).contiguous())
     experts.w3_EFD = torch.nn.Parameter(rows["up"][:2].transpose(-2, -1).contiguous())
     experts.w2_EDF = torch.nn.Parameter(rows["down"][:2].transpose(-2, -1).contiguous())
-    # rows 0-2 to expert 0, 3-4 to expert 1, 5-6 to the slot; the remote experts
-    # take none here, which is what the offsets assert.
-    cu = torch.tensor([3, 5, 5, 5, 7, 7], dtype=torch.int32)
-    dispatcher = _StubDispatcher(2, cu)
+    # rows 0-2 to this rank's expert 0, 3-4 to its expert 1, 5-6 to its first slot
+    cu = torch.tensor([3, 5, 7, 7], dtype=torch.int32)
+    dispatcher = _StubDispatcher(cu)
     backend = _StubBackend(rows)
     mesh = SimpleNamespace(get_local_rank=lambda: 0, size=lambda: 2)
     experts.attach(dispatcher, backend, mesh)
-    plan_a = _Plan(torch.tensor([[2, -1]], dtype=torch.int32))
-    plan_b = _Plan(torch.tensor([[3, -1]], dtype=torch.int32))
+    plan_a = _Plan(torch.tensor([[2, -1], [-1, -1]], dtype=torch.int32))
+    plan_b = _Plan(torch.tensor([[3, -1], [-1, -1]], dtype=torch.int32))
     torch.manual_seed(1)
     x_a = torch.randn(7, dim, requires_grad=True)
     x_b = torch.randn(7, dim, requires_grad=True)
