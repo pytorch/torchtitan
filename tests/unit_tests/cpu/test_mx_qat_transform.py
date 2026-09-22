@@ -107,6 +107,21 @@ class MXQATTransformTest(unittest.TestCase):
             {"mlp1_weight_EGD", "mlp1_bias_EG", "mlp2_weight_EDF", "mlp2_bias_ED"},
         )
 
+    def test_backend_mismatch_fails_before_model_config_changes(self):
+        config = _config()
+        transform = MXQATTransform()
+        transform.weight_fake_quant_config = replace(
+            transform.weight_fake_quant_config, kernel_preference=KernelPreference.AUTO
+        )
+        with self.assertRaisesRegex(ValueError, "matching.*kernel_preference"):
+            transform.transform(config)
+        self.assertIs(type(config.experts), GroupedExperts.Config)
+        # Weight-only dense QAT has no activation backend to match.
+        transform.grouped_expert_fqns = ()
+        transform.linear_fqns = ("projection",)
+        transform.transform(config)
+        self.assertTrue(type(config.projection)._owner._mx_qat)
+
     def test_rejects_partial_group_and_unknown_weights(self):
         for weights in ({"experts.w1_EFD"}, {"missing.weight"}):
             with self.subTest(weights=weights), self.assertRaises(ValueError):
