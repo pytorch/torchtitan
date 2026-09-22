@@ -19,7 +19,7 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
-- `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
+- `DistMuon.Config` consumes optimizer-agnostic per-parameter `ComputeLayout`
   values in `compute_sharding_by_fqn`. DistMuon's `BlockShard` path accepts
   only a 2D parameter `[M * R, C]` with contiguous local DTensor storage. The
   placement must target tensor dimension 0 with `block_size=R`; the leading

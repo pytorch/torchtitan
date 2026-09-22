@@ -167,6 +167,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         from types import SimpleNamespace
 
         from torchtitan.components.optimizer import (
+            AdamW,
             OptimizersContainer,
             ParamGroupConfig,
         )
@@ -200,8 +201,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                     param_groups=[
                         ParamGroupConfig(
                             pattern=r".*",
-                            optimizer_name="AdamW",
-                            optimizer_kwargs={"lr": 0.05, "weight_decay": 0.0},
+                            optimizer=AdamW.Config(lr=0.05, weight_decay=0.0),
                         )
                     ],
                     implementation="for-loop",
@@ -1368,6 +1368,7 @@ class TestReparametrizeOptimizer(unittest.TestCase):
 
     def test_titan_optimizers_container(self):
         from torchtitan.components.optimizer import (
+            AdamW,
             OptimizersContainer,
             ParamGroupConfig,
         )
@@ -1379,8 +1380,7 @@ class TestReparametrizeOptimizer(unittest.TestCase):
                 param_groups=[
                     ParamGroupConfig(
                         pattern=r".*",
-                        optimizer_name="AdamW",
-                        optimizer_kwargs={"lr": 1e-3},
+                        optimizer=AdamW.Config(lr=1e-3),
                     )
                 ],
                 implementation="for-loop",

@@ -31,14 +31,11 @@ from torchtitan.components.optimizer.utils import (
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
-    build_dist_muon,
     ComputeLayout,
+    DistMuon,
     Owned,
 )
-from torchtitan.distributed.flex_shard.dist_muon import (
-    _adjust_muon_learning_rate,
-    DistMuon,
-)
+from torchtitan.distributed.flex_shard.dist_muon import _adjust_muon_learning_rate
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -81,13 +78,7 @@ class TestDistMuon(DTensorTestBase):
         ):
             redistributed_fqn = "layers.0.redistributed"
             local_blocks_fqn = "layers.0.local_blocks"
-            return build_dist_muon(
-                [
-                    {
-                        "params": [redistributed, local_blocks],
-                        "param_names": [redistributed_fqn, local_blocks_fqn],
-                    }
-                ],
+            return DistMuon.Config(
                 compute_sharding_by_fqn={
                     redistributed_fqn: ComputeLayout(
                         shardings_by_mesh_axis={
@@ -114,6 +105,13 @@ class TestDistMuon(DTensorTestBase):
                 momentum=0.8,
                 nesterov=True,
                 ns_steps=ns_steps,
+            ).build(
+                params=[
+                    {
+                        "params": [redistributed, local_blocks],
+                        "param_names": [redistributed_fqn, local_blocks_fqn],
+                    }
+                ]
             )
 
         redistributed_value = (
@@ -286,8 +284,7 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             distribute_tensor(value.clone(), mesh, storage_placements)
         )
         fqn = "layers.0.feed_forward.w13.weight"
-        optimizer = build_dist_muon(
-            [{"params": [parameter], "param_names": [fqn]}],
+        optimizer = DistMuon.Config(
             compute_sharding_by_fqn={
                 fqn: ComputeLayout(
                     shardings_by_mesh_axis={"dp_shard": compute_sharding},
@@ -300,7 +297,7 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             nesterov=True,
             ns_steps=2,
             adjust_lr_fn="match_rms_adamw",
-        )
+        ).build(params=[{"params": [parameter], "param_names": [fqn]}])
         reference_parameters = [torch.nn.Parameter(matrix.clone()) for matrix in value]
         reference_optimizer = torch.optim.Muon(
             reference_parameters,
@@ -405,8 +402,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         fqn = "layers.0.routed_experts.inner_experts.w1_EFD"
 
         def make_optimizer(param, shard_order_by_tensor_dim):
-            return build_dist_muon(
-                [{"params": [param], "param_names": [fqn]}],
+            return DistMuon.Config(
                 lr=lr,
                 weight_decay=weight_decay,
                 momentum=0.0,
@@ -422,7 +418,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
                     )
                 },
                 bucket_configs=[BucketConfig(patterns=(fqn,))],
-            )
+            ).build(params=[{"params": [param], "param_names": [fqn]}])
 
         expected_shard_order = {0: ("ep", "efsdp")}
         # The storage-mesh order shards over EFSDP first, which loses the exact
