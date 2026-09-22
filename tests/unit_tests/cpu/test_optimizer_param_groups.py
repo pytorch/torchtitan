@@ -190,7 +190,7 @@ def _get_default_groups(model, config):
     groups_by_opt, _ = OptimizersContainer._build_param_groups(
         model, param_groups, impl_kwargs
     )
-    return groups_by_opt.get("AdamW", [])
+    return groups_by_opt.get(AdamW.Config, [])
 
 
 def _run_torchft_moe_load_balancing_step(rank, store_path):
@@ -706,9 +706,7 @@ class TestMixedOptimizers(unittest.TestCase):
         opt_types = {type(opt).__name__ for opt in container.optimizers}
         self.assertEqual(opt_types, {"AdamW", "Adam"})
 
-        adam = next(
-            opt for opt in container.optimizers if type(opt) is torch.optim.Adam
-        )
+        adam = next(opt for opt in container.optimizers if type(opt).__name__ == "Adam")
         self.assertEqual(adam.param_groups[0]["lr"], 5e-4)
         self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
 
@@ -874,7 +872,7 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             scheduler.step()
         for opt in container.optimizers:
             base_lr = opt.param_groups[0]["lr"]
-            if type(opt) is torch.optim.Adam:
+            if type(opt).__name__ == "Adam":
                 self.assertAlmostEqual(base_lr, 5e-4, places=6)
             else:
                 self.assertAlmostEqual(base_lr, 1e-3, places=6)

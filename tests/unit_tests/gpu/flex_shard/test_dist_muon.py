@@ -284,8 +284,7 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             distribute_tensor(value.clone(), mesh, storage_placements)
         )
         fqn = "layers.0.feed_forward.w13.weight"
-        optimizer = build_dist_muon(
-            [{"params": [parameter], "param_names": [fqn]}],
+        optimizer = DistMuon.Config(
             compute_sharding_by_fqn={
                 fqn: ComputeLayout(
                     shardings_by_mesh_axis={"dp_shard": compute_sharding},
@@ -298,7 +297,7 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             nesterov=True,
             ns_steps=2,
             adjust_lr_fn="match_rms_adamw",
-        )
+        ).build(params=[{"params": [parameter], "param_names": [fqn]}])
         reference_parameters = [torch.nn.Parameter(matrix.clone()) for matrix in value]
         reference_optimizer = torch.optim.Muon(
             reference_parameters,

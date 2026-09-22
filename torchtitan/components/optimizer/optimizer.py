@@ -70,7 +70,7 @@ class ParamGroupConfig:
 
     Suppressed from the command line: the frozen CLI expands a component base
     into one option per field per subclass, the same reason
-    ``Trainer.Config.model_spec`` is suppressed."""
+    ``Trainer.Config.model`` is suppressed."""
 
 
 T = TypeVar("T", bound=TorchOptimizer)

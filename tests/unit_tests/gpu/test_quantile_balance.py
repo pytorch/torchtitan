@@ -17,6 +17,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.components.optimizer import (
+    AdamW,
     OptimizersContainer,
     ParamGroupConfig,
     register_moe_quantile_balancing_hook,
@@ -195,8 +196,7 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
             param_groups=[
                 ParamGroupConfig(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                    optimizer=AdamW.Config(lr=0.0, weight_decay=0.0),
                 )
             ],
         ).build(model_parts=[model])
