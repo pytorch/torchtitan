@@ -118,6 +118,16 @@ def test_quantization_preserves_partial_bias_linear(monkeypatch):
     torch.testing.assert_close(linear(input), expected)
 
 
+def test_quantization_rejects_unsupported_linear_wrapper():
+    config = _ScaledLinear.Config(in_features=16, out_features=16)
+
+    with pytest.raises(ValueError, match="does not support _ScaledLinear"):
+        quantization_transform._get_quantized_linear_config_cls(
+            config,
+            _ScaledLinear,
+        )
+
+
 @pytest.mark.parametrize("parallel_cls", [ColumnParallelLinear, RowParallelLinear])
 def test_get_quantized_linear_preserves_compute_and_tp_role(parallel_cls):
     quantized_cls = get_quantized_linear(_ScaledLinear, parallel_cls)

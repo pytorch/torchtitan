@@ -17,10 +17,11 @@ import torch._inductor.config
 
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
-    get_parallel_linear_cls,
+    ColumnParallelLinear,
     Linear,
     PartialBiasLinear,
     RouterGateLinear,
+    RowParallelLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.quantization.float8 import (
@@ -49,13 +50,24 @@ def _get_quantized_linear_config_cls(
     quantized_cls: type[Linear],
 ) -> type[Any]:
     """Select a quantized config while preserving its Linear behavior."""
-    parent_cls = (
-        PartialBiasLinear
-        if isinstance(config, PartialBiasLinear.Config)
-        else get_parallel_linear_cls(config)
+    parent_cls = config._owner
+    assert parent_cls is not None
+    if parent_cls is Linear:
+        return cast(type[Any], quantized_cls.Config)
+    if parent_cls not in (
+        ColumnParallelLinear,
+        RowParallelLinear,
+        PartialBiasLinear,
+    ):
+        raise ValueError(
+            f"Quantization does not support {parent_cls.__qualname__}; only Linear, "
+            "ColumnParallelLinear, RowParallelLinear, and PartialBiasLinear "
+            "can be converted."
+        )
+    quantized_cls = get_quantized_linear(
+        quantized_cls,
+        cast(type[Linear], parent_cls),
     )
-    if parent_cls is not None:
-        quantized_cls = get_quantized_linear(quantized_cls, parent_cls)
     return cast(type[Any], quantized_cls.Config)
 
 
