@@ -372,6 +372,7 @@ class TestModuleRedistribution(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=2,
+            enable_sequence_parallel=False,
         )
 
         with self.assertRaisesRegex(
@@ -393,6 +394,7 @@ class TestModuleRedistribution(unittest.TestCase):
             pp=1,
             ep=2,
             world_size=2,
+            enable_sequence_parallel=False,
         )
 
         with self.assertRaisesRegex(
