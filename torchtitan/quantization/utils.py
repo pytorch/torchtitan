@@ -12,6 +12,7 @@ import torch
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
+    PartialBiasLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
@@ -24,11 +25,11 @@ from torchtitan.protocols.module import Module
 
 
 class _QuantizedLinearMixin:
-    """Add quantized local compute while preserving an outer TP boundary.
+    """Add quantized local compute while preserving specialized Linear behavior.
 
     This follows the same composition pattern as ``_LoRALinearMixin``: the
-    mixin overrides ``_linear``, while ``ColumnParallelLinear`` or
-    ``RowParallelLinear`` continues to own communication in ``forward``.
+    The mixin overrides ``_linear`` while the selected Linear subclass keeps
+    ownership of its bias handling or communication in ``forward``.
 
     Unlike LoRA, some quantized implementations are complete TorchAO modules
     rather than cooperative TorchTitan mixins. In particular, Float8 and
@@ -58,14 +59,16 @@ class _QuantizedLinearMixin:
 @functools.cache
 def specialize_quantized_linear(
     quantized_cls: type[Module],
-    parallel_cls: type[ColumnParallelLinear] | type[RowParallelLinear],
+    specialization_cls: type[
+        ColumnParallelLinear | PartialBiasLinear | RowParallelLinear
+    ],
 ) -> type[Module]:
-    """Compose quantized local compute with a synchronous TP boundary."""
+    """Compose quantized local compute with specialized Linear behavior."""
     quantized_config_cls = quantized_cls.Config
 
-    class QuantizedParallelLinear(
+    class QuantizedSpecializedLinear(
         _QuantizedLinearMixin,
-        parallel_cls,  # pyrefly: ignore [invalid-inheritance]
+        specialization_cls,  # pyrefly: ignore [invalid-inheritance]
         quantized_cls,
     ):
         _quantized_linear_cls = quantized_cls
@@ -75,13 +78,13 @@ def specialize_quantized_linear(
             pass
 
     quantized_name = quantized_cls.__name__.removesuffix("Linear")
-    specialized_name = f"{quantized_name}{parallel_cls.__name__}"
-    QuantizedParallelLinear.__name__ = specialized_name
-    QuantizedParallelLinear.__qualname__ = specialized_name
-    QuantizedParallelLinear.__module__ = quantized_cls.__module__
-    QuantizedParallelLinear.Config.__qualname__ = f"{specialized_name}.Config"
-    QuantizedParallelLinear.Config.__module__ = quantized_cls.__module__
-    return QuantizedParallelLinear
+    specialized_name = f"{quantized_name}{specialization_cls.__name__}"
+    QuantizedSpecializedLinear.__name__ = specialized_name
+    QuantizedSpecializedLinear.__qualname__ = specialized_name
+    QuantizedSpecializedLinear.__module__ = quantized_cls.__module__
+    QuantizedSpecializedLinear.Config.__qualname__ = f"{specialized_name}.Config"
+    QuantizedSpecializedLinear.Config.__module__ = quantized_cls.__module__
+    return QuantizedSpecializedLinear
 
 
 def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) -> bool:

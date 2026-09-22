@@ -19,6 +19,7 @@ from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
     get_parallel_linear_cls,
     Linear,
+    PartialBiasLinear,
     RouterGateLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
@@ -44,12 +45,19 @@ def _quantized_linear_config_cls(
     config: Linear.Config,
     linear_cls: type[Module],
 ) -> type[Any]:
-    """Select a quantized config without changing a projection's TP role."""
-    parallel_cls = get_parallel_linear_cls(config)
+    """Select a quantized config without changing specialized Linear behavior."""
+    specialization_cls = get_parallel_linear_cls(config)
+    owner = config._owner
+    if (
+        specialization_cls is None
+        and owner is not None
+        and issubclass(owner, PartialBiasLinear)
+    ):
+        specialization_cls = PartialBiasLinear
     module_cls = (
         linear_cls
-        if parallel_cls is None
-        else specialize_quantized_linear(linear_cls, parallel_cls)
+        if specialization_cls is None
+        else specialize_quantized_linear(linear_cls, specialization_cls)
     )
     return cast(type[Any], module_cls.Config)
 

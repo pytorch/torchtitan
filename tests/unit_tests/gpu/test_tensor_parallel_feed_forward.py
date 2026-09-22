@@ -17,7 +17,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.common.config_utils import make_ffn_config
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
@@ -94,6 +94,11 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     else x_full.detach().clone()
                 ).requires_grad_()
                 mesh = parallel_dims.spmd_dense_mesh()
+                set_spmd_meshes(
+                    dense_mesh=mesh,
+                    sparse_mesh=None,
+                    dense_sp_enabled=enable_sp,
+                )
                 with set_current_spmd_mesh(mesh), typecheck(local=False):
                     spmd.assert_type(x_local, attn_x_layout)
                     parallel_out = parallel(x_local)

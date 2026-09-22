@@ -8,10 +8,13 @@ import dataclasses
 import math
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -118,7 +121,19 @@ class Attention(BaseAttention):
 
         # Reshape and project output
         output = output.reshape(output.shape[0], -1).contiguous()
-        return self.wo(output)
+        output = self.wo(output)
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return output
+        # The projection folds its invariant bias into the partial result;
+        # GPT-OSS owns the reduction because this is its only such boundary.
+        return spmd.redistribute(
+            output,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            backward_options={"op_dtype": output.dtype},
+        )
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""

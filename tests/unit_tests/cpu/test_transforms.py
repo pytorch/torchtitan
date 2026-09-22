@@ -31,7 +31,7 @@ from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttentio
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
-    PartialBiasRowwiseLinear,
+    PartialBiasLinear,
     RowParallelLinear,
 )
 
@@ -350,17 +350,18 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
                 config
             )
 
-    def test_async_transform_rejects_partial_bias_rowwise_linear(self):
-        config = PartialBiasRowwiseLinear.Config(
+    def test_async_transform_skips_partial_bias_linear(self):
+        config = PartialBiasLinear.Config(
             in_features=4,
             out_features=4,
             bias=True,
         )
 
-        with self.assertRaisesRegex(ValueError, "converted .* projections"):
-            AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
-                config
-            )
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(config)
+
+        self.assertIs(type(transformed), PartialBiasLinear.Config)
 
     def test_async_transform_conflicts_with_lora(self):
         config = self._model_config()

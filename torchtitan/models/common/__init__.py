@@ -37,7 +37,6 @@ from .linear import (
     ColumnParallelLinear,
     Linear,
     PartialBiasLinear,
-    PartialBiasRowwiseLinear,
     RouterGateLinear,
     RowParallelLinear,
 )
@@ -83,7 +82,6 @@ __all__ = [
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "PartialBiasLinear",
-    "PartialBiasRowwiseLinear",
     "RMSNorm",
     "RoPE",
     "RowParallelLinear",

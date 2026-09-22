@@ -28,7 +28,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
-    PartialBiasRowwiseLinear,
+    PartialBiasLinear,
     RowParallelLinear,
 )
 from torchtitan.models.llama3 import model_registry
@@ -280,8 +280,8 @@ def test_lora_handler_matches_linear_config_subclass():
     assert model.lora_b.weight.requires_grad
 
 
-def test_lora_preserves_partial_bias_row_parallel_linear():
-    config = PartialBiasRowwiseLinear.Config(
+def test_lora_preserves_partial_bias_linear():
+    config = PartialBiasLinear.Config(
         in_features=4,
         out_features=3,
         bias=True,
@@ -293,7 +293,7 @@ def test_lora_preserves_partial_bias_row_parallel_linear():
     ).transform(config)
     linear = transformed.build()
 
-    assert isinstance(linear, PartialBiasRowwiseLinear)
+    assert isinstance(linear, PartialBiasLinear)
     x = torch.randn(5, 4)
     expected = F.linear(x, linear.weight, linear.bias)
     expected += 2 * linear.lora_b(linear.lora_a(x))

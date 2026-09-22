@@ -222,7 +222,10 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
 
     @with_comms
     def test_stacked_w13_typechecks(self):
-        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.distributed.spmd_types import (
+            set_current_spmd_mesh,
+            set_spmd_meshes,
+        )
         from torchtitan.models.common.config_utils import make_ffn_config
 
         input_layout = dense_sequence_parallel_placement()
@@ -243,9 +246,13 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         feed_forward.parallelize(parallel_dims)
 
         x_local = torch.randn(8, DIM, device=self.device_type, requires_grad=True)
-        with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()), typecheck(
-            local=False
-        ):
+        mesh = parallel_dims.spmd_dense_mesh()
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=None,
+            dense_sp_enabled=True,
+        )
+        with set_current_spmd_mesh(mesh), typecheck(local=False):
             spmd.assert_type(x_local, input_layout)
             output = feed_forward(x_local)
             output.sum().backward()
@@ -254,7 +261,10 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
 
     @with_comms
     def test_gpt_oss_attention_reshapes_gathered_tokens(self):
-        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.distributed.spmd_types import (
+            set_current_spmd_mesh,
+            set_spmd_meshes,
+        )
         from torchtitan.models.gpt_oss import model_registry
         from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 
@@ -279,7 +289,13 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         attention.parallelize(parallel_dims)
 
         x_local = torch.randn(8, config.dim, device=self.device_type)
-        with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+        mesh = parallel_dims.spmd_dense_mesh()
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=None,
+            dense_sp_enabled=True,
+        )
+        with set_current_spmd_mesh(mesh):
             output = attention(x_local, None, None)
 
         self.assertEqual(output.shape, x_local.shape)

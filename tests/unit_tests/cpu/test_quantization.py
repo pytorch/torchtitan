@@ -38,7 +38,7 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
-    PartialBiasRowwiseLinear,
+    PartialBiasLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
@@ -89,8 +89,8 @@ def _router_config_for_quantization(dim: int):
     )
 
 
-def test_quantization_preserves_partial_bias_row_parallel_linear(monkeypatch):
-    config = PartialBiasRowwiseLinear.Config(
+def test_quantization_preserves_partial_bias_linear(monkeypatch):
+    config = PartialBiasLinear.Config(
         in_features=16,
         out_features=16,
         bias=True,
@@ -102,7 +102,7 @@ def test_quantization_preserves_partial_bias_row_parallel_linear(monkeypatch):
     converted = config_cls(in_features=16, out_features=16, bias=True, scale=3.0)
 
     assert converted._owner is not None
-    assert issubclass(converted._owner, PartialBiasRowwiseLinear)
+    assert issubclass(converted._owner, PartialBiasLinear)
     assert issubclass(converted._owner, _ScaledLinear)
 
     linear = converted.build()
@@ -113,8 +113,6 @@ def test_quantization_preserves_partial_bias_row_parallel_linear(monkeypatch):
         "convert",
         lambda bias, *_args, **_kwargs: converted_bias,
     )
-    monkeypatch.setattr(linear, "_reduce_output", lambda output: output)
-
     input = torch.randn(2, 16)
     expected = 3.0 * torch.nn.functional.linear(input, linear.weight, converted_bias)
     torch.testing.assert_close(linear(input), expected)
