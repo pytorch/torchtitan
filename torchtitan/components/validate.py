@@ -72,8 +72,11 @@ class Validator(BaseValidator):
     class Config(BaseValidator.Config):
         steps: int = -1
         """
-        Number of validation steps. -1 consumes the finite dataset and therefore
-        requires an effective data-parallel degree of one.
+        Number of validation steps. -1 consumes the finite dataset once
+        (dataloader repeat=False). Ranks then stop independently, so this
+        requires data-parallel degree 1; otherwise validation collectives hang.
+        Use a positive count when DP > 1 so every rank runs the same number of
+        steps with repeat=True.
         """
 
         dataloader: BaseDataLoader.Config = field(
@@ -88,9 +91,10 @@ class Validator(BaseValidator):
 
         def __post_init__(self):
             BaseValidator.Config.__post_init__(self)
-            assert (
-                self.steps > 0 or self.steps == -1
-            ), "validation steps must be positive or -1"
+            if not (self.steps > 0 or self.steps == -1):
+                raise ValueError(
+                    f"validation steps must be positive or -1, got {self.steps}"
+                )
 
     # TODO: improve the constructor signature
     def __init__(
@@ -120,6 +124,15 @@ class Validator(BaseValidator):
         self.dl_config = replace(config.dataloader, repeat=config.steps != -1)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
+        if config.steps == -1 and self.dp_world_size > 1:
+            raise ValueError(
+                "validation.steps=-1 runs one finite pass (dataloader "
+                "repeat=False). With data-parallel degree > 1, ranks can exhaust "
+                "at different steps and hang on validation collectives. Got "
+                f"dp_world_size={self.dp_world_size}. Set validation.steps to a "
+                "positive count so every rank runs the same number of steps, "
+                "or run with data-parallel degree 1."
+            )
         self.seq_len = seq_len
         self.num_tokens_per_microbatch = num_tokens_per_microbatch
         self.metrics_processor = metrics_processor
