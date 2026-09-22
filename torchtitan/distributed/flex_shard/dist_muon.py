@@ -12,7 +12,7 @@ import heapq
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
+from functools import lru_cache, partial
 from typing import Any, cast, NoReturn, overload
 
 import torch
@@ -285,6 +285,7 @@ class DistMuon(Optimizer):
         eps: float = 1e-7,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
+        use_quack: bool = False,
     ) -> None:
         defaults = {
             "lr": lr,
@@ -295,6 +296,7 @@ class DistMuon(Optimizer):
             "eps": eps,
             "ns_steps": ns_steps,
             "adjust_lr_fn": adjust_lr_fn,
+            "use_quack": use_quack,
         }
         self._first_step_validated = False
         self._param_groups_frozen = False
@@ -356,6 +358,7 @@ class DistMuon(Optimizer):
                 or not all(isinstance(value, (int, float)) for value in coefficients)
                 or group["adjust_lr_fn"]
                 not in (None, "original", "match_rms_adamw", "spectral_unclamped")
+                or not isinstance(group["use_quack"], bool)
             ):
                 raise ValueError(f"unsupported DistMuon group {group_index}")
 
@@ -621,6 +624,7 @@ class DistMuon(Optimizer):
             ns_coefficients=group["ns_coefficients"],
             ns_steps=group["ns_steps"],
             eps=group["eps"],
+            use_quack=group["use_quack"],
             out=compute,
         )
 
@@ -1850,6 +1854,7 @@ def _compute_muon_direction(
     ns_coefficients: tuple[float, float, float],
     ns_steps: int,
     eps: float,
+    use_quack: bool,
     out: Tensor,
 ) -> Tensor:
     """Compute Muon's approximate orthogonal update direction."""
@@ -1858,6 +1863,7 @@ def _compute_muon_direction(
         ns_coefficients=ns_coefficients,
         ns_steps=ns_steps,
         eps=eps,
+        use_quack=use_quack,
     )
     out.copy_(direction)
     return out
@@ -1889,6 +1895,7 @@ def _zeropower_via_newtonschulz(
     ns_coefficients: tuple[float, float, float],
     ns_steps: int,
     eps: float,
+    use_quack: bool = False,
 ) -> Tensor:
     """Compute Muon's approximate polar factor without optimizer state."""
     a, b, c = ns_coefficients
@@ -1898,23 +1905,70 @@ def _zeropower_via_newtonschulz(
         result = result.transpose(-2, -1)
     result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
 
+    quack_symmetric_gemm = _get_quack_symmetric_gemm() if use_quack else None
+
     if result.ndim == 2:
         for _ in range(ns_steps):
-            gram = result @ result.T
-            gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
-            result = torch.addmm(result, gram_update, result, beta=a)
+            if quack_symmetric_gemm is None:
+                gram = result @ result.T
+                gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
+                result = torch.addmm(result, gram_update, result, beta=a)
+            else:
+                gram = quack_symmetric_gemm(result.unsqueeze(0)).squeeze(0)
+                gram_square = quack_symmetric_gemm(gram.unsqueeze(0)).squeeze(0)
+                gram_update = gram.mul(b).add_(gram_square, alpha=c)
+                result = torch.addmm(result, gram_update, result, beta=a)
     else:
         original_shape = result.shape
         matrices = result.reshape(-1, *original_shape[-2:])
         # Batched kernels and independent matrix calls can use different BF16
         # reduction orders.
         for _ in range(ns_steps):
-            gram = matrices @ matrices.transpose(-2, -1)
-            gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
-            matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
+            if quack_symmetric_gemm is None:
+                gram = matrices @ matrices.transpose(-2, -1)
+                gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
+                matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
+            else:
+                gram = quack_symmetric_gemm(matrices)
+                gram_square = quack_symmetric_gemm(gram)
+                gram_update = gram.mul(b).add_(gram_square, alpha=c)
+                matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)
         result = matrices.reshape(original_shape)
 
     return result.transpose(-2, -1) if transposed else result
+
+
+@lru_cache(maxsize=1)
+def _get_quack_symmetric_gemm() -> Callable[[Tensor], Tensor] | None:
+    """Return QuACK's symmetric GEMM wrapper when the optional dependency exists."""
+    try:
+        from quack.gemm_symmetric import gemm_symmetric
+    except ImportError:
+        return None
+
+    def symmetric_gemm(matrices: Tensor) -> Tensor:
+        squeeze_batch = matrices.ndim == 2
+        if squeeze_batch:
+            matrices = matrices.unsqueeze(0)
+        output = torch.empty(
+            (*matrices.shape[:-1], matrices.shape[-2]),
+            device=matrices.device,
+            dtype=matrices.dtype,
+        )
+        gemm_symmetric(
+            matrices,
+            matrices,
+            output,
+            None,
+            None,
+            tile_M=128,
+            tile_N=128,
+            cluster_M=1,
+            cluster_N=1,
+        )
+        return output.squeeze(0) if squeeze_batch else output
+
+    return symmetric_gemm
 
 
 def _after_load_state_dict(optimizer: Optimizer) -> None:
