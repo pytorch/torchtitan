@@ -22,7 +22,7 @@ have no suitable home, e.g. the training token-budget settings, and those can
 be placed here. Discuss with the maintainers first if you intend to add one.
 
 The command-line surface is frozen either way, so annotate a new field with
-``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
+``tyro.conf.Suppress``, as ``Trainer.Config.model`` does. See
 ``torchtitan/config/README.md``.
 """
 

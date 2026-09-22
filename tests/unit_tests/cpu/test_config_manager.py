@@ -59,8 +59,7 @@ class TestConfigManager(unittest.TestCase):
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
-        assert config.model_spec.name == "llama3"
-        assert config.model_spec.flavor == "debugmodel"
+        assert type(config.model).__qualname__ == "Llama3Model.Config"
         assert config.training.steps == 10
 
     def test_model_config_args_equals_form(self):
@@ -69,8 +68,7 @@ class TestConfigManager(unittest.TestCase):
         config = config_manager.parse_args(
             ["--module=llama3", "--config=llama3_debugmodel"]
         )
-        assert config.model_spec.name == "llama3"
-        assert config.model_spec.flavor == "debugmodel"
+        assert type(config.model).__qualname__ == "Llama3Model.Config"
 
     def test_parse_args_uses_current_sys_argv(self):
         """parse_args() without args reads sys.argv at call time."""
@@ -109,8 +107,7 @@ class TestConfigManager(unittest.TestCase):
                 "llama3_debugmodel_fsdp2_cp2",
             ]
         )
-        assert config.model_spec.name == "llama3"
-        assert config.model_spec.flavor == "debugmodel"
+        assert type(config.model).__qualname__ == "Llama3Model.Config"
         assert config.parallelism.context_parallel_degree == 2
 
     def test_invalid_model_errors(self):
@@ -446,7 +443,7 @@ class TestConfigManager(unittest.TestCase):
 
             config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
             dispatcher_configs = list(
-                config.model_spec.model.traverse(HybridEPTokenDispatcher.Config)
+                config.model.traverse(HybridEPTokenDispatcher.Config)
             )
             assert dispatcher_configs
             for _, dispatcher_config, _, _ in dispatcher_configs:
@@ -518,7 +515,7 @@ class TestConfigManager(unittest.TestCase):
         from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 
         config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
-        for _, dispatcher_config, _, _ in config.model_spec.model.traverse(
+        for _, dispatcher_config, _, _ in config.model.traverse(
             HybridEPTokenDispatcher.Config
         ):
             dispatcher_config.non_blocking_capacity_factor = None
@@ -609,7 +606,7 @@ class TestConfigManager(unittest.TestCase):
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
-        assert not has_quantization(config.model_spec.model)
+        assert not has_quantization(config.model)
 
     # TODO: remove this test when we remove the merge functionality
     def test_extend_trainer_config_directly(self):
@@ -632,17 +629,17 @@ class TestConfigManager(unittest.TestCase):
         )
 
         # Verify the merged type has both base and custom fields
-        model_spec = (
+        model = (
             ConfigManager()
             .parse_args(["--module", "llama3", "--config", "llama3_debugmodel"])
-            .model_spec
+            .model
         )
-        merged = MergedTrainerConfig(model_spec=model_spec)
+        merged = MergedTrainerConfig(model=model)
         assert hasattr(merged, "checkpointer")
         assert hasattr(merged.checkpointer, "convert_path")
         assert merged.checkpointer.convert_path == "/custom/path"
         assert merged.checkpointer.fake_model is True
-        assert hasattr(merged, "model_spec")
+        assert hasattr(merged, "model")
 
     def test_flux_config_via_cli(self):
         """Test that --module flux --config flux_debugmodel works."""
@@ -650,7 +647,7 @@ class TestConfigManager(unittest.TestCase):
         config = config_manager.parse_args(
             ["--module", "flux", "--config", "flux_debugmodel"]
         )
-        assert config.model_spec.name == "flux"
+        assert type(config.model).__qualname__ == "FluxModel.Config"
         assert hasattr(config, "encoder")
         assert config.parallelism.context_parallel_load_balancer == "headtail"
 
@@ -663,10 +660,9 @@ class TestConfigManager(unittest.TestCase):
         config = config_manager.parse_args(
             ["--module", "deepseek_v3", "--config", "deepseek_v3_debugmodel"]
         )
-        assert config.model_spec.name == "deepseek_v3"
-        assert config.model_spec.flavor == "debugmodel"
+        assert type(config.model).__qualname__ == "DeepSeekV3Model.Config"
 
-    def test_suppressed_model_spec_is_opaque_to_tyro(self):
+    def test_suppressed_model_is_opaque_to_tyro(self):
         config = ConfigManager().parse_args(
             [
                 "--module",
@@ -676,7 +672,7 @@ class TestConfigManager(unittest.TestCase):
             ]
         )
 
-        assert config.model_spec.name == "transformers_modeling_backend"
+        assert type(config.model).__qualname__ == "HFTransformerModel.Config"
 
     def test_fqn_module_with_config_registry(self):
         """--module torchtitan.models.llama3.config_registry works."""
@@ -689,8 +685,7 @@ class TestConfigManager(unittest.TestCase):
                 "llama3_debugmodel",
             ]
         )
-        assert config.model_spec.name == "llama3"
-        assert config.model_spec.flavor == "debugmodel"
+        assert type(config.model).__qualname__ == "Llama3Model.Config"
 
     def test_fqn_module_without_config_registry(self):
         """--module torchtitan.models.llama3 (auto-appends .config_registry)."""
@@ -703,8 +698,7 @@ class TestConfigManager(unittest.TestCase):
                 "llama3_debugmodel",
             ]
         )
-        assert config.model_spec.name == "llama3"
-        assert config.model_spec.flavor == "debugmodel"
+        assert type(config.model).__qualname__ == "Llama3Model.Config"
 
     def test_fqn_module_invalid_errors(self):
         """--module with invalid FQN raises ImportError."""

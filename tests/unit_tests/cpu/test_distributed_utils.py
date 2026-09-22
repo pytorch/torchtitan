@@ -111,7 +111,7 @@ def test_spmd_context_exposes_dense_sp_state(
             "torchtitan.distributed.spmd_types.spmd_dense_mesh",
             return_value=dense_mesh,
         ),
-        dist_utils.get_spmd_context(parallel_dims=parallel_dims)(),
+        dist_utils.get_spmd_context(parallel_dims=parallel_dims),
     ):
         assert spmd_dense_sp_enabled() is enable_sequence_parallel
 

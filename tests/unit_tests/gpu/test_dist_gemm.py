@@ -59,8 +59,8 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         """model_registry(tp_gemm_backend="dist_gemm") swaps all three pieces."""
         from torchtitan.models.llama3 import model_registry
 
-        spec = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
-        for layer in spec.model.layers:
+        config = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
+        for layer in config.layers:
             attn = layer.attention
             self.assertIs(type(attn.qkv_linear), QKVLinear.Config)
             self.assertIsInstance(
@@ -72,17 +72,17 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         """The default must stay stock, or every model silently changes."""
         from torchtitan.models.llama3 import model_registry
 
-        for layer in model_registry("debugmodel").model.layers:
+        for layer in model_registry("debugmodel").layers:
             self.assertNotIsInstance(layer.attention.wo, AsyncRowParallelLinear.Config)
 
     def test_stock_parameter_shapes_survive(self):
         """Fused modules keep the stock layouts, or checkpoints stop loading."""
         from torchtitan.models.llama3 import model_registry
 
-        stock = model_registry("debugmodel").model.layers[0].attention
+        stock = model_registry("debugmodel").layers[0].attention
         fused = (
             model_registry("debugmodel", tp_gemm_backend="dist_gemm")
-            .model.layers[0]
+            .layers[0]
             .attention
         )
         self.assertEqual(
@@ -100,7 +100,7 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         from torchtitan.models.llama3 import model_registry
 
         attn = model_registry("debugmodel", tp_gemm_backend="dist_gemm")
-        attn = attn.model.layers[0].attention
+        attn = attn.layers[0].attention
         with self.assertRaisesRegex(ValueError, "enable_sequence_parallel"):
             set_gqa_attention_sharding(attn, enable_sp=False)
 
@@ -115,10 +115,10 @@ class TestDistGemmAttentionConfig(unittest.TestCase):
         """
         from torchtitan.models.llama3 import model_registry
 
-        stock = model_registry("debugmodel").model.layers[0].attention
+        stock = model_registry("debugmodel").layers[0].attention
         fused = (
             model_registry("debugmodel", tp_gemm_backend="dist_gemm")
-            .model.layers[0]
+            .layers[0]
             .attention
         )
         set_gqa_attention_sharding(stock, enable_sp=True)
@@ -175,14 +175,10 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
         from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
 
         parallel_dims = self._parallel_dims()
-        attn_cfg = (
-            llama3_debugmodel_dist_gemm(seq_len=2048)
-            .model_spec.model.layers[0]
-            .attention
-        )
+        attn_cfg = llama3_debugmodel_dist_gemm(seq_len=2048).model.layers[0].attention
         set_gqa_attention_sharding(attn_cfg, enable_sp=True)
         attn = attn_cfg.build().to(self.device_type)
-        attn.parallelize(parallel_dims)
+        attn._parallelize(parallel_dims)
 
         self.assertIsNone(attn._sharding_config)
         self.assertIsNone(attn.wo._sharding_config.out_src_shardings)
@@ -207,7 +203,7 @@ class TestDistGemmAttentionSharding(DTensorTestBase):
             enable_sp=True,
         )
         feed_forward = ffn_config.build().to(self.device_type)
-        feed_forward.parallelize(self._parallel_dims())
+        feed_forward._parallelize(self._parallel_dims())
 
         self.assertEqual(
             feed_forward.w13.weight.shape,

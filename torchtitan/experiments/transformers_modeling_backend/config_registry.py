@@ -41,13 +41,13 @@ class TransformersBackendConfig(Trainer.Config):
 def transformers_modeling_backend_debugmodel(
     seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> TransformersBackendConfig:
-    model_spec = model_registry("debugmodel", seq_len=seq_len)
+    model_config = model_registry("debugmodel", seq_len=seq_len)
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
-        model_spec=model_spec,
+        model=model_config,
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -89,7 +89,7 @@ def transformers_modeling_backend_debugmodel_moe(
         hf_assets_path="./tests/assets/tokenizer",
         hf_model="Qwen/Qwen3-30B-A3B",
         debug=DebugConfig(print_config=True),
-        model_spec=model_registry("debugmodel_moe", seq_len=seq_len),
+        model=model_registry("debugmodel_moe", seq_len=seq_len),
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -129,7 +129,7 @@ def transformers_modeling_backend_full_moe(
     return TransformersBackendConfig(
         hf_model="Qwen/Qwen3-30B-A3B",
         debug=DebugConfig(print_config=True),
-        model_spec=model_registry("full_moe", seq_len=seq_len),
+        model=model_registry("full_moe", seq_len=seq_len),
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -158,12 +158,12 @@ def transformers_modeling_backend_full_moe(
 def transformers_modeling_backend_full(
     seq_len: int = 2048,
 ) -> TransformersBackendConfig:
-    model_spec = model_registry("full", seq_len=seq_len)
+    model_config = model_registry("full", seq_len=seq_len)
     return TransformersBackendConfig(
         loss=CrossEntropyLoss.Config(),
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         debug=DebugConfig(print_config=True),
-        model_spec=model_spec,
+        model=model_config,
         profiler=Profiler.Config(profile_freq=5),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -204,7 +204,7 @@ def transformers_modeling_backend_sft_full(
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/qwen3_0.6b",
         hf_model="Qwen/Qwen3-0.6B",
-        model_spec=model_registry("sft_full", seq_len=seq_len),
+        model=model_registry("sft_full", seq_len=seq_len),
         tokenizer=HFBackendTokenizer.Config(),
         optimizer=default_adamw(lr=2e-5),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -262,7 +262,7 @@ def transformers_modeling_backend_sft_debugmodel(
         loss=CrossEntropyLoss.Config(),
         hf_assets_path="./tests/assets/tokenizer",
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
-        model_spec=model_registry("sft_debugmodel", seq_len=seq_len),
+        model=model_registry("sft_debugmodel", seq_len=seq_len),
         tokenizer=HFBackendTokenizer.Config(),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(

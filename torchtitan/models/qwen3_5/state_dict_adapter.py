@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 """
 State dict adapter for Qwen3.5.
 
@@ -24,13 +26,14 @@ Other notable conversions:
 """
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
-from .model import Qwen35Model
+if TYPE_CHECKING:
+    from .model import Qwen35Model
 
 
 class Qwen35StateDictAdapter(StateDictAdapter):
