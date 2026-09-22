@@ -103,6 +103,7 @@ class BaseModel(Module, ABC):
 
     state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None
     pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
+    pipeline_last_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
     supports_pipeline_parallel: ClassVar[bool] = True
 
     def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
@@ -114,13 +115,17 @@ class BaseModel(Module, ABC):
 
         from torchtitan.distributed.pipeline_parallel import (
             pipeline_llm,
-            pipeline_with_first_stage_modules,
+            pipeline_with_first_last_stage_modules,
         )
 
-        if self.pipeline_first_stage_module_fqns:
-            return pipeline_with_first_stage_modules(
+        if (
+            self.pipeline_first_stage_module_fqns
+            or self.pipeline_last_stage_module_fqns
+        ):
+            return pipeline_with_first_last_stage_modules(
                 self,
                 first_stage_module_fqns=self.pipeline_first_stage_module_fqns,
+                last_stage_module_fqns=self.pipeline_last_stage_module_fqns,
                 **kwargs,
             )
         return pipeline_llm(self, **kwargs)
