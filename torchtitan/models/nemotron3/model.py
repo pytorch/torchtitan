@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import distribute_tensor, DTensor
 from torch import nn
 
 import torchtitan.distributed
@@ -21,7 +22,10 @@ from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.utils import get_nparams_and_active_nparams
+from torchtitan.models.utils import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 
 # --- Mamba-2 Pure PyTorch Chunk Scan Helpers ---
 
@@ -137,8 +141,9 @@ class NoRoPE(RoPE):
         dim: int = 0
         max_context_length: int = 0
 
-        def build(self, **kwargs):
-            return NoRoPE(self, **kwargs)
+        # No build() override, for the same reason as NemotronMLP: it would
+        # bypass Module.Config.build and drop _param_init/_sharding_config.
+        # Harmless for a no-op module today, but it is the same latent trap.
 
     def _precompute_cache(self) -> torch.Tensor:
         return torch.empty(0)
@@ -191,8 +196,14 @@ class NemotronMLP(torchtitan.protocols.module.Module):
         up_proj: Linear.Config | None = None
         down_proj: Linear.Config | None = None
 
-        def build(self, **kwargs):
-            return NemotronMLP(self, **kwargs)
+        # No build() override here on purpose: Module.Config.build is what
+        # attaches _param_init and _sharding_config to the built instance.
+        # Overriding it skipped that, so this module's declared input
+        # redistribution never ran -- under TP+SP the shared expert consumed
+        # sequence-sharded input without the all-gather and returned half the
+        # tokens ("size of tensor a (64) must match tensor b (32)"). The child
+        # Linears still got their own configs, which is what made it look like
+        # sharding was working.
 
     def __init__(self, config: Config):
         super().__init__()
@@ -403,9 +414,30 @@ class NemotronTransformerBlock(TransformerBlock):
             return
 
         # A spans a spectrum of timescales: A = -exp(A_log) = -(1..num_heads).
-        A = torch.arange(1, self.mamba_num_heads + 1, dtype=torch.float32)
+        # This init is POSITION-DEPENDENT, so unlike an elementwise fill it
+        # cannot be applied to a local shard directly: under FSDP the parameter
+        # is a DTensor whose local view is an arbitrary slice (often empty).
+        # Build the full vector, then let distribute_tensor cut the matching
+        # shard so every rank writes the right global slice.
         with torch.no_grad():
-            self.A_log.copy_(torch.log(A))
+            A = torch.arange(
+                1,
+                self.mamba_num_heads + 1,
+                dtype=self.A_log.dtype,
+                device=self.A_log.device,
+            )
+            a_log_full = torch.log(A)
+            if isinstance(self.A_log, DTensor):
+                self.A_log.copy_(
+                    distribute_tensor(
+                        a_log_full, self.A_log.device_mesh, self.A_log.placements
+                    )
+                )
+            else:
+                self.A_log.copy_(a_log_full)
+
+            # These two are constant fills, so they are shard-agnostic and work
+            # on a DTensor as-is.
             nn.init.ones_(self.D)
             nn.init.ones_(self.dt_bias)
 
@@ -488,9 +520,32 @@ class Nemotron3Model(Decoder):
             )
 
         def get_nparams_and_flops(self, model: nn.Module, seq_len: int) -> tuple[int, int]:
-            nparams, _ = get_nparams_and_active_nparams(model)
-            active_params = nparams * (self.top_k_experts / self.num_experts)
-            return nparams, int(6 * active_params)
+            # get_nparams_and_active_nparams already weights routed-expert
+            # params by the active ratio, so use its active count directly.
+            # Deriving it here as nparams * top_k/num_experts was both wrong
+            # (it scaled non-expert params too) and a ZeroDivisionError on the
+            # dense flavors, which have num_experts == 0.
+            nparams, active_nparams = get_nparams_and_active_nparams(model)
+
+            # Only attention layers carry the quadratic term; in this hybrid
+            # stack mamba/mlp/moe layers leave `attention` as None.
+            attention_op_flops = 0
+            for layer in self.layers:
+                attention = layer.attention
+                if attention is None:
+                    continue
+                head_dim = (
+                    attention.head_dim
+                    if attention.head_dim is not None
+                    else attention.dim // attention.n_heads
+                )
+                attention_op_flops += quadratic_attention_flops_per_token(
+                    num_heads=attention.n_heads,
+                    qk_head_dim=head_dim,
+                    v_head_dim=head_dim,
+                    seq_len=seq_len,
+                )
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def verify_module_protocol(self) -> None:
         """Skip the plain-``nn.Module``-child check.

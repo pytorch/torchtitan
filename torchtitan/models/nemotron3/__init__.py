@@ -119,6 +119,16 @@ def _build_nemotron_layers(
     if moe_intermediate_dim is None:
         moe_intermediate_dim = hidden_dim
 
+    # Mamba-2 shares each B/C pair across the heads of a group and expands them
+    # with repeat_interleave(num_heads // n_groups). A non-divisible pair makes
+    # that expansion silently produce the wrong width (or a zero-size repeat),
+    # so reject it here where the flavor is readable rather than mid-scan.
+    if mamba_num_heads % mamba_n_groups != 0:
+        raise ValueError(
+            f"mamba_num_heads ({mamba_num_heads}) must be divisible by "
+            f"mamba_n_groups ({mamba_n_groups})"
+        )
+
     if hybrid_pattern is not None:
         block_types = parse_hybrid_pattern(hybrid_pattern)
         if len(block_types) != n_layers:
@@ -297,7 +307,12 @@ def _debugmodel(
             top_k_experts=top_k_experts,
             mamba_num_heads=4,
             mamba_head_dim=64,
-            mamba_conv_dim=256,
+            # Keep the debug model internally consistent: B/C are shared across
+            # heads within a group, so num_heads must be divisible by n_groups.
+            # The real flavors use 8 groups, which 4 heads cannot support.
+            mamba_n_groups=2,
+            mamba_state_dim=16,
+            mamba_conv_dim=4 * 64 + 2 * 2 * 16,
             attn_backend=attn_backend,
             tp_gemm_backend=tp_gemm_backend,
         ),

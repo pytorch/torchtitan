@@ -21,7 +21,15 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_attention_sharding,
     set_gqa_inner_attention_local_map,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    # Private, but deliberately reused: Nemotron-H's shared expert is the
+    # ungated NemotronMLP (up_proj/down_proj) rather than a SwiGLU w1/w2/w3, so
+    # set_moe_sharding_config cannot annotate it. Borrowing the layout factory
+    # keeps the shared expert's placements in lockstep with the common
+    # implementation instead of duplicating them here and drifting.
+    _shared_experts_sharding_configs,
+    set_moe_sharding_config,
+)
 from torchtitan.protocols.sharding import ShardingConfig
 
 # Nemotron-H's grouped experts are UNGATED: only an up projection (``w1_EFD``,
@@ -62,6 +70,32 @@ def _set_nemotron_mlp_sharding(
     )
     feed_forward_cfg.up_proj.sharding_config = colwise_config()
     feed_forward_cfg.down_proj.sharding_config = rowwise_config(output_sp=enable_sp)
+
+
+def _set_nemotron_shared_expert_sharding(
+    shared_cfg,
+    *,
+    enable_ep: bool,
+    enable_sp: bool,
+) -> None:
+    """TP sharding for the MoE's ungated shared expert.
+
+    Same shape problem as ``_set_nemotron_mlp_sharding``, but a shared expert
+    sits inside the MoE and must land on the MoE's input/output boundary
+    layouts rather than the dense FFN's, so the placements come from the common
+    helper instead of being rebuilt here. ``up_proj`` takes the ``w1``/``w3``
+    column-parallel config and ``down_proj`` the ``w2`` row-parallel one, which
+    performs the reduction to the boundary layout the routed + shared add needs.
+    """
+    (
+        parent_config,
+        colwise,
+        rowwise,
+        _unused_w3,
+    ) = _shared_experts_sharding_configs(enable_ep=enable_ep, enable_sp=enable_sp)
+    shared_cfg.sharding_config = parent_config
+    shared_cfg.up_proj.sharding_config = colwise
+    shared_cfg.down_proj.sharding_config = rowwise
 
 
 def set_nemotron_sharding_config(
@@ -175,9 +209,29 @@ def _set_nemotron_layer_sharding(
                 )
 
         if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
-            set_moe_sharding_config(
-                layer_cfg.moe,
-                enable_ep=enable_ep,
-                enable_sp=enable_sp,
-                expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
-            )
+            moe_cfg = layer_cfg.moe
+
+            # set_moe_sharding_config assumes a gated SwiGLU shared expert and
+            # dereferences shared.w1/w2/w3. Nemotron-H's shared expert is the
+            # ungated NemotronMLP, so hide it for that call and annotate it
+            # ourselves afterwards.
+            shared = moe_cfg.shared_experts
+            shared_is_ungated = shared is not None and hasattr(shared, "up_proj")
+            if shared_is_ungated:
+                moe_cfg.shared_experts = None
+
+            try:
+                set_moe_sharding_config(
+                    moe_cfg,
+                    enable_ep=enable_ep,
+                    enable_sp=enable_sp,
+                    expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
+                )
+            finally:
+                if shared_is_ungated:
+                    moe_cfg.shared_experts = shared
+
+            if shared_is_ungated:
+                _set_nemotron_shared_expert_sharding(
+                    shared, enable_ep=enable_ep, enable_sp=enable_sp
+                )

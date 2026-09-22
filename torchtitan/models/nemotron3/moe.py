@@ -37,8 +37,12 @@ class NemotronGroupedExperts(GroupedExperts):
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedExperts.Config):
-        def build(self, **kwargs):
-            return NemotronGroupedExperts(self, **kwargs)
+        # Deliberately no build() override. Module.Config.build is what attaches
+        # _param_init and _sharding_config to the instance, so overriding it
+        # here silently left the expert weights undistributed -- FSDP then hit
+        # "Got plain tensor for parameter 'w1_EFD'". The base machinery already
+        # resolves this Config to its enclosing class, exactly as kimi_k3 does.
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)

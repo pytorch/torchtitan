@@ -11,8 +11,9 @@ import re
 from typing import Any
 
 import torch
+from torch.distributed.tensor import DTensor
 
-from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+from torchtitan.models.utils import MoEStateDictAdapter
 from torchtitan.tools.logging import logger
 
 from .model import Nemotron3Model
@@ -151,7 +152,7 @@ _IGNORABLE_HF_PATTERNS = (
 )
 
 
-class NemotronStateDictAdapter(StateDictAdapter):
+class NemotronStateDictAdapter(MoEStateDictAdapter):
     """Convert Nemotron-H (Nemotron-3 Nano) checkpoints between HF and torchtitan.
 
     Design rules, in response to how the previous adapter failed:
@@ -361,11 +362,12 @@ class NemotronStateDictAdapter(StateDictAdapter):
             num_experts = self._num_experts(layer_id)
             for proj in sorted(by_proj):
                 shards = by_proj[proj]
-                if len(shards) != num_experts or set(shards) != set(range(num_experts)):
+                expected = self._expected_expert_indices(proj, num_experts)
+                if set(shards) != expected:
                     continue
                 suffix = _MOE_EXPERT_STACK_SUFFIX[proj]
-                state_dict[f"layers.{layer_id}.{suffix}"] = torch.stack(
-                    [shards[i] for i in range(num_experts)], dim=0
+                state_dict[f"layers.{layer_id}.{suffix}"] = self._stack_experts(
+                    proj, [shards[i] for i in sorted(expected)]
                 )
                 by_proj[proj] = {}
             self._expert_buffer[layer_id] = {
@@ -373,6 +375,45 @@ class NemotronStateDictAdapter(StateDictAdapter):
             }
             if not self._expert_buffer[layer_id]:
                 del self._expert_buffer[layer_id]
+
+    def _expert_key(self, proj: str) -> str:
+        """Layer-independent metadata key, matching :meth:`_unstack_experts`.
+
+        Every MoE layer has the same expert count and the same EP sharding, so
+        one key per projection is enough.
+        """
+        return f"layers.{{}}.moe.routed_experts.{proj}"
+
+    def _expected_expert_indices(self, proj: str, num_experts: int) -> set[int]:
+        """Expert indices this rank must see before it can restack.
+
+        Under expert parallelism a rank only ever receives its own slice --
+        ``to_hf`` emitted just the local experts -- so demanding the full set
+        would reject a load that is actually complete. Offline conversion has
+        no recorded indices and still requires every expert.
+        """
+        local = self.local_experts_indices.get(self._expert_key(proj))
+        if local is None:
+            return set(range(num_experts))
+        return set(range(local[0], local[1]))
+
+    def _stack_experts(self, proj: str, ordered: list[Any]) -> Any:
+        """Stack per-expert tensors back into the grouped dim-0 weight.
+
+        On the EP path the result must be rebuilt as a DTensor from the local
+        shard, using the mesh/placements recorded by :meth:`_unstack_experts`.
+        """
+        stacked = torch.stack(ordered, dim=0)
+        key = self._expert_key(proj)
+        if key not in self.grouped_expert_weight_mesh:
+            return stacked
+        local = stacked._local_tensor if isinstance(stacked, DTensor) else stacked
+        return DTensor.from_local(
+            local,
+            self.grouped_expert_weight_mesh[key],
+            self.grouped_expert_weight_placements[key],
+            run_check=False,
+        )
 
     def _assert_experts_drained(self) -> None:
         """Raise if any layer is still holding an incomplete expert set.
@@ -389,10 +430,11 @@ class NemotronStateDictAdapter(StateDictAdapter):
             num_experts = self._num_experts(layer_id)
             for proj in sorted(self._expert_buffer[layer_id]):
                 present = set(self._expert_buffer[layer_id][proj])
-                missing = sorted(set(range(num_experts)) - present)
-                extra = sorted(present - set(range(num_experts)))
+                expected = self._expected_expert_indices(proj, num_experts)
+                missing = sorted(expected - present)
+                extra = sorted(present - expected)
                 details.append(
-                    f"layer {layer_id} {proj}: {len(present)}/{num_experts} experts "
+                    f"layer {layer_id} {proj}: {len(present)}/{len(expected)} experts "
                     f"present, missing indices {missing}"
                     + (f", out-of-range indices {extra}" if extra else "")
                 )
@@ -413,6 +455,29 @@ class NemotronStateDictAdapter(StateDictAdapter):
                 f"{stacked.shape[0]} experts on dim 0 but the config declares "
                 f"{num_experts}. Refusing to write a mismatched checkpoint."
             )
+        if isinstance(stacked, DTensor):
+            # Under EP the stacked weight is sharded on dim 0 -- the expert
+            # dim -- so torch.unbind(dim=0) raises "Attempted to unbind along
+            # the sharded dimension". Emit only this rank's local experts, on a
+            # sub-mesh with the expert-dim sharding removed, exactly as the
+            # other MoE adapters do. The metadata recorded here is what
+            # from_hf() uses to restack.
+            titan_abstract_key = f"layers.{{}}.moe.routed_experts.{proj}"
+            self.grouped_expert_weight_placements[
+                titan_abstract_key
+            ] = stacked.placements
+            self.grouped_expert_weight_shape[titan_abstract_key] = stacked.shape
+            self.grouped_expert_weight_mesh[titan_abstract_key] = stacked.device_mesh
+            # `prefix` already has the layer baked in, but the helper formats
+            # with (layer_id, expert_id). Use the explicit positional index
+            # {1} so the EXPERT id lands here and the layer arg is ignored.
+            return self._get_local_experts_weights(
+                f"{prefix}.mixer.experts.{{1}}.{proj}.weight",
+                titan_abstract_key,
+                str(layer_id),
+                stacked,
+            )
+
         return {
             f"{prefix}.mixer.experts.{i}.{proj}.weight": tensor
             for i, tensor in enumerate(torch.unbind(stacked, dim=0))
