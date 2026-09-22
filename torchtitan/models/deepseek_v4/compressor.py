@@ -14,6 +14,7 @@ from attn_gym.sparse import lightning_indexer
 from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
 
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -252,22 +253,19 @@ class Indexer(Module):
         ratio: int,
         topk: int,
         cu_seqlens: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Select top-k compressed positions per folded query token.
 
-        Uses Attention Gym's ``lightning_indexer``: score[t, s] is proportional
-        to sum_h(w[t, h] * relu(q[t, h] . k[s])) (it applies a further positive
-        scale, so the ranking is unchanged), with query ``t`` limited to
-        compressed positions ``s < (t + 1) // ratio``.
-
-        ``max_seqlen`` is the longest sequence a query can attend: ``T``, or the
-        longest document when packed, which bounds the selectable positions.
+        Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
+        recomputes the selected logits inside autograd for the distillation loss.
+        With packed ``cu_seqlens``, returned indices are local to the query's
+        document in the packed compressed-KV pool.
 
         Returns:
-            int32 ``[T, min(topk, max_seqlen // ratio)]`` indices into
-            ``idx_k``, in unspecified order. Slots a query cannot causally
-            select are ``-1``. With packed ``cu_seqlens`` the indices are local
-            to the query's document in the packed ``idx_k``.
+            ``(indices, scores)``. ``indices`` is int32
+            ``[T, min(topk, max_seqlen // ratio)]`` with ``-1`` in unusable
+            slots. ``scores`` holds live indexer logits for those selected
+            entries and ``-inf`` in unusable slots.
         """
         # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
         # fall back; CPU, fp32, ROCm, and older GPUs use the reference
@@ -277,17 +275,194 @@ class Indexer(Module):
             and idx_q.dtype in (torch.float16, torch.bfloat16)
             and has_cuda_capability(9, 0)
         )
-        topk_indices = lightning_indexer(
-            idx_q.unsqueeze(0),
-            idx_k.unsqueeze(0),
-            idx_w.unsqueeze(0),
-            min(topk, max_seqlen // ratio),
-            causal=True,
-            compress_ratio=ratio,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_k=(
-                None if cu_seqlens is None else compressed_cu_seqlens(cu_seqlens, ratio)
-            ),
-            impl="fused" if fused else "reference",
+        k = min(topk, max_seqlen // ratio)
+        cu_seqlens_k = (
+            None if cu_seqlens is None else compressed_cu_seqlens(cu_seqlens, ratio)
         )
-        return topk_indices.squeeze(0)
+        with torch.no_grad():
+            topk_indices = lightning_indexer(
+                idx_q.unsqueeze(0),
+                idx_k.unsqueeze(0),
+                idx_w.unsqueeze(0),
+                k,
+                causal=True,
+                compress_ratio=ratio,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_k=cu_seqlens_k,
+                impl="fused" if fused else "reference",
+            ).squeeze(0)
+
+        valid_TK = topk_indices >= 0
+        gather_indices_TK = topk_indices.clamp_min(0).to(torch.long)
+        if cu_seqlens is not None:
+            assert cu_seqlens_k is not None
+            doc_T = torch.searchsorted(
+                cu_seqlens[1:],
+                torch.arange(idx_q.size(0), device=idx_q.device),
+                right=True,
+                out_int32=True,
+            )
+            gather_indices_TK = gather_indices_TK + cu_seqlens_k[doc_T].unsqueeze(1)
+
+        selected_TKD = idx_k[gather_indices_TK]
+        logits_THK = torch.einsum("thd,tkd->thk", idx_q, selected_TKD)
+        topk_scores = (logits_THK.relu() * idx_w.unsqueeze(-1)).sum(dim=1)
+        topk_scores = topk_scores.masked_fill(~valid_TK, -torch.inf)
+        return topk_indices, topk_scores
+
+
+class SparseIndexerLoss(AuxLoss):
+    """Train sparse indexer scores from compressed-attention mass."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(AuxLoss.Config):
+        """Aux-loss fields plus sparse-attention geometry."""
+
+        softmax_scale: float
+        window_size: int
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.softmax_scale = config.softmax_scale
+        self.window_size = config.window_size
+
+    def _global_compressed_indices(
+        self,
+        topk_indices_TK: torch.Tensor,
+        cu_seqlens: torch.Tensor | None,
+    ) -> torch.Tensor:
+        gather_indices_TK = topk_indices_TK.clamp_min(0).to(torch.long)
+        if cu_seqlens is None:
+            return gather_indices_TK
+
+        doc_T = torch.searchsorted(
+            cu_seqlens[1:],
+            torch.arange(topk_indices_TK.size(0), device=topk_indices_TK.device),
+            right=True,
+            out_int32=True,
+        )
+        cmp_cu = compressed_cu_seqlens(cu_seqlens, 4)
+        return gather_indices_TK + cmp_cu[doc_T].unsqueeze(1)
+
+    def _window_logits(
+        self,
+        q_THD: torch.Tensor,
+        swa_k_TD: torch.Tensor,
+        cu_seqlens: torch.Tensor | None,
+    ) -> torch.Tensor:
+        seqlen = q_THD.size(0)
+        offsets_W = torch.arange(self.window_size, device=q_THD.device)
+        token_T = torch.arange(seqlen, device=q_THD.device)
+        key_TW = token_T.unsqueeze(1) - (self.window_size - 1 - offsets_W)
+        valid_TW = key_TW >= 0
+        if cu_seqlens is not None:
+            doc_T = torch.searchsorted(
+                cu_seqlens[1:],
+                token_T,
+                right=True,
+                out_int32=True,
+            )
+            valid_TW &= key_TW >= cu_seqlens[doc_T].unsqueeze(1)
+
+        selected_TWD = swa_k_TD[key_TW.clamp_min(0)]
+        logits_THW = (
+            torch.einsum("thd,twd->thw", q_THD, selected_TWD).float()
+            * self.softmax_scale
+        )
+        return logits_THW.masked_fill(~valid_TW.unsqueeze(1), -torch.inf)
+
+    def _teacher(
+        self,
+        q_THD: torch.Tensor,
+        swa_k_TD: torch.Tensor,
+        cmp_k_SD: torch.Tensor,
+        topk_indices_TK: torch.Tensor,
+        attn_sink_H: torch.Tensor,
+        cu_seqlens: torch.Tensor | None,
+    ) -> torch.Tensor:
+        valid_TK = topk_indices_TK >= 0
+        gather_indices_TK = self._global_compressed_indices(
+            topk_indices_TK, cu_seqlens
+        )
+        selected_TKD = cmp_k_SD[gather_indices_TK]
+        cmp_logits_THK = (
+            torch.einsum("thd,tkd->thk", q_THD, selected_TKD).float()
+            * self.softmax_scale
+        )
+        cmp_logits_THK = cmp_logits_THK.masked_fill(
+            ~valid_TK.unsqueeze(1), -torch.inf
+        )
+
+        window_lse_TH = torch.logsumexp(
+            self._window_logits(q_THD, swa_k_TD, cu_seqlens), dim=-1
+        )
+        cmp_lse_TH = torch.logsumexp(cmp_logits_THK, dim=-1)
+        full_lse_TH = torch.logsumexp(
+            torch.stack(
+                [
+                    window_lse_TH,
+                    cmp_lse_TH,
+                    attn_sink_H.float().unsqueeze(0).expand_as(window_lse_TH),
+                ],
+                dim=-1,
+            ),
+            dim=-1,
+        )
+        mass_TH = torch.exp(cmp_lse_TH - full_lse_TH)
+
+        row_valid_T = valid_TK.any(dim=-1)
+        conditional_THK = torch.softmax(
+            cmp_logits_THK.masked_fill(~row_valid_T[:, None, None], 0.0),
+            dim=-1,
+        )
+        return (mass_TH.unsqueeze(-1) * conditional_THK).sum(dim=1) / q_THD.size(1)
+
+    def _logged_kl(
+        self,
+        p_TK: torch.Tensor,
+        t_TK: torch.Tensor,
+        logits_TK: torch.Tensor,
+        slot_valid_TK: torch.Tensor,
+    ) -> torch.Tensor:
+        log_student_TK = F.log_softmax(
+            logits_TK.masked_fill(~slot_valid_TK, -torch.inf).masked_fill(
+                ~slot_valid_TK.any(dim=-1, keepdim=True), 0.0
+            ),
+            dim=-1,
+        )
+        weighted_TK = torch.special.xlogy(p_TK, t_TK) - p_TK * log_student_TK
+        return weighted_TK.masked_fill(~slot_valid_TK, 0.0)
+
+    def forward(
+        self,
+        q_THD: torch.Tensor,
+        swa_k_TD: torch.Tensor,
+        cmp_k_SD: torch.Tensor,
+        topk_indices_TK: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        attn_sink_H: torch.Tensor,
+        cu_seqlens: torch.Tensor | None,
+        *,
+        carrier: torch.Tensor,
+        denominator: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute distillation loss and inject its gradient on ``carrier``."""
+        if topk_scores_TK.numel() == 0:
+            return carrier
+
+        p_TK = self._teacher(
+            q_THD,
+            swa_k_TD,
+            cmp_k_SD,
+            topk_indices_TK,
+            attn_sink_H,
+            cu_seqlens,
+        )
+        tiny = torch.finfo(torch.float32).tiny
+        t_TK = p_TK / p_TK.sum(dim=-1, keepdim=True).clamp_min(tiny)
+
+        row_valid_T = torch.isfinite(topk_scores_TK).any(dim=-1)
+        logits_TK = topk_scores_TK.float().masked_fill(~row_valid_T.unsqueeze(-1), 0.0)
+        slot_valid_TK = torch.isfinite(topk_scores_TK) & row_valid_T.unsqueeze(-1)
+        raw_sum = self._logged_kl(p_TK, t_TK, logits_TK, slot_valid_TK).sum()
+        return self.inject(raw_sum, carrier=carrier, denominator=denominator)

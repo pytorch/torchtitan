@@ -44,7 +44,7 @@ from .attention import (
     HeavilyCompressedAttention,
     SlidingWindowAttention,
 )
-from .compressor import Compressor, Indexer
+from .compressor import Compressor, Indexer, SparseIndexerLoss
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4Router
@@ -237,11 +237,22 @@ def _make_v4_attn_config(
         inner_attention_cls = HeavilyCompressedAttention
     else:
         inner_attention_cls = SlidingWindowAttention
+    aux_loss_cfg = (
+        SparseIndexerLoss.Config(
+            coeff=0.01,
+            reduce_mesh="loss",
+            softmax_scale=softmax_scale,
+            window_size=window_size,
+        )
+        if compress_ratio == 4
+        else None
+    )
     inner_attention_cfg = inner_attention_cls.Config(
         window_size=window_size,
         compress_ratio=compress_ratio,
         softmax_scale=softmax_scale,
         index_topk=index_topk,
+        aux_loss=aux_loss_cfg,
     )
 
     return Attention.Config(
@@ -523,6 +534,7 @@ def _make_mtp_inner_block(
         compress_ratio=1,
         softmax_scale=inner_attn_cfg.softmax_scale,
         index_topk=inner_attn_cfg.index_topk,
+        aux_loss=None,
     )
     return block_cfg
 

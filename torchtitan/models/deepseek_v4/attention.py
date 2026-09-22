@@ -23,7 +23,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 
-from .compressor import compressed_cu_seqlens, Compressor, Indexer
+from .compressor import compressed_cu_seqlens, Compressor, Indexer, SparseIndexerLoss
 
 
 def _packed_cu_seqlens(
@@ -50,9 +50,8 @@ class DSV4InnerAttention(InnerAttention):
     only in ``cmp_topk``: none (SWA), every causal position (HCA), or the
     indexer's top-k (CSA). K and V are the same single-head latent.
 
-    TODO: the indexer auxiliary loss is intentionally dropped for now; it will
-    be re-added as a carrier-injected aux loss (see the NPU fork) once the
-    general aux-loss mechanism lands.
+    The indexer distillation loss is implemented as a carrier-injected
+    auxiliary loss on CSA layers.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -61,6 +60,7 @@ class DSV4InnerAttention(InnerAttention):
         compress_ratio: int
         softmax_scale: float
         index_topk: int
+        aux_loss: SparseIndexerLoss.Config | None = None
 
         def build_attention_metadata(
             self,
@@ -84,9 +84,21 @@ class DSV4InnerAttention(InnerAttention):
         self.compress_ratio = config.compress_ratio
         self.softmax_scale = config.softmax_scale
         self.index_topk = config.index_topk
+        self.aux_loss = (
+            config.aux_loss.build() if config.aux_loss is not None else None
+        )
 
     def _gather_attn(
-        self, q_THD, swa_k_TD, cmp_k_SD, cmp_topk_TK, attn_sink, cu_seqlens
+        self,
+        q_THD,
+        swa_k_TD,
+        cmp_k_SD,
+        cmp_topk_TK,
+        attn_sink,
+        cu_seqlens,
+        *,
+        topk_scores_TK=None,
+        aux_loss_denominator=None,
     ) -> torch.Tensor:
         """``cmp_topk_TK`` holds indices into ``cmp_k_SD``; -1 marks unused slots.
 
@@ -116,6 +128,26 @@ class DSV4InnerAttention(InnerAttention):
                 impl="fused" if q_THD.device.type == "cuda" else "reference",
             )
             out_THD = out_1HTD.squeeze(0).transpose(0, 1)
+            if (
+                self.training
+                and self.aux_loss is not None
+                and topk_scores_TK is not None
+            ):
+                if aux_loss_denominator is None:
+                    raise RuntimeError(
+                        "SparseIndexerLoss requires aux_loss_denominator."
+                    )
+                out_THD = self.aux_loss(
+                    q_THD.detach(),
+                    swa_k_TD.detach(),
+                    cmp_k_SD.detach(),
+                    cmp_topk_TK,
+                    topk_scores_TK,
+                    attn_sink.detach(),
+                    cu_seqlens,
+                    carrier=out_THD,
+                    denominator=aux_loss_denominator,
+                )
         # Kernel output is opaque to SPMD typechecking; it keeps q's layout.
         if spmd.is_type_checking():
             spmd.assert_type(
@@ -200,10 +232,11 @@ class CompressedSparseAttention(DSV4InnerAttention):
         attn_sink,
         *,
         attention_metadata=None,
+        aux_loss_denominator=None,
     ) -> torch.Tensor:
         cu_seqlens = _packed_cu_seqlens(attention_metadata)
         with spmd.no_typecheck():
-            cmp_topk = Indexer.select(
+            cmp_topk, topk_scores = Indexer.select(
                 idx_q,
                 idx_k,
                 idx_w,
@@ -214,7 +247,16 @@ class CompressedSparseAttention(DSV4InnerAttention):
                 topk=self.index_topk,
                 cu_seqlens=cu_seqlens,
             )
-        return self._gather_attn(q, swa_k, cmp_k, cmp_topk, attn_sink, cu_seqlens)
+        return self._gather_attn(
+            q,
+            swa_k,
+            cmp_k,
+            cmp_topk,
+            attn_sink,
+            cu_seqlens,
+            topk_scores_TK=topk_scores,
+            aux_loss_denominator=aux_loss_denominator,
+        )
 
 
 class Attention(BaseAttention):
@@ -295,7 +337,13 @@ class Attention(BaseAttention):
 
         self.inner_attention = cfg.inner_attention.build()
 
-    def forward(self, x, attention_metadata=None, positions=None):
+    def forward(
+        self,
+        x,
+        attention_metadata=None,
+        positions=None,
+        aux_loss_denominator=None,
+    ):
         """Apply one DeepSeek V4 attention layer over folded tokens."""
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
@@ -357,6 +405,7 @@ class Attention(BaseAttention):
                 idx_w,
                 attn_sink_param,
                 attention_metadata=attention_metadata,
+                aux_loss_denominator=aux_loss_denominator,
             )
         elif self.compress_ratio > 1:
             o = self.inner_attention(

@@ -93,7 +93,12 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         """
         residual = x
         x, post, comb = self.hc_attn_pre(x)
-        x = self.attention(self.attention_norm(x), attention_metadata, positions)
+        x = self.attention(
+            self.attention_norm(x),
+            attention_metadata,
+            positions,
+            aux_loss_denominator=aux_loss_denominator,
+        )
         # hc_post reads the attention output (wo_b projection) with bare ops.
         remat.recompute_needs_tensor(x)
         x = self.hc_post(x, residual, post, comb)
@@ -132,9 +137,11 @@ class DeepSeekV4Model(Decoder):
     def _register_optimizer_hooks(
         cls, optimizers, model_parts, parallelism_context
     ) -> None:
+        from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
         from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
     def _apply_fsdp(
         self,
