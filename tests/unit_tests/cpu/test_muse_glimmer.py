@@ -28,7 +28,7 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
                 SimpleNamespace(),
             )
 
-        model = model_registry("debugmodel_mm", seq_len=8).model.build()
+        model = model_registry("debugmodel_mm", seq_len=8).build()
         model.init_states()
         hidden_TD = torch.randn(4, model.config.dim, requires_grad=True)
         encoder_outputs = []

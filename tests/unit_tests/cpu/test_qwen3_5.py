@@ -140,7 +140,7 @@ class _RecordingVisionEncoder(nn.Module):
 
 
 def _small_qwen35_model() -> Qwen35Model:
-    config = cast(Qwen35Model.Config, model_registry("debugmodel", seq_len=8).model)
+    config = cast(Qwen35Model.Config, model_registry("debugmodel", seq_len=8))
     config = replace(
         config,
         vocab_size=8,

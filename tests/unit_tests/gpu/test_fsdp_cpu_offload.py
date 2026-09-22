@@ -201,7 +201,7 @@ class TestConditionalVisionFSDP(DTensorTestBase):
                 pos_emb_grid_h=2,
                 pos_emb_grid_w=2,
             ).build()
-        apply_fsdp_to_vision_encoder(
+        apply_fsdp_to_multimodal_encoder(
             encoder,
             mesh,
             param_dtype=torch.bfloat16,
@@ -268,7 +268,7 @@ class TestVisionHSDP(DTensorTestBase):
                 pos_emb_grid_h=2,
                 pos_emb_grid_w=2,
             ).build()
-        apply_fsdp_to_vision_encoder(
+        apply_fsdp_to_multimodal_encoder(
             encoder,
             mesh,
             param_dtype=torch.bfloat16,
