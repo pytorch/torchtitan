@@ -159,15 +159,13 @@ class RoutedExperts(Module):
             and dispatcher.ep_mesh is not None
         ):
             recompute_ep_communication = self.remat_should_recompute("ep_communication")
-            dispatch_output = remat.region(
-                dispatcher._dispatch_for_remat,
-                self.remat_region_name("ep_communication.dispatch"),
-                recompute=recompute_ep_communication,
-            )(
+            dispatch_output = dispatcher.dispatch_region(
                 x_TD,
                 topk_scores_TK,
                 topk_expert_ids_TK,
                 num_local_tokens_per_expert_E,
+                region_name=self.remat_region_name("ep_communication.dispatch"),
+                recompute=recompute_ep_communication,
             )
             remat.recompute_needs_tensor(
                 dispatch_output.routed_input_RD,
@@ -178,11 +176,13 @@ class RoutedExperts(Module):
                     dispatch_output.routed_input_RD,
                     dispatch_output.num_tokens_per_local_expert_e,
                 )
-            out_TD = remat.region(
-                dispatcher._combine_for_remat,
-                self.remat_region_name("ep_communication.combine"),
+            out_TD = dispatcher.combine_region(
+                routed_output_RD,
+                dispatch_output,
+                x_TD,
+                region_name=self.remat_region_name("ep_communication.combine"),
                 recompute=recompute_ep_communication,
-            )(routed_output_RD, dispatch_output, x_TD)
+            )
             remat.recompute_needs_tensor(out_TD)
             return out_TD
 
