@@ -247,7 +247,7 @@ def test_float8_lora_targets_fused_feed_forward_projection():
 
 
 def test_lora_class_is_reused_for_the_same_parent():
-    """LoRA specialization is cached for each parent Linear class."""
+    """The LoRA class is cached for each parent Linear class."""
     first = LoRATransform(handlers=LINEAR_LORA_HANDLERS, rank=2, alpha=4.0).transform(
         Linear.Config(in_features=4, out_features=3)
     )

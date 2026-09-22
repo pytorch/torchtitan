@@ -24,7 +24,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 
-__all__ = ["specialize_lora_linear"]
+__all__ = ["get_lora_linear"]
 
 
 class _LoRALinearMixin:
@@ -120,8 +120,8 @@ class _LoRALinearMixin:
 
 
 @functools.cache
-def specialize_lora_linear(parent_cls: type[Module]) -> type[Module]:
-    """Create a cached LoRA specialization of a linear module class."""
+def get_lora_linear(parent_cls: type[Module]) -> type[Module]:
+    """Get a cached LoRA version of a linear module class."""
     parent_config_cls = parent_cls.Config
 
     class LoRALinear(_LoRALinearMixin, parent_cls):  # type: ignore[misc, valid-type]

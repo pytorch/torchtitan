@@ -46,7 +46,7 @@ from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
 from torchtitan.quantization import Float8Linear, MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
-from torchtitan.quantization.utils import has_quantization, specialize_quantized_linear
+from torchtitan.quantization.utils import get_quantized_linear, has_quantization
 
 
 class _ScaledLinear(Linear):
@@ -96,7 +96,7 @@ def test_quantization_preserves_partial_bias_linear(monkeypatch):
         bias=True,
     )
 
-    config_cls = quantization_transform._quantized_linear_config_cls(
+    config_cls = quantization_transform._get_quantized_linear_config_cls(
         config, _ScaledLinear
     )
     converted = config_cls(in_features=16, out_features=16, bias=True, scale=3.0)
@@ -119,15 +119,17 @@ def test_quantization_preserves_partial_bias_linear(monkeypatch):
 
 
 @pytest.mark.parametrize("parallel_cls", [ColumnParallelLinear, RowParallelLinear])
-def test_quantized_linear_specialization_preserves_compute_and_tp_role(parallel_cls):
-    specialized = specialize_quantized_linear(_ScaledLinear, parallel_cls)
-    config = specialized.Config(in_features=4, out_features=2, num_linears=2, scale=3.0)
+def test_get_quantized_linear_preserves_compute_and_tp_role(parallel_cls):
+    quantized_cls = get_quantized_linear(_ScaledLinear, parallel_cls)
+    config = quantized_cls.Config(
+        in_features=4, out_features=2, num_linears=2, scale=3.0
+    )
     linear = config.build()
 
-    assert specialized is specialize_quantized_linear(_ScaledLinear, parallel_cls)
-    assert issubclass(specialized, parallel_cls)
-    assert issubclass(specialized, _ScaledLinear)
-    assert issubclass(specialized.Config, _ScaledLinear.Config)
+    assert quantized_cls is get_quantized_linear(_ScaledLinear, parallel_cls)
+    assert issubclass(quantized_cls, parallel_cls)
+    assert issubclass(quantized_cls, _ScaledLinear)
+    assert issubclass(quantized_cls.Config, _ScaledLinear.Config)
 
     input = torch.randn(3, 4)
     expected = 3.0 * torch.nn.functional.linear(
@@ -469,7 +471,7 @@ def test_nvfp4_parallel_build_preserves_collective_boundary(parallel_cls):
         pytest.skip("torchao NVFP4 training prototype not available")
 
     boundary_layout = dense_sequence_parallel_placement()
-    linear_cls = specialize_quantized_linear(NVFP4Linear, parallel_cls)
+    linear_cls = get_quantized_linear(NVFP4Linear, parallel_cls)
     sharding_config = (
         colwise_config(input_layout=boundary_layout)
         if parallel_cls is ColumnParallelLinear

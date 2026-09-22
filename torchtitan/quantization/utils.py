@@ -18,29 +18,29 @@ from torchtitan.models.common.token_dispatcher import (
 
 
 @functools.cache
-def specialize_quantized_linear(
+def get_quantized_linear(
     quantized_cls: type[Linear],
-    specialization_cls: type[Linear],
+    parent_cls: type[Linear],
 ) -> type[Linear]:
-    """Compose quantized compute with specialized Linear behavior."""
+    """Get a cached quantized version of a linear module class."""
     quantized_config_cls = quantized_cls.Config
 
-    class QuantizedSpecializedLinear(  # pyrefly: ignore [invalid-inheritance]
-        specialization_cls,
+    class QuantizedLinear(  # pyrefly: ignore [invalid-inheritance]
         quantized_cls,
+        parent_cls,
     ):
         @dataclass(kw_only=True, slots=True)
         class Config(quantized_config_cls):  # type: ignore[misc]
             pass
 
     quantized_name = quantized_cls.__name__.removesuffix("Linear")
-    specialized_name = f"{quantized_name}{specialization_cls.__name__}"
-    QuantizedSpecializedLinear.__name__ = specialized_name
-    QuantizedSpecializedLinear.__qualname__ = specialized_name
-    QuantizedSpecializedLinear.__module__ = quantized_cls.__module__
-    QuantizedSpecializedLinear.Config.__qualname__ = f"{specialized_name}.Config"
-    QuantizedSpecializedLinear.Config.__module__ = quantized_cls.__module__
-    return cast(type[Linear], QuantizedSpecializedLinear)
+    linear_name = f"{quantized_name}{parent_cls.__name__}"
+    QuantizedLinear.__name__ = linear_name
+    QuantizedLinear.__qualname__ = linear_name
+    QuantizedLinear.__module__ = quantized_cls.__module__
+    QuantizedLinear.Config.__qualname__ = f"{linear_name}.Config"
+    QuantizedLinear.Config.__module__ = quantized_cls.__module__
+    return cast(type[Linear], QuantizedLinear)
 
 
 def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) -> bool:

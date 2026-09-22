@@ -23,7 +23,6 @@ from torchtitan.models.common.linear import (
     RouterGateLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.protocols.module import Module
 from torchtitan.quantization.float8 import (
     _float8_experts_import_error,
     _get_float8_grouped_experts_cls,
@@ -33,8 +32,8 @@ from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linea
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
 from torchtitan.quantization.nvfp4 import NVFP4Linear
 from torchtitan.quantization.utils import (
+    get_quantized_linear,
     module_filter_fn,
-    specialize_quantized_linear,
     swap_token_dispatcher,
 )
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
@@ -45,25 +44,19 @@ from .converter import ModelConfigConverter
 logger = logging.getLogger(__name__)
 
 
-def _quantized_linear_config_cls(
+def _get_quantized_linear_config_cls(
     config: Linear.Config,
-    linear_cls: type[Module],
+    quantized_cls: type[Linear],
 ) -> type[Any]:
-    """Select a quantized config without changing specialized Linear behavior."""
-    specialization_cls = get_parallel_linear_cls(config)
-    owner = config._owner
-    if (
-        specialization_cls is None
-        and owner is not None
-        and issubclass(owner, PartialBiasLinear)
-    ):
-        specialization_cls = PartialBiasLinear
-    module_cls = (
-        linear_cls
-        if specialization_cls is None
-        else specialize_quantized_linear(linear_cls, specialization_cls)
+    """Select a quantized config while preserving its Linear behavior."""
+    parent_cls = (
+        PartialBiasLinear
+        if isinstance(config, PartialBiasLinear.Config)
+        else get_parallel_linear_cls(config)
     )
-    return cast(type[Any], module_cls.Config)
+    if parent_cls is not None:
+        quantized_cls = get_quantized_linear(quantized_cls, parent_cls)
+    return cast(type[Any], quantized_cls.Config)
 
 
 class QuantizationConverter(ModelConfigConverter):
@@ -173,7 +166,7 @@ class Float8LinearConverter(QuantizationConverter):
                         f"Float8 quantization does not support router gate {fqn!r}; "
                         "exclude it with filter_fqns."
                     )
-                config_cls = _quantized_linear_config_cls(
+                config_cls = _get_quantized_linear_config_cls(
                     linear_config,
                     Float8Linear,
                 )
@@ -383,7 +376,7 @@ class MXFP8LinearConverter(QuantizationConverter):
             fqn for fqn in target_fqns if any(selector in fqn for selector in selectors)
         }
         for fqn, config, parent, attr in targets:
-            config_cls = _quantized_linear_config_cls(
+            config_cls = _get_quantized_linear_config_cls(
                 config,
                 MXFP8Linear,
             )
@@ -517,7 +510,7 @@ class NVFP4LinearConverter(QuantizationConverter):
                         f"NVFP4 quantization does not support router gate {fqn!r}; "
                         "exclude it with fqns."
                     )
-                config_cls = _quantized_linear_config_cls(
+                config_cls = _get_quantized_linear_config_cls(
                     config,
                     NVFP4Linear,
                 )
