@@ -80,6 +80,21 @@ def test_batcher_counts_trainable_groups_not_rollouts() -> None:
     assert group_is_trainable
 
 
+def test_batcher_packs_groups_in_id_order_regardless_of_arrival() -> None:
+    batcher = _build_batcher(num_prompts_per_train_step=2)
+    late_group = _trainable_group(7, num_samples=1)
+    early_group = _trainable_group(3, num_samples=1)
+    late_group.training_samples[0].min_policy_version = 7
+    early_group.training_samples[0].min_policy_version = 3
+
+    # g7 finishes first; the packed batch still lists g3 before g7.
+    batcher.add_training_samples(training_sample_group=late_group)
+    batch, _ = batcher.add_training_samples(training_sample_group=early_group)
+
+    assert batch is not None
+    assert batch.min_policy_versions == [3, 7]
+
+
 def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     # Metric-only (empty) groups do not count toward the target and cannot form a zero-token batch;
     # they ride along until a trainable group completes the batch.
