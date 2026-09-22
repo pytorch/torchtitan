@@ -4,31 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from functools import partial
-
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.qwen3_5 import (
     _27b,
     _35b_a3b,
     _debugmodel,
     _debugmodel_moe,
-    parallelize_qwen3_5,
     Qwen35Model,
     QWEN3_5_SPECIAL_TOKENS,
 )
-from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
-from torchtitan.protocols.model_spec import ModelSpec
 
 __all__ = [
     "model_registry",
     "QWEN3_6_SPECIAL_TOKENS",
     "Qwen35Model",
-    "Qwen35StateDictAdapter",
     "qwen3_6_configs",
 ]
 
@@ -49,7 +41,7 @@ def model_registry(
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> Qwen35Model.Config:
     get_config, max_context_len = qwen3_6_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -71,16 +63,4 @@ def model_registry(
         for converter_config in converters:
             config = converter_config.build().convert(config)
 
-    return ModelSpec(
-        name="qwen3_6",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_qwen3_5,
-        pipelining_fn=partial(
-            pipeline_with_first_stage_modules,
-            first_stage_module_fqns=("vision_encoder",),
-        ),
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
-        state_dict_adapter=Qwen35StateDictAdapter,
-    )
+    return config

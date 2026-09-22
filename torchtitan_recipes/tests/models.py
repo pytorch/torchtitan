@@ -121,6 +121,7 @@ def deepseek_v3_debugmodel_mtp_cp2() -> Trainer.Config:
 def deepseek_v3_debugmodel_mtp_tp2_cp2() -> Trainer.Config:
     config = deepseek_v3_debugmodel_mtp_cp2()
     config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
     config.parallelism.enable_sequence_parallel = True
     return config
 

@@ -358,6 +358,19 @@ class CUDAGraphWrapper:
         self._non_tensor_inputs.clear()
 
 
+def cuda_graphs_supported() -> bool:
+    """Whether CUDA graph capture can actually run on this build/device.
+
+    ROCm is excluded: capture is unsupported there, so anything gated on CUDA
+    graphs must agree that they are inert.
+    """
+    return (
+        utils.device_type == "cuda"
+        and torch.cuda.is_available()
+        and torch.version.hip is None
+    )
+
+
 # TODO: Unify PP and non-PP callable signatures to restore strict input typing.
 def wrap_with_cuda_graph(
     fn: Callable[..., Any],
@@ -372,11 +385,7 @@ def wrap_with_cuda_graph(
         fn: Callable to capture.
     """
 
-    if not (
-        utils.device_type == "cuda"
-        and torch.cuda.is_available()
-        and torch.version.hip is None
-    ):
+    if not cuda_graphs_supported():
         logger.warning(
             "CUDA graph capture is only supported on NVIDIA CUDA; "
             "using eager execution."

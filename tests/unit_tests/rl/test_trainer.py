@@ -64,7 +64,6 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
 
     config = Trainer.Config(training=TrainingConfig(disable_cuda_graphs=True))
     model_config = MagicMock()
-    model_spec = SimpleNamespace(model=model_config)
 
     with patch(
         "torchtitan.rl.trainer.validate_model_training_config",
@@ -73,7 +72,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
         with pytest.raises(ValidationReachedError):
             Trainer(
                 config,
-                model_spec=model_spec,
+                model_config=model_config,
                 compile_config=CompileConfig(),
                 max_num_documents=None,
                 output_dir="",
@@ -90,28 +89,34 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
     )
 
 
-def test_forward_backward_step_uses_global_token_count() -> None:
+def test_forward_backward_uses_global_token_count() -> None:
     engine = SimpleNamespace(
         device=torch.device("cpu"),
         num_completed_steps=0,
         gc_handler=SimpleNamespace(run=MagicMock()),
         optimizers=SimpleNamespace(zero_grad=MagicMock()),
-        config=SimpleNamespace(training=SimpleNamespace(disable_cuda_graphs=True)),
-        _configure_fsdp_gradient_accumulation=MagicMock(),
-        _preprocess_accumulation_step_inputs=MagicMock(return_value=()),
-        _run_gradient_accumulation=MagicMock(
+        config=SimpleNamespace(
+            training=SimpleNamespace(disable_cuda_graphs=True),
+            parallelism=SimpleNamespace(
+                fsdp_defer_gradient_reduction=False,
+                fsdp_reshard_after_forward="default",
+            ),
+        ),
+        parallel_dims=SimpleNamespace(fsdp_enabled=False),
+        _preprocess_microbatch_group=MagicMock(return_value=()),
+        _run_forward_backward=MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
         sdc_replayer=None,
     )
-    accumulation_step_inputs = [[object()], [object()], [object()]]
+    microbatch_groups = [[object()], [object()], [object()]]
 
     with patch(
         "torchtitan.training_engine.AuxLoss.set_step_denominator"
     ) as set_denominator:
-        result = TrainingEngine.forward_backward_step(
+        result = TrainingEngine.forward_backward(
             engine,
-            accumulation_step_inputs=accumulation_step_inputs,
+            microbatch_groups=microbatch_groups,
             global_valid_tokens=17,
         )
 
@@ -121,7 +126,7 @@ def test_forward_backward_step_uses_global_token_count() -> None:
     engine.gc_handler.run.assert_called_once_with(1)
     engine.optimizers.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3
-    assert engine._preprocess_accumulation_step_inputs.call_count == 3
+    assert engine._preprocess_microbatch_group.call_count == 3
 
 
 def test_close_stops_training_engine() -> None:
@@ -160,7 +165,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             ntokens_seen=10,
             sdc_replayer=None,
         )
-        engine.forward_backward_step = MagicMock(
+        engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
                 loss=torch.tensor(0.5),
                 loss_metrics=[
@@ -200,8 +205,8 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
 
         result = await Trainer.forward_backward_steps(trainer, [[batch], [batch]], 3)
 
-        engine.forward_backward_step.assert_called_once_with(
-            accumulation_step_inputs=[[batch], [batch]],
+        engine.forward_backward.assert_called_once_with(
+            microbatch_groups=[[batch], [batch]],
             global_valid_tokens=3,
         )
         assert trainer._step_num_tokens_per_dp_rank == 2

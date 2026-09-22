@@ -17,6 +17,7 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from .state_dict_adapter import Llama3StateDictAdapter
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -57,6 +58,8 @@ class Llama3TransformerBlock(TransformerBlock):
 
 
 class Llama3Model(Decoder):
+    state_dict_adapter_cls = Llama3StateDictAdapter
+
     """
     Llama3Model Module
 

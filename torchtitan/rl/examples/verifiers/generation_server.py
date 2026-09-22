@@ -60,15 +60,26 @@ class GenerationServer(Configurable):
         port: int = 0
         """Listening port; zero requests an ephemeral port."""
 
+        max_rollout_tokens: int
+        """Inclusive upper bound for the rendered prompt length.
+
+        The server advertises this value as ``max_model_len`` through
+        ``GET /v1/models`` so Verifiers can reject longer prompts before
+        forwarding them to the generator.
+        """
+
         def __post_init__(self) -> None:
             if not 0 <= self.port <= 65535:
                 raise ValueError("port must be between 0 and 65535")
+            if self.max_rollout_tokens <= 0:
+                raise ValueError("max_rollout_tokens must be positive")
 
     model_id = "torchtitan"
 
     def __init__(self, config: Config) -> None:
         self.host = config.host
         self.requested_port = config.port
+        self.max_rollout_tokens = config.max_rollout_tokens
         self.generate_fn: GenerateFn | None = None
         self.runner: web.AppRunner | None = None
         self.bound_port: int | None = None
@@ -94,6 +105,7 @@ class GenerationServer(Configurable):
             return
         app = web.Application()
         app.router.add_get("/healthz", self._handle_health_request)
+        app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
         runner = web.AppRunner(app)
         await runner.setup()
@@ -130,6 +142,18 @@ class GenerationServer(Configurable):
     async def _handle_health_request(self, request: web.Request) -> web.Response:
         del request
         return web.json_response({"status": "ok"})
+
+    async def _handle_models_request(self, request: web.Request) -> web.Response:
+        """Return OpenAI-compatible model metadata for Verifiers clients."""
+        del request
+        model: dict[str, object] = {
+            "id": self.model_id,
+            "object": "model",
+            "created": 0,
+            "owned_by": "torchtitan",
+            "max_model_len": self.max_rollout_tokens,
+        }
+        return web.json_response({"object": "list", "data": [model]})
 
     async def _handle_generate_request(self, request: web.Request) -> web.Response:
         if self.generate_fn is None:

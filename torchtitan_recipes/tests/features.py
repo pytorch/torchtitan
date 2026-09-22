@@ -75,7 +75,7 @@ class SDCReplayMismatchTrainingEngine(TrainingEngine):
         )
         self._num_forward_backward_calls = 0
 
-    def _non_pp_forward_backward_body(
+    def _non_pp_forward_backward_microbatch(
         self,
         *,
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
@@ -83,7 +83,7 @@ class SDCReplayMismatchTrainingEngine(TrainingEngine):
         model_kwargs: dict[str, Any],
         loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        loss = super()._non_pp_forward_backward_body(
+        loss = super()._non_pp_forward_backward_microbatch(
             inputs=inputs,
             labels=labels,
             model_kwargs=model_kwargs,

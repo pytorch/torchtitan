@@ -47,7 +47,7 @@ The pipeline has three layers.
 **3. Distributed execution.** A router sends requests to one or more vLLM generator replicas. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
 
 Core and RL each expose a workflow-specific `Trainer`. Both compose the shared
-`torchtitan.trainer.TrainingEngine`, which owns distributed model execution,
+`torchtitan.training_engine.TrainingEngine`, which owns distributed model execution,
 optimization, checkpointing, profiling, GC, SDC replay, and CUDA graphs.
 
 The distributed layer builds on two core components:
@@ -117,7 +117,7 @@ That's it. Wire the rollouter into a config registry function:
 # my_project/my_experiment/config_registry.py
 def my_experiment() -> Controller.Config:
     return Controller.Config(
-        model_spec=...,
+        model=...,
         rollouter=rollouter,
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         trainer=Trainer.Config(loss=..., ...),

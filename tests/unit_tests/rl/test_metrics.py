@@ -635,7 +635,7 @@ class TestMetricsProcessorBuild:
 
         # `log` forwards to the stub.
         logger_inst.log(3, [m.Metric("k", m.NoReduce(1.0))])
-        fake_wandb.log.assert_called_once_with({"k": 1.0}, step=3)
+        fake_wandb.log.assert_called_once_with({"k": 1.0}, step=3, commit=True)
 
         # `close` calls `wandb.finish` when there's a run.
         fake_wandb.run = MagicMock()

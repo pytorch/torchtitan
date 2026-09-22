@@ -73,11 +73,16 @@ def test_replay_commits_only_final_candidate():
         module.counter.add_(1)
         loss = module.weight.square().sum()
         loss.backward()
-        return loss
+        return loss, calls
 
-    loss = replayer.run_fwd_bwd(execute, step=3)
+    loss, final_call = replayer.run_fwd_bwd(
+        execute,
+        step=3,
+        get_loss=lambda result: result[0],
+    )
 
     assert calls == 3
+    assert final_call == 3
     torch.testing.assert_close(loss, torch.tensor(4.0))
     torch.testing.assert_close(module.counter, torch.ones(1))
     torch.testing.assert_close(module.weight.grad, torch.tensor([4.0]))
@@ -97,7 +102,7 @@ def test_replay_wraps_compiled_forward_backward():
         loss.backward()
         return loss
 
-    replayer.run_fwd_bwd(execute, step=1)
+    replayer.run_fwd_bwd(execute, step=1, get_loss=lambda loss: loss)
 
     assert module.weight.grad is not None
 
@@ -118,7 +123,7 @@ def test_replay_ignores_unregistered_scratch_state():
         loss.backward()
         return loss
 
-    replayer.run_fwd_bwd(execute, step=1)
+    replayer.run_fwd_bwd(execute, step=1, get_loss=lambda loss: loss)
 
     assert scratch_invocations == 2
 
@@ -142,7 +147,7 @@ def test_replay_mismatch_is_fatal():
         return loss
 
     with pytest.raises(SDCReplayMismatch, match="gradient:0:weight"):
-        replayer.run_fwd_bwd(execute, step=9)
+        replayer.run_fwd_bwd(execute, step=9, get_loss=lambda loss: loss)
     assert replayer.steps_since_reset == 0
 
 
@@ -178,7 +183,7 @@ def test_replay_detects_semantic_state_mismatch(corruption, expected):
         return loss
 
     with pytest.raises(SDCReplayMismatch, match=expected):
-        replayer.run_fwd_bwd(execute, step=9)
+        replayer.run_fwd_bwd(execute, step=9, get_loss=lambda loss: loss)
 
 
 @pytest.mark.parametrize(
@@ -207,7 +212,7 @@ def test_schedule_checks_first_num_steps_and_rearms_on_reset(
     checked = []
     for index in range(len(expected_checked)):
         calls_before = calls
-        replayer.run_fwd_bwd(execute, step=index)
+        replayer.run_fwd_bwd(execute, step=index, get_loss=lambda loss: loss)
         # A checked step executes twice (reference plus one replay).
         checked.append(calls - calls_before == 2)
         assert replayer.steps_since_reset == index + 1
@@ -216,7 +221,7 @@ def test_schedule_checks_first_num_steps_and_rearms_on_reset(
     replayer.reset_schedule()
     assert replayer.steps_since_reset == 0
     calls_before = calls
-    replayer.run_fwd_bwd(execute, step=99)
+    replayer.run_fwd_bwd(execute, step=99, get_loss=lambda loss: loss)
     assert calls - calls_before == 2
 
 

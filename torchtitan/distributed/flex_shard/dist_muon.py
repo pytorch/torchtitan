@@ -70,8 +70,11 @@ def build_dist_muon(
     must be nonzero and divisible by ``R``. Each consecutive ``R`` rows forms
     one independent ``[R, C]`` matrix for local Muon compute. A native
     batch-first 3D ``[M, R, C]`` parameter uses ``Shard(0)`` to distribute
-    complete matrices. A single 2D matrix without ``BlockShard`` uses
-    whole-matrix compute such as ``Owned``.
+    complete matrices, or ``Owned`` to assign the complete batch to one rank.
+    Replicated storage and storage shards along either matrix dimension can
+    redistribute to ``Shard(0)`` compute on one mesh axis.
+    A single 2D matrix without ``BlockShard`` uses whole-matrix compute such as
+    ``Owned``.
     """
     return DistMuon(
         _normalize_param_groups(params),
@@ -1044,10 +1047,11 @@ def _estimate_muon_compute_cost(
     matrix_shape: torch.Size,
     ns_steps: int,
 ) -> int:
-    rows, columns = matrix_shape
+    *batch_shape, rows, columns = matrix_shape
+    num_matrices = math.prod(batch_shape)
     short_dim, long_dim = sorted((rows, columns))
     # Each NS step has two s^2 * l matmuls and one s^3 matmul.
-    return ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
+    return num_matrices * ns_steps * short_dim * short_dim * (2 * long_dim + short_dim)
 
 
 def _balance_loads_across_partitions(
@@ -1692,10 +1696,11 @@ def _resolve_storage_to_compute_transition(
     resolved_compute_layout_signature = tuple(resolved_target_signature)
     compute_shard_dims = [*resolved_shard_dims, *declared_shard_dims]
     if applicable_owned_storage_mesh_axes and (
-        len(global_compute_shape) != 2 or param.ndim != 2
+        compute_view is not None or param.ndim not in (2, 3)
     ):
         raise ValueError(
-            f"Muon owned compute for parameter {fqn!r} requires a 2D matrix"
+            f"Muon owned compute for parameter {fqn!r} requires a native "
+            "2D matrix or batch-first 3D matrix tensor"
         )
     if active_owned_storage_mesh_axes:
         compute_sharding: _ResolvedComputeSharding = Owned()
@@ -1718,28 +1723,6 @@ def _resolve_storage_to_compute_transition(
         compute_sharding = Owned()
     else:
         raise ValueError(f"unsupported storage-to-compute layout for {fqn!r}")
-
-    if redistribution_storage_mesh_axis is not None and type(compute_sharding) is Shard:
-        source_sharding = _normalize_storage_placement(
-            param.placements[redistribution_storage_mesh_axis],
-            ndim=param.ndim,
-            mesh_axis_size=param.device_mesh.size(redistribution_storage_mesh_axis),
-        )
-        target_sharding = normalized_target_sharding_by_storage_mesh_axis[
-            redistribution_storage_mesh_axis
-        ]
-        if (
-            type(source_sharding) is not Replicate
-            and type(target_sharding) is not BlockShard
-            and source_sharding != target_sharding
-            and not uses_supported_orthogonal_shard_redistribution
-        ):
-            axis_name = mesh_axis_names[redistribution_storage_mesh_axis]
-            raise NotImplementedError(
-                f"Muon parameter {fqn!r} cannot yet change tensor sharding "
-                f"from {source_sharding} to {target_sharding} on mesh axis "
-                f"{axis_name!r}"
-            )
 
     if redistribution_storage_mesh_axis is None:
         return _ResolvedStorageToComputeTransition(
@@ -1962,12 +1945,14 @@ def _local_storage_signature(tensor: Tensor) -> tuple[Any, ...]:
 
 def _storage_layout_signature(tensor: DTensor) -> tuple[Any, ...]:
     local = tensor.to_local()
+    # Empty shards address no elements, and autograd can choose different strides.
+    local_strides = tuple(local.stride()) if local.numel() else ()
     return (
         tuple(tensor.shape),
         tuple(tensor.stride()),
         tensor.placements,
         tuple(local.shape),
-        tuple(local.stride()),
+        local_strides,
         local.dtype,
         local.device,
         local.is_contiguous(),

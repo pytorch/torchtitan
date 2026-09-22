@@ -20,7 +20,6 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
-from torch.distributed.tensor import DTensor, Replicate
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -717,8 +716,9 @@ class QKVLinear(Module):
 
     Compatible with ColwiseParallel on the ``wqkv`` linear layer.
 
-    Checkpoints expose logical ``wq.weight`` / ``wk.weight`` / ``wv.weight``
-    keys via state_dict hooks so they interoperate with external formats.
+    Native state dicts retain the physical ``wqkv`` parameter. Hugging Face
+    state-dict adapters split and merge the logical Q/K/V projections at the
+    external checkpoint boundary.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -739,8 +739,6 @@ class QKVLinear(Module):
         self.wqkv = config.wqkv.build()
         self.heads_per_kv = config.n_heads // config.n_kv_heads
         self.r_dim = self.heads_per_kv + 2
-        self.register_state_dict_post_hook(self._split_qkv_on_save)
-        self.register_load_state_dict_pre_hook(self._merge_qkv_on_load)
 
     @spmd.local_map(
         out_types=(
@@ -778,63 +776,6 @@ class QKVLinear(Module):
             xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
             xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
         )
-
-    @staticmethod
-    def _split_qkv_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Split fused ``wqkv`` into stock ``wq``/``wk``/``wv`` (weight and bias)."""
-        hd, hpk, r = module.head_dim, module.heads_per_kv, module.r_dim
-
-        for param, ndim in (("weight", 4), ("bias", 3)):
-            key = f"{prefix}wqkv.{param}"
-            if key not in state_dict:
-                continue
-            tensor = state_dict.pop(key)
-            # Gather to Replicate so the n_kv-leading reshape is local (dim 0
-            # unsharded) when a Shard(0) split would not divide n_kv_heads
-            # (e.g. dp_shard=8, n_kv_heads=4); stays a DTensor for the copy.
-            if isinstance(tensor, DTensor):
-                tensor = tensor.redistribute(
-                    tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
-                )
-            n_kv = tensor.shape[0] // (r * hd)
-            tail = (tensor.shape[1],) if ndim == 4 else ()
-            w = tensor.reshape(n_kv, r, hd, *tail)
-            state_dict[f"{prefix}wq.{param}"] = (
-                w[:, :hpk].reshape(-1, *tail).contiguous()
-            )
-            state_dict[f"{prefix}wk.{param}"] = (
-                w[:, hpk].reshape(-1, *tail).contiguous()
-            )
-            state_dict[f"{prefix}wv.{param}"] = (
-                w[:, hpk + 1].reshape(-1, *tail).contiguous()
-            )
-
-    @staticmethod
-    def _merge_qkv_on_load(module, state_dict, prefix, *args) -> None:
-        """Merge stock ``wq``/``wk``/``wv`` back into fused ``wqkv`` (weight and bias)."""
-        hd, hpk = module.head_dim, module.heads_per_kv
-
-        for param, ndim in (("weight", 4), ("bias", 3)):
-            keys = [f"{prefix}{w}.{param}" for w in ("wq", "wk", "wv")]
-            if not all(k in state_dict for k in keys):
-                continue
-            wq, wk, wv = (state_dict.pop(k) for k in keys)
-            # TODO: check if we could avoid this All-gather
-            # Gather to Replicate so the n_kv reshape is local; stays a DTensor so the
-            # fused result can be copied into the sharded wqkv param.
-            if isinstance(wq, DTensor):
-                wq, wk, wv = (
-                    t.redistribute(t.device_mesh, [Replicate()] * t.device_mesh.ndim)
-                    for t in (wq, wk, wv)
-                )
-            n_kv = wk.shape[0] // hd
-            tail = (wq.shape[1],) if ndim == 4 else ()
-            q = wq.reshape(n_kv, hpk, hd, *tail)
-            k = wk.reshape(n_kv, 1, hd, *tail)
-            v = wv.reshape(n_kv, 1, hd, *tail)
-            state_dict[f"{prefix}wqkv.{param}"] = torch.cat([q, k, v], dim=1).reshape(
-                -1, *tail
-            )
 
 
 class GQAttention(BaseAttention):
