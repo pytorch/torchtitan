@@ -36,9 +36,11 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
+    CastLinear,
     ColumnParallelLinear,
     Linear,
     PartialBiasLinear,
+    RouterGateLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
@@ -118,14 +120,12 @@ def test_quantization_preserves_partial_bias_linear(monkeypatch):
     torch.testing.assert_close(linear(input), expected)
 
 
-def test_quantization_rejects_unsupported_linear_wrapper():
-    config = _ScaledLinear.Config(in_features=16, out_features=16)
+@pytest.mark.parametrize("config_cls", [CastLinear.Config, RouterGateLinear.Config])
+def test_quantization_rejects_unsupported_linear_wrapper(config_cls):
+    config = config_cls(in_features=16, out_features=16)
 
-    with pytest.raises(ValueError, match="does not support _ScaledLinear"):
-        quantization_transform._get_quantized_linear_config_cls(
-            config,
-            _ScaledLinear,
-        )
+    with pytest.raises(ValueError, match=f"does not support {config._owner.__name__}"):
+        quantization_transform._validate_quantizable_linear(config, "projection")
 
 
 @pytest.mark.parametrize("parallel_cls", [ColumnParallelLinear, RowParallelLinear])
@@ -155,7 +155,7 @@ def test_float8_converter_rejects_router_gate():
     converter = Float8LinearConverter(
         Float8LinearConverter.Config(emulate=True, model_compile_enabled=False)
     )
-    with pytest.raises(ValueError, match="does not support router gate"):
+    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
         converter.convert(_router_config_for_quantization(16))
 
 
@@ -223,7 +223,7 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(MXFP8LinearConverter.Config())
-    with pytest.raises(ValueError, match="does not support router gates"):
+    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 
@@ -256,7 +256,7 @@ def test_nvfp4_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao NVFP4 training prototype not available")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = NVFP4LinearConverter(NVFP4LinearConverter.Config())
-    with pytest.raises(ValueError, match="does not support router gate"):
+    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 

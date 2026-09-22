@@ -23,6 +23,9 @@ def get_quantized_linear(
     parent_cls: type[Linear],
 ) -> type[Linear]:
     """Get a cached quantized version of a linear module class."""
+    if parent_cls is Linear:
+        return quantized_cls
+
     quantized_config_cls = quantized_cls.Config
 
     class QuantizedLinear(  # pyrefly: ignore [invalid-inheritance]

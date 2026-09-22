@@ -6,7 +6,6 @@
 
 """Asynchronous tensor-parallel model transform."""
 
-import logging
 from dataclasses import dataclass
 from typing import cast
 
@@ -26,8 +25,6 @@ from .lora import LoRATransform
 
 __all__ = ["AsyncTensorParallelTransform"]
 
-logger = logging.getLogger(__name__)
-
 
 @dataclass(kw_only=True, slots=True)
 class AsyncTensorParallelTransform(ModelConfigTransform):
@@ -37,11 +34,7 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
 
     def transform(self, model: Module.Config) -> Module.Config:
         if not self.enable_sequence_parallel:
-            logger.warning(
-                "Async tensor parallelism requires sequence parallelism; "
-                "leaving synchronous tensor-parallel projections unchanged."
-            )
-            return model
+            raise ValueError("Async tensor parallelism requires sequence parallelism.")
 
         for fqn, config, parent, attr in list(model.traverse(Linear.Config)):
             owner = config._owner
@@ -80,4 +73,6 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
 
 # Async kernels call their fused autograd functions directly instead of the
 # projection's ``_linear`` method, so they would silently omit LoRA computation.
+# TODO: Add quantization transforms to this conflict list when quantization
+# migrates from ModelConfigConverter to ModelConfigTransform.
 AsyncTensorParallelTransform.conflicts_with = (LoRATransform,)

@@ -20,7 +20,6 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     PartialBiasLinear,
-    RouterGateLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
@@ -44,31 +43,34 @@ from .converter import ModelConfigConverter
 
 logger = logging.getLogger(__name__)
 
+_QUANTIZABLE_LINEAR_CLASSES = (
+    Linear,
+    ColumnParallelLinear,
+    RowParallelLinear,
+    PartialBiasLinear,
+)
+
+
+def _validate_quantizable_linear(config: Linear.Config, fqn: str) -> None:
+    owner = config._owner
+    assert owner is not None
+    if owner not in _QUANTIZABLE_LINEAR_CLASSES:
+        supported = ", ".join(cls.__qualname__ for cls in _QUANTIZABLE_LINEAR_CLASSES)
+        raise ValueError(
+            f"Quantization does not support {owner.__qualname__} at {fqn!r}; "
+            f"supported Linear classes are {supported}."
+        )
+
 
 def _get_quantized_linear_config_cls(
     config: Linear.Config,
     quantized_cls: type[Linear],
 ) -> type[Any]:
-    """Select a quantized config while preserving its Linear behavior."""
+    """Return the config for quantized compute composed with a Linear class."""
     parent_cls = config._owner
     assert parent_cls is not None
-    if parent_cls is Linear:
-        return cast(type[Any], quantized_cls.Config)
-    if parent_cls not in (
-        ColumnParallelLinear,
-        RowParallelLinear,
-        PartialBiasLinear,
-    ):
-        raise ValueError(
-            f"Quantization does not support {parent_cls.__qualname__}; only Linear, "
-            "ColumnParallelLinear, RowParallelLinear, and PartialBiasLinear "
-            "can be converted."
-        )
-    quantized_cls = get_quantized_linear(
-        quantized_cls,
-        cast(type[Linear], parent_cls),
-    )
-    return cast(type[Any], quantized_cls.Config)
+    linear_cls = get_quantized_linear(quantized_cls, cast(type[Linear], parent_cls))
+    return cast(type[Any], linear_cls.Config)
 
 
 class QuantizationConverter(ModelConfigConverter):
@@ -173,11 +175,7 @@ class Float8LinearConverter(QuantizationConverter):
         assert Float8Linear is not None
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
             if self.filter_fn(linear_config, fqn):
-                if isinstance(linear_config, RouterGateLinear.Config):
-                    raise ValueError(
-                        f"Float8 quantization does not support router gate {fqn!r}; "
-                        "exclude it with filter_fqns."
-                    )
+                _validate_quantizable_linear(linear_config, fqn)
                 config_cls = _get_quantized_linear_config_cls(
                     linear_config,
                     Float8Linear,
@@ -351,24 +349,14 @@ class MXFP8LinearConverter(QuantizationConverter):
         ]
 
         block_size = MXFP8Linear.WEIGHT_BLOCK_SIZE
-        for fqn, _config, parent, _attr in targets:
+        for fqn, config, parent, _attr in targets:
+            _validate_quantizable_linear(config, fqn)
             if isinstance(parent, QKVLinear.Config) and parent.head_dim % block_size:
                 raise ValueError(
                     "MXFP8 quantization of fused QKV requires head_dim divisible "
                     f"by {block_size} so weight scale blocks do not span Q, K, "
                     f"or V; got {fqn!r} with head_dim={parent.head_dim}."
                 )
-
-        quantized_router_fqns = [
-            fqn
-            for fqn, config, _parent, _attr in targets
-            if isinstance(config, RouterGateLinear.Config)
-        ]
-        if quantized_router_fqns:
-            raise ValueError(
-                "MXFP8 quantization does not support router gates; exclude "
-                f"{quantized_router_fqns} with fqns."
-            )
 
         selectors = self.config.linears_saving_inputs_for_backward_in_mxfp8
         target_fqns = [fqn for fqn, _config, _parent, _attr in targets]
@@ -517,11 +505,7 @@ class NVFP4LinearConverter(QuantizationConverter):
         fqns = self.config.fqns
         for fqn, config, parent, attr in model_config.traverse(Linear.Config):
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                if isinstance(config, RouterGateLinear.Config):
-                    raise ValueError(
-                        f"NVFP4 quantization does not support router gate {fqn!r}; "
-                        "exclude it with fqns."
-                    )
+                _validate_quantizable_linear(config, fqn)
                 config_cls = _get_quantized_linear_config_cls(
                     config,
                     NVFP4Linear,

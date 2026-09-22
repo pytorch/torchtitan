@@ -103,6 +103,8 @@ class LoRATransform(ModelConfigTransform):
     and adapter configuration depend on their order.
     """
 
+    # TODO: Add quantization transforms here after they migrate from
+    # ModelConfigConverter so LoRA always wraps an already quantized linear.
     run_after: ClassVar[tuple[type[ModelConfigTransform], ...]] = (
         ContextParallelTransform,
     )

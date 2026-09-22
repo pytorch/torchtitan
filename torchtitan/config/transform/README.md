@@ -48,6 +48,11 @@ all model config transforms. In particular, apply quantization in
 `model_registry` before applying `LoRATransform`; running a converter over a
 LoRA-transformed tree can replace an adapter config.
 
+NOTE: With quantization followed by LoRA, LoRA freezes the original weights,
+but the current quantized linear implementations still regenerate quantized
+weight operands on every forward or FSDP unshard. This is avoidable work for
+frozen weights. TODO: Cache their quantized operands across forwards.
+
 Synchronous tensor-parallel boundaries compose with quantization and LoRA.
 Their converters replace the projection computation while preserving its
 column- or row-parallel role. Async tensor parallelism does not yet support

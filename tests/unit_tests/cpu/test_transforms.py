@@ -288,19 +288,14 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
             )
             self.assertIsInstance(layer.feed_forward.w2, AsyncRowParallelLinear.Config)
 
-    def test_sequence_parallel_disabled_keeps_sync_roles(self):
-        with self.assertLogs(
-            "torchtitan.config.transform.async_tensor_parallel", level="WARNING"
+    def test_sequence_parallel_disabled_raises(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires sequence parallelism",
         ):
-            model = AsyncTensorParallelTransform(
-                enable_sequence_parallel=False
-            ).transform(self._model_config())
-
-        layer = model.layers[0]
-        self.assertIsInstance(
-            layer.attention.qkv_linear.wqkv, ColumnParallelLinear.Config
-        )
-        self.assertIsInstance(layer.attention.wo, RowParallelLinear.Config)
+            AsyncTensorParallelTransform(enable_sequence_parallel=False).transform(
+                self._model_config()
+            )
 
     def test_shared_expert_transforms_parallel_projections(self):
         config = make_shared_expert_ffn_config(
