@@ -236,48 +236,36 @@ def gemma4_26b_a4b(seq_len: int | None = None) -> Trainer.Config:
 # Gemma-4 instruction-tuned checkpoints share the exact architecture and
 # hyperparameters of their base counterpart; only the released weights,
 # tokenizer, and chat template differ. Each recipe below therefore reuses its
-# base recipe verbatim and only re-tags the ModelSpec flavor as ``<size>_it`` so
-# that checkpoint conversion (``--model_flavor <size>_it``) and logging reflect
-# the instruction-tuned lineage. Point ``--hf_assets_path`` /
-# ``--checkpoint.initial_load_path`` at the corresponding ``-it`` weights when
-# training (see development_artifacts/tests/run_gemma4_cpt_pipeline.sh).
+# base recipe (and its base model flavor, mirroring how e.g. llama3's
+# ``sft_debugmodel`` reuses the ``debugmodel`` flavor). Select the instruction-
+# tuned lineage by pointing ``--hf_assets_path`` / ``--checkpoint.initial_load_path``
+# at the corresponding ``-it`` weights when training
+# (see development_artifacts/tests/run_gemma4_cpt_pipeline.sh).
 # -----------------------------------------------------------------------------
 
 
 def gemma4_debugmodel_it(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry("debugmodel_it", seq_len=seq_len)
-    return config
+    return gemma4_debugmodel(seq_len=seq_len)
 
 
 def gemma4_e2b_it(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_e2b(seq_len=seq_len)
-    config.model_spec = model_registry("e2b_it", seq_len=seq_len)
-    return config
+    return gemma4_e2b(seq_len=seq_len)
 
 
 def gemma4_e4b_it(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_e4b(seq_len=seq_len)
-    config.model_spec = model_registry("e4b_it", seq_len=seq_len)
-    return config
+    return gemma4_e4b(seq_len=seq_len)
 
 
 def gemma4_12b_it(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_12b(seq_len=seq_len)
-    config.model_spec = model_registry("12b_it", seq_len=seq_len)
-    return config
+    return gemma4_12b(seq_len=seq_len)
 
 
 def gemma4_26b_a4b_it(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_26b_a4b(seq_len=seq_len)
-    config.model_spec = model_registry("26b_a4b_it", seq_len=seq_len)
-    return config
+    return gemma4_26b_a4b(seq_len=seq_len)
 
 
 def gemma4_31b_it(seq_len: int | None = None) -> Trainer.Config:
-    config = gemma4_31b(seq_len=seq_len)
-    config.model_spec = model_registry("31b_it", seq_len=seq_len)
-    return config
+    return gemma4_31b(seq_len=seq_len)
 
 
 def gemma4_31b(seq_len: int | None = None) -> Trainer.Config:

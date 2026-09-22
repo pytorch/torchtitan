@@ -19,12 +19,12 @@ Each flavor also has an instruction-tuned recipe named `gemma4_<flavor>_it`
 (`gemma4_debugmodel_it`, `gemma4_e2b_it`, `gemma4_e4b_it`, `gemma4_12b_it`,
 `gemma4_26b_a4b_it`, `gemma4_31b_it`). The instruction-tuned checkpoints share
 the **exact architecture** of their base counterpart — only the released
-weights, tokenizer, and chat template differ — so the `_it` recipes reuse the
-base recipe and simply re-tag the flavor as `<size>_it`. Point
-`--hf_assets_path` / `--checkpoint.initial_load_path` at the corresponding
-`google/gemma-4-<flavor>-it` weights when training. `model_registry` accepts the
-`_it` / `-it` suffix directly (e.g. `--model_flavor 12b_it` for checkpoint
-conversion).
+weights, tokenizer, and chat template differ — so each `_it` recipe reuses its
+base recipe and base model flavor (mirroring how llama3's `sft_debugmodel`
+reuses the `debugmodel` flavor). Select the instruction-tuned lineage by
+pointing `--hf_assets_path` / `--checkpoint.initial_load_path` at the
+corresponding `google/gemma-4-<flavor>-it` weights when training. Checkpoint
+conversion uses the base size flavor (e.g. `--model_flavor 12b`).
 
 ## Download Tokenizer
 
