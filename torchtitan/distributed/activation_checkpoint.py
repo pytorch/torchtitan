@@ -180,12 +180,13 @@ class FullAC(ActivationCheckpointing):
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
+        config = cast("FullAC.Config", self.config)
         return ptd_checkpoint_wrapper(
             module,
-            preserve_rng_state=self.config.preserve_rng_state,
-            determinism_check=self.config.determinism_check,
-            early_stop=self.config.early_stop,  # pyrefly: ignore [missing-attribute]
-            debug=self.config.debug,
+            preserve_rng_state=config.preserve_rng_state,
+            determinism_check=config.determinism_check,
+            early_stop=config.early_stop,
+            debug=config.debug,
         )
 
 
