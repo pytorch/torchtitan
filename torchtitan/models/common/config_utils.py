@@ -28,6 +28,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    Linear,
     RouterGateLinear,
     RowParallelLinear,
 )
@@ -279,7 +280,7 @@ def make_shared_expert_ffn_config(
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
 ) -> FeedForward.Config:
-    """Build a shared FFN whose projections own their TP collectives."""
+    """Build a shared FFN whose output reduction is owned by its sharding config."""
     return FeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
@@ -287,7 +288,10 @@ def make_shared_expert_ffn_config(
             num_linears=2,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
-        w2=RowParallelLinear.Config(
+        # Shared w2 must remain Partial when EP is enabled without SP so the
+        # outer MoE boundary performs the only all-reduce. RowParallelLinear
+        # would reduce P -> I here and reduce the shared output a second time.
+        w2=Linear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=w2w3_param_init,

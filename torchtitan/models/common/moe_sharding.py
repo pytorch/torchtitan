@@ -15,7 +15,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
-    rowwise_config,
     stacked_colwise_config,
     token_id_placement,
 )
@@ -118,6 +117,21 @@ def _router_gate_sharding_config() -> ShardingConfig:
     )
 
 
+def shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
+    """Shard shared-expert w2 locally and reduce at its module boundary."""
+    return ShardingConfig(
+        state_shardings={
+            "weight": dense_param_placement(tp=spmd.S(1)),
+            "bias": dense_param_placement(tp=spmd.R),
+        },
+        in_src_shardings={
+            "input": dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
+        },
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
+        out_dst_shardings=output_layout,
+    )
+
+
 def _shared_experts_sharding_configs(
     *, enable_ep: bool, enable_sp: bool
 ) -> tuple[ShardingConfig, ShardingConfig, ShardingConfig]:
@@ -142,7 +156,7 @@ def _shared_experts_sharding_configs(
             out_src_shardings=output_layout,
         ),
         stacked_colwise_config(input_layout=input_layout),
-        rowwise_config(output_layout=output_layout),
+        shared_expert_rowwise_config(output_layout=output_layout),
     )
 
 

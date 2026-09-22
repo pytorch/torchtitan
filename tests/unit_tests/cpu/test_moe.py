@@ -25,8 +25,8 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    Linear,
     RouterGateLinear,
-    RowParallelLinear,
 )
 from torchtitan.models.common.moe import (
     GroupedExperts,
@@ -345,7 +345,7 @@ class TestMoE(unittest.TestCase):
                     _per_axis_types(token_id_placement(enable_sp=enable_ep)),
                 )
 
-    def test_shared_expert_ffn_uses_parallel_projection_boundaries(self):
+    def test_shared_expert_ffn_leaves_w2_reduction_to_sharding_config(self):
         config = make_shared_expert_ffn_config(
             dim=4,
             hidden_dim=8,
@@ -354,7 +354,7 @@ class TestMoE(unittest.TestCase):
         )
 
         self.assertIs(type(config.w13), ColumnParallelLinear.Config)
-        self.assertIs(type(config.w2), RowParallelLinear.Config)
+        self.assertIs(type(config.w2), Linear.Config)
         self.assertEqual(config.w13.num_linears, 2)
 
     def test_expert_branch_layouts_before_moe_boundary(self):
@@ -373,14 +373,19 @@ class TestMoE(unittest.TestCase):
                 )
 
                 shared_output = shared.out_src_shardings
-                w2_output = w2.out_src_shardings
+                w2_partial_output = w2.out_src_shardings
+                w2_output = w2.out_dst_shardings
                 routed_output = routed.out_dst_shardings
                 assert isinstance(shared_output, SpmdType)
+                assert isinstance(w2_partial_output, SpmdType)
                 assert isinstance(w2_output, SpmdType)
                 assert isinstance(routed_output, SpmdType)
                 self.assertEqual(
                     _per_axis_types(shared_output).get(MeshAxisName.TP),
                     expected,
+                )
+                self.assertEqual(
+                    _per_axis_types(w2_partial_output).get(MeshAxisName.TP), spmd.P
                 )
                 self.assertEqual(
                     _per_axis_types(w2_output).get(MeshAxisName.TP), expected
@@ -464,8 +469,8 @@ class TestMoE(unittest.TestCase):
         self.assertEqual(
             tp_type(shared.w2.sharding_config.state_shardings["weight"]), spmd.S(1)
         )
-        self.assertEqual(tp_type(shared.w2.sharding_config.out_src_shardings), spmd.R)
-        self.assertIsNone(shared.w2.sharding_config.out_dst_shardings)
+        self.assertEqual(tp_type(shared.w2.sharding_config.out_src_shardings), spmd.P)
+        self.assertEqual(tp_type(shared.w2.sharding_config.out_dst_shardings), spmd.R)
 
         routed = moe_config.routed_experts
         assert routed.sharding_config.in_dst_shardings is not None

@@ -21,7 +21,10 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     enable_ep: bool,
     enable_sp: bool,
 ) -> None:
-    from torchtitan.models.common.linear import Linear, RowParallelLinear
+    import spmd_types as spmd
+
+    from torchtitan.distributed.parallel_dims import MeshAxisName
+    from torchtitan.models.common.linear import Linear
     from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
@@ -37,7 +40,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     assert type(shared_experts.w13) is Linear.Config
     assert shared_experts.w13.num_linears == 2
     assert type(shared_experts.gate) is Linear.Config
-    assert type(shared_experts.w2) is RowParallelLinear.Config
+    assert type(shared_experts.w2) is Linear.Config
 
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None
@@ -53,8 +56,13 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     assert shared_experts.gate.sharding_config.in_src_shardings["input"] == (
         projection_input
     )
+    assert shared_experts.w2.sharding_config.out_src_shardings is not None
     assert (
-        shared_experts.w2.sharding_config.out_src_shardings
+        shared_experts.w2.sharding_config.out_src_shardings.local_type[MeshAxisName.TP]
+        == spmd.P
+    )
+    assert (
+        shared_experts.w2.sharding_config.out_dst_shardings
         == shared_experts.sharding_config.out_src_shardings
     )
 

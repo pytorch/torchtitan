@@ -297,7 +297,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
                 self._model_config()
             )
 
-    def test_shared_expert_transforms_parallel_projections(self):
+    def test_shared_expert_transforms_only_collective_owning_projection(self):
         config = make_shared_expert_ffn_config(
             dim=4,
             hidden_dim=8,
@@ -310,7 +310,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         ).transform(config)
 
         self.assertIs(type(transformed.w13), AsyncColumnParallelLinear.Config)
-        self.assertIs(type(transformed.w2), AsyncRowParallelLinear.Config)
+        self.assertIs(type(transformed.w2), Linear.Config)
 
     def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
         from torchtitan.models.muse_glimmer import muse_glimmer_configs

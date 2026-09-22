@@ -138,7 +138,7 @@ def _shared_experts_config(
             num_linears=2,
             param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
         ),
-        w2=RowParallelLinear.Config(
+        w2=Linear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=depth_init,

@@ -14,6 +14,7 @@ from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.async_linear import AsyncRowParallelLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    Linear,
     RouterGateLinear,
     RowParallelLinear,
 )
@@ -57,7 +58,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertIsNotNone(shared_experts)
         assert shared_experts is not None
         self.assertIs(type(shared_experts.w13), ColumnParallelLinear.Config)
-        self.assertIs(type(shared_experts.w2), RowParallelLinear.Config)
+        self.assertIs(type(shared_experts.w2), Linear.Config)
 
     def test_attention_owns_input_gather_and_wo_owns_output_reduction(self):
         build_config, _ = deepseekv3_configs["debugmodel"]

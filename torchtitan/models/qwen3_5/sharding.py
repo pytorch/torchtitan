@@ -41,6 +41,7 @@ from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import (
     set_moe_block_padding_mask_sharding,
     set_routed_moe_sharding_config,
+    shared_expert_rowwise_config,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
@@ -237,7 +238,9 @@ def set_sigmoid_gated_feed_forward_sharding_config(
     shared_experts.w13.sharding_config = stacked_colwise_config(
         input_layout=replicated_input_layout
     )
-    shared_experts.w2.sharding_config = rowwise_config(output_layout=output_layout)
+    shared_experts.w2.sharding_config = shared_expert_rowwise_config(
+        output_layout=output_layout
+    )
     shared_experts.gate.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),
