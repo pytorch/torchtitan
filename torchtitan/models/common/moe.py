@@ -151,27 +151,25 @@ class RoutedExperts(Module):
         When parallelized, ``local_spmd`` (from ``sharding_config``) establishes
         the local SPMD types for the forward body.
         """
-        dispatch_output = self.token_dispatcher.dispatch(
+        (
+            routed_input_RD,
+            num_global_tokens_per_local_expert_e,
+            metadata,
+        ) = self.token_dispatcher.dispatch(
             x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        remat.recompute_needs_tensor(
-            dispatch_output.routed_input_RD,
-            dispatch_output.num_tokens_per_local_expert_e,
-        )
         with maybe_set_sparse_mesh():
             routed_output_RD = self.inner_experts(
-                dispatch_output.routed_input_RD,
-                dispatch_output.num_tokens_per_local_expert_e,
+                routed_input_RD, num_global_tokens_per_local_expert_e
             )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
-            dispatch_output,
+            metadata,
             x_TD,
         )
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
 
