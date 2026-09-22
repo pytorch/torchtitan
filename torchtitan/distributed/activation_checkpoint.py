@@ -177,9 +177,6 @@ class FullAC(ActivationCheckpointing):
         early_stop: bool = True
         """
         Stop recomputation once all tensors needed by backward are available.
-
-        Disable this when a checkpointed region contains asynchronous effects that
-        must finish before recomputation returns.
         """
 
     def _wrap_block(
