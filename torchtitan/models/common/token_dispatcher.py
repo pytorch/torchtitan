@@ -844,6 +844,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_experts,
             self.num_experts,
             num_tokens_per_rank=x_TD.shape[0],
+            remat_region_name=self.remat_region_name("ep_communication.dispatch"),
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
@@ -861,8 +862,11 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-        # pyrefly: ignore [bad-argument-type]
-        combined_TD = combine_tokens(routed_output_RD, metadata.state)
+        combined_TD = combine_tokens(
+            routed_output_RD,
+            metadata.state,  # pyrefly: ignore [bad-argument-type]
+            remat_region_name=self.remat_region_name("ep_communication.combine"),
+        )
         sync_combine()
         return combined_TD
 

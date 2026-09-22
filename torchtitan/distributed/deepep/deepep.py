@@ -39,6 +39,7 @@ ignores ``topk_weights`` in expand mode anyway).
 from dataclasses import dataclass
 
 import torch
+import torch_remat as remat
 from torch.distributed import ProcessGroup
 
 try:
@@ -459,6 +460,7 @@ def dispatch_tokens(
     num_experts: int,
     *,
     num_tokens_per_rank: int,
+    remat_region_name: str,
     cuda_graph_compatible: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
@@ -481,6 +483,7 @@ def dispatch_tokens(
             mode, to size the current ``recv_x``. This is distinct from the
             lifetime maximum used to initialize the communication buffer and
             must not exceed that maximum.
+        remat_region_name: Name for the always-saved dispatch communication region.
         cuda_graph_compatible: If True, use the static, no-host-sync expand layout so the forward is
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -514,19 +517,33 @@ def dispatch_tokens(
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
 
+    # DeepEP communication owns opaque cached handles consumed by combine and
+    # backward, so it is not replay-safe. Match SelectiveAC's MUST_SAVE policy.
+    dispatch_region = remat.region(
+        torch.ops.deepep.dispatch,
+        remat_region_name,
+        recompute=False,
+    )
     (
         recv_x,
         recv_topk_idx,
         recv_scores,
         num_recv_per_expert,
         handle_id,
-    ) = torch.ops.deepep.dispatch(
+    ) = dispatch_region(
         hidden_states,
         selected_experts_indices,
         top_scores,
         num_experts=num_experts,
         num_tokens_per_rank=num_tokens_per_rank,
         cuda_graph_compatible=cuda_graph_compatible,
+    )
+    remat.recompute_needs_tensor(
+        recv_x,
+        recv_topk_idx,
+        recv_scores,
+        num_recv_per_expert,
+        handle_id,
     )
 
     num_tokens_per_expert = num_recv_per_expert.to(recv_x.device)
@@ -560,6 +577,8 @@ def dispatch_tokens(
 def combine_tokens(
     hidden_states: torch.Tensor,
     state: DispatchState,
+    *,
+    remat_region_name: str,
 ) -> torch.Tensor:
     """Combine expert outputs back to tokens via DeepEP v2.
 
@@ -575,6 +594,7 @@ def combine_tokens(
     Args:
         hidden_states: Raw (unweighted) expert outputs [num_recv, hidden].
         state: Dispatch state from ``dispatch_tokens``.
+        remat_region_name: Name for the always-saved combine communication region.
 
     Returns:
         Combined tokens [num_tokens, hidden_dim].
@@ -592,9 +612,7 @@ def combine_tokens(
         hidden_states = _unpermute_tokens(
             hidden_states, state.permuted_indices, state.num_recv_tokens
         )
-        return torch.ops.deepep.combine(hidden_states, state.handle_id, will_backward)
-
-    if state.recv_scores is not None:
+    elif state.recv_scores is not None:
         # One routing score per received row (each row is one token->expert assignment).
         # Collapse the trailing dim with sum so this is correct whether recv_scores is
         # [num_recv], [num_recv, 1], or [num_recv, topk] with a single valid entry/row.
@@ -602,4 +620,11 @@ def combine_tokens(
             dim=-1, keepdim=True
         )
         hidden_states = hidden_states * per_row_score.to(hidden_states.dtype)
-    return torch.ops.deepep.combine(hidden_states, state.handle_id, will_backward)
+
+    combined = remat.region(
+        torch.ops.deepep.combine,
+        remat_region_name,
+        recompute=False,
+    )(hidden_states, state.handle_id, will_backward)
+    remat.recompute_needs_tensor(combined)
+    return combined
