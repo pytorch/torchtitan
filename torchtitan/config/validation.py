@@ -39,6 +39,7 @@ def validate_model_training_config(
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
     from torchtitan.distributed.activation_checkpoint import MemoryBudgetAC, SelectiveAC
+    from torchtitan.distributed.cuda_graph import cuda_graphs_supported
     from torchtitan.models.common.attention import (
         FlexInnerAttention,
         VarlenInnerAttention,
@@ -48,7 +49,7 @@ def validate_model_training_config(
         LocalTokenDispatcher,
     )
 
-    if not training.disable_cuda_graphs:
+    if not training.disable_cuda_graphs and cuda_graphs_supported():
         if max_num_documents is None:
             for fqn, _, _, _ in model.traverse(VarlenInnerAttention.Config):
                 raise ValueError(

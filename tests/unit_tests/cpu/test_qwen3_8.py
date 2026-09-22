@@ -12,8 +12,9 @@ import torch
 
 pytest.importorskip("attn_gym")
 
-from torchtitan.models.qwen3_5 import Qwen35Model, Qwen35StateDictAdapter
+from torchtitan.models.qwen3_5 import Qwen35Model
 from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
+from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.models.qwen3_8 import model_registry, qwen3_8_configs
 from torchtitan.models.qwen3_8.config_registry import qwen38_27b, qwen38_2_4t_a95b
 
@@ -39,10 +40,8 @@ def test_qwen38_registry_exposes_only_qwen38_flavors() -> None:
 
 
 def test_qwen38_27b_reuses_qwen35_multimodal_architecture() -> None:
-    model_spec = model_registry("27B")
-    config = cast(Qwen35Model.Config, model_spec.model)
+    config = cast(Qwen35Model.Config, model_registry("27B"))
 
-    assert model_spec.name == "qwen3_8"
     assert config.dim == 5120
     assert len(config.layers) == 64
     assert config.vision_encoder is not None
@@ -54,11 +53,9 @@ def test_qwen38_recipes_use_released_hugging_face_paths() -> None:
     moe_config = qwen38_2_4t_a95b()
 
     assert dense_config.hf_assets_path.endswith("Qwen3.8-27B")
-    assert dense_config.model_spec is not None
-    assert dense_config.model_spec.name == "qwen3_8"
+    assert isinstance(dense_config.model, Qwen35Model.Config)
     assert moe_config.hf_assets_path.endswith("Qwen3.8-2.4T-A95B")
-    assert moe_config.model_spec is not None
-    assert moe_config.model_spec.name == "qwen3_8"
+    assert isinstance(moe_config.model, Qwen35Model.Config)
 
 
 def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:

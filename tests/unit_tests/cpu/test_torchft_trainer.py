@@ -32,7 +32,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         ).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
-        model_spec=model_registry("debugmodel"),
+        model=model_registry("debugmodel"),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
     )
@@ -72,7 +72,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         "build",
         lambda self, **kwargs: SimpleNamespace(color=""),
     )
-    monkeypatch.setattr(type(config.model_spec.model), "build", build_model)
+    monkeypatch.setattr(type(config.model), "build", build_model)
 
     with pytest.raises(ModelBuildReachedError):
         ft.FaultTolerantTrainer(config)
@@ -83,6 +83,48 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
 def test_ft_trainer_composes_specialized_training_engine() -> None:
     assert not issubclass(ft.FaultTolerantTrainer, TrainingEngine)
     assert issubclass(ft.FaultTolerantTrainingEngine, TrainingEngine)
+
+
+def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:
+    config = ft.FaultTolerantTrainer.Config(
+        model=model_registry("debugmodel"),
+        tokenizer=None,
+        loss=CrossEntropyLoss.Config(),
+    )
+    config.fault_tolerance.enable = True
+    config.training.disable_cuda_graphs = False
+    config.training.num_tokens_per_train_step = (
+        2 * config.training.num_tokens_per_microbatch_per_dp_rank
+    )
+    engine = SimpleNamespace(
+        parallel_dims=SimpleNamespace(
+            dp_enabled=False,
+            pp_enabled=False,
+            fsdp_enabled=True,
+        ),
+        ft_manager=SimpleNamespace(get_dp_info=lambda degree, rank: (degree, rank)),
+        device_memory_monitor=SimpleNamespace(),
+    )
+
+    monkeypatch.setattr(
+        ft, "FaultTolerantTrainingEngine", lambda *args, **kwargs: engine
+    )
+    monkeypatch.setattr(
+        type(config.dataloader),
+        "build",
+        lambda self, **kwargs: SimpleNamespace(max_num_documents=None),
+    )
+    monkeypatch.setattr(
+        type(config.metrics),
+        "build",
+        lambda self, **kwargs: SimpleNamespace(color=""),
+    )
+    monkeypatch.setattr(ft, "cuda_graphs_supported", lambda: True)
+
+    with pytest.raises(
+        ValueError, match="does not support CUDA-graphed FSDP gradient accumulation"
+    ):
+        ft.FaultTolerantTrainer(config)
 
 
 def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
@@ -97,7 +139,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])]),
         num_completed_steps=1,
         ntokens_seen=4,
-        forward_backward_step=Mock(
+        forward_backward=Mock(
             return_value=ForwardBackwardResult(torch.tensor(2.0), [])
         ),
         optimizer_step=Mock(return_value=torch.tensor(0.0)),
@@ -117,9 +159,9 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     microbatch = SimpleNamespace(num_valid_tokens=4)
     ft.FaultTolerantTrainer.train_step(trainer, iter([microbatch]))
 
-    engine.forward_backward_step.assert_called_once()
-    forward_backward_args = engine.forward_backward_step.call_args.kwargs
-    assert forward_backward_args["accumulation_step_inputs"] == [[microbatch]]
+    engine.forward_backward.assert_called_once()
+    forward_backward_args = engine.forward_backward.call_args.kwargs
+    assert forward_backward_args["microbatch_groups"] == [[microbatch]]
     assert forward_backward_args["global_valid_tokens"].item() == 4
     trainer.metrics_processor.log.assert_called_once()
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
@@ -134,8 +176,8 @@ def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None
     with patch.object(TrainingEngine, "_initialize_model") as initialize_model:
         ft.FaultTolerantTrainingEngine._initialize_model(
             engine,
-            SimpleNamespace(),
             compile_config=SimpleNamespace(),
+            hf_assets_path="",
         )
 
     initialize_model.assert_called_once()

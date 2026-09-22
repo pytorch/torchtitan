@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -12,10 +14,12 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    annotate_replicated_parameters,
     spmd_local_context,
 )
 from torchtitan.models.common import FeedForward, Linear
@@ -32,6 +36,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    MultimodalModel,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -46,6 +51,7 @@ from torchtitan.protocols.module import Module
 
 from .kda import KDA
 from .moe import KimiLatentMoE
+from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
 
 KimiK3AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
@@ -286,7 +292,18 @@ class KimiK3TransformerBlock(Module):
         return prefix_sum_TD + h_TD, block_residual_TND
 
 
-class KimiK3Model(Decoder):
+class KimiK3Model(MultimodalModel):
+    state_dict_adapter_cls = KimiK3StateDictAdapter
+    multimodal_encoder_fqns = ("vision_encoder",)
+
+    @classmethod
+    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+        from torchtitan.components.optimizer import register_moe_quantile_balancing_hook
+
+        register_moe_quantile_balancing_hook(optimizers, model_parts, parallel_dims)
+
+    supports_pipeline_parallel = False
+
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         layers: list[KimiK3TransformerBlock.Config]
@@ -353,6 +370,51 @@ class KimiK3Model(Decoder):
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
+
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> KimiK3Model:
+        unsupported = [
+            name
+            for name, enabled in (
+                ("pipeline parallel", parallel_dims.pp_enabled),
+                ("context parallel", parallel_dims.cp_enabled),
+            )
+            if enabled
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                "Kimi K3 currently supports FSDP2 data parallelism only; "
+                f"disable {', '.join(unsupported)}."
+            )
+        if compile_config is not None and "model" in compile_config.components:
+            raise NotImplementedError("Kimi K3 does not support model compilation yet.")
+
+        from torchtitan.distributed.utils import get_spmd_context
+
+        with get_spmd_context(parallel_dims=parallel_dims):
+            annotate_replicated_parameters(self, parallel_dims)
+            self._parallelize(parallel_dims)
+            if ac_config is not None:
+                policy = ac_config.build(dump_folder=dump_folder)
+                policy.apply(self)
+                if self.vision_encoder is not None:
+                    policy.apply(self.vision_encoder)
+            if not skip_dp:
+                self._apply_fsdp(
+                    parallel_dims=parallel_dims,
+                    training=training,
+                    parallelism=parallelism,
+                )
+        return self
 
     def preprocess_inputs(
         self,

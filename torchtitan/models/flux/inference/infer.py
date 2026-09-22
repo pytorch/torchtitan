@@ -10,6 +10,7 @@ import os
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.config import ConfigManager
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.observability.logging import init_logger
@@ -62,7 +63,10 @@ def inference(config: FluxTrainer.Config):
         global_ids = list(range(global_rank, total_prompts, world_size))
 
         for i in range(0, len(prompts), bs):
-            with trainer.engine.train_context():
+            with dist_utils.get_spmd_context(
+                parallel_dims=trainer.engine.parallel_dims,
+                spmd_typechecking=trainer.engine.config.debug.spmd_typechecking,
+            ):
                 images = generate_image(
                     device=trainer.engine.device,
                     dtype=trainer._dtype,

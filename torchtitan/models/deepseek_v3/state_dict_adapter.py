@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -14,7 +15,9 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
-from .model import DeepSeekV3Model
+
+if TYPE_CHECKING:
+    from .model import DeepSeekV3Model
 
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
@@ -154,6 +157,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's weight.
         """
+        state_dict = self._native_fused_linears_to_hf(state_dict)
 
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
@@ -278,4 +282,4 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = self.from_hf_map[key]
                 state_dict[new_key] = value
 
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)

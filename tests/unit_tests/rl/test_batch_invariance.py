@@ -21,8 +21,8 @@ def test_batch_invariance_gathers_vocab_shards(monkeypatch):
     local_logits = full_logits[:, :2]
     labels = torch.tensor([3, 1])
     calls = []
-    monkeypatch.setattr(loss_module, "spmd_mesh_size", lambda _dim: 2)
     monkeypatch.setattr(loss_module, "is_in_batch_invariant_mode", lambda: True)
+    tp_group = object()
 
     def gather(logits, *args, **kwargs):
         calls.append((logits, args, kwargs))
@@ -32,6 +32,7 @@ def test_batch_invariance_gathers_vocab_shards(monkeypatch):
     logprobs, entropy = loss_module.compute_logprobs(
         local_logits,
         labels,
+        vocab_parallel_group=tp_group,
         return_entropy=True,
         global_vocab_size=full_logits.shape[-1],
     )
@@ -47,14 +48,38 @@ def test_batch_invariance_gathers_vocab_shards(monkeypatch):
 
 
 def test_vocab_parallel_policy_stats_require_global_vocab_size(monkeypatch):
-    monkeypatch.setattr(loss_module, "spmd_mesh_size", lambda _dim: 2)
     monkeypatch.setattr(loss_module, "is_in_batch_invariant_mode", lambda: False)
+    tp_group = object()
 
     with pytest.raises(
         ValueError,
         match="global_vocab_size is required for vocab-parallel policy statistics",
     ):
-        loss_module.compute_logprobs(torch.randn(2, 4), torch.tensor([0, 1]))
+        loss_module.compute_logprobs(
+            torch.randn(2, 4),
+            torch.tensor([0, 1]),
+            vocab_parallel_group=tp_group,
+        )
+
+
+def test_replicated_policy_stats_do_not_infer_layout_from_spmd_context(monkeypatch):
+    monkeypatch.setattr(
+        loss_module.spmd,
+        "redistribute",
+        lambda *args, **kwargs: pytest.fail("replicated logits must not be gathered"),
+    )
+    monkeypatch.setattr(loss_module, "spmd_mesh_size", lambda _axis: 2)
+
+    logits = torch.randn(2, 4)
+    labels = torch.tensor([0, 1])
+    actual = loss_module.compute_logprobs(
+        logits,
+        labels,
+        vocab_parallel_group=None,
+    )
+
+    expected = -F.cross_entropy(logits, labels, reduction="none")
+    torch.testing.assert_close(actual, expected)
 
 
 def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
@@ -113,5 +138,4 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
     for column, (call_logits, call_labels, call_kwargs) in enumerate(calls):
         assert call_logits is logits
         torch.testing.assert_close(call_labels, token_ids[:, column].to(torch.int64))
-        # vLLM calls outside the trainer TP SPMD context with full logits.
-        assert call_kwargs == {}
+        assert call_kwargs == {"vocab_parallel_group": None}

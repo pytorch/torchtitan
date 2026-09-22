@@ -4,14 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
-from .model import DeepSeekV4Model
+if TYPE_CHECKING:
+    from .model import DeepSeekV4Model
 
 
 class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
@@ -167,6 +170,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         return False
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        state_dict = self._native_fused_linears_to_hf(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
         delegated_state_dict = {}
@@ -229,4 +233,4 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
         if delegated_hf_state_dict:
             state_dict.update(super().from_hf(delegated_hf_state_dict))
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)

@@ -201,7 +201,7 @@ def _run_pp_cache_lifecycle(
             for _ in range(2)
         ]
         outputs = [linear(input_MK) for input_MK in inputs]
-        assert num_quantize_calls == 1
+        assert num_quantize_calls == 1, num_quantize_calls
         weight_param = _get_weight_param(linear)
         assert isinstance(linear.weight, _UnshardedFSDPTensor)
         assert linear.weight.operands is not None
@@ -223,7 +223,7 @@ def _run_pp_cache_lifecycle(
         )
 
         outputs[0].sum().backward()
-        assert num_quantize_calls == 1
+        assert num_quantize_calls == 1, num_quantize_calls
         assert isinstance(linear.weight, _UnshardedFSDPTensor)
         assert linear.weight.operands is not None
         assert all(
@@ -453,7 +453,7 @@ def _run_simple_fsdp(
         output_MN.sum().backward()
 
         assert output_MN.shape == (64, 128)
-        assert num_quantize_calls == 1
+        assert num_quantize_calls == 1, num_quantize_calls
         assert input_MK.grad is not None
         assert sharded_weight.grad is not None
     finally:

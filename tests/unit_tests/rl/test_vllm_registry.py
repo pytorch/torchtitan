@@ -35,14 +35,12 @@ def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):
         value_head_dim=6,
         conv_kernel_size=4,
     )
-    model_spec = SimpleNamespace(
-        model=SimpleNamespace(layers=[SimpleNamespace(delta_net=gdn_config)])
-    )
+    model_config = SimpleNamespace(layers=[SimpleNamespace(delta_net=gdn_config)])
 
     class Model:
         pass
 
-    _configure_gdn_hybrid_model(Model, model_spec)
+    _configure_gdn_hybrid_model(Model, model_config)
 
     gdn_type = object()
     short_conv_type = object()
