@@ -367,7 +367,7 @@ def pipeline_hf_transformers(
         stages_per_rank = 1 if is_single_stage_schedule else 2
         num_virtual_stages = parallel_dims.pp * stages_per_rank
 
-    module_names_per_stage = parallelism.module_fqns_per_model_part
+    module_names_per_stage = parallelism.pipeline_parallel_module_fqns_per_model_part
     if module_names_per_stage is None:
         module_names_per_stage = generate_llm_fqn_per_model_part(
             num_virtual_stages, num_layers, input_weight, output_weight
