@@ -6,7 +6,7 @@
 
 import functools
 from dataclasses import dataclass
-from typing import cast
+from typing import cast, TypeVar
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
@@ -16,20 +16,22 @@ from torchtitan.models.common.token_dispatcher import (
     TorchAOTokenDispatcher,
 )
 
+_LinearT = TypeVar("_LinearT", bound=Linear)
+
 
 @functools.cache
 def get_quantized_linear(
-    quantized_cls: type[Linear],
+    quantized_cls: type[_LinearT],
     parent_cls: type[Linear],
-) -> type[Linear]:
+) -> type[_LinearT]:
     """Get a cached quantized version of a linear module class."""
     if parent_cls is Linear:
         return quantized_cls
 
     quantized_config_cls = quantized_cls.Config
 
-    class QuantizedLinear(  # pyrefly: ignore [invalid-inheritance]
-        quantized_cls,
+    class QuantizedLinear(
+        quantized_cls,  # pyrefly: ignore [invalid-inheritance]
         parent_cls,
     ):
         @dataclass(kw_only=True, slots=True)
@@ -43,7 +45,7 @@ def get_quantized_linear(
     QuantizedLinear.__module__ = quantized_cls.__module__
     QuantizedLinear.Config.__qualname__ = f"{linear_name}.Config"
     QuantizedLinear.Config.__module__ = quantized_cls.__module__
-    return cast(type[Linear], QuantizedLinear)
+    return cast(type[_LinearT], QuantizedLinear)
 
 
 def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) -> bool:

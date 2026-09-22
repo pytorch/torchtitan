@@ -82,7 +82,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                 )
                 with patch("torchtitan.distributed.parallel_dims.device_type", device):
                     parallel_dims.build_mesh()
-                parallel.parallelize(parallel_dims)
+                parallel._parallelize(parallel_dims)
 
                 torch.manual_seed(1)
                 x_full = torch.randn(num_tokens, dim, device=device, requires_grad=True)

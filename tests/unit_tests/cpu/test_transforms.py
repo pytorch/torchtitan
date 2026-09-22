@@ -31,9 +31,9 @@ from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttentio
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
-    PartialBiasLinear,
     RowParallelLinear,
 )
+from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 
 
 def _llama3_cp_ready():
@@ -331,6 +331,23 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         self.assertIs(type(attention.o_gate), Linear.Config)
         self.assertIsInstance(attention.wo, AsyncRowParallelLinear.Config)
 
+    def test_gpt_oss_biased_output_projection_uses_async_row_parallel(self):
+        from torchtitan.models.gpt_oss import model_registry
+
+        model = model_registry("debugmodel", seq_len=128, attn_backend="flex")
+        self.assertIs(type(model.layers[0].attention.wo), RowParallelLinear.Config)
+        self.assertTrue(model.layers[0].attention.wo.bias)
+
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(model)
+
+        self.assertIs(
+            type(transformed.layers[0].attention.wo),
+            AsyncRowParallelLinear.Config,
+        )
+        self.assertTrue(transformed.layers[0].attention.wo.bias)
+
     def test_async_transform_rejects_converted_projection(self):
         config = copy.deepcopy(self._model_config().layers[0].feed_forward)
         config.w13 = _ConvertedLinear.Config(
@@ -345,8 +362,8 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
                 config
             )
 
-    def test_async_transform_skips_partial_bias_linear(self):
-        config = PartialBiasLinear.Config(
+    def test_async_transform_skips_invariant_row_parallel_linear(self):
+        config = InvariantRowParallelLinear.Config(
             in_features=4,
             out_features=4,
             bias=True,
@@ -356,7 +373,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
             enable_sequence_parallel=True
         ).transform(config)
 
-        self.assertIs(type(transformed), PartialBiasLinear.Config)
+        self.assertIs(type(transformed), InvariantRowParallelLinear.Config)
 
     def test_async_transform_conflicts_with_lora(self):
         config = self._model_config()

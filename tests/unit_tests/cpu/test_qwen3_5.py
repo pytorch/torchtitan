@@ -60,17 +60,34 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
 
 
 def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
-    from torchtitan.models.common.linear import Linear, PartialBiasLinear
+    import spmd_types as spmd
+
+    from torchtitan.distributed.parallel_dims import MeshAxisName
+    from torchtitan.models.common.linear import Linear
+    from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+    from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
     config = cast(Qwen35Model.Config, model_registry("debugmodel"))
     vision_encoder = config.vision_encoder
     assert vision_encoder is not None
 
     assert type(vision_encoder.block.mlp.fc1) is Linear.Config
-    assert type(vision_encoder.block.mlp.fc2) is PartialBiasLinear.Config
-    assert type(vision_encoder.block.attn.proj) is PartialBiasLinear.Config
+    assert type(vision_encoder.block.mlp.fc2) is InvariantRowParallelLinear.Config
+    assert type(vision_encoder.block.attn.proj) is InvariantRowParallelLinear.Config
     assert type(vision_encoder.merger.fc1) is Linear.Config
-    assert type(vision_encoder.merger.fc2) is PartialBiasLinear.Config
+    assert type(vision_encoder.merger.fc2) is InvariantRowParallelLinear.Config
+
+    set_qwen35_sharding_config(config, enable_sp=True, enable_ep=False)
+    for projection in (
+        vision_encoder.block.mlp.fc2,
+        vision_encoder.block.attn.proj,
+        vision_encoder.merger.fc2,
+    ):
+        sharding = projection.sharding_config
+        assert sharding is not None
+        assert sharding.out_dst_shardings is None
+        assert sharding.out_src_shardings is not None
+        assert sharding.out_src_shardings.local_type[MeshAxisName.TP] == spmd.I
 
 
 @pytest.mark.parametrize("enable_sp", [False, True])

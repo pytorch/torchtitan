@@ -100,23 +100,26 @@ class Attention(BaseAttention):
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
+    def _gather_tp_input(self, x: torch.Tensor) -> torch.Tensor:
+        """Gather the shared MLA input before its projection branches."""
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x
+        return spmd.redistribute(
+            x,
+            tp_group,
+            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            dst=spmd.R,
+            backward_options={"op_dtype": x.dtype},
+        )
+
     def forward(
         self,
         x: torch.Tensor,
         attention_masks: AttentionMasksType,
         positions: torch.Tensor | None = None,
     ):
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # MLA has several branches that consume x. Gather once at the
-            # attention boundary instead of once per projection.
-            x = spmd.redistribute(
-                x,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x.dtype},
-            )
+        x = self._gather_tp_input(x)
 
         num_tokens = x.shape[0]
 

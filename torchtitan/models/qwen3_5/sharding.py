@@ -47,7 +47,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     set_vision_transformer_block_sharding_config,
     vision_colwise_config,
     vision_invariant_linear_config,
-    vision_partial_bias_rowwise_config,
+    vision_rowwise_config,
 )
 from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
 from torchtitan.protocols.sharding import ShardingConfig
@@ -280,7 +280,7 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     merger = ve_cfg.merger
     merger.norm.sharding_config = invariant_norm_config()
     merger.fc1.sharding_config = vision_colwise_config()
-    merger.fc2.sharding_config = vision_partial_bias_rowwise_config()
+    merger.fc2.sharding_config = vision_rowwise_config()
 
 
 def _set_full_attention_sharding(

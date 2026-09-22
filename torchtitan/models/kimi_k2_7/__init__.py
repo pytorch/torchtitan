@@ -17,7 +17,6 @@ from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
-    PartialBiasLinear,
     RMSNorm,
     Sigmoid,
     Softmax,
@@ -26,6 +25,7 @@ from torchtitan.models.common import (
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -101,10 +101,10 @@ def _vl_linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _partial_bias_linear(
+def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> PartialBiasLinear.Config:
-    return PartialBiasLinear.Config(
+) -> InvariantRowParallelLinear.Config:
+    return InvariantRowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -146,11 +146,11 @@ def _vision_encoder_config(
             wq=_vl_linear(dim, dim),
             wk=_vl_linear(dim, dim),
             wv=_vl_linear(dim, dim),
-            proj=_partial_bias_linear(dim, dim),
+            proj=_vision_row_parallel_linear(dim, dim),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(dim, ffn_dim),
-            fc2=_partial_bias_linear(ffn_dim, dim),
+            fc2=_vision_row_parallel_linear(ffn_dim, dim),
         ),
     )
 
@@ -176,7 +176,7 @@ def _vision_encoder_config(
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
             linear_1=_vl_linear(merged_dim, merged_dim),
-            linear_2=_partial_bias_linear(merged_dim, text_hidden_size),
+            linear_2=_vision_row_parallel_linear(merged_dim, text_hidden_size),
         ),
     )
 

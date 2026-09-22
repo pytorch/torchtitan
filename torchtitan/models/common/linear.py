@@ -184,7 +184,8 @@ class RowParallelLinear(Linear):
     This is a ``Linear`` rather than a wrapper around one, so its parameter
     FQNs remain unchanged. ``Partial -> Shard(0)`` is a reduce-scatter, while
     ``Partial -> Invariant`` is an all-reduce without it. Dense SP state selects
-    between the two.
+    between the two. An invariant bias is converted to a partial contribution
+    before local compute so the reduction adds it exactly once.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -192,8 +193,28 @@ class RowParallelLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output = super().forward(input)
         tp_group = spmd_mesh_group(MeshAxisName.TP)
+        weight, bias = self._flatten_weight_and_bias()
+        if bias is not None and tp_group is not None:
+            bias = spmd.convert(
+                bias,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.P,
+                expert_mode=True,
+            )
+            # The selected local compute may be native, LoRA, or quantized.
+            # Its row-sharded operands and bias jointly produce a partial output.
+            with spmd.no_typecheck():
+                output = self._unflatten_output(self._linear(input, weight, bias))
+            if spmd.is_type_checking():
+                spmd.assert_local_type_like(
+                    output,
+                    input,
+                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
+                )
+        else:
+            output = self._unflatten_output(self._linear(input, weight, bias))
         if tp_group is None:
             return output
 
@@ -282,36 +303,10 @@ class RouterGateLinear(Linear):
         return output_TE
 
 
-class PartialBiasLinear(Linear):
-    """Linear whose invariant bias joins a TP-partial output."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        def __post_init__(self) -> None:
-            if not self.bias:
-                raise ValueError("PartialBiasLinear requires bias=True")
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight, bias = self._flatten_weight_and_bias()
-        assert bias is not None
-        tp_group = spmd_mesh_group("tp")
-        if tp_group is not None:
-            bias = spmd.convert(
-                bias,
-                tp_group,
-                src=spmd.I,
-                dst=spmd.P,
-                expert_mode=True,
-            )
-        output = self._linear(input, weight, bias)
-        return self._unflatten_output(output)
-
-
 __all__ = [
     "CastLinear",
     "ColumnParallelLinear",
     "Linear",
-    "PartialBiasLinear",
     "RowParallelLinear",
     "RouterGateLinear",
 ]

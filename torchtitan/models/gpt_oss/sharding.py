@@ -14,6 +14,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_gqa_inner_attention_local_spmd,
 )
@@ -27,20 +28,6 @@ from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
-
-
-def partial_bias_config() -> ShardingConfig:
-    input_layout = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.I),
-        },
-        in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        local_spmd=True,
-    )
 
 
 def set_gpt_oss_sharding_config(
@@ -99,7 +86,7 @@ def _set_gpt_oss_layer_sharding(
     attention.qkv_linear.wqkv.sharding_config = colwise_config(
         input_layout=attn_x_layout
     )
-    attention.wo.sharding_config = partial_bias_config()
+    attention.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
     set_gqa_inner_attention_local_spmd(attention.inner_attention)
 

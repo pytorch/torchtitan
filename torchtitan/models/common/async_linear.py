@@ -179,13 +179,13 @@ class AsyncLinearReduceScatter(torch.autograd.Function):
         bias: torch.Tensor | None,
         group: dist.ProcessGroup,
     ) -> None:
-        """SPMD type: x S(1)@TP, w S(1)@TP, bias R@TP -> y S(0)@TP."""
+        """SPMD type: x S(1)@TP, w S(1)@TP, bias I@TP -> y S(0)@TP."""
         spmd.assert_type(x_shard_k, {group: spmd.S(1)})
         # Torch stores weight as [N, K], so row-parallel input-feature sharding
         # is dimension 1 of the stored weight.
         spmd.assert_type(w_shard_k, {group: spmd.S(1)})
         if bias is not None:
-            spmd.assert_type(bias, {group: spmd.R})
+            spmd.assert_type(bias, {group: spmd.I})
         spmd.assert_local_type_like(
             result,
             x_shard_k,

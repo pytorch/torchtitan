@@ -22,6 +22,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    RowParallelLinear,
     Softmax,
     TransformerBlock,
 )
@@ -30,7 +31,6 @@ from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
 )
-from torchtitan.models.common.linear import PartialBiasLinear
 from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from .model import Attention, GptOssModel, GptOssTransformerBlock
@@ -110,7 +110,7 @@ def _make_gptoss_attn_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=PartialBiasLinear.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             bias=True,

@@ -18,7 +18,6 @@ from torchtitan.models.common import (  # noqa: F401
     Conv1d,
     Embedding,
     Linear,
-    PartialBiasLinear,
     RowParallelLinear,
     Softmax,
 )
@@ -33,6 +32,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
 from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -109,10 +109,10 @@ def _linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _partial_bias_linear(
+def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> PartialBiasLinear.Config:
-    return PartialBiasLinear.Config(
+) -> InvariantRowParallelLinear.Config:
+    return InvariantRowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -186,11 +186,11 @@ def _qwen35_vision_encoder_config(
                 wq=_linear(dim, dim),
                 wk=_linear(dim, dim),
                 wv=_linear(dim, dim),
-                proj=_partial_bias_linear(dim, dim),
+                proj=_vision_row_parallel_linear(dim, dim),
             ),
             mlp=VisionMLP.Config(
                 fc1=_linear(dim, ffn_dim),
-                fc2=_partial_bias_linear(ffn_dim, dim),
+                fc2=_vision_row_parallel_linear(ffn_dim, dim),
             ),
         ),
         rotary_pos_emb=VisionRotaryEmbedding.Config(
@@ -201,7 +201,7 @@ def _qwen35_vision_encoder_config(
             merged_hidden_size=merged_hidden_size,
             norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
             fc1=_linear(merged_hidden_size, merged_hidden_size),
-            fc2=_partial_bias_linear(merged_hidden_size, out_hidden_size),
+            fc2=_vision_row_parallel_linear(merged_hidden_size, out_hidden_size),
         ),
         param_init=_POS_EMBED_INIT,
     )

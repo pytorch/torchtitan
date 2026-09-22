@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field, fields
 from functools import partial
 from importlib.util import find_spec
-from typing import Any, cast, Literal
+from typing import Literal
 
 import torch
 import torch._inductor.config
@@ -19,10 +19,10 @@ from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
-    PartialBiasLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.quantization.float8 import (
     _float8_experts_import_error,
     _get_float8_grouped_experts_cls,
@@ -47,11 +47,14 @@ _QUANTIZABLE_LINEAR_CLASSES = (
     Linear,
     ColumnParallelLinear,
     RowParallelLinear,
-    PartialBiasLinear,
+    InvariantRowParallelLinear,
 )
 
 
-def _validate_quantizable_linear(config: Linear.Config, fqn: str) -> None:
+def _validate_quantizable_linear(
+    config: Linear.Config,
+    fqn: str,
+) -> type[Linear]:
     owner = config._owner
     assert owner is not None
     if owner not in _QUANTIZABLE_LINEAR_CLASSES:
@@ -60,17 +63,8 @@ def _validate_quantizable_linear(config: Linear.Config, fqn: str) -> None:
             f"Quantization does not support {owner.__qualname__} at {fqn!r}; "
             f"supported Linear classes are {supported}."
         )
-
-
-def _get_quantized_linear_config_cls(
-    config: Linear.Config,
-    quantized_cls: type[Linear],
-) -> type[Any]:
-    """Return the config for quantized compute composed with a Linear class."""
-    parent_cls = config._owner
-    assert parent_cls is not None
-    linear_cls = get_quantized_linear(quantized_cls, cast(type[Linear], parent_cls))
-    return cast(type[Any], linear_cls.Config)
+    assert issubclass(owner, Linear)
+    return owner
 
 
 class QuantizationConverter(ModelConfigConverter):
@@ -175,11 +169,10 @@ class Float8LinearConverter(QuantizationConverter):
         assert Float8Linear is not None
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
             if self.filter_fn(linear_config, fqn):
-                _validate_quantizable_linear(linear_config, fqn)
-                config_cls = _get_quantized_linear_config_cls(
-                    linear_config,
+                config_cls = get_quantized_linear(
                     Float8Linear,
-                )
+                    _validate_quantizable_linear(linear_config, fqn),
+                ).Config
                 new_config = config_cls(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,
@@ -349,8 +342,7 @@ class MXFP8LinearConverter(QuantizationConverter):
         ]
 
         block_size = MXFP8Linear.WEIGHT_BLOCK_SIZE
-        for fqn, config, parent, _attr in targets:
-            _validate_quantizable_linear(config, fqn)
+        for fqn, _config, parent, _attr in targets:
             if isinstance(parent, QKVLinear.Config) and parent.head_dim % block_size:
                 raise ValueError(
                     "MXFP8 quantization of fused QKV requires head_dim divisible "
@@ -376,10 +368,10 @@ class MXFP8LinearConverter(QuantizationConverter):
             fqn for fqn in target_fqns if any(selector in fqn for selector in selectors)
         }
         for fqn, config, parent, attr in targets:
-            config_cls = _get_quantized_linear_config_cls(
-                config,
+            config_cls = get_quantized_linear(
                 MXFP8Linear,
-            )
+                _validate_quantizable_linear(config, fqn),
+            ).Config
             new_config = config_cls(
                 in_features=config.in_features,
                 out_features=config.out_features,
@@ -505,11 +497,10 @@ class NVFP4LinearConverter(QuantizationConverter):
         fqns = self.config.fqns
         for fqn, config, parent, attr in model_config.traverse(Linear.Config):
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                _validate_quantizable_linear(config, fqn)
-                config_cls = _get_quantized_linear_config_cls(
-                    config,
+                config_cls = get_quantized_linear(
                     NVFP4Linear,
-                )
+                    _validate_quantizable_linear(config, fqn),
+                ).Config
                 new_config = config_cls(
                     in_features=config.in_features,
                     out_features=config.out_features,

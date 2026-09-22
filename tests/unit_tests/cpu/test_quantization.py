@@ -11,7 +11,6 @@ import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint as dcp
 import torchtitan.config.transform.quantization as quantization_transform
-import torchtitan.models.common.linear as linear_module
 from spmd_types import SpmdType
 
 from torchtitan.components.data import (
@@ -39,11 +38,11 @@ from torchtitan.models.common.linear import (
     CastLinear,
     ColumnParallelLinear,
     Linear,
-    PartialBiasLinear,
     RouterGateLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
 from torchtitan.quantization import Float8Linear, MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls
@@ -91,32 +90,17 @@ def _router_config_for_quantization(dim: int):
     )
 
 
-def test_quantization_preserves_partial_bias_linear(monkeypatch):
-    config = PartialBiasLinear.Config(
-        in_features=16,
-        out_features=16,
-        bias=True,
-    )
-
-    config_cls = quantization_transform._get_quantized_linear_config_cls(
-        config, _ScaledLinear
-    )
+def test_quantization_preserves_invariant_row_parallel_linear():
+    config_cls = get_quantized_linear(_ScaledLinear, InvariantRowParallelLinear).Config
     converted = config_cls(in_features=16, out_features=16, bias=True, scale=3.0)
 
     assert converted._owner is not None
-    assert issubclass(converted._owner, PartialBiasLinear)
+    assert issubclass(converted._owner, InvariantRowParallelLinear)
     assert issubclass(converted._owner, _ScaledLinear)
 
     linear = converted.build()
-    converted_bias = linear.bias + 1
-    monkeypatch.setattr(linear_module, "spmd_mesh_group", lambda _axis: object())
-    monkeypatch.setattr(
-        linear_module.spmd,
-        "convert",
-        lambda bias, *_args, **_kwargs: converted_bias,
-    )
     input = torch.randn(2, 16)
-    expected = 3.0 * torch.nn.functional.linear(input, linear.weight, converted_bias)
+    expected = 3.0 * torch.nn.functional.linear(input, linear.weight, linear.bias)
     torch.testing.assert_close(linear(input), expected)
 
 

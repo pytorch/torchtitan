@@ -178,7 +178,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         attn_cfg = llama3_debugmodel_dist_gemm(seq_len=2048).model.layers[0].attention
         set_gqa_attention_sharding(attn_cfg, enable_sp=True)
         attn = attn_cfg.build().to(self.device_type)
-        attn.parallelize(parallel_dims)
+        attn._parallelize(parallel_dims)
 
         self.assertIsNone(attn._sharding_config.in_dst_shardings)
         self.assertIsNone(attn._sharding_config.out_dst_shardings)
@@ -206,7 +206,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             enable_sp=True,
         )
         feed_forward = ffn_config.build().to(self.device_type)
-        feed_forward.parallelize(self._parallel_dims())
+        feed_forward._parallelize(self._parallel_dims())
 
         self.assertEqual(
             feed_forward.w13.weight.shape,
@@ -240,7 +240,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         )
         feed_forward = ffn_config.build().to(self.device_type)
         parallel_dims = self._parallel_dims()
-        feed_forward.parallelize(parallel_dims)
+        feed_forward._parallelize(parallel_dims)
 
         x_local = torch.randn(8, DIM, device=self.device_type, requires_grad=True)
         mesh = parallel_dims.spmd_dense_mesh()
@@ -283,7 +283,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         attention.inner_attention = _AttentionOutput()
 
         parallel_dims = self._parallel_dims()
-        attention.parallelize(parallel_dims)
+        attention._parallelize(parallel_dims)
 
         x_local = torch.randn(8, config.dim, device=self.device_type)
         mesh = parallel_dims.spmd_dense_mesh()
@@ -355,7 +355,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
         )
         with patch("torchtitan.distributed.parallel_dims.device_type", device):
             parallel_dims.build_mesh()
-        async_qkv.parallelize(parallel_dims)
+        async_qkv._parallelize(parallel_dims)
 
         x_TD = torch.randn(
             num_tokens,
@@ -467,7 +467,7 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
         )
         with patch("torchtitan.distributed.parallel_dims.device_type", dev):
             parallel_dims.build_mesh()
-        dist_gemm.parallelize(parallel_dims)
+        dist_gemm._parallelize(parallel_dims)
 
         mesh = parallel_dims.spmd_dense_mesh()
         x_shard = x.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()

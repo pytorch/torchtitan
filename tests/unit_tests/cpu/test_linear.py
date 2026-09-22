@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchtitan.models.common.linear as linear_module
+import torchtitan.models.common.vision_encoder as vision_encoder_module
+from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -24,9 +26,9 @@ from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
-    PartialBiasLinear,
     RowParallelLinear,
 )
+from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.protocols.module import Module
 
 
@@ -145,29 +147,6 @@ class TestLinear(unittest.TestCase):
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
 
 
-class TestPartialBiasLinear(unittest.TestCase):
-    def test_requires_bias(self):
-        with self.assertRaisesRegex(ValueError, "requires bias=True"):
-            PartialBiasLinear.Config(
-                in_features=4,
-                out_features=2,
-                bias=False,
-            ).build()
-
-    def test_unparallelized_forward(self):
-        linear = PartialBiasLinear.Config(
-            in_features=4,
-            out_features=2,
-            bias=True,
-        ).build()
-        input = torch.randn(3, 4)
-
-        expected = nn.functional.linear(input, linear.weight, linear.bias)
-        actual = linear(input)
-
-        torch.testing.assert_close(actual, expected)
-
-
 class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
     def test_collective_types_follow_dense_sp_state(self):
         input = torch.randn(3, 4)
@@ -185,6 +164,7 @@ class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
                 row = RowParallelLinear.Config(
                     in_features=4,
                     out_features=2,
+                    bias=True,
                 ).build()
 
                 with (
@@ -200,6 +180,11 @@ class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
                     ),
                     patch.object(
                         linear_module.spmd,
+                        "convert",
+                        side_effect=lambda tensor, *_args, **_kwargs: tensor,
+                    ) as convert,
+                    patch.object(
+                        linear_module.spmd,
                         "redistribute",
                         side_effect=lambda tensor, *_args, **_kwargs: tensor,
                     ) as redistribute,
@@ -209,11 +194,46 @@ class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
                     assert redistribute.call_args.kwargs["dst"] == spmd.R
 
                     row(input)
+                    assert convert.call_args.kwargs["src"] == spmd.I
+                    assert convert.call_args.kwargs["dst"] == spmd.P
                     assert redistribute.call_args.kwargs["src"] == spmd.P
                     assert redistribute.call_args.kwargs["dst"] == expected_type
 
+    def test_vision_row_parallel_output_is_always_invariant(self):
+        input = torch.randn(3, 4)
+        tp_group = object()
+        linear = InvariantRowParallelLinear.Config(
+            in_features=4,
+            out_features=2,
+            bias=True,
+        ).build()
 
-class TestPartialBiasLinearDistributed(DTensorTestBase):
+        with (
+            patch.object(
+                vision_encoder_module,
+                "spmd_mesh_group",
+                return_value=tp_group,
+            ),
+            patch.object(
+                linear_module.spmd,
+                "convert",
+                side_effect=lambda tensor, *_args, **_kwargs: tensor,
+            ) as convert,
+            patch.object(
+                vision_encoder_module.spmd,
+                "redistribute",
+                side_effect=lambda tensor, *_args, **_kwargs: tensor,
+            ) as redistribute,
+        ):
+            linear(input)
+
+        assert convert.call_args.kwargs["src"] == spmd.I
+        assert convert.call_args.kwargs["dst"] == spmd.P
+        assert redistribute.call_args.kwargs["src"] == spmd.P
+        assert redistribute.call_args.kwargs["dst"] == spmd.I
+
+
+class TestBiasedRowParallelLinearDistributed(DTensorTestBase):
     @property
     def world_size(self):
         return 2
@@ -237,32 +257,32 @@ class TestPartialBiasLinearDistributed(DTensorTestBase):
         input_dtensor = distribute_tensor(input, mesh, (Shard(1),))
         weight_dtensor = distribute_tensor(weight, mesh, (Shard(1),))
         local_input = input_dtensor.to_local().detach().requires_grad_()
-        linear = (
-            PartialBiasLinear.Config(
-                in_features=4,
-                out_features=2,
-                bias=True,
-            )
-            .build()
-            .to(self.device_type)
-        )
-        linear.weight = nn.Parameter(weight_dtensor.to_local())
-        linear.bias = nn.Parameter(bias.detach().clone())
-        with set_current_spmd_mesh(mesh):
-            linear._parameters["bias"] = spmd.assert_type(
-                linear.bias, {tp_group: spmd.I}
-            )
-            local_partial = linear(local_input)
-            actual = spmd.redistribute(
-                local_partial,
-                tp_group,
-                src=spmd.P,
-                dst=spmd.I,
-            )
-            actual.sum().backward()
+        for linear_cls in (RowParallelLinear, InvariantRowParallelLinear):
+            with self.subTest(linear_cls=linear_cls.__name__):
+                linear = (
+                    linear_cls.Config(
+                        in_features=4,
+                        out_features=2,
+                        bias=True,
+                    )
+                    .build()
+                    .to(self.device_type)
+                )
+                linear.weight = nn.Parameter(weight_dtensor.to_local())
+                linear.bias = nn.Parameter(bias.detach().clone())
+                with set_current_spmd_mesh(mesh), typecheck(local=False):
+                    linear._parameters["weight"] = spmd.assert_type(
+                        linear.weight, {tp_group: spmd.S(1)}
+                    )
+                    linear._parameters["bias"] = spmd.assert_type(
+                        linear.bias, {tp_group: spmd.I}
+                    )
+                    typed_input = spmd.assert_type(local_input, {tp_group: spmd.S(1)})
+                    actual = linear(typed_input)
+                    actual.sum().backward()
 
-        torch.testing.assert_close(actual, expected)
-        torch.testing.assert_close(linear.bias.grad, expected_bias.grad)
+                torch.testing.assert_close(actual, expected)
+                torch.testing.assert_close(linear.bias.grad, expected_bias.grad)
 
 
 if __name__ == "__main__":

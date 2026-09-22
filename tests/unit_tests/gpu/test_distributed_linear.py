@@ -17,12 +17,16 @@ tensors below, which localizes the bug immediately.
 
 import unittest
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from spmd_types.checker import typecheck
+from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 
 from torchtitan.models.common.async_linear import (
     AsyncAllGatherLinear,
@@ -163,7 +167,7 @@ class TestDistLinearPrimitives(DTensorTestBase):
 
     @with_comms
     def test_bias_is_applied_once(self):
-        """A replicated bias must land once, not once per rank.
+        """An invariant bias must land once, not once per rank.
 
         Compared against a reference that includes the bias, rather than by
         differencing the with/without outputs: |y| is much larger than |b| here,
@@ -171,24 +175,34 @@ class TestDistLinearPrimitives(DTensorTestBase):
         """
         W = self.world_size
         M, N, K = 8 * W, 64, 32
-        group = torch.distributed.group.WORLD
         dev = self.device_type
+        mesh = init_device_mesh(dev, (W,), mesh_dim_names=("tp",))
+        group = mesh.get_group("tp")
         torch.manual_seed(1)
         x = torch.randn(M, K, device=dev, dtype=torch.bfloat16)
         w = torch.randn(N, K, device=dev, dtype=torch.bfloat16)
-        b = torch.randn(N, device=dev, dtype=torch.bfloat16)
+        b = torch.randn(N, device=dev, dtype=torch.bfloat16, requires_grad=True)
+        ref_bias = b.detach().clone().requires_grad_()
 
         xs = x.chunk(W, 1)[self.rank].contiguous()
         ws = w.chunk(W, 1)[self.rank].contiguous()
-        y = AsyncLinearReduceScatter.apply(xs, ws, b, group, group.group_name)
+        with set_current_spmd_mesh(mesh), typecheck(local=False):
+            spmd.assert_type(xs, {group: spmd.S(1)})
+            spmd.assert_type(ws, {group: spmd.S(1)})
+            spmd.assert_type(b, {group: spmd.I})
+            y = AsyncLinearReduceScatter.apply(xs, ws, b, group, group.group_name)
+            y.sum().backward()
 
-        ref = F.linear(x, w, b).chunk(W, 0)[self.rank]
+        ref_full = F.linear(x, w, ref_bias)
+        ref_full.sum().backward()
+        ref = ref_full.chunk(W, 0)[self.rank]
         torch.testing.assert_close(y, ref, atol=self.TOL, rtol=self.TOL)
+        self.assertEqual(b.grad, ref_bias.grad, atol=0, rtol=0)
 
         # A bias applied W times instead of once would be off by (W-1)*b, which
         # is far outside the tolerance above -- confirm that is really true, so
         # the assertion above cannot pass vacuously.
-        double = F.linear(x, w, b * W).chunk(W, 0)[self.rank]
+        double = F.linear(x, w, b.detach() * W).chunk(W, 0)[self.rank]
         self.assertGreater((double - ref).abs().max().item(), 10 * self.TOL)
 
 
