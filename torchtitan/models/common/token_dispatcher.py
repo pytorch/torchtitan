@@ -6,7 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import spmd_types as spmd
 import torch
@@ -34,6 +34,18 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
     permuted_indices: torch.Tensor  # for _unpermute
     input_splits: list[int]
     output_splits: list[int]
+
+
+class _AllToAllRematDispatchOutput(NamedTuple):
+    """Tensor-only AllToAll dispatch output that can cross a remat region."""
+
+    routed_input_RD: torch.Tensor  # noqa: N815
+    num_tokens_per_local_expert_e: torch.Tensor
+    token_indices_experts_sorted_N: torch.Tensor  # noqa: N815
+    topk_scores_experts_sorted_N: torch.Tensor  # noqa: N815
+    permuted_indices_R: torch.Tensor  # noqa: N815
+    input_splits_EP: torch.Tensor  # noqa: N815
+    output_splits_EP: torch.Tensor  # noqa: N815
 
 
 class LocalTokenDispatcher(Configurable):
@@ -463,6 +475,50 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             output_splits=output_splits_list,
         )
         return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
+
+    def _dispatch_for_remat(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> _AllToAllRematDispatchOutput:
+        """Return the distributed dispatch result as one flat tensor tuple."""
+        routed_input_RD, num_tokens_per_local_expert_e, metadata = self.dispatch(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+        assert isinstance(metadata, AllToAllDispatchMetadata)
+        return _AllToAllRematDispatchOutput(
+            routed_input_RD=routed_input_RD,
+            num_tokens_per_local_expert_e=num_tokens_per_local_expert_e,
+            token_indices_experts_sorted_N=metadata.token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N=metadata.topk_scores_experts_sorted_N,
+            permuted_indices_R=metadata.permuted_indices,
+            input_splits_EP=torch.tensor(metadata.input_splits, dtype=torch.int64),
+            output_splits_EP=torch.tensor(metadata.output_splits, dtype=torch.int64),
+        )
+
+    def _combine_for_remat(
+        self,
+        routed_output_RD: torch.Tensor,
+        dispatch_output: _AllToAllRematDispatchOutput,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Combine using metadata reconstructed from tensor region outputs."""
+        metadata = AllToAllDispatchMetadata(
+            token_indices_experts_sorted_N=(
+                dispatch_output.token_indices_experts_sorted_N
+            ),
+            topk_scores_experts_sorted_N=(dispatch_output.topk_scores_experts_sorted_N),
+            input_shape=dispatch_output.routed_input_RD.shape,
+            permuted_indices=dispatch_output.permuted_indices_R,
+            input_splits=dispatch_output.input_splits_EP.tolist(),
+            output_splits=dispatch_output.output_splits_EP.tolist(),
+        )
+        return self.combine(routed_output_RD, metadata, x_TD)
 
     def _permute(
         self,
