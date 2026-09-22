@@ -22,8 +22,7 @@ def force_logprobs_fn_for_batch_invariance() -> None:
 
     Swapping the kernel routes the generator and the trainer through
     the same set of ops, so logprobs match bit-for-bit. The wrapper supplies
-    full logits to vLLM outside the trainer's TP SPMD context, so the replicated
-    path is selected directly even though this patch omits ``global_vocab_size``.
+    full logits to vLLM, so the wrapper explicitly selects the replicated path.
     """
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
@@ -54,7 +53,12 @@ def force_logprobs_fn_for_batch_invariance() -> None:
         # position; it is not a cross-column/cross-position dependency.
         token_ids = token_ids.to(torch.int64)
         per_column = [
-            compute_logprobs(logits, token_ids[:, k]) for k in range(token_ids.shape[1])
+            compute_logprobs(
+                logits,
+                token_ids[:, k],
+                vocab_parallel_group=None,
+            )
+            for k in range(token_ids.shape[1])
         ]
         return torch.stack(per_column, dim=-1)  # [N, K]
 

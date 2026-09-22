@@ -12,8 +12,13 @@ from unittest import mock
 import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, DTensor, Shard
+from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+    subtest,
+)
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -241,6 +246,125 @@ class TestDistMuon(DTensorTestBase):
             second_redistributed_grad,
             second_local_blocks_grad,
         )
+
+
+@instantiate_parametrized_tests
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistMuonNativeMatrixBatch(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @parametrize(
+        "storage_placement,compute_sharding",
+        [
+            subtest((Shard(1), Owned()), name="rows_to_owned"),
+            subtest((Shard(1), Shard(0)), name="rows_to_matrix_shards"),
+            subtest((Shard(2), Shard(0)), name="columns_to_matrix_shards"),
+            subtest((Replicate(), Shard(0)), name="replicated_to_matrix_shards"),
+        ],
+    )
+    @with_comms
+    def test_gate_up_matches_independent_matrix_updates(
+        self, storage_placement, compute_sharding
+    ):
+        lr = 0.03
+        weight_decay = 0.2
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("dp_shard",),
+        )
+        device = torch.device(self.device_type, self.rank)
+        value = torch.arange(70, device=device).reshape(2, 7, 5).float().div_(17)
+        storage_placements = (storage_placement,)
+        parameter = torch.nn.Parameter(
+            distribute_tensor(value.clone(), mesh, storage_placements)
+        )
+        fqn = "layers.0.feed_forward.w13.weight"
+        optimizer = build_dist_muon(
+            [{"params": [parameter], "param_names": [fqn]}],
+            compute_sharding_by_fqn={
+                fqn: ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": compute_sharding},
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=(fqn,))],
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+            adjust_lr_fn="match_rms_adamw",
+        )
+        reference_parameters = [torch.nn.Parameter(matrix.clone()) for matrix in value]
+        reference_optimizer = torch.optim.Muon(
+            reference_parameters,
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.8,
+            nesterov=True,
+            ns_steps=2,
+            adjust_lr_fn="match_rms_adamw",
+        )
+        adjusted_lr = lr * 0.2 * max(value.shape[-2:]) ** 0.5
+        for step in range(3):
+            gradient = value.mul(step + 0.7).add_(0.2).sin_()
+            gradient[1].mul_(7)
+            local_gradient = distribute_tensor(
+                gradient.clone(), mesh, storage_placements
+            ).to_local()
+            optimizer.zero_grad()
+            (parameter.to_local() * local_gradient).sum().backward()
+            if storage_placement == Shard(2) and self.rank == self.world_size - 1:
+                # The padded empty column shard and autograd disagree on strides.
+                self.assertEqual(parameter.to_local().numel(), 0)
+                self.assertNotEqual(
+                    parameter.to_local().stride(), parameter.grad.to_local().stride()
+                )
+            before = parameter.to_local().clone()
+            reference_before = torch.stack(
+                [reference.detach().clone() for reference in reference_parameters]
+            )
+            for reference, reference_grad in zip(
+                reference_parameters, gradient, strict=True
+            ):
+                reference.grad = reference_grad.clone()
+
+            with mock.patch.object(
+                optimizer, "_compute_update", wraps=optimizer._compute_update
+            ) as compute_update:
+                optimizer.step()
+            if compute_sharding == Shard(0):
+                self.assertEqual(compute_update.call_count, int(self.rank < 2))
+                if self.rank < 2:
+                    self.assertEqual(compute_update.call_args.args[1].shape, (1, 7, 5))
+            reference_optimizer.step()
+
+            expected = torch.stack(
+                [reference.detach() for reference in reference_parameters]
+            )
+            actual_update = (
+                before * (1 - lr * weight_decay) - parameter.to_local()
+            ) / adjusted_lr
+            expected_update = (
+                reference_before * (1 - lr * weight_decay) - expected
+            ) / adjusted_lr
+            expected_local_update = distribute_tensor(
+                expected_update, mesh, storage_placements
+            ).to_local()
+            # Batched BF16 Newton-Schulz can differ across GEMM schedules.
+            torch.testing.assert_close(
+                actual_update,
+                expected_local_update,
+                rtol=0,
+                atol=2e-2,
+            )
+            self.assertEqual(parameter.placements, storage_placements)
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")

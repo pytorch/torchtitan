@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 """
-This script is adapted from torchtitan/models/llama3/model/state_dict_adapter.py.
+This script is adapted from torchtitan/models/llama3/state_dict_adapter.py.
 
 We can use this script to adapt the checkpoint from HF to the format that we can load into the torchtitan model and vice versa.
 This can enable us to do a parity test with the HF implementation and make sure that our results are
@@ -14,13 +16,15 @@ aligned with the HF implementation.
 """
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
-from .model import Qwen3Model
+
+if TYPE_CHECKING:
+    from .model import Qwen3Model
 
 
 class Qwen3StateDictAdapter(MoEStateDictAdapter):
@@ -58,6 +62,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's wegiht.
         """
+        state_dict = self._native_fused_linears_to_hf(state_dict)
 
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
@@ -203,4 +208,4 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     continue
                 state_dict[new_key] = value
 
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)

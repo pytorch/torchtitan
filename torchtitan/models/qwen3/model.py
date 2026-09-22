@@ -17,6 +17,7 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from .state_dict_adapter import Qwen3StateDictAdapter
 
 
 class Qwen3TransformerBlock(TransformerBlock):
@@ -68,6 +69,14 @@ class Qwen3TransformerBlock(TransformerBlock):
 
 
 class Qwen3Model(Decoder):
+    state_dict_adapter_cls = Qwen3StateDictAdapter
+
+    @classmethod
+    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+
     """
     Qwen3Model Module
 

@@ -28,27 +28,20 @@ The folder should be organized as follows
   - Define `set_<model>_sharding_config(config, *, enable_sp, ...)` that populates `sharding_config` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention local SPMD regions are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
   - Call the helper from `Model.Config.update_from_config()` so placements depend on the trainer's `parallelism` settings.
   - Reuse shared helpers from `torchtitan/models/common/decoder_sharding.py` (`set_decoder_sharding_config`, `set_dense_ffn_sharding`, `set_gqa_attention_sharding`, `norm_config`, `dense_param_placement`, `dense_activation_placement`) where possible.
-  - Declare the mesh axes in canonical outer-to-inner SPMD order: `(dp, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, efsdp, ep)` for sparse (MoE expert weights). `Module.parallelize` resolves the mesh from the declared axes.
-- `parallelize.py`
-  - apply training techniques in the following order
-    - `model.parallelize(parallel_dims)` — auto-recursive declarative sharding driven by `sharding_config` (TP, SP, attention `local_spmd`). Replaces per-model `parallelize_module` plan dicts.
-    - (MoE models) routed expert weights follow the sparse mesh axes declared in `sharding_config`; `apply_fsdp_to_decoder` takes `ep_degree` and `edp_mesh` to shard them over the expert FSDP mesh.
-    - activation checkpointing
-    - `torch.compile`
-    - FSDP /  HSDP
-    - NOTE: language-model CP goes through `Decoder.preprocess_inputs` -> `prepare_context_parallel_input`. Ideally no extra work is needed to enable CP.
+  - Declare the mesh axes in canonical outer-to-inner SPMD order: `(dp, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, efsdp, ep)` for sparse (MoE expert weights). `Module._parallelize` resolves the mesh from the declared axes.
+- `model.py`
+  - `BaseModel.parallelize()` applies declarative model parallelism, activation checkpointing, `torch.compile`, and FSDP/HSDP in order.
+  - Override `parallelize()` only when the model needs a different lifecycle order, and override `_apply_fsdp()` when it has a model-family-specific FSDP structure.
+  - Language-model CP goes through `Decoder.preprocess_inputs` -> `prepare_context_parallel_input`.
 - `pipeline.py` (optional if model size is small)
   - apply PP
 - `__init__.py`
   - A dictionary of the actual model configurations, of the type `[str: Model.Config]`.
-  - Define `model_registry(flavor)` to return a [`ModelSpec`](/torchtitan/protocols/model_spec.py), consisting of
-    - model name and flavor
-    - model config (a `Model.Config` dataclass)
-    - parallelizing function, pipelining function
-    - loss function builder
-    - state dict adapter
+  - Define `model_registry(flavor)` to return a concrete `Model.Config`.
+  - Bind the state dict adapter to the model class with `state_dict_adapter_cls`.
+  - Override the model's pipeline or optimizer hook methods only when it needs model-specific behavior.
   - Model name should be the same as the folder name, which should be added to `torchtitan/models/__init__.py` or ``torchtitan/experiments/__init__.py``.
-  - Read [more](/docs/extension.md#modelspec) on `ModelSpec`.
+  - Read [more](/docs/extension.md#models) about the model extension point.
 - `config_registry.py`
   - Define one function for each training configuration (e.g. `llama3_debugmodel`, `llama3_8b`, `llama3_70b`).
   - Each function returns a `Trainer.Config` (or subclass) instance with all training settings.

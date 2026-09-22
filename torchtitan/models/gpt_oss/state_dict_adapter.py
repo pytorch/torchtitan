@@ -4,15 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
-from .model import GptOssModel
+
+if TYPE_CHECKING:
+    from .model import GptOssModel
 
 
 class GptOssStateDictAdapter(MoEStateDictAdapter):
@@ -84,6 +88,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         Warning: Conversion does not support saving to mxfp4 quantization format.
                  One can save into unquantized hf checkpoints with last_save_in_hf = true.
         """
+        state_dict = self._native_fused_linears_to_hf(state_dict)
 
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
@@ -155,4 +160,4 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 else torch.zeros(moe_config.num_experts, dtype=torch.float32)
             )
 
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)
