@@ -167,7 +167,14 @@ def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:
             model_adapter,
             layouts,
             ParallelDims(
-                dp_replicate=1, dp_shard=1, cp=1, tp=2, pp=1, ep=1, world_size=2
+                dp_replicate=1,
+                dp_shard=1,
+                cp=1,
+                tp=2,
+                pp=1,
+                ep=1,
+                world_size=2,
+                enable_sequence_parallel=False,
             ),
         )
         restored = adapter.from_hf(model_adapter.to_hf(state_dict))
