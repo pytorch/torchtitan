@@ -278,7 +278,7 @@ def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
 
 
 def test_check_steps_incompatible_with_dp():
-    with pytest.raises(ValueError, match="validation.steps=-1"):
+    with pytest.raises(ValueError, match="hang on validation collectives"):
         check_steps_compatible_with_dp(-1, dp_world_size=2)
 
 

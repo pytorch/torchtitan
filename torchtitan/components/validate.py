@@ -77,8 +77,11 @@ class Validator(BaseValidator):
     class Config(BaseValidator.Config):
         steps: int = -1
         """
-        Number of validation steps. -1 consumes the finite dataset and therefore
-        requires an effective data-parallel degree of one.
+        Number of validation steps. -1 consumes the finite dataset once
+        (dataloader repeat=False). Ranks then stop independently, so this
+        requires data-parallel degree 1; otherwise validation collectives hang.
+        Use a positive count when DP > 1 so every rank runs the same number of
+        steps with repeat=True.
         """
 
         dataloader: BaseDataLoader.Config = field(
@@ -297,12 +300,20 @@ class Validator(BaseValidator):
 
 
 def check_steps_compatible_with_dp(steps: int, *, dp_world_size: int) -> None:
-    """Raise if validation.steps=-1 is used with data-parallel degree > 1."""
+    """Raise if validation.steps=-1 is used with data-parallel degree > 1.
+
+    steps=-1 sets the validation loader to repeat=False. Grain already rejects
+    that under DP (ranks can exhaust at different steps; see
+    TODO(data-finite-dp) in loader.py). The validation loop then all-reduces
+    token counts and loss on the DP mesh every step, so uneven exhaustion hangs.
+    """
     if steps == -1 and dp_world_size > 1:
         raise ValueError(
-            "validation.steps=-1 consumes the finite dataset and requires "
-            "an effective data-parallel degree of 1, got "
-            f"{dp_world_size}. Set validation.steps to a positive count "
+            "validation.steps=-1 runs one finite pass (dataloader "
+            "repeat=False). With data-parallel degree > 1, ranks can exhaust "
+            "at different steps and hang on validation collectives. Got "
+            f"dp_world_size={dp_world_size}. Set validation.steps to a "
+            "positive count so every rank runs the same number of steps, "
             "or run with data-parallel degree 1."
         )
 
