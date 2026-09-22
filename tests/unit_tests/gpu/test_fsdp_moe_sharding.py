@@ -246,6 +246,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=True,
         )
         parallel_dims.build_mesh()
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
@@ -295,6 +296,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
             pp=1,
             ep=2,
             world_size=self.world_size,
+            enable_sequence_parallel=True,
         )
         parallel_dims.build_mesh()
         config = model_registry("debugmodel").model

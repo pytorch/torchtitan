@@ -320,11 +320,11 @@ class VLLMModelWrapper(Module):
             pp=training_parallelism.pipeline_parallel_degree,
             ep=training_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
+            enable_sequence_parallel=training_parallelism.enable_sequence_parallel,
         )
         self.spmd_context = dist_utils.get_spmd_context(
             parallel_dims=self.parallel_dims,
             spmd_typechecking=False,
-            dense_sp_enabled=training_parallelism.enable_sequence_parallel,
         )
 
         # Fill sharding configs on the config BEFORE build so every sub-module

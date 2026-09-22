@@ -414,7 +414,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=self.parallel_dims,
             spmd_typechecking=self.config.debug.spmd_typechecking,
-            dense_sp_enabled=self.config.parallelism.enable_sequence_parallel,
         )
         if self.parallel_dims.pp_enabled:
             self.forward_backward_body_fn = cast(

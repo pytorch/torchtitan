@@ -303,6 +303,7 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=False,
         )
         with patch("torchtitan.distributed.parallel_dims.device_type", "cpu"):
             parallel_dims = ParallelDims(**{**kwargs, **overrides})
@@ -320,7 +321,9 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
         parallel_dims = self._build_dims(ep=2)
         dense_mesh = parallel_dims.get_mesh(["dp", "cp", "tp"])
         set_spmd_meshes(
-            dense_mesh=dense_mesh, sparse_mesh=parallel_dims.spmd_sparse_mesh()
+            dense_mesh=dense_mesh,
+            sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+            dense_sp_enabled=parallel_dims.sp_enabled,
         )
         return parallel_dims, dense_mesh
 

@@ -2272,6 +2272,7 @@ class TestTraceFSDP(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
     def test_graph_gradient_accumulation_preserves_fsdp_layout(self):
@@ -2761,6 +2762,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
                 pp=1,
                 ep=1,
                 world_size=self.world_size,
+                enable_sequence_parallel=False,
             )
             from torchtitan.experiments.graph_trainer.common_utils import (
                 get_simple_fsdp_mesh,

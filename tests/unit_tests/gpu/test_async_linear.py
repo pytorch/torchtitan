@@ -161,6 +161,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=True,
         )
         with patch(
             "torchtitan.distributed.parallel_dims.device_type", self.device_type
@@ -250,7 +251,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         set_spmd_meshes(
             dense_mesh=mesh,
             sparse_mesh=None,
-            dense_sp_enabled=True,
+            dense_sp_enabled=parallel_dims.sp_enabled,
         )
         with set_current_spmd_mesh(mesh), typecheck(local=False):
             spmd.assert_type(x_local, input_layout)
@@ -293,7 +294,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         set_spmd_meshes(
             dense_mesh=mesh,
             sparse_mesh=None,
-            dense_sp_enabled=True,
+            dense_sp_enabled=parallel_dims.sp_enabled,
         )
         with set_current_spmd_mesh(mesh):
             output = attention(x_local, None, None)
@@ -354,6 +355,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=R,
+            enable_sequence_parallel=True,
         )
         with patch("torchtitan.distributed.parallel_dims.device_type", device):
             parallel_dims.build_mesh()
@@ -465,6 +467,7 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=R,
+            enable_sequence_parallel=True,
         )
         with patch("torchtitan.distributed.parallel_dims.device_type", dev):
             parallel_dims.build_mesh()

@@ -78,6 +78,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     pp=1,
                     ep=1,
                     world_size=self.world_size,
+                    enable_sequence_parallel=enable_sp,
                 )
                 with patch("torchtitan.distributed.parallel_dims.device_type", device):
                     parallel_dims.build_mesh()
@@ -97,7 +98,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                 set_spmd_meshes(
                     dense_mesh=mesh,
                     sparse_mesh=None,
-                    dense_sp_enabled=enable_sp,
+                    dense_sp_enabled=parallel_dims.sp_enabled,
                 )
                 with set_current_spmd_mesh(mesh), typecheck(local=False):
                     spmd.assert_type(x_local, attn_x_layout)
