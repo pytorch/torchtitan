@@ -109,8 +109,11 @@ directory. `HuggingFaceStreamingSource.Config.path` and
 `HuggingFaceRandomAccessSource.Config.path` accept a Hub id or a local directory
 that `datasets.load_dataset` accepts.
 
+Recipes use the `en` config. Download that subset (plus `README.md`, which
+declares the config) rather than the full multilingual dump.
+
 ```bash
-huggingface-cli download allenai/c4 --repo-type dataset --local-dir /datasets/c4
+huggingface-cli download allenai/c4 --repo-type dataset --include "en/*" --include "README.md" --local-dir /datasets/c4
 ```
 
 ```python
@@ -119,6 +122,7 @@ from huggingface_hub import snapshot_download
 snapshot_download(
     repo_id="allenai/c4",
     repo_type="dataset",
+    allow_patterns=["en/*", "README.md"],
     local_dir="/datasets/c4",
 )
 ```
