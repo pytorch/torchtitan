@@ -47,6 +47,12 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_float8_grouped_fsdp2_ep2_compile],
+            test_descr="Float8 grouped experts with expert FSDP and torch.compile",
+            test_name="float8_grouped_experts_fsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
             configs=[recipes.deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile],
             test_descr="DeepSeek V3 FSDP+HybridEP+compile",
             test_name="deepseek_v3_fsdp+hybridep+compile",
