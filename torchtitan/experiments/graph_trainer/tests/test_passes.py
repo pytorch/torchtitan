@@ -107,6 +107,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     tag_with_memory_policy_pass,
     validate_memory_policy_config,
 )
+from torchtitan.experiments.graph_trainer.mutation_utils import mutation_target_nodes
 from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
     selective_activation_remat_pass,
@@ -3654,13 +3655,20 @@ class TestChunkPasses(TestCase):
         amax.meta["custom"] = {_MODULE_FQN: "layers.0"}
         return gm
 
-    def _build_buffer_mutation_gm(self):
+    def _build_buffer_mutation_gm(self, *, use_out_variant: bool = False):
         graph = torch.fx.Graph()
         buf = graph.placeholder("buf")
         x = graph.placeholder("x")
         relu = graph.call_function(torch.ops.aten.relu.default, args=(x,))
         count = graph.call_function(torch.ops.aten.sum.dim_IntList, args=(x, [0]))
-        add_ = graph.call_function(torch.ops.aten.add_.Tensor, args=(buf, count))
+        if use_out_variant:
+            add_ = graph.call_function(
+                torch.ops.aten.add.out,
+                args=(buf, count),
+                kwargs={"out": buf},
+            )
+        else:
+            add_ = graph.call_function(torch.ops.aten.add_.Tensor, args=(buf, count))
         graph.output(relu)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
@@ -4211,7 +4219,16 @@ class TestChunkPasses(TestCase):
         self.assertEqual(len(add_mutations), 2)
         self.assertEqual({node.meta.get("chunk_id") for node in add_mutations}, {0, 1})
         by_chunk = {node.meta.get("chunk_id"): node for node in add_mutations}
-        self.assertIs(by_chunk[1].args[0], by_chunk[0])
+        self.assertEqual(mutation_target_nodes(by_chunk[1]), [by_chunk[0]])
+
+    def test_chunk_batch_preserves_out_buffer_mutation_order(self):
+        gm = self._build_buffer_mutation_gm(use_out_variant=True)
+        self._chunk_batch(gm, module_patterns=["layers.*"], num_static_inputs=1)
+        add_mutations = self._nodes_by_target(gm, torch.ops.aten.add.out)
+        self.assertEqual(len(add_mutations), 2)
+        self.assertEqual({node.meta.get("chunk_id") for node in add_mutations}, {0, 1})
+        by_chunk = {node.meta.get("chunk_id"): node for node in add_mutations}
+        self.assertEqual(mutation_target_nodes(by_chunk[1]), [by_chunk[0]])
 
     def test_chunk_batch_rejects_non_ep_collective_in_body(self):
         graph = torch.fx.Graph()

@@ -54,6 +54,7 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     annotate_fsdp_unshard_outputs,
     find_fsdp_unshard_outputs_by_param,
 )
+from torchtitan.experiments.graph_trainer.mutation_utils import mutation_target_nodes
 from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
 
 
@@ -1158,9 +1159,14 @@ def schedule_fsdp_comms_to_dense_regions_pass(
         if node.target is not torch.ops.aten.add_.Tensor:
             return False, f"{wait.name} has non-output user {node.name} ({node.target})"
 
-        mutated_arg = node.args[0] if node.args else None
-        if not isinstance(mutated_arg, fx.Node):
-            return False, f"{node.name} has non-node mutated input"
+        mutation_targets = mutation_target_nodes(node)
+        if len(mutation_targets) != 1:
+            return (
+                False,
+                f"{node.name} has {len(mutation_targets)} schema-declared "
+                "mutation targets; expected one",
+            )
+        (mutated_arg,) = mutation_targets
 
         # Chunked loss can accumulate multiple reduce-scattered grad shards via
         # an in-place add chain before returning the detached final shard. That
