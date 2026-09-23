@@ -99,6 +99,11 @@ from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     tensor_meta,
     view_shape_arg_index,
 )
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    is_mutation_node,
+    mutation_arguments,
+    replace_mutation_argument,
+)
 from torchtitan.experiments.graph_trainer.registry import (
     register_trace_call_input_preparer,
     register_trace_input_preparer,
@@ -155,26 +160,9 @@ def _custom_meta(node: fx.Node) -> dict[str, Any]:
     return custom if isinstance(custom, dict) else {}
 
 
-def _mutates_input(node: fx.Node) -> bool:
-    """Return whether a call_function schema writes through an aliased input."""
-    return bool(_mutable_arg_indices(node))
-
-
-def _mutable_arg_indices(node: fx.Node) -> tuple[int, ...]:
-    """Return positional schema arg indices written by ``node``."""
-    schema = getattr(node.target, "_schema", None)
-    if node.op != "call_function" or schema is None:
-        return ()
-    return tuple(
-        idx
-        for idx, arg in enumerate(schema.arguments)
-        if arg.alias_info is not None and arg.alias_info.is_write
-    )
-
-
 def _is_semantic_user(node: fx.Node) -> bool:
     """Return whether a user must be preserved when crossing a chunk boundary."""
-    return node.op == "output" or bool(node.users) or _mutates_input(node)
+    return node.op == "output" or bool(node.users) or is_mutation_node(node)
 
 
 def _copy_meta(meta: dict[str, Any]) -> dict[str, Any]:
@@ -449,7 +437,7 @@ def _semantic_body_closure(body: set[fx.Node]) -> set[fx.Node]:
     seeds = {
         node
         for node in body
-        if _mutates_input(node)
+        if is_mutation_node(node)
         or any(user.op == "output" for user in node.users)
         or (
             tensor_meta(node) is not None
@@ -1532,29 +1520,42 @@ def _copy_body(
                 and isinstance(args, tuple)
                 and isinstance(new_args, tuple)
             ):
-                mutable_indices = [
-                    idx
-                    for idx in _mutable_arg_indices(node)
-                    if idx < len(args)
-                    and idx < len(new_args)
-                    and isinstance(args[idx], fx.Node)
-                    and args[idx] not in copied
-                ]
-                if mutable_indices:
-                    if len(mutable_indices) != 1:
+                shared_mutation_arguments = []
+                for argument_name, argument_value in mutation_arguments(node).items():
+                    shared_targets = [
+                        value
+                        for value in tree_leaves(argument_value)
+                        if isinstance(value, fx.Node) and value not in copied
+                    ]
+                    if shared_targets:
+                        shared_mutation_arguments.append(
+                            (argument_name, argument_value, shared_targets)
+                        )
+                if shared_mutation_arguments:
+                    if len(shared_mutation_arguments) != 1 or not isinstance(
+                        shared_mutation_arguments[0][1], fx.Node
+                    ):
+                        argument_names = [
+                            argument_name
+                            for argument_name, _, _ in shared_mutation_arguments
+                        ]
                         raise ValueError(
                             "Graph EP chunking only supports duplicated mutable ops "
-                            "with one schema-declared mutable positional input. "
-                            f"Found mutable arg indices {mutable_indices} on "
+                            "with one schema-declared mutable Tensor argument. "
+                            f"Found shared mutable arguments {argument_names} on "
                             f"{node.name} ({node.target})."
                         )
                     # Match eager chunking for shared mutable live-ins such as MoE
                     # token-count buffers: later chunks consume earlier chunks'
                     # mutation results through the schema-declared write aliases.
-                    updated_args = list(new_args)
-                    for idx in mutable_indices:
-                        updated_args[idx] = prior_chunk_copies[node]
-                    new_args = tuple(updated_args)
+                    argument_name, _, _ = shared_mutation_arguments[0]
+                    new_args, new_kwargs = replace_mutation_argument(
+                        node,
+                        new_args,
+                        new_kwargs,
+                        argument_name,
+                        prior_chunk_copies[node],
+                    )
             if in_place and node not in preserve_originals:
                 new_node = node
                 new_node.args = new_args
@@ -2150,7 +2151,7 @@ def _erase_unused_copied_body(
             node in copied
             and node not in protected
             and not node.users
-            and not _mutates_input(node)
+            and not is_mutation_node(node)
         ):
             gm.graph.erase_node(node)
 

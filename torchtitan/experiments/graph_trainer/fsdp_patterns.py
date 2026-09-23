@@ -26,6 +26,10 @@ import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
 
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    mutation_deps,
+)
 from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
 
 
@@ -251,37 +255,6 @@ def annotate_fsdp_unshard_outputs(gm: fx.GraphModule) -> None:
                 consumer.meta[_FSDP_UNSHARD_CONSUMER_INPUT_PATHS] = consumer_inputs
 
 
-def _base_tensor(node: fx.Node) -> fx.Node:
-    while (
-        node.op == "call_function"
-        and hasattr(node.target, "is_view")
-        and node.target.is_view
-        and node.args
-        and isinstance(node.args[0], fx.Node)
-    ):
-        node = node.args[0]
-    return node
-
-
-def _mutation_writers_by_base(graph: fx.Graph) -> dict[fx.Node, list[fx.Node]]:
-    writers: dict[fx.Node, list[fx.Node]] = {}
-    for node in graph.nodes:
-        schema = getattr(node.target, "_schema", None)
-        if node.op != "call_function" or schema is None:
-            continue
-        inputs = {
-            argument.name: value for argument, value in zip(schema.arguments, node.args)
-        }
-        inputs.update(node.kwargs)
-        for argument in schema.arguments:
-            if argument.alias_info is None or not argument.alias_info.is_write:
-                continue
-            for target in pytree.tree_leaves(inputs.get(argument.name, ())):
-                if isinstance(target, fx.Node):
-                    writers.setdefault(_base_tensor(target), []).append(node)
-    return writers
-
-
 def _depends_on(
     node: fx.Node,
     ancestor: fx.Node,
@@ -300,7 +273,9 @@ def _depends_on(
         pending.extend(candidate.all_input_nodes)
         pending.extend(
             writer
-            for writer in mutation_writers.get(_base_tensor(candidate), ())
+            for writer in mutation_writers.get(
+                base_tensor_for_mutation_target(candidate), ()
+            )
             if node_order[writer] < node_order[node]
         )
     return False
@@ -331,7 +306,7 @@ def find_fsdp_unshard_outputs_by_param(
     if not annotated_params:
         return outputs_by_param
 
-    mutation_writers = _mutation_writers_by_base(graph)
+    mutation_writers = mutation_deps(graph)
     node_order = {node: index for index, node in enumerate(graph.nodes)}
     marked_outputs: dict[str, list[fx.Node]] = {name: [] for name in annotated_params}
     consumer_paths: dict[str, list[tuple[fx.Node, pytree.KeyPath]]] = {
