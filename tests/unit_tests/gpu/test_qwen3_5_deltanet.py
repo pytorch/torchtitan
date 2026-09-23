@@ -435,7 +435,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             device=device,
         )
 
-        flex_model = model_registry("debugmodel").model.build()
+        flex_model = model_registry("debugmodel").build()
         masks = flex_model.get_attention_masks(positions)
         self.assertIsInstance(masks, dict)
         self.assertEqual(set(masks.keys()), {"quadratic_attention", "deltanet"})
@@ -456,7 +456,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 "quadratic_attention" if layer.full_attn else "deltanet",
             )
 
-        varlen_model = model_registry("debugmodel", attn_backend="varlen").model.build()
+        varlen_model = model_registry("debugmodel", attn_backend="varlen").build()
         varlen_masks = varlen_model.get_attention_masks(positions)
         self.assertIsInstance(varlen_masks, dict)
         self.assertIs(varlen_masks["quadratic_attention"], varlen_masks["deltanet"])
@@ -466,7 +466,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
-        deltanet_only_config = model_registry("debugmodel").model
+        deltanet_only_config = model_registry("debugmodel")
         deltanet_only_config.layers = [
             layer
             for layer in deltanet_only_config.layers

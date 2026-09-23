@@ -9,19 +9,32 @@
 import logging
 import os
 from collections.abc import Iterator
-from dataclasses import dataclass, fields
-from typing import Any
+from dataclasses import dataclass, fields, replace
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
+from renderers import Message, Qwen3RendererConfig
 from torch.distributed.tensor import DTensor
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data import (
+    FirstFitPackingConfig,
+    GrainDataLoader,
+    SingleDatasetConfig,
+)
+from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.renderer import from_renderers
+from torchtitan.components.validate import Validator
+from torchtitan.config import CompileConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
+    UlyssesCPVarlenInnerAttention,
 )
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.llama3.config_registry import (
@@ -31,8 +44,11 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel_varlen_attn,
     sft_debugmodel,
 )
+from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
+from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
+from torchtitan.training_engine import TrainingEngine
 
 from . import _set_spmd_typechecking
 
@@ -40,26 +56,38 @@ from . import _set_spmd_typechecking
 logger = logging.getLogger(__name__)
 
 
-class SDCReplayMismatchTrainer(Trainer):
-    """Inject a replay-only gradient mismatch and verify it is fatal."""
+class SDCReplayMismatchTrainingEngine(TrainingEngine):
+    """Inject a gradient mismatch into the first SDC replay execution."""
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(Trainer.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__(config)
+    def __init__(
+        self,
+        config: TrainingEngine.Config,
+        *,
+        model_config: BaseModel.Config,
+        max_num_documents: int | None,
+        output_dir: str,
+    ) -> None:
+        super().__init__(
+            config,
+            model_config=model_config,
+            max_num_documents=max_num_documents,
+            output_dir=output_dir,
+        )
         self._num_forward_backward_calls = 0
 
-    def forward_backward_step(
+    def _non_pp_forward_backward_body(
         self,
         *,
-        input_dict: dict[str, Any] | list[dict[str, Any]],
-        global_valid_tokens: torch.Tensor,
+        inputs: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        model_kwargs: dict[str, Any],
+        loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        loss = super().forward_backward_step(
-            input_dict=input_dict,
-            global_valid_tokens=global_valid_tokens,
+        loss = super()._non_pp_forward_backward_body(
+            inputs=inputs,
+            labels=labels,
+            model_kwargs=model_kwargs,
+            loss_kwargs=loss_kwargs,
         )
         self._num_forward_backward_calls += 1
         if self._num_forward_backward_calls != 2 or dist.get_rank() != 0:
@@ -73,15 +101,25 @@ class SDCReplayMismatchTrainer(Trainer):
                     grad = parameter.grad
                     local_grad = grad.to_local() if isinstance(grad, DTensor) else grad
                     if local_grad.numel() > 0:
-                        # Intentionally corrupt one local gradient element to verify
-                        # that SDC replay reports the injected mismatch.
+                        # Corrupt the first replay before SDC captures its signature.
                         local_grad[(0,) * local_grad.ndim].add_(1)
                         return loss
         raise AssertionError("Could not find a local gradient to corrupt.")
 
+
+class SDCReplayMismatchTrainer(Trainer):
+    """Inject a replay-only gradient mismatch and verify it is fatal."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Trainer.Config):
+        pass
+
+    engine_cls = SDCReplayMismatchTrainingEngine
+    engine: SDCReplayMismatchTrainingEngine
+
     def train_step(
         self,
-        data_iterator: Iterator[dict[str, Any]],
+        data_iterator: Iterator[TrainingMicrobatch],
     ) -> None:
         try:
             super().train_step(data_iterator)
@@ -92,9 +130,10 @@ class SDCReplayMismatchTrainer(Trainer):
             assert error.rank == 0
             assert error.signature_mismatch is not None
             assert error.signature_mismatch.startswith("gradient:0:")
-            assert self.sdc_replayer is not None
-            assert self.sdc_replayer.steps_since_reset == 0
+            assert self.engine.sdc_replayer is not None
+            assert self.engine.sdc_replayer.steps_since_reset == 0
             logger.info("Detected expected %s", error)
+            self.engine.num_completed_steps = error.step
             return
         raise AssertionError("Expected SDC replay to detect the injected mismatch.")
 
@@ -118,7 +157,7 @@ def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_sdc_replay_cudagraph() -> Trainer.Config:
+def llama3_debugmodel_sdc_replay_cuda_graph() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     config.debug.deterministic = True
     config.debug.seed = 42
@@ -138,7 +177,7 @@ def llama3_debugmodel_default() -> Trainer.Config:
 def llama3_debugmodel_compile() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
-    config.compile.enable = True
+    config.compile = CompileConfig()
     return config
 
 
@@ -184,7 +223,10 @@ def llama3_debugmodel_tp2_asynctp_compile_spmd_types() -> Trainer.Config:
 def llama3_debugmodel_full_checkpoint_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.checkpoint.enable = True
+    config.checkpointer = CheckpointManager.Config(
+        interval=10,
+        last_save_model_only=False,
+    )
     return config
 
 
@@ -196,9 +238,9 @@ def llama3_debugmodel_full_checkpoint_load() -> Trainer.Config:
 
 def llama3_debugmodel_hf_checkpoint_save() -> Trainer.Config:
     config = llama3_debugmodel_full_checkpoint_save()
-    config.checkpoint.folder = "hf_checkpoint"
-    config.checkpoint.last_save_model_only = True
-    config.checkpoint.last_save_in_hf = True
+    config.checkpointer.folder = "hf_checkpoint"
+    config.checkpointer.last_save_model_only = True
+    config.checkpointer.last_save_in_hf = True
     return config
 
 
@@ -215,19 +257,19 @@ def llama3_debugmodel_hf_checkpoint_load() -> Trainer.Config:
             "artifacts-to-be-uploaded/model_only_hf_checkpoint",
         ),
     )
-    config.checkpoint.initial_load_path = os.path.join(
+    config.checkpointer.initial_load_path = os.path.join(
         test_output_dir,
         "hf_checkpoint/step-10/",
     )
-    config.checkpoint.initial_load_model_only = True
-    config.checkpoint.initial_load_in_hf = True
+    config.checkpointer.initial_load_model_only = True
+    config.checkpointer.initial_load_in_hf = True
     return config
 
 
 def llama3_debugmodel_last_save_model_only_bf16() -> Trainer.Config:
     config = llama3_debugmodel_full_checkpoint_save()
-    config.checkpoint.last_save_model_only = True
-    config.checkpoint.export_dtype = "bfloat16"
+    config.checkpointer.last_save_model_only = True
+    config.checkpointer.export_dtype = "bfloat16"
     return config
 
 
@@ -278,7 +320,10 @@ def llama3_debugmodel_tp2_pp2_gpipe() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
-    config.checkpoint.enable = True
+    config.checkpointer = CheckpointManager.Config(
+        interval=10,
+        last_save_model_only=False,
+    )
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.data_parallel_shard_degree = 2
@@ -301,7 +346,7 @@ def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.compile.enable = True
+    config.compile = CompileConfig()
     return config
 
 
@@ -355,9 +400,10 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_optimizer_bf16_states() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
+    config.training.mixed_precision_reduce = "float32"
     config.optimizer.implementation = "fused_opt_states_bf16"
     return config
 
@@ -398,6 +444,20 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     return apply_transforms(
         config,
         [ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention)],
+    )
+
+
+def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
+    """Llama 3 with varlen Ulysses CP."""
+    config = llama3_debugmodel_varlen_attn()
+    # Packed varlen metadata lacks SPMD annotations.
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.context_parallel_degree = 2
+    # Ulysses does not support token reordering.
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
     )
 
 
@@ -456,7 +516,10 @@ def llama3_debugmodel_fsdp_reshard_always() -> Trainer.Config:
 def llama3_debugmodel_optional_checkpoint_save() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.checkpoint.enable = True
+    config.checkpointer = CheckpointManager.Config(
+        interval=10,
+        last_save_model_only=False,
+    )
     return config
 
 
@@ -467,7 +530,11 @@ def llama3_debugmodel_optional_checkpoint_load_tp2() -> Trainer.Config:
     mismatched dp degree.
     """
     config = llama3_debugmodel_optional_checkpoint_save()
-    config.checkpoint.exclude_from_loading = ["lr_scheduler", "dataloader", "optimizer"]
+    config.checkpointer.exclude_from_loading = [
+        "lr_scheduler",
+        "dataloader",
+        "optimizer",
+    ]
     config.parallelism.tensor_parallel_degree = 2
     config.training.steps = 20
     return config
@@ -485,7 +552,12 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
 def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
-    config.validator.enable = True
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.validator = Validator.Config(
+        freq=5,
+        steps=10,
+        dataloader=replace(config.dataloader),
+    )
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
@@ -540,10 +612,30 @@ def llama3_debugmodel_sft() -> Trainer.Config:
     return config
 
 
+def llama3_debugmodel_sft_multiturn() -> Trainer.Config:
+    config = llama3_debugmodel_sft()
+
+    def messages(sample) -> list[Message]:
+        return [
+            {"role": "user", "content": sample["question"]},
+            {"role": "assistant", "content": sample["answer"]},
+            {"role": "user", "content": "Repeat your answer."},
+            {"role": "assistant", "content": sample["answer"]},
+        ]
+
+    dataloader = cast(GrainDataLoader.Config, config.dataloader)
+    packing = cast(FirstFitPackingConfig, dataloader.dataset)
+    dataset = cast(SingleDatasetConfig, packing.dataset)
+    processor = cast(ChatProcessor.Config, dataset.processor)
+    processor.messages_fn = messages
+    processor.renderer = from_renderers(Qwen3RendererConfig())
+    return config
+
+
 def llama3_debugmodel_seed_checkpoint() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.checkpoint.enable = True
-    config.checkpoint.create_seed_checkpoint = True
+    config.checkpointer = CheckpointManager.Config()
+    config.create_seed_checkpoint = True
     config.training.disable_cuda_graphs = True
     return config

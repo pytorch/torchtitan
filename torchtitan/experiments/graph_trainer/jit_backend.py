@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_compile_backend_with_passes(
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     fsdp_manual_buckets: list[list[str] | str] | None,
 ) -> callable:
     """

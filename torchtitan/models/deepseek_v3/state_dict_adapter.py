@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -14,7 +15,9 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
-from .model import DeepSeekV3Model
+
+if TYPE_CHECKING:
+    from .model import DeepSeekV3Model
 
 
 class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
@@ -152,10 +155,12 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
-        2. Split grouped weights into individual expert weights.
+        2. Split grouped-linear weights into individual expert weights.
         """
+        state_dict = self._to_logical_expert_state(
+            self._native_fused_linears_to_hf(state_dict)
+        )
 
-        state_dict = self._to_logical_expert_state(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
 
         hf_state_dict = {}
@@ -173,7 +178,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
                     self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
 
-                    # Split the grouped weight into local expert weights.
+                    # Split the grouped weight into local individual experts.
                     local_expert_fqn = self._get_local_experts_weights(
                         new_abstract_key,
                         abstract_key,
@@ -213,7 +218,7 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         """
         1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.
-        3. Concatenate individual expert weights into grouped weights.
+        3. Concatenate individual expert weights into grouped-linear weights.
         """
         self._validate_hf_rope_config(ComplexRoPE.Config)
 
@@ -279,4 +284,6 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = self.from_hf_map[key]
                 state_dict[new_key] = value
 
-        return self._to_native_expert_state(state_dict)
+        return self._native_fused_linears_from_hf(
+            self._to_native_expert_state(state_dict)
+        )

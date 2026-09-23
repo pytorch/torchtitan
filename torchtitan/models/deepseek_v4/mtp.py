@@ -42,7 +42,7 @@ class MTPBlock(DeepSeekV4TransformerBlock):
         self.mtp_norm = config.mtp_norm.build()
         self.hc_head = config.hc_head.build()
 
-    def forward(  # pyrefly: ignore[bad-param-name-override]
+    def forward(  # pyrefly: ignore[bad-param-name-override, bad-override]
         self,
         mtp_input_embed: torch.Tensor,
         prev_hc_hidden: torch.Tensor,
@@ -50,6 +50,8 @@ class MTPBlock(DeepSeekV4TransformerBlock):
         mtp_input_valid_mask: torch.Tensor,
         attention_masks: "AttentionMasksType | None",
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if prev_hc_hidden.ndim != 3:
             raise ValueError(
@@ -58,8 +60,9 @@ class MTPBlock(DeepSeekV4TransformerBlock):
                 f"{tuple(prev_hc_hidden.shape)}."
             )
 
-        valid_mask = mtp_input_valid_mask.view(-1, 1, 1).to(dtype=prev_hc_hidden.dtype)
-        prev_hc_hidden = prev_hc_hidden * valid_mask
+        prev_hc_hidden = prev_hc_hidden * mtp_input_valid_mask.view(-1, 1, 1).to(
+            dtype=prev_hc_hidden.dtype
+        )
 
         hidden = self.e_proj(self.enorm(mtp_input_embed)).unsqueeze(1)
         hidden = hidden + self.h_proj(self.hnorm(prev_hc_hidden))
@@ -68,6 +71,11 @@ class MTPBlock(DeepSeekV4TransformerBlock):
             mtp_input_ids_T,
             attention_masks,
             positions,
+            padding_mask=(
+                ~mtp_input_valid_mask
+                if padding_mask is None
+                else ~mtp_input_valid_mask | padding_mask
+            ),
         )
         prediction_hidden = self.hc_head(next_hc_hidden)
         prediction_hidden = self.mtp_norm(prediction_hidden)
