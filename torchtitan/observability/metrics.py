@@ -23,7 +23,6 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.tools import utils
 from torchtitan.tools.utils import Color, device_module, device_type, NoColor
 
-
 # named tuple for passing device memory stats for logging
 logger = logging.getLogger(__name__)
 
@@ -107,6 +106,29 @@ def build_device_memory_monitor():
     return device_memory_monitor
 
 
+def compute_training_performance_metrics(
+    *,
+    num_tokens: int,
+    elapsed_time: float,
+    non_data_parallel_size: int,
+    num_flops_per_token: int,
+    gpu_peak_flops: float,
+    has_quantization: bool,
+) -> dict[str, float]:
+    """Compute per-device throughput, TFLOPS, and optional MFU."""
+    tokens_per_second = num_tokens / (elapsed_time * non_data_parallel_size)
+    tflops = num_flops_per_token * tokens_per_second / 1e12
+    metrics = {
+        "tokens_per_second": tokens_per_second,
+        "tflops": tflops,
+    }
+    if not has_quantization:
+        metrics["mfu_percent"] = (
+            100 * num_flops_per_token * tokens_per_second / gpu_peak_flops
+        )
+    return metrics
+
+
 class BaseLogger:
     """Logger that does nothing, used when logging is disabled."""
 
@@ -173,7 +195,7 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        self.wandb.log(wandb_metrics, step=step)
+        self.wandb.log(wandb_metrics, step=step, commit=True)
 
     def close(self) -> None:
         if self.wandb.run is not None:
@@ -272,6 +294,8 @@ class MetricsProcessor(Configurable):
     Args:
         config (Config): Metrics configuration.
         parallel_dims (ParallelDims): Parallel dimensions.
+        device_memory_monitor (DeviceMemoryMonitor): Monitor supplied by the
+            execution component that owns the device.
         dump_folder (str): Base folder for log output.
         pp_schedule (str): Pipeline parallel schedule name.
         ft_enable (bool): Whether fault tolerance is enabled.
@@ -331,6 +355,7 @@ class MetricsProcessor(Configurable):
         config: Config,
         *,
         parallel_dims: ParallelDims,
+        device_memory_monitor: DeviceMemoryMonitor,
         dump_folder: str = "./outputs",
         pp_schedule: str = "1F1B",
         ft_enable: bool = False,
@@ -351,7 +376,7 @@ class MetricsProcessor(Configurable):
         )
         self.parallel_dims = parallel_dims
         self.config = config
-        self.device_memory_monitor = build_device_memory_monitor()
+        self.device_memory_monitor = device_memory_monitor
         # used for colorful printing
         self.color = utils.NoColor() if config.disable_color_printing else utils.Color()
 
@@ -487,20 +512,17 @@ class MetricsProcessor(Configurable):
 
         time_delta = time.perf_counter() - self.time_last_log
 
-        # tokens per second per device, abbreviated as tps
-        tps = self.ntokens_since_last_log / (
-            time_delta * self.parallel_dims.non_data_parallel_size
+        performance = compute_training_performance_metrics(
+            num_tokens=self.ntokens_since_last_log,
+            elapsed_time=time_delta,
+            non_data_parallel_size=self.parallel_dims.non_data_parallel_size,
+            num_flops_per_token=self.num_flops_per_token,
+            gpu_peak_flops=self.gpu_peak_flops,
+            has_quantization=self.has_quantization,
         )
-        # model FLOPS utilization
-        # For its definition and calculation, please refer to the PaLM paper:
-        # https://arxiv.org/abs/2204.02311
-        # MFU is based on BF16 peak FLOPS which is misleading when quantization
-        # (FP8/MX) is active, so we skip it in that case.
-        tflops = self.num_flops_per_token * tps / 1e12
-        if self.has_quantization:
-            mfu = None
-        else:
-            mfu = 100 * self.num_flops_per_token * tps / self.gpu_peak_flops
+        tps = performance["tokens_per_second"]
+        tflops = performance["tflops"]
+        mfu = performance.get("mfu_percent")
 
         assert self.step_last_log is not None
         time_end_to_end = time_delta / (step - self.step_last_log)

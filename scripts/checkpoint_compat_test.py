@@ -31,6 +31,13 @@ import subprocess
 import sys
 import tempfile
 
+if __package__:
+    from scripts._checkpoint_test_config import configure_checkpoint
+else:
+    from _checkpoint_test_config import (  # pyrefly: ignore [missing-import]
+        configure_checkpoint,
+    )
+
 FIXED_OPTIONS = (
     "--debug.deterministic --debug.seed=42"
     " --metrics.enable_tensorboard --metrics.log_freq=1"
@@ -69,10 +76,17 @@ def checkout(commit: str, label: str) -> None:
         subprocess.run(["git", "checkout", commit], check=True)
 
 
-def run_cmd(cmd: str, logfile: str, ngpus: int) -> None:
+def run_cmd(
+    cmd: str,
+    logfile: str,
+    ngpus: int,
+    env_overrides: dict[str, str] | None = None,
+) -> None:
     """Run training command with real-time output and log capture."""
     log(f"Executing: {cmd}")
     env = {**os.environ, "NGPU": str(ngpus), "PYTHONUNBUFFERED": "1"}
+    if env_overrides:
+        env.update(env_overrides)
     with open(logfile, "w") as f:
         proc = subprocess.Popen(
             cmd,
@@ -99,8 +113,6 @@ def build_cmd(
     dump_folder: str,
     *,
     total_steps: int = 0,
-    checkpoint_enable: bool = False,
-    checkpoint_interval: int = 0,
 ) -> str:
     cmd = (
         f"MODULE='{module}' CONFIG='{config}' ./run_train.sh"
@@ -112,8 +124,6 @@ def build_cmd(
         cmd += f" --lr_scheduler.total_steps={total_steps}"
     if options:
         cmd += f" {options}"
-    if checkpoint_enable:
-        cmd += f" --checkpoint.enable --checkpoint.interval={checkpoint_interval}"
     return cmd
 
 
@@ -240,15 +250,28 @@ def main() -> None:
         log(f"STEP 2: Save run ({args.resume_step} steps)")
         log("=" * 60)
         checkout(save_sha, "save_commit")
+        save_env: dict[str, str] = {}
+        save_module, save_config = configure_checkpoint(
+            save_env,
+            module=args.module,
+            config=args.config,
+            mode="resume",
+            interval=args.resume_step,
+        )
         cmd = build_cmd(
-            **common,
+            module=save_module,
+            config=save_config,
+            options=args.options,
             steps=args.resume_step,
             dump_folder=resume_dump,
             total_steps=args.steps,
-            checkpoint_enable=True,
-            checkpoint_interval=args.resume_step,
         )
-        run_cmd(cmd, os.path.join(args.output_folder, "save.log"), args.ngpus)
+        run_cmd(
+            cmd,
+            os.path.join(args.output_folder, "save.log"),
+            args.ngpus,
+            save_env,
+        )
 
         # Step 3: Resume run at load_commit (load checkpoint, train to end)
         log()
@@ -256,14 +279,27 @@ def main() -> None:
         log(f"STEP 3: Resume run (to step {args.steps})")
         log("=" * 60)
         checkout(load_sha, "load_commit")
+        resume_env: dict[str, str] = {}
+        resume_module, resume_config = configure_checkpoint(
+            resume_env,
+            module=args.module,
+            config=args.config,
+            mode="resume",
+            interval=args.resume_step,
+        )
         cmd = build_cmd(
-            **common,
+            module=resume_module,
+            config=resume_config,
+            options=args.options,
             steps=args.steps,
             dump_folder=resume_dump,
-            checkpoint_enable=True,
-            checkpoint_interval=args.resume_step,
         )
-        run_cmd(cmd, os.path.join(args.output_folder, "resume.log"), args.ngpus)
+        run_cmd(
+            cmd,
+            os.path.join(args.output_folder, "resume.log"),
+            args.ngpus,
+            resume_env,
+        )
 
         # Step 4: Compare
         log()

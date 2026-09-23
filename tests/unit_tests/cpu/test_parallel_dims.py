@@ -38,7 +38,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_sequence_parallel_placement,
     token_id_placement,
-    token_id_sequence_parallel_placement,
 )
 from torchtitan.models.llama3 import model_registry
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
@@ -58,6 +57,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=True,
         )
         self.assertEqual(parallel_dims.dp_replicate, 2)
         self.assertEqual(parallel_dims.dp_shard, 2)
@@ -66,6 +66,7 @@ class TestParallelDimsValidation(unittest.TestCase):
         self.assertEqual(parallel_dims.pp, 1)
         self.assertEqual(parallel_dims.ep, 1)
         self.assertEqual(parallel_dims.world_size, 8)
+        self.assertTrue(parallel_dims.sp_enabled)
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
     def test_from_config(self):
@@ -77,6 +78,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             tensor_parallel_degree=2,
             pipeline_parallel_degree=1,
             expert_parallel_degree=1,
+            enable_sequence_parallel=False,
         )
         parallel_dims = ParallelDims.from_config(
             config, DistributedTopology(world_size=8)
@@ -88,6 +90,7 @@ class TestParallelDimsValidation(unittest.TestCase):
         self.assertEqual(parallel_dims.pp, 1)
         self.assertEqual(parallel_dims.ep, 1)
         self.assertEqual(parallel_dims.world_size, 8)
+        self.assertFalse(parallel_dims.sp_enabled)
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
     def test_auto_calculate_dp_shard(self):
@@ -100,6 +103,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=False,
         )
         self.assertEqual(parallel_dims.dp_shard, 2)
 
@@ -115,6 +119,7 @@ class TestParallelDimsValidation(unittest.TestCase):
                 pp=1,
                 ep=1,
                 world_size=10,  # Invalid: 2*2*1*2*1 = 8, not 10
+                enable_sequence_parallel=False,
             )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -129,6 +134,7 @@ class TestParallelDimsValidation(unittest.TestCase):
                 pp=1,
                 ep=1,
                 world_size=1,
+                enable_sequence_parallel=False,
             )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -143,6 +149,7 @@ class TestParallelDimsValidation(unittest.TestCase):
                 pp=1,
                 ep=1,
                 world_size=1,
+                enable_sequence_parallel=False,
             )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -157,12 +164,14 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=True,
         )
         self.assertTrue(parallel_dims.dp_enabled)
         self.assertTrue(parallel_dims.dp_replicate_enabled)
         self.assertTrue(parallel_dims.dp_shard_enabled)
         self.assertFalse(parallel_dims.cp_enabled)
         self.assertTrue(parallel_dims.tp_enabled)
+        self.assertTrue(parallel_dims.sp_enabled)
         self.assertFalse(parallel_dims.pp_enabled)
         self.assertFalse(parallel_dims.ep_enabled)
         self.assertTrue(parallel_dims.fsdp_enabled)
@@ -176,11 +185,13 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=2,
+            enable_sequence_parallel=True,
         )
         self.assertFalse(parallel_dims.dp_enabled)
         self.assertTrue(parallel_dims.cp_enabled)
         self.assertTrue(parallel_dims.dp_cp_enabled)
         self.assertTrue(parallel_dims.fsdp_enabled)
+        self.assertFalse(parallel_dims.sp_enabled)
 
         # Test with EP enabled (EP must not contribute to world_size)
         parallel_dims = ParallelDims(
@@ -191,6 +202,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=2,
             world_size=2,
+            enable_sequence_parallel=False,
         )
         self.assertTrue(parallel_dims.ep_enabled)
 
@@ -203,6 +215,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=2,
             ep=1,
             world_size=2,
+            enable_sequence_parallel=False,
         )
         self.assertTrue(parallel_dims.pp_enabled)
 
@@ -217,6 +230,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=2,
             ep=1,
             world_size=48,
+            enable_sequence_parallel=False,
         )
         # Should be cp * tp * pp = 2 * 3 * 2 = 12
         self.assertEqual(parallel_dims.non_data_parallel_size, 12)
@@ -232,6 +246,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=16,
+            enable_sequence_parallel=False,
         )
         # Should be tp * (cp * 2) = 4 * 4 = 16
         self.assertEqual(parallel_dims.seq_len_divisor, 16)
@@ -272,7 +287,7 @@ class TestSpmdLayout(DTensorTestBase):
             ((MeshAxisName.DP, MeshAxisName.CP),),
         )
         self.assertEqual(
-            token_id_sequence_parallel_placement().partition_spec,
+            token_id_placement(enable_sp=True).partition_spec,
             ((MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP),),
         )
         self.assertEqual(
@@ -469,7 +484,7 @@ class TestSpmdLayout(DTensorTestBase):
         )
         x = torch.arange(8, device=self.device_type)
         src = token_id_placement()
-        dst = token_id_sequence_parallel_placement()
+        dst = token_id_placement(enable_sp=True)
         spmd_validate_redistributions(
             ShardingConfig(
                 in_src_shardings={"input_ids_T": src},
@@ -532,6 +547,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
         parallel_dims.build_mesh()
 
@@ -550,6 +566,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
         # Don't call build_mesh explicitly
         self.assertEqual(len(parallel_dims._single_axis_meshes), 0)
@@ -574,6 +591,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
 
         # Test mesh building
@@ -584,7 +602,6 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         # Verify all expected meshes are created
         self.assertIsNotNone(parallel_dims._single_axis_meshes)
         self.assertIn("pp", parallel_dims._single_axis_meshes)
-        self.assertIn("batch", parallel_dims._single_axis_meshes)
         self.assertIn("loss", parallel_dims._single_axis_meshes)
         self.assertIn("dp_replicate", parallel_dims._single_axis_meshes)
         self.assertIn("dp", parallel_dims._single_axis_meshes)
@@ -597,7 +614,6 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         self.assertEqual(parallel_dims._single_axis_meshes["dp"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["dp_shard"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["tp"].size(), 1)
-        self.assertEqual(parallel_dims._single_axis_meshes["batch"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["loss"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["pp"].size(), 1)
         self.assertEqual(parallel_dims._single_axis_meshes["cp"].size(), 1)
@@ -643,6 +659,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
         parallel_dims.build_mesh()
 
@@ -663,6 +680,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=2,
             world_size=2,  # 1 * 2 * 1 * 1 * 1 = 2
+            enable_sequence_parallel=False,
         )
         self.assertTrue(parallel_dims.ep_enabled)
 
@@ -675,6 +693,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=2,
             world_size=4,  # 2 * 2 * 1 * 1 * 1 = 4
+            enable_sequence_parallel=False,
         )
         self.assertTrue(parallel_dims.ep_enabled)
         self.assertTrue(parallel_dims.dp_replicate_enabled)
@@ -692,6 +711,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
                 pp=1,
                 ep=3,
                 world_size=4,
+                enable_sequence_parallel=False,
             )
 
 
@@ -711,6 +731,7 @@ class TestDenseStorageAxes(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=False,
         )
         pd.build_mesh()
         return pd
@@ -747,6 +768,7 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                enable_sequence_parallel=False,
             )
             pd.build_mesh()
 
@@ -780,6 +802,7 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                 pp=1,
                 ep=2,
                 world_size=8,
+                enable_sequence_parallel=False,
             )
             pd.build_mesh()
 
@@ -818,6 +841,7 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                enable_sequence_parallel=False,
             )
 
             # Test mesh building
@@ -828,7 +852,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             # Verify all expected meshes are created
             self.assertIsNotNone(parallel_dims._single_axis_meshes)
             self.assertIn("pp", parallel_dims._single_axis_meshes)
-            self.assertIn("batch", parallel_dims._single_axis_meshes)
             self.assertIn("loss", parallel_dims._single_axis_meshes)
             self.assertIn("dp_replicate", parallel_dims._single_axis_meshes)
             self.assertIn("dp", parallel_dims._single_axis_meshes)
@@ -840,9 +863,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
 
             # Validate 1D mesh sizes match parallelism configuration
             self.assertEqual(parallel_dims._single_axis_meshes["pp"].size(), 1)
-            self.assertEqual(
-                parallel_dims._single_axis_meshes["batch"].size(), 4
-            )  # dp_replicate * dp_shard = 2 * 2
             self.assertEqual(
                 parallel_dims._single_axis_meshes["loss"].size(), 4
             )  # dp_replicate * dp_shard * cp = 2 * 2 * 1
@@ -876,7 +896,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertIsNotNone(parallel_dims.get_mesh("dp_replicate"))
             self.assertIsNotNone(parallel_dims.get_mesh("dp"))
             self.assertIsNotNone(parallel_dims.get_mesh("dp_shard"))
-            self.assertIsNotNone(parallel_dims.get_mesh("batch"))
             self.assertIsNotNone(parallel_dims.get_mesh("loss"))
 
             # Test get_optional_mesh returns None for disabled dimensions (size = 1)
@@ -897,7 +916,6 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
             self.assertIn("dp", one_d_meshes)
             self.assertIn("dp_shard", one_d_meshes)
             self.assertIn("tp", one_d_meshes)
-            self.assertIn("batch", one_d_meshes)
             self.assertIn("loss", one_d_meshes)
             # Should not include: pp, cp, ep (all with size = 1)
             self.assertNotIn("pp", one_d_meshes)
@@ -956,8 +974,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         """apply_fsdp with bf16 on Llama3 debugmodel matches manual bf16 reference on a single GPU."""
         torch.manual_seed(42)
 
-        model_spec = model_registry("debugmodel")
-        model_config = model_spec.model
+        model_config = model_registry("debugmodel")
 
         # This test runs forward+backward on self.device_type (CPU in the
         # CPU CI job). The default FlexInnerAttention backend has no CPU backward,

@@ -10,8 +10,8 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.dist_gemm import (
-    DistGEMMFeedForward,
-    RowParallelLinear,
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
     validate_dist_gemm_preconditions,
 )
 from torchtitan.protocols.sharding import ShardingConfig
@@ -61,31 +61,18 @@ def dense_activation_placement(
     )
 
 
-def token_id_placement() -> SpmdType:
-    """Placement for decoder token IDs with shape ``(tokens,)``."""
-    return SpmdType(
-        {
-            DP: spmd.V,
-            CP: spmd.V,
-            TP: spmd.R,
-        },
-        partition_spec=spmd.PartitionSpec((DP, CP)),
-    )
+def token_id_placement(*, enable_sp: bool = False) -> SpmdType:
+    """Placement for decoder token IDs with shape ``(tokens,)``.
 
-
-def token_id_sequence_parallel_placement() -> SpmdType:
-    """Sequence-parallel token IDs with shape ``(tokens,)``.
-
-    Same token-axis mesh as ``dense_sequence_parallel_placement()``, but the
-    tensor is 1D so there is no trailing replicated feature dim.
+    When sequence parallelism is enabled, TP also shards the token dimension.
     """
     return SpmdType(
         {
             DP: spmd.V,
             CP: spmd.V,
-            TP: spmd.V,
+            TP: spmd.V if enable_sp else spmd.R,
         },
-        partition_spec=spmd.PartitionSpec((DP, CP, TP)),
+        partition_spec=spmd.PartitionSpec((DP, CP, TP) if enable_sp else (DP, CP)),
     )
 
 
@@ -128,6 +115,7 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
     return {
         "input": token_id_placement(),
         "positions": token_id_placement(),
+        "padding_mask": token_id_placement(),
         "labels": SpmdType(
             {DP: spmd.V, CP: spmd.V, TP: spmd.I},
             partition_spec=spmd.PartitionSpec((DP, CP)),
@@ -143,6 +131,31 @@ def colwise_config() -> ShardingConfig:
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
         out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
+    )
+
+
+def stacked_colwise_config() -> ShardingConfig:
+    """Shard each ``[F, D]`` matrix in a ``[N, F, D]`` weight over ``F``.
+
+    The input is ``[T, D]`` and the output is ``[T, N, F]``. DP and CP shard
+    tokens while TP shards the per-matrix output features.
+    """
+    input_TD_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    weight_NFD_layout = dense_param_placement(tp=spmd.S(1))
+    bias_NF_layout = dense_param_placement(tp=spmd.S(1))
+    output_TNF_layout = SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+        partition_spec=spmd.PartitionSpec((DP, CP), None, TP),
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": weight_NFD_layout,
+            "bias": bias_NF_layout,
+        },
+        in_src_shardings={"input": input_TD_layout},
+        in_dst_shardings={"input": input_TD_layout},
+        out_src_shardings=output_TNF_layout,
+        local_spmd=True,
     )
 
 
@@ -225,7 +238,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     # GEMMs, so it declares different activation contracts from the stock block.
     # SP and spmd_types are preconditions for dist-GEMM, enforced in
     # validate_dist_gemm_preconditions; this branch only declares the contracts.
-    dist_gemm = isinstance(attention_cfg.wo, RowParallelLinear.Config)
+    dist_gemm = isinstance(attention_cfg.wo, AsyncRowParallelLinear.Config)
     if dist_gemm:
         validate_dist_gemm_preconditions(enable_sp=enable_sp)
 
@@ -234,8 +247,8 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    # dist-GEMM: AllGatherFusedQKVLinear consumes the sequence shard directly, so
-    # there is no attention-boundary all-gather left for the block to declare.
+    # dist-GEMM: AsyncColumnParallelLinear inside QKVLinear consumes the sequence
+    # shard directly, so there is no attention-boundary all-gather to declare.
     attention_cfg.sharding_config = (
         None
         if dist_gemm
@@ -257,7 +270,7 @@ def set_gqa_attention_sharding(attention_cfg, *, enable_sp: bool) -> None:
     wo_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
         # A stock rowwise linear emits a Partial over its slice of K and lets the
-        # framework reduce-scatter it. RowParallelLinear collapses those two
+        # framework reduce-scatter it. AsyncRowParallelLinear collapses those two
         # steps -- the reduce-scatter happens inside the fused op -- so it returns
         # the final Shard(1) directly and never produces a Partial. Keep only the
         # parameter shardings: with the output already in its final layout there
@@ -315,7 +328,7 @@ def set_dense_ffn_sharding(
     # declare, and the fused w2 emits its final Shard(1) rather than a Partial.
     # See set_gqa_attention_sharding; both branches collapse once redistribute
     # collectives move inside the modules.
-    dist_gemm = isinstance(feed_forward_cfg, DistGEMMFeedForward.Config)
+    dist_gemm = isinstance(feed_forward_cfg.w13, AsyncColumnParallelLinear.Config)
     if dist_gemm:
         validate_dist_gemm_preconditions(enable_sp=enable_sp)
     feed_forward_cfg.sharding_config = (
@@ -326,7 +339,7 @@ def set_dense_ffn_sharding(
             in_dst_shardings={"x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0))},
         )
     )
-    feed_forward_cfg.w13.sharding_config = colwise_config()
+    feed_forward_cfg.w13.sharding_config = stacked_colwise_config()
     w2_config = rowwise_config(output_sp=enable_sp)
     if dist_gemm:
         w2_config = ShardingConfig(state_shardings=w2_config.state_shardings)
