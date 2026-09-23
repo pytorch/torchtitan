@@ -4,13 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Checkpoint and forward tests for QKVLinear.
+"""State-dict adapter and forward tests for QKVLinear.
 
-QKVLinear stores a single fused ``wqkv`` parameter but checkpoints in the
-logical ``wq.weight`` / ``wk.weight`` / ``wv.weight`` layout via state_dict
-hooks.
-
-All tests run on CPU.
+QKVLinear keeps its packed ``wqkv`` parameter in native state dicts. Hugging
+Face adapters expose the logical ``wq`` / ``wk`` / ``wv`` projections.
 """
 
 import unittest
@@ -26,8 +23,6 @@ _HEAD_DIM = 8
 _HPK = _N_HEADS // _N_KV_HEADS  # heads_per_kv = 2
 _R_DIM = _HPK + 2  # 4
 _WQKV_OUT = (_N_HEADS + 2 * _N_KV_HEADS) * _HEAD_DIM  # 64
-_WQ_OUT = _N_HEADS * _HEAD_DIM  # 32
-_WK_OUT = _N_KV_HEADS * _HEAD_DIM  # 16
 
 
 def _build_qkv_linear(with_bias: bool = False) -> QKVLinear:
@@ -44,77 +39,76 @@ def _build_qkv_linear(with_bias: bool = False) -> QKVLinear:
     return fused
 
 
-def _logical_state_dict(with_bias: bool = False) -> dict[str, torch.Tensor]:
-    state_dict = {
-        "wq.weight": torch.randn(_WQ_OUT, _DIM),
-        "wk.weight": torch.randn(_WK_OUT, _DIM),
-        "wv.weight": torch.randn(_WK_OUT, _DIM),
-    }
-    if with_bias:
-        state_dict.update(
-            {
-                "wq.bias": torch.randn(_WQ_OUT),
-                "wk.bias": torch.randn(_WK_OUT),
-                "wv.bias": torch.randn(_WK_OUT),
-            }
-        )
-    return state_dict
-
-
 class TestQKVLinearCheckpointInterop(unittest.TestCase):
-    def test_state_dict_exposes_logical_qkv(self):
-        """The fused parameter is exposed as logical Q/K/V tensors."""
+    def test_state_dict_retains_native_qkv(self):
+        """Native state dicts expose the physical packed parameter."""
         fused = _build_qkv_linear(with_bias=True)
         state_dict = fused.state_dict()
 
-        n_kv = _WQKV_OUT // (_R_DIM * _HEAD_DIM)
-        wqkv = fused.wqkv.weight.reshape(n_kv, _R_DIM, _HEAD_DIM, _DIM)
-        self.assertTrue(
-            torch.equal(state_dict["wq.weight"], wqkv[:, :_HPK].reshape(-1, _DIM))
+        self.assertEqual(set(state_dict), {"wqkv.weight", "wqkv.bias"})
+        self.assertEqual(
+            state_dict["wqkv.weight"].data_ptr(), fused.wqkv.weight.data_ptr()
         )
-        self.assertTrue(
-            torch.equal(state_dict["wk.weight"], wqkv[:, _HPK].reshape(-1, _DIM))
-        )
-        self.assertTrue(
-            torch.equal(state_dict["wv.weight"], wqkv[:, _HPK + 1].reshape(-1, _DIM))
-        )
+        self.assertEqual(state_dict["wqkv.bias"].data_ptr(), fused.wqkv.bias.data_ptr())
 
-        b_3d = fused.wqkv.bias.reshape(n_kv, _R_DIM, _HEAD_DIM)
-        self.assertTrue(torch.equal(state_dict["wq.bias"], b_3d[:, :_HPK].reshape(-1)))
-        self.assertTrue(torch.equal(state_dict["wk.bias"], b_3d[:, _HPK].reshape(-1)))
-        self.assertTrue(
-            torch.equal(state_dict["wv.bias"], b_3d[:, _HPK + 1].reshape(-1))
-        )
+    def test_native_checkpoint_loads_into_qkv_linear(self):
+        """A native packed checkpoint loads without layout conversion."""
+        source = _build_qkv_linear(with_bias=True)
+        target = _build_qkv_linear(with_bias=True)
 
-    def test_logical_checkpoint_loads_into_qkv_linear(self):
-        """Logical Q/K/V checkpoint tensors are packed into wqkv."""
-        state_dict = _logical_state_dict(with_bias=True)
+        target.load_state_dict(source.state_dict())
+
+        torch.testing.assert_close(target.wqkv.weight, source.wqkv.weight)
+        torch.testing.assert_close(target.wqkv.bias, source.wqkv.bias)
+
+    def test_adapter_split_and_merge_preserve_qkv_layout(self):
+        """HF-boundary conversion preserves the packed QKV ordering."""
         fused = _build_qkv_linear(with_bias=True)
-        fused.load_state_dict(state_dict)
+        native_state_dict = dict(fused.state_dict())
+        state_dict = dict(native_state_dict)
+        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
-        n_kv = _WQKV_OUT // (_R_DIM * _HEAD_DIM)
-        wqkv = fused.wqkv.weight.reshape(n_kv, _R_DIM, _HEAD_DIM, _DIM)
-        self.assertTrue(
-            torch.equal(wqkv[:, :_HPK].reshape(-1, _DIM), state_dict["wq.weight"])
-        )
-        self.assertTrue(
-            torch.equal(wqkv[:, _HPK].reshape(-1, _DIM), state_dict["wk.weight"])
-        )
-        self.assertTrue(
-            torch.equal(wqkv[:, _HPK + 1].reshape(-1, _DIM), state_dict["wv.weight"])
+        build_config, max_context_length = llama3_configs["debugmodel"]
+        model_config = build_config(attn_backend="flex", seq_len=max_context_length)
+        adapter = Llama3StateDictAdapter(model_config, hf_assets_path=None)
+
+        adapter._split_qkv_linear(
+            state_dict,
+            prefix="",
+            head_dim=_HEAD_DIM,
+            heads_per_kv=_HPK,
         )
 
-        wqkv_b = fused.wqkv.bias.reshape(n_kv, _R_DIM, _HEAD_DIM)
-        self.assertTrue(
-            torch.equal(wqkv_b[:, :_HPK].reshape(-1), state_dict["wq.bias"])
+        n_kv_heads = _WQKV_OUT // (_R_DIM * _HEAD_DIM)
+        weight = fused.wqkv.weight.reshape(n_kv_heads, _R_DIM, _HEAD_DIM, _DIM)
+        bias = fused.wqkv.bias.reshape(n_kv_heads, _R_DIM, _HEAD_DIM)
+        torch.testing.assert_close(
+            state_dict["wq.weight"], weight[:, :_HPK].reshape(-1, _DIM)
         )
-        self.assertTrue(torch.equal(wqkv_b[:, _HPK].reshape(-1), state_dict["wk.bias"]))
-        self.assertTrue(
-            torch.equal(wqkv_b[:, _HPK + 1].reshape(-1), state_dict["wv.bias"])
+        torch.testing.assert_close(
+            state_dict["wk.weight"], weight[:, _HPK].reshape(-1, _DIM)
         )
+        torch.testing.assert_close(
+            state_dict["wv.weight"], weight[:, _HPK + 1].reshape(-1, _DIM)
+        )
+        torch.testing.assert_close(state_dict["wq.bias"], bias[:, :_HPK].reshape(-1))
+        torch.testing.assert_close(state_dict["wk.bias"], bias[:, _HPK].reshape(-1))
+        torch.testing.assert_close(state_dict["wv.bias"], bias[:, _HPK + 1].reshape(-1))
+
+        adapter._merge_qkv_linear(
+            state_dict,
+            prefix="",
+            head_dim=_HEAD_DIM,
+            heads_per_kv=_HPK,
+        )
+
+        self.assertEqual(state_dict.keys(), native_state_dict.keys())
+        for key, value in native_state_dict.items():
+            torch.testing.assert_close(state_dict[key], value)
 
     def test_hf_adapter_roundtrip(self):
-        """HF adapter works with QKVLinear's hook-produced wq/wk/wv keys."""
+        """HF adapters split and restore QKVLinear's native packed parameter."""
         from torchtitan.models.llama3 import llama3_configs
         from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
         from torchtitan.models.muse_glimmer import muse_glimmer_configs
@@ -176,10 +170,13 @@ class TestFusedQKVForwardContiguity(unittest.TestCase):
         self.assertTrue(xk_THK.is_contiguous())
         self.assertTrue(xv_THV.is_contiguous())
 
-        sd = fused.state_dict()
-        ref_q_THK = (x_TD @ sd["wq.weight"].T).view(num_tokens, _N_HEADS, _HEAD_DIM)
-        ref_k_THK = (x_TD @ sd["wk.weight"].T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
-        ref_v_THV = (x_TD @ sd["wv.weight"].T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
+        wqkv = fused.wqkv.weight.reshape(_N_KV_HEADS, _R_DIM, _HEAD_DIM, _DIM)
+        wq = wqkv[:, :_HPK].reshape(-1, _DIM)
+        wk = wqkv[:, _HPK].reshape(-1, _DIM)
+        wv = wqkv[:, _HPK + 1].reshape(-1, _DIM)
+        ref_q_THK = (x_TD @ wq.T).view(num_tokens, _N_HEADS, _HEAD_DIM)
+        ref_k_THK = (x_TD @ wk.T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
+        ref_v_THV = (x_TD @ wv.T).view(num_tokens, _N_KV_HEADS, _HEAD_DIM)
         torch.testing.assert_close(xq_THK, ref_q_THK)
         torch.testing.assert_close(xk_THK, ref_k_THK)
         torch.testing.assert_close(xv_THV, ref_v_THV)
