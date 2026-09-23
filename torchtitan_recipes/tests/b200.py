@@ -74,3 +74,23 @@ def kimi_k3_debugmodel_pp4_vp4() -> Trainer.Config:
         ["norm", "lm_head", "output_res_proj", "output_res_norm"],
     ]
     return config
+
+
+def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2() -> Trainer.Config:
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+
+    config = kimi_k3_debugmodel()
+    # Type checking stays off under pipeline parallelism, as the other pipeline
+    # recipes have it.
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.enable_sequence_parallel = True
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.num_pp_microbatches = 4
+    # DistMuon does not support tensor parallelism yet (#3353), so this cell
+    # keeps AdamW the way kimi_k3_debugmodel_mm does.
+    config.optimizer = default_adamw(lr=8e-4)
+    return config
