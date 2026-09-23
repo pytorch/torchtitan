@@ -10,9 +10,14 @@ from typing import cast, TYPE_CHECKING
 import torch
 from torch import nn
 
+from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import (
+    apply_fsdp_to_mtp_decoder,
+    roll_mtp_sequence,
+)
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -20,6 +25,7 @@ from torchtitan.models.utils import (
 from torchtitan.protocols.module import ModuleList
 
 from .mhc import HcHead, HcPost, HcPre
+from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
     from .attention import Attention
@@ -63,6 +69,8 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         input_ids_T: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         """Run one DeepSeek V4 decoder block.
 
@@ -83,11 +91,16 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
         if self.moe_enabled:
+            assert self.moe is not None
             ffn_input = self.ffn_norm(x)
             if getattr(self.moe.router, "hash", False):
-                x = self.moe(ffn_input, input_ids_T=input_ids_T)
+                x = self.moe(
+                    ffn_input,
+                    padding_mask_T=padding_mask,
+                    input_ids_T=input_ids_T,
+                )
             else:
-                x = self.moe(ffn_input)
+                x = self.moe(ffn_input, padding_mask_T=padding_mask)
         else:
             x = self.feed_forward(self.ffn_norm(x))
         x = self.hc_post(x, residual, post, comb)
@@ -95,7 +108,46 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
 
 class DeepSeekV4Model(Decoder):
+    state_dict_adapter_cls = DeepSeekV4StateDictAdapter
+
     """DeepSeek V4 decoder model with HC branches and sparse attention."""
+
+    @classmethod
+    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            resolve_fsdp_mesh,
+            resolve_sparse_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+        apply_fsdp_to_mtp_decoder(
+            # DeepSeek V4 has the decoder and MTP layer structure required by
+            # this helper, but uses its own MTP implementation.
+            self,  # pyrefly: ignore [bad-argument-type]
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallel_dims.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallel_dims.ep,
+            edp_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+        )
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
@@ -228,6 +280,7 @@ class DeepSeekV4Model(Decoder):
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        padding_mask: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
@@ -244,7 +297,13 @@ class DeepSeekV4Model(Decoder):
 
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
-            h = layer(h, input_ids_T, attention_masks, positions)
+            h = layer(
+                h,
+                input_ids_T,
+                attention_masks,
+                positions,
+                padding_mask=padding_mask,
+            )
 
         prev_hc_hidden = h
         main_hidden = self.hc_head(h)
@@ -260,6 +319,7 @@ class DeepSeekV4Model(Decoder):
             tokens,
             attention_masks,
             positions,
+            padding_mask,
         )
         return [
             self.lm_head(item) if self.lm_head is not None else item for item in outputs
@@ -271,6 +331,7 @@ class DeepSeekV4Model(Decoder):
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         """Run auxiliary MTP depths and return prediction hidden states."""
         mtp_outputs = []
@@ -280,6 +341,7 @@ class DeepSeekV4Model(Decoder):
                 shift=depth,
                 fill_value=0,
                 positions=positions,
+                padding_mask=padding_mask,
                 return_valid_mask=True,
             )
             prev_hc_hidden, prediction_hidden = mtp_block(
@@ -289,6 +351,7 @@ class DeepSeekV4Model(Decoder):
                 valid_mask,
                 attention_masks,
                 positions,
+                padding_mask=padding_mask,
             )
             mtp_outputs.append(prediction_hidden)
         return mtp_outputs

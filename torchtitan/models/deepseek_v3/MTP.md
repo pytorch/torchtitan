@@ -188,7 +188,7 @@ This keeps the MTP block forward code independent from explicit redistribution d
 If an MTP layer contains MoE, the current implementation reuses the normal DeepSeek-V3 MoE sharding config:
 
 - Expert parameters use the EP-related placement.
-- Grouped expert parameter layout reuses `_GROUPED_EXPERTS_PARAM_LAYOUT`.
+- Grouped expert parameter names come from the inner-expert initialization config.
 - Router, shared experts, and token dispatch/combine paths follow the normal layer configuration.
 
 The intended behavior is that MTP layers under EP match normal decoder layers, instead of introducing a separate expert-parallel semantics for MTP.

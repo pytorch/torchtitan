@@ -126,19 +126,19 @@ if [ "$TOTAL_GPUS" -ge 8 ]; then
         "FSDP + EP=4 + compile" \
             --parallelism.data_parallel_shard_degree -1 \
             --parallelism.expert_parallel_degree 4 \
-            --compile.enable
+            --config transformers_modeling_backend_debugmodel_moe_compile
 
     run_pair \
         "FSDP + TP=2 + EP=2 + compile" \
             --parallelism.data_parallel_shard_degree -1 \
             --parallelism.tensor_parallel_degree 2 \
             --parallelism.expert_parallel_degree 2 \
-            --compile.enable \
+            --config transformers_modeling_backend_debugmodel_moe_compile \
         -- \
         "FSDP + TP=2 (MoE, no EP) + compile" \
             --parallelism.data_parallel_shard_degree -1 \
             --parallelism.tensor_parallel_degree 2 \
-            --compile.enable
+            --config transformers_modeling_backend_debugmodel_moe_compile
 
     run_pair \
         "FSDP + PP=2 + EP=2" \
@@ -182,7 +182,7 @@ if [ "$TOTAL_GPUS" -ge 8 ]; then
             --parallelism.num_pp_microbatches 2 \
             --parallelism.pipeline_parallel_schedule 1F1B \
             --parallelism.expert_parallel_degree 2 \
-            --compile.enable
+            --config transformers_modeling_backend_debugmodel_moe_compile
 
     run_half \
         "FSDP + CP=2 + TP=2" \
@@ -227,14 +227,14 @@ else
         "FSDP + TP=4 (MoE, no EP)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 4" \
         "FSDP + TP=2 + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2" \
         "FSDP + TP=2 + EP=4|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4" \
-        "FSDP + EP=4 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4 --compile.enable" \
-        "FSDP + TP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --compile.enable" \
-        "FSDP + TP=2 (MoE, no EP) + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --compile.enable" \
+        "FSDP + EP=4 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4 --config transformers_modeling_backend_debugmodel_moe_compile" \
+        "FSDP + TP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --config transformers_modeling_backend_debugmodel_moe_compile" \
+        "FSDP + TP=2 (MoE, no EP) + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --config transformers_modeling_backend_debugmodel_moe_compile" \
         "FSDP + PP=2 + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2" \
         "HSDP + EP=2|--parallelism.data_parallel_replicate_degree 2 --parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2" \
         "FSDP + EP=2 (no SAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2 activation-checkpoint:none" \
         "FSDP + TP=2 + EP=2 (no SAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 activation-checkpoint:none" \
-        "FSDP + PP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable" \
+        "FSDP + PP=2 + EP=2 + compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --config transformers_modeling_backend_debugmodel_moe_compile" \
         "FSDP + CP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2" \
         "FSDP + CP=2 + EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.expert_parallel_degree 2" \
         "FSDP + CP=2 + TP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.tensor_parallel_degree 2" \
@@ -279,14 +279,14 @@ if [ "${SKIP_MODEL_SWEEP:-0}" != "1" ]; then
         "TP=4|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 4"
         "TP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2"
         "TP=2+EP=4|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 4"
-        "EP=4+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4 --compile.enable"
-        "TP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --compile.enable"
-        "TP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --compile.enable"
+        "EP=4+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 4 --config transformers_modeling_backend_debugmodel_moe_compile"
+        "TP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 --config transformers_modeling_backend_debugmodel_moe_compile"
+        "TP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --config transformers_modeling_backend_debugmodel_moe_compile"
         "PP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2"
         "HSDP+EP=2|--parallelism.data_parallel_replicate_degree 2 --parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2"
         "EP=2(noSAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.expert_parallel_degree 2 activation-checkpoint:none"
         "TP=2+EP=2(noSAC)|--parallelism.data_parallel_shard_degree -1 --parallelism.tensor_parallel_degree 2 --parallelism.expert_parallel_degree 2 activation-checkpoint:none"
-        "PP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --compile.enable"
+        "PP=2+EP=2+compile|--parallelism.data_parallel_shard_degree -1 --parallelism.pipeline_parallel_degree 2 --parallelism.num_pp_microbatches 2 --parallelism.pipeline_parallel_schedule 1F1B --parallelism.expert_parallel_degree 2 --config transformers_modeling_backend_debugmodel_moe_compile"
         "CP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2"
         "CP=2+EP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.expert_parallel_degree 2"
         "CP=2+TP=2|--parallelism.data_parallel_shard_degree -1 --parallelism.context_parallel_degree 2 --parallelism.tensor_parallel_degree 2"
