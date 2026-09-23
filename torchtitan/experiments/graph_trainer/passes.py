@@ -33,8 +33,12 @@ import logging
 import time
 import warnings
 from collections.abc import Callable
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
+from typing import Any
 
 import torch
+import torch.nn as nn
 
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.configs import (
@@ -42,7 +46,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     MOE_BLOCK_FQN,
     validate_ep_overlap_config,
 )
-
 from torchtitan.experiments.graph_trainer.cpu_offload import apply_cpu_offload_pass
 from torchtitan.experiments.graph_trainer.cuda_graph import (
     cuda_graph_pass,
@@ -100,6 +103,20 @@ logger = logging.getLogger(__name__)
 
 
 c10d = torch.ops._c10d_functional
+
+
+@dataclass(frozen=True)
+class GraphPassRuntimeContext:
+    """Live training state made available when graph passes are constructed.
+
+    A pass pipeline may bind this context to passes that need to evaluate graph
+    candidates with the live model state and current batch. Most passes should
+    continue to use only the graph and its fake example inputs.
+    """
+
+    module: nn.Module
+    args: tuple[Any, ...]
+    train_context: Callable[[], AbstractContextManager[Any]]
 
 
 def async_tensor_parallel_pass(
@@ -436,6 +453,7 @@ def construct_default_graph_passes(
     config: "GraphTrainer.Config",
     *,
     parallel_dims=None,
+    runtime_context: GraphPassRuntimeContext | None = None,
 ) -> list[Callable]:
     """Build the pass list for the aot_fx_trace path.
 
@@ -443,7 +461,9 @@ def construct_default_graph_passes(
     FlexInnerAttention annotation, regional_inductor, and CUDA graph.
 
     When ``precompile_artifact_dir`` is set, the artifact has graph
-    transformed during precompile phase, so only CUDA graph is returned.
+    transformed during precompile phase, so only CUDA graph is returned. Custom pass
+    pipelines may bind ``runtime_context`` to passes that require live model
+    state or inputs; the default pipeline does not use it.
     """
     want_cuda_graph = "cuda_graph_pass" not in config.compile.disable_passes
 
