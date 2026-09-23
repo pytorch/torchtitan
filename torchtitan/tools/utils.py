@@ -39,6 +39,14 @@ def has_cuda_capability(major: int, minor: int) -> bool:
 def get_cuda_flash_attention_impl() -> str | None:
     """Return the FlashAttention implementation for the current CUDA architecture."""
 
+    # ROCm has neither FA3 nor FA4: torch's flash_attn_interface is CUDA-only.
+    # This has to be checked explicitly, because has_cuda_capability() below is
+    # just torch.cuda.get_device_capability() >= (major, minor) and AMD devices
+    # report a capability too -- gfx950 (MI350X) reports (9, 5), which satisfies
+    # the (9, 0) test and would select FA3 on hardware that cannot run it.
+    if torch.version.hip is not None:
+        return None
+
     # FA4 advertises Hopper support, but as of writing it hangs under
     # torch.compile there, so Hopper (sm90) stays on FA3.
     # https://github.com/pytorch/torchtitan/pull/4413
@@ -142,7 +150,7 @@ class GarbageCollection:
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU,
-# AMD MI250, MI300X, MI325X, MI355X, Intel PVC, and AWS Trainium/Inferentia
+# AMD MI250, MI300X, MI325X, MI350X, MI355X, Intel PVC, and AWS Trainium/Inferentia
 def get_peak_flops(device_name: str) -> float:
     try:
         # Run the lspci command and capture the output
@@ -196,6 +204,9 @@ def get_peak_flops(device_name: str) -> float:
         # data from https://resources.nvidia.com/en-us-blackwell-architecture
         # Checked after GB300 to avoid false match on "GB300"
         return 2.25e15
+    elif "MI350X" in device_name:
+        # MI350X data from https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html
+        return 2300e12
     elif "MI355X" in device_name:
         # MI355X data from https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
         return 2500e12

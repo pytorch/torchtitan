@@ -264,7 +264,8 @@ class _CommunicationContext:
         device: torch.device,
     ) -> _CommunicationContext:
         device_handle = torch.get_device_module(device)
-        transfer_stream = device_handle.Stream(device=device, priority=0)
+        with device_handle.stream(device_handle.current_stream(device)):
+            transfer_stream = device_handle.Stream(priority=0)
 
         def create_slot() -> _PipelineSlot:
             return _PipelineSlot(

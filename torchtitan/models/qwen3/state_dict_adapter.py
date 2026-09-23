@@ -4,8 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 """
-This script is adapted from torchtitan/models/llama3/model/state_dict_adapter.py.
+This script is adapted from torchtitan/models/llama3/state_dict_adapter.py.
 
 We can use this script to adapt the checkpoint from HF to the format that we can load into the torchtitan model and vice versa.
 This can enable us to do a parity test with the HF implementation and make sure that our results are
@@ -14,13 +16,15 @@ aligned with the HF implementation.
 """
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
-from .model import Qwen3Model
+
+if TYPE_CHECKING:
+    from .model import Qwen3Model
 
 
 class Qwen3StateDictAdapter(MoEStateDictAdapter):
@@ -56,10 +60,12 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
-        2. Split grouped weights into individual expert weights.
+        2. Split grouped-linear weights into individual expert weights.
         """
+        state_dict = self._to_logical_expert_state(
+            self._native_fused_linears_to_hf(state_dict)
+        )
 
-        state_dict = self._to_logical_expert_state(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
 
@@ -80,7 +86,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     self.grouped_expert_weight_shape[abstract_key] = value.shape
                     self.grouped_expert_weight_mesh[abstract_key] = value.device_mesh
 
-                    # Split the grouped weight into local expert weights.
+                    # Split the grouped weight into local individual experts.
                     local_expert_fqn = self._get_local_experts_weights(
                         new_abstract_key,
                         abstract_key,
@@ -132,7 +138,7 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
-        2. Concatenate individual expert weights into grouped weights.
+        2. Concatenate individual expert weights into grouped-linear weights.
         """
         self._validate_hf_rope_config(CosSinRoPE.Config)
 
@@ -204,4 +210,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     continue
                 state_dict[new_key] = value
 
-        return self._to_native_expert_state(state_dict)
+        return self._native_fused_linears_from_hf(
+            self._to_native_expert_state(state_dict)
+        )
