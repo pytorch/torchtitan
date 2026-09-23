@@ -21,6 +21,10 @@ from torchtitan.components.optimizer import (
     default_adamw,
     register_moe_load_balancing_hook,
 )
+from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
+    hf_to_titan_moe_state_dict,
+    titan_to_hf_moe_state_dict,
+)
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 
@@ -42,6 +46,26 @@ def _moe_buffer(moe, prefix):
         if leaf_name == prefix or leaf_name.startswith(prefix + "_"):
             return buf
     raise AttributeError(f"{type(moe).__name__} has no buffer matching '{prefix}*'")
+
+
+def test_moe_state_dict_roundtrip_uses_native_w13():
+    """Transformer-backend conversion keeps W13 native inside TorchTitan."""
+    gate_up_EGD = torch.arange(4 * 2 * 8 * 4).reshape(4, 16, 4)
+    down_EDF = torch.arange(4 * 4 * 8).reshape(4, 4, 8)
+    hf_state = {
+        "layers.0.moe.experts.gate_up_proj": gate_up_EGD,
+        "layers.0.moe.experts.down_proj": down_EDF,
+    }
+
+    titan_state = hf_to_titan_moe_state_dict(hf_state)
+
+    expert_prefix = "layers.0.moe.routed_experts.inner_experts"
+    assert titan_state[f"{expert_prefix}.w13_E2FD"].shape == (4, 2, 8, 4)
+    assert titan_state[f"{expert_prefix}.w2_EDF"] is down_EDF
+    restored = titan_to_hf_moe_state_dict(titan_state)
+    assert restored.keys() == hf_state.keys()
+    for key in hf_state:
+        torch.testing.assert_close(restored[key], hf_state[key], rtol=0, atol=0)
 
 
 try:

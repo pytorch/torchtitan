@@ -89,10 +89,9 @@ def test_state_dict_layouts_include_native_qkv_weight():
     assert "qkv_linear.wv.weight" not in layouts
 
 
-def test_state_dict_layouts_include_split_expert_weights():
-    """Verify fused grouped-expert layouts use the exported split state-dict keys."""
+def test_state_dict_layouts_include_native_expert_weights():
+    """Verify fused grouped-expert layouts use native model-state keys."""
     physical_colwise = dense_param_placement(tp=spmd.S(2))
-    exported_colwise = dense_param_placement(tp=spmd.S(1))
     rowwise = dense_param_placement(tp=spmd.S(2))
     config = GroupedExperts.Config(
         dim=16,
@@ -113,8 +112,7 @@ def test_state_dict_layouts_include_split_expert_weights():
 
     layouts = wrapper.get_state_dict_layouts()
 
-    assert layouts["experts.w1_EFD"] == exported_colwise
-    assert layouts["experts.w3_EFD"] == exported_colwise
+    assert layouts["experts.w13_E2FD"] is physical_colwise
     assert layouts["experts.w2_EDF"] is rowwise
 
 

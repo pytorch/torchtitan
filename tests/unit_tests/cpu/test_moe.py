@@ -114,7 +114,8 @@ class TestMoE(unittest.TestCase):
             experts.w13_E2FD.untyped_storage().data_ptr(),
         )
 
-    def test_grouped_experts_checkpoint_uses_logical_projection_keys(self):
+    def test_grouped_experts_state_uses_native_weight_and_loads_legacy_keys(self):
+        """Native state matches parameter FQNs while legacy W1/W3 still load."""
         source = GroupedExperts.Config(
             dim=4,
             hidden_dim=8,
@@ -125,14 +126,19 @@ class TestMoE(unittest.TestCase):
             source.w2_EDF.copy_(torch.randn_like(source.w2_EDF))
 
         state_dict = source.state_dict()
-        self.assertEqual(set(state_dict), {"w1_EFD", "w2_EDF", "w3_EFD"})
+        self.assertEqual(set(state_dict), {"w13_E2FD", "w2_EDF"})
+        legacy_state_dict = {
+            "w1_EFD": source.w13_E2FD[:, 0].contiguous(),
+            "w2_EDF": source.w2_EDF,
+            "w3_EFD": source.w13_E2FD[:, 1].contiguous(),
+        }
 
         target = GroupedExperts.Config(
             dim=4,
             hidden_dim=8,
             num_experts=2,
         ).build()
-        target.load_state_dict(state_dict)
+        target.load_state_dict(legacy_state_dict)
         torch.testing.assert_close(target.w13_E2FD, source.w13_E2FD)
         torch.testing.assert_close(target.w2_EDF, source.w2_EDF)
 
