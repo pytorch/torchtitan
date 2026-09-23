@@ -1,0 +1,395 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+import torch
+import torch.distributed.checkpoint as dcp
+from safetensors import safe_open
+from safetensors.torch import save_file
+from torch.distributed.checkpoint.metadata import MetadataIndex
+from torch.distributed.checkpoint.planner import LoadItemType, ReadItem
+from torchtitan.components.checkpointer.hf_storage import (
+    HuggingFaceStorageReaderWithViews,
+    LogicalPrefixSpec,
+    PackedPairSpec,
+)
+from torchtitan.quantization.mx_qat.checkpoint import decode_mxfp4
+
+_PACKED_KEY = "model.layers.0.experts.0.w1.weight_packed"
+_SCALE_KEY = "model.layers.0.experts.0.w1.weight_scale"
+_VIRTUAL_KEY = "model.layers.0.experts.0.w1.weight"
+
+
+def _spec() -> PackedPairSpec:
+    return PackedPairSpec(
+        packed_suffix=".weight_packed",
+        scale_suffix=".weight_scale",
+        virtual_suffix=".weight",
+        block_size=32,
+        packed_values_per_byte=2,
+        target_dtype=torch.bfloat16,
+        target_fqns=frozenset({_VIRTUAL_KEY}),
+        decode=decode_mxfp4,
+    )
+
+
+def _packed_fixture() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    nibbles = torch.arange(2 * 64, dtype=torch.uint8).reshape(2, 64) % 16
+    packed = nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)
+    scales = torch.tensor([[127, 128], [126, 255]], dtype=torch.uint8)
+    lookup = torch.tensor(
+        [
+            0.0,
+            0.5,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            4.0,
+            6.0,
+            -0.0,
+            -0.5,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+            -4.0,
+            -6.0,
+        ],
+        dtype=torch.float32,
+    )
+    decoded = torch.stack(
+        (lookup[(packed & 0x0F).long()], lookup[(packed >> 4).long()]), dim=-1
+    ).flatten(-2)
+    expanded_scales = scales.repeat_interleave(32, dim=-1)
+    expected = torch.ldexp(decoded, expanded_scales.to(torch.int32) - 127)
+    expected = torch.where(expanded_scales == 255, torch.nan, expected).to(
+        torch.bfloat16
+    )
+    return packed, scales, expected
+
+
+class _Planner:
+    def __init__(self, destination: torch.Tensor) -> None:
+        self.destination = destination
+        self.committed = False
+
+    def resolve_tensor(self, _read_item: ReadItem) -> torch.Tensor:
+        return self.destination
+
+    def commit_tensor(self, _read_item: ReadItem, tensor: torch.Tensor) -> None:
+        self.committed = tensor.data_ptr() == self.destination.data_ptr()
+
+
+class _RecordingSlice:
+    def __init__(self, tensor_slice: object, calls: list[tuple[str, object]], key: str):
+        self.tensor_slice = tensor_slice
+        self.calls = calls
+        self.key = key
+
+    def __getitem__(self, slices: object) -> torch.Tensor:
+        self.calls.append((self.key, slices))
+        return self.tensor_slice[slices]  # type: ignore[index]
+
+
+class _RecordingFile:
+    def __init__(self, handle: object) -> None:
+        self.handle = handle
+        self.calls: list[tuple[str, object]] = []
+
+    def get_slice(self, key: str) -> _RecordingSlice:
+        return _RecordingSlice(self.handle.get_slice(key), self.calls, key)  # type: ignore[attr-defined]
+
+
+class HuggingFaceStorageReaderWithViewsMetadataTest(unittest.TestCase):
+    def _write_checkpoint(self, tensors: dict[str, torch.Tensor]) -> str:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        save_file(tensors, Path(directory.name) / "model.safetensors")
+        return directory.name
+
+    def test_read_metadata_exposes_virtual_weight(self) -> None:
+        path = self._write_checkpoint(
+            {
+                _PACKED_KEY: torch.zeros((2, 32), dtype=torch.uint8),
+                _SCALE_KEY: torch.full((2, 2), 127, dtype=torch.uint8),
+                "dense.weight": torch.ones((3, 4), dtype=torch.bfloat16),
+            }
+        )
+
+        metadata = HuggingFaceStorageReaderWithViews(path, _spec()).read_metadata()
+
+        self.assertEqual(
+            set(metadata.state_dict_metadata), {_VIRTUAL_KEY, "dense.weight"}
+        )
+        virtual = metadata.state_dict_metadata[_VIRTUAL_KEY]
+        self.assertEqual(virtual.size, torch.Size((2, 64)))
+        self.assertEqual(virtual.properties.dtype, torch.bfloat16)
+        self.assertEqual(
+            {index.fqn for index in metadata.storage_data},
+            {_VIRTUAL_KEY, "dense.weight"},
+        )
+
+    def test_read_metadata_rejects_dense_substitution_for_expected_pair(self) -> None:
+        path = self._write_checkpoint(
+            {_VIRTUAL_KEY: torch.ones((2, 64), dtype=torch.bfloat16)}
+        )
+        with self.assertRaisesRegex(ValueError, "requires missing pairs"):
+            HuggingFaceStorageReaderWithViews(path, _spec()).read_metadata()
+
+    def test_read_metadata_rejects_missing_scale(self) -> None:
+        path = self._write_checkpoint(
+            {_PACKED_KEY: torch.zeros((2, 32), dtype=torch.uint8)}
+        )
+
+        with self.assertRaisesRegex(ValueError, "missing scale tensor"):
+            HuggingFaceStorageReaderWithViews(path, _spec()).read_metadata()
+
+    def test_read_metadata_rejects_orphan_scale(self) -> None:
+        path = self._write_checkpoint(
+            {_SCALE_KEY: torch.full((2, 2), 127, dtype=torch.uint8)}
+        )
+
+        with self.assertRaisesRegex(ValueError, "orphan scale tensor"):
+            HuggingFaceStorageReaderWithViews(path, _spec()).read_metadata()
+
+    def test_read_metadata_rejects_non_uint8_payload(self) -> None:
+        path = self._write_checkpoint(
+            {
+                _PACKED_KEY: torch.zeros((2, 32), dtype=torch.int16),
+                _SCALE_KEY: torch.full((2, 2), 127, dtype=torch.uint8),
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "must use torch.uint8"):
+            HuggingFaceStorageReaderWithViews(path, _spec()).read_metadata()
+
+    def test_read_metadata_rejects_incompatible_shapes(self) -> None:
+        path = self._write_checkpoint(
+            {
+                _PACKED_KEY: torch.zeros((2, 31), dtype=torch.uint8),
+                _SCALE_KEY: torch.full((2, 2), 127, dtype=torch.uint8),
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "incompatible packed and scale shapes"):
+            HuggingFaceStorageReaderWithViews(path, _spec()).read_metadata()
+
+    def test_read_metadata_rejects_pair_outside_target_policy(self) -> None:
+        path = self._write_checkpoint(
+            {
+                "model.layers.0.dense.weight_packed": torch.zeros(
+                    (2, 32), dtype=torch.uint8
+                ),
+                "model.layers.0.dense.weight_scale": torch.full(
+                    (2, 2), 127, dtype=torch.uint8
+                ),
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "outside the packed-weight policy"):
+            HuggingFaceStorageReaderWithViews(path, _spec()).read_metadata()
+
+
+class HuggingFaceStorageReaderWithViewsReadTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        packed, scales, self.expected = _packed_fixture()
+        save_file(
+            {_PACKED_KEY: packed, _SCALE_KEY: scales},
+            Path(self.directory.name) / "model.safetensors",
+        )
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def test_dcp_load_dequantizes_full_tensor(self) -> None:
+        destination = torch.empty((2, 64), dtype=torch.bfloat16)
+
+        dcp.load(
+            {_VIRTUAL_KEY: destination},
+            storage_reader=HuggingFaceStorageReaderWithViews(
+                self.directory.name, _spec()
+            ),
+        )
+
+        torch.testing.assert_close(
+            destination, self.expected, rtol=0, atol=0, equal_nan=True
+        )
+
+    def test_unaligned_read_uses_only_intersecting_groups(self) -> None:
+        reader = HuggingFaceStorageReaderWithViews(self.directory.name, _spec())
+        reader.read_metadata()
+        destination = torch.empty((2, 38), dtype=torch.bfloat16)
+        planner = _Planner(destination)
+        request = ReadItem(
+            type=LoadItemType.TENSOR,
+            dest_index=MetadataIndex(_VIRTUAL_KEY, [0, 0]),
+            dest_offsets=torch.Size((0, 0)),
+            storage_index=MetadataIndex(_VIRTUAL_KEY, [0, 0]),
+            storage_offsets=torch.Size((0, 7)),
+            lengths=torch.Size((2, 38)),
+        )
+
+        with safe_open(
+            Path(self.directory.name) / "model.safetensors", framework="pt"
+        ) as handle:
+            recording_file = _RecordingFile(handle)
+            reader._process_read_request(recording_file, request, planner)
+
+        self.assertTrue(planner.committed)
+        torch.testing.assert_close(
+            destination, self.expected[:, 7:45], rtol=0, atol=0, equal_nan=True
+        )
+        self.assertEqual(
+            recording_file.calls,
+            [
+                (_PACKED_KEY, (slice(0, 2), slice(0, 32))),
+                (_SCALE_KEY, (slice(0, 2), slice(0, 2))),
+            ],
+        )
+
+    def test_aligned_read_dequantizes_second_group(self) -> None:
+        reader = HuggingFaceStorageReaderWithViews(self.directory.name, _spec())
+        reader.read_metadata()
+        destination = torch.empty((1, 32), dtype=torch.bfloat16)
+        planner = _Planner(destination)
+        request = ReadItem(
+            type=LoadItemType.TENSOR,
+            dest_index=MetadataIndex(_VIRTUAL_KEY, [0, 0]),
+            dest_offsets=torch.Size((0, 0)),
+            storage_index=MetadataIndex(_VIRTUAL_KEY, [0, 0]),
+            storage_offsets=torch.Size((1, 32)),
+            lengths=torch.Size((1, 32)),
+        )
+
+        with safe_open(
+            Path(self.directory.name) / "model.safetensors", framework="pt"
+        ) as handle:
+            reader._process_read_request(handle, request, planner)
+
+        torch.testing.assert_close(
+            destination, self.expected[1:2, 32:64], rtol=0, atol=0, equal_nan=True
+        )
+
+    def test_e8m0_extreme_bytes_follow_mx_semantics(self) -> None:
+        packed = torch.full((1, 48), 0x11, dtype=torch.uint8)
+        scales = torch.tensor([[0, 254, 255]], dtype=torch.uint8)
+        with tempfile.TemporaryDirectory() as directory:
+            save_file(
+                {_PACKED_KEY: packed, _SCALE_KEY: scales},
+                Path(directory) / "model.safetensors",
+            )
+            destination = torch.empty((1, 96), dtype=torch.bfloat16)
+            dcp.load(
+                {_VIRTUAL_KEY: destination},
+                storage_reader=HuggingFaceStorageReaderWithViews(directory, _spec()),
+            )
+
+        expected = torch.cat(
+            (
+                torch.full(
+                    (32,),
+                    torch.ldexp(torch.tensor(0.5), torch.tensor(-127)).item(),
+                ),
+                torch.full(
+                    (32,),
+                    torch.ldexp(torch.tensor(0.5), torch.tensor(127)).item(),
+                ),
+                torch.full((32,), torch.nan),
+            )
+        ).reshape(1, 96)
+        torch.testing.assert_close(
+            destination,
+            expected.to(torch.bfloat16),
+            rtol=0,
+            atol=0,
+            equal_nan=True,
+        )
+
+
+class LogicalPrefixTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "model.safetensors"
+        self.prefix = torch.arange(96, dtype=torch.float32)
+
+    def reader(self):
+        return HuggingFaceStorageReaderWithViews(
+            self.directory.name,
+            logical_prefixes={"A_log": LogicalPrefixSpec(96, 128)},
+        )
+
+    def test_canonical_and_padded_vectors_load_through_dcp(self):
+        for padding in (0, 32):
+            with self.subTest(padding=padding):
+                save_file(
+                    {"A_log": torch.cat((self.prefix, torch.zeros(padding)))}, self.path
+                )
+                reader = self.reader()
+                metadata = reader.read_metadata()
+                tensor = metadata.state_dict_metadata["A_log"]
+                self.assertEqual(tensor.size, (96,))
+                self.assertEqual(tensor.chunks[0].sizes, (96,))
+                self.assertEqual(
+                    next(iter(metadata.storage_data.values())).shape, (96,)
+                )
+                destination = {"A_log": torch.empty(96)}
+                dcp.load(destination, storage_reader=reader)
+                torch.testing.assert_close(
+                    destination["A_log"], self.prefix, rtol=0, atol=0
+                )
+
+    def test_rejects_nonzero_or_nan_tail(self):
+        for invalid in (1e-30, float("nan"), float("inf")):
+            with self.subTest(invalid=invalid):
+                tail = torch.zeros(32)
+                tail[-1] = invalid
+                save_file({"A_log": torch.cat((self.prefix, tail))}, self.path)
+                with self.assertRaisesRegex(ValueError, "padding must be exactly zero"):
+                    self.reader().read_metadata()
+
+    def test_rejects_unknown_physical_shape_or_missing_tensor(self):
+        for shape in ((95,), (97,), (129,), (1, 128)):
+            with self.subTest(shape=shape):
+                save_file({"A_log": torch.zeros(shape)}, self.path)
+                with self.assertRaisesRegex(ValueError, "expected physical shape"):
+                    self.reader().read_metadata()
+        save_file({"other": torch.zeros(128)}, self.path)
+        with self.assertRaisesRegex(ValueError, "requires tensor"):
+            self.reader().read_metadata()
+
+    def test_read_at_logical_boundary_never_reads_padding(self):
+        save_file({"A_log": torch.cat((self.prefix, torch.zeros(32)))}, self.path)
+        reader = self.reader()
+        reader.read_metadata()
+        destination = torch.empty(7)
+        planner = _Planner(destination)
+        request = ReadItem(
+            type=LoadItemType.TENSOR,
+            dest_index=MetadataIndex("A_log", [0]),
+            dest_offsets=torch.Size((0,)),
+            storage_index=MetadataIndex("A_log", [0]),
+            storage_offsets=torch.Size((89,)),
+            lengths=torch.Size((7,)),
+        )
+        with safe_open(self.path, framework="pt") as handle:
+            recording = _RecordingFile(handle)
+            reader._process_read_request(recording, request, planner)
+            self.assertEqual(recording.calls, [("A_log", (slice(89, 96),))])
+            request = replace(request, lengths=torch.Size((8,)))
+            with self.assertRaisesRegex(ValueError, "exceeds logical prefix"):
+                reader._process_read_request(recording, request, planner)
+        torch.testing.assert_close(destination, self.prefix[89:], rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    unittest.main()

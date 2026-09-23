@@ -6,19 +6,33 @@
 
 from __future__ import annotations
 
-"""HuggingFace checkpoint adapter for unquantized Kimi K3 weights."""
+"""HuggingFace checkpoint adapter for dense and packed Kimi K3 weights."""
 
+import json
 import re
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 import torch
-from torch.distributed.tensor import DTensor
+from torch.distributed.checkpoint import HuggingFaceStorageReader
+from torch.distributed.tensor import DTensor, Replicate, Shard
 
+from torchtitan.components.checkpointer.hf_storage import (
+    HuggingFaceStorageReaderWithViews,
+    LogicalPrefixSpec,
+    PackedPairSpec,
+)
+from torchtitan.models.common.linear import Linear, RouterGateLinear
+from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.utils import MoEStateDictAdapter
+from torchtitan.protocols.state_dict_adapter import dtensor_safe
+from torchtitan.quantization.mx_qat.checkpoint import (
+    decode_mxfp4,
+    MXFP4CheckpointPolicy,
+)
 
 if TYPE_CHECKING:
     from .model import KimiK3Model
-
 
 _UNUSED_HF_LAYER_ZERO_ATTN_RES_KEYS = {
     "language_model.model.layers.0.self_attention_res_norm.weight",
@@ -136,6 +150,181 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         )
         return attention_map.get(abstract_key)
 
+    def hf_linear_weight_mapping(self) -> dict[str, str | None]:
+        """Map the supported HF Linear hierarchy to Titan parameter FQNs.
+
+        Reuse the adapter's architecture mapping. RouterGateLinear represents
+        HF KimiMoEGate's raw parameter, not an HF Linear. Grouped expert tensors
+        represent one HF Linear per expert; no quantization-name regex is used.
+        """
+        linear_weights = {
+            f"{fqn}.weight"
+            for fqn, config, _, _ in self.kimi_config.traverse(Linear.Config)
+            if not isinstance(config, RouterGateLinear.Config)
+        }
+        # MoonViT builds repeated layers from one block config and renames MLP
+        # fields. Inspect one meta block to recover its actual parameter names.
+        vision = self.kimi_config.vision_encoder
+        if vision is not None:
+            with torch.device("meta"):
+                block = vision.block.build()
+            linear_weights.update(
+                f"vision_encoder.layers.{layer}.{name}.weight"
+                for layer in range(vision.num_layers)
+                for name, module in block.named_modules()
+                if isinstance(module, Linear)
+            )
+        grouped = {
+            fqn: config
+            for fqn, config, _, _ in self.kimi_config.traverse(GroupedExperts.Config)
+        }
+        result: dict[str, str | None] = {}
+        for mapping in (self.from_hf_map, self.mla_from_hf_map, self.kda_from_hf_map):
+            for hf_template, titan_template in mapping.items():
+                layers = (
+                    range(
+                        vision.num_layers
+                        if hf_template.startswith("vision_tower.")
+                        and vision is not None
+                        else len(self.kimi_config.layers)
+                    )
+                    if "{}" in titan_template
+                    else (None,)
+                )
+                for layer in layers:
+                    titan_key = titan_template.format(layer)
+                    if titan_key in linear_weights:
+                        result[hf_template.format(layer)] = titan_key
+                    elif hf_template.count("{}") == 2:
+                        module = titan_key.rsplit(".", 1)[0]
+                        if module in grouped:
+                            for expert in range(grouped[module].num_experts):
+                                result[hf_template.format(layer, expert)] = titan_key
+        # HF has an unused layer-zero residual projection absent from Titan.
+        if self.kimi_config.layers[0].attention_res_proj is None:
+            result[
+                "language_model.model.layers.0.self_attention_res_proj.weight"
+            ] = None
+        # The HF vision projection is fused; Titan stores its three slices.
+        # Current Kimi recipes require vision to remain unquantized.
+        if self.kimi_config.vision_encoder is not None:
+            for layer in range(self.kimi_config.vision_encoder.num_layers):
+                result[
+                    f"vision_tower.encoder.blocks.{layer}.wqkv.weight"
+                ] = f"vision_encoder.layers.{layer}.attn.wqkv.weight"
+        return result
+
+    def mxfp4_policy(self, path: str) -> MXFP4CheckpointPolicy:
+        config_path = Path(path) / "config.json"
+        if not config_path.is_file():
+            raise ValueError(f"Quantized Kimi checkpoint is missing {config_path}.")
+        config = json.loads(config_path.read_text())
+        quantization = config.get("text_config", config).get("quantization_config")
+        if not isinstance(quantization, dict):
+            raise ValueError("Kimi checkpoint is missing quantization_config metadata.")
+        return MXFP4CheckpointPolicy.from_config(
+            quantization, self.hf_linear_weight_mapping()
+        )
+
+    @staticmethod
+    def _validate_qat_weight_config(config, policy: MXFP4CheckpointPolicy) -> None:
+        if (
+            config.dtype != torch.float4_e2m1fn_x2
+            or config.block_size != policy.block_size
+        ):
+            raise ValueError("MX QAT weight format disagrees with checkpoint policy")
+
+    def _validate_qat_policy(self, policy: MXFP4CheckpointPolicy) -> None:
+        """Reject a QAT recipe whose selected parameters differ from import."""
+        mapping = self.hf_linear_weight_mapping()
+        selected = set()
+        has_qat = False
+        for fqn, config, _, _ in self.kimi_config.traverse(Linear.Config):
+            if getattr(type(config)._owner, "_mx_qat", False):
+                has_qat = True
+                self._validate_qat_weight_config(
+                    config.weight_fake_quant_config, policy
+                )
+                selected.add(f"{fqn}.weight")
+        for fqn, config, _, _ in self.kimi_config.traverse(GroupedExperts.Config):
+            if getattr(type(config)._owner, "_mx_qat", False):
+                has_qat = True
+                self._validate_qat_weight_config(
+                    config.weight_fake_quant_config, policy
+                )
+                selected.update(
+                    key
+                    for key in mapping.values()
+                    if key and key.rsplit(".", 1)[0] == fqn
+                )
+        if not has_qat:
+            return  # Packed import into a BF16 model remains supported.
+        expected = {
+            mapping[key] for key in policy.weight_fqns if mapping[key] is not None
+        }
+        if selected != expected:
+            raise ValueError(
+                "MX QAT selection disagrees with checkpoint policy: "
+                f"missing={sorted(expected - selected)}, unexpected={sorted(selected - expected)}"
+            )
+
+    def _reshape_dt_bias(
+        self, value: torch.Tensor, shape: tuple[int, ...]
+    ) -> torch.Tensor:
+        """Preserve leading-axis FSDP shards, including ranks with no heads."""
+        if isinstance(value, DTensor) and any(
+            not isinstance(p, Replicate) and not (type(p) is Shard and p.dim == 0)
+            for p in value.placements
+        ):
+            raise ValueError("KDA dt_bias reshape supports only Replicate and Shard(0)")
+        return self._reshape_dt_bias_replicated(value, shape)
+
+    @dtensor_safe
+    def _reshape_dt_bias_replicated(
+        self, value: torch.Tensor, shape: tuple[int, ...]
+    ) -> torch.Tensor:
+        # Reuse the adapter's gather/restore helper only for this small bias.
+        return value.reshape(shape)
+
+    def get_hf_storage_reader(
+        self,
+        path: str,
+        from_quantized: bool = False,
+    ) -> HuggingFaceStorageReader:
+        # The released 96-head KDA stores A_log in a 128-element vector.
+        # Other architectures must not inherit this checkpoint-specific rule.
+        prefixes = {
+            f"language_model.model.layers.{index}.self_attn.A_log": LogicalPrefixSpec(
+                logical_length=layer.delta_attention.num_heads,
+                padded_length=128,
+            )
+            for index, layer in enumerate(self.kimi_config.layers)
+            if layer.delta_attention is not None
+            and layer.delta_attention.num_heads == 96
+            and layer.delta_attention.head_dim == 128
+        }
+        if not from_quantized and not prefixes:
+            return super().get_hf_storage_reader(path, from_quantized=False)
+        spec = None
+        if from_quantized:
+            policy = self.mxfp4_policy(path)
+            self._validate_qat_policy(policy)
+            spec = PackedPairSpec(
+                packed_suffix=".weight_packed",
+                scale_suffix=".weight_scale",
+                virtual_suffix=".weight",
+                block_size=policy.block_size,
+                packed_values_per_byte=2,
+                target_dtype=torch.bfloat16,
+                target_fqns=policy.weight_fqns,
+                decode=decode_mxfp4,
+            )
+        return HuggingFaceStorageReaderWithViews(
+            path=path,
+            spec=spec,
+            logical_prefixes=prefixes,
+        )
+
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
         state_dict = self._native_fused_linears_to_hf(state_dict)
@@ -213,7 +402,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                     unmapped.append(key)
                     continue
                 if abstract_key == "layers.{}.delta_attention.dt_bias":
-                    value = value.reshape(-1)
+                    value = self._reshape_dt_bias(value, (-1,))
                 hf_state_dict[hf_abstract_key.format(layer_num)] = value
                 continue
 
@@ -361,9 +550,8 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                     ].delta_attention
                     if delta_config is None:
                         raise ValueError(f"HF key '{key}' targets a non-KDA layer.")
-                    value = value.reshape(
-                        delta_config.num_heads,
-                        delta_config.head_dim,
+                    value = self._reshape_dt_bias(
+                        value, (delta_config.num_heads, delta_config.head_dim)
                     )
                 state_dict[new_abstract_key.format(layer_num)] = value
                 continue

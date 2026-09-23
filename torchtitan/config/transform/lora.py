@@ -14,7 +14,7 @@ from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform
 from .context_parallel import ContextParallelTransform
-
+from .mx_qat import MXQATTransform
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,7 @@ class LoRATransform(ModelConfigTransform):
 
     run_after: ClassVar[tuple[type[ModelConfigTransform], ...]] = (
         ContextParallelTransform,
+        MXQATTransform,
     )
 
     handlers: tuple[_LoRAHandler, ...]

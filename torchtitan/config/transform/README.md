@@ -38,6 +38,35 @@ model_config = model_registry("0.6B", attn_backend="varlen")
 model_config = transform_model_config_(model_config, [LMHeadCastTransform()])
 ```
 
+## MX quantization-aware training
+
+`MXQATTransform` keeps master parameters and optimizer state in the training
+precision. It specializes the grouped-MM hook and, when selected, ordinary
+`Linear` projections. Grouped experts fake-quantize weights and activations;
+dense projections fake-quantize weights only.
+
+```python
+config = apply_transforms(config, [MXQATTransform()])
+```
+
+By default, every grouped-expert config is selected and dense projections are
+unchanged. Use exact config FQNs in `grouped_expert_fqns` and `linear_fqns` for
+explicit selection. An empty tuple selects none. `from_weight_fqns` translates
+adapter-resolved parameter FQNs and rejects unsupported or partially selected
+grouped modules. This translation requires parameter and config paths to agree;
+models with renamed or repeated configs need adapter-specific translation.
+
+Pass TorchAO `MXFakeQuantizeConfig` instances through `weight_fake_quant_config`
+and `activation_fake_quant_config`. Their existing `kernel_preference` controls
+both quantization and grouped execution: `EMULATED` uses dequantized operands,
+while `AUTO` uses native MXFP8 grouped forward kernels with a high-precision STE
+backward. Both preferences must agree. Native execution requires supported CUDA
+hardware and TorchAO kernel dependencies.
+
+The transform preserves inherited config fields, rejects existing incompatible
+execution overrides, and runs before `LoRATransform`. Packed checkpoint import
+resolves its own quantization metadata and checks that the QAT selection agrees.
+
 ## What belongs here
 
 Use `model_registry` to select the base architecture, attention algorithm, and

@@ -31,7 +31,6 @@ from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
 
 from .converter import ModelConfigConverter
 
-
 logger = logging.getLogger(__name__)
 
 

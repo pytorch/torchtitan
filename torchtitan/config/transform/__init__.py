@@ -13,6 +13,7 @@ from .cast_linear import LMHeadCastConverter
 from .context_parallel import ContextParallelTransform
 from .converter import ModelConfigConverter, validate_converter_compatibility
 from .lora import LinearLoRAHandler, LoRATransform
+from .mx_qat import MXQATTransform
 from .quantization import (
     Float8GroupedExpertsConverter,
     Float8LinearConverter,
@@ -37,6 +38,7 @@ __all__ = [
     "Float8LinearConverter",
     "MXFP8GroupedExpertsConverter",
     "MXFP8LinearConverter",
+    "MXQATTransform",
     "NVFP4LinearConverter",
     "QuantizationConverter",
     "validate_converter_compatibility",
