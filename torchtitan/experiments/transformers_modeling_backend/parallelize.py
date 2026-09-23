@@ -20,8 +20,8 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.config import (
     CompileConfig,
+    FSDPSymmMemScope,
     ParallelismConfig,
-    TORCH_DTYPE_MAP,
     TrainingConfig,
 )
 from torchtitan.distributed import ParallelDims
@@ -31,8 +31,6 @@ from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
-    resolve_fsdp_mesh,
-    resolve_sparse_fsdp_mesh,
 )
 
 
@@ -93,7 +91,7 @@ def parallelize_hf_transformers(
     parallel_dims: ParallelDims,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
 ):
@@ -103,7 +101,7 @@ def parallelize_hf_transformers(
     1. Build and swap Titan MoE modules (sets _sharding_config on MoE tree)
     2. Convert all remaining HF nn.Modules to Module protocol via __class__ swap
     3. Set ShardingConfig on every module based on its role
-    4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
+    4. Single model._parallelize(parallel_dims) call -- shards states, wraps forward
     5. Apply AC, compile, FSDP as usual
     """
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
@@ -165,17 +163,17 @@ def parallelize_hf_transformers(
     )
 
     # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
-    # the CP axis (on the seq dim). Must run before model.parallelize so the
+    # the CP axis (on the seq dim). Must run before model._parallelize so the
     # wrap is captured inside the local SPMD region and operates on the local
     # (already TP-head-sharded, CP-seq-sharded) tensors.
     if parallel_dims.cp_enabled:
         _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
 
     # 4. Single parallelize call -- handles TP, EP, MoE, everything
-    model.parallelize(parallel_dims)
+    model._parallelize(parallel_dims)
 
     model_compile_enabled = (
-        compile_config.enable and "model" in compile_config.components
+        compile_config is not None and "model" in compile_config.components
     )
 
     if ac_config is not None:
@@ -192,22 +190,10 @@ def parallelize_hf_transformers(
             parallel_dims=parallel_dims,
         )
 
-    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-    edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
-
-    apply_fsdp(
-        model,
-        dp_mesh,
-        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-        pp_enabled=parallel_dims.pp_enabled,
-        cpu_offload=training.enable_cpu_offload,
-        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-        enable_symm_mem=parallelism.enable_fsdp_symm_mem,
-        ep_degree=parallel_dims.ep,
-        dp_mod_ep_mesh=edp_mesh,
-        dp_mesh_dims=dp_mesh_dims,
-        edp_mesh_dims=edp_mesh_dims,
+    model._apply_fsdp(
+        parallel_dims=parallel_dims,
+        training=training,
+        parallelism=parallelism,
     )
 
     if training.enable_cpu_offload:
@@ -238,7 +224,7 @@ def apply_fsdp(
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
     gradient_divide_factor: int | None = None,
-    enable_symm_mem: bool = False,
+    symm_mem_scope: FSDPSymmMemScope = None,
 ):
     """Apply data parallelism (via FSDP2) to the model.
 
@@ -362,8 +348,7 @@ def apply_fsdp(
 
     fully_shard(model, **fsdp_config)
 
-    if enable_symm_mem:
-        enable_fsdp_symm_mem(model)
+    enable_fsdp_symm_mem(model, symm_mem_scope)
 
     # Disable FSDP's automatic gradient division for all FSDP modules
     disable_fsdp_gradient_division(model)

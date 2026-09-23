@@ -8,7 +8,6 @@ MXFP8 training can provide substantial training speedups for models where the ma
 
 - [Requirements](#requirements)
 - [How MXFP8 Works](#how-mxfp8-works)
-  - [TorchAO and TorchTitan Responsibilities](#torchao-and-torchtitan-responsibilities)
   - [FSDP-Managed Dense Weights](#fsdp-managed-dense-weights)
 - [MXFP8 for Linear Modules](#mxfp8-for-linear-modules)
   - [Input Activation Storage](#input-activation-storage)
@@ -55,26 +54,6 @@ error, but they are orientation-symmetric: FPROP and DGRAD use the same
 quantized values and share one cached qdata allocation. This avoids choosing
 two independently quantized weight operands for the two GEMM
 orientations.
-
-#### TorchAO and TorchTitan Responsibilities
-
-The dense linear integration keeps a narrow boundary between TorchAO and
-TorchTitan. TorchTitan uses these kernel-level operations from TorchAO:
-
-- `mxfp8_quantize_cuda` for rowwise and columnwise activation quantization.
-- `triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale` for 32x32 weight
-  quantization with one shared qdata allocation and both scale layouts.
-- `triton_mx_block_rearrange` for scale layout conversion.
-
-TorchTitan owns the pieces coupled to the training system:
-
-- MXFP8 linear autograd.
-- The generic FSDP unsharded-tensor lifecycle and its MXFP8 specialization.
-- Quantized-weight storage and lifetime.
-- Model-specific input-activation storage policy.
-
-This keeps FSDP and parallelism policy in TorchTitan while allowing additional
-kernel fusion to be implemented independently in TorchAO.
 
 #### FSDP-Managed Dense Weights
 
@@ -263,7 +242,7 @@ model_spec = model_registry(
 )
 
 # In your Trainer.Config:
-compile=CompileConfig(enable=True),
+compile=CompileConfig(),
 ```
 
 ### Performance

@@ -15,9 +15,9 @@ import torch
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.distributed.cudagraph import (
-    cudagraph_teardown,
-    get_cudagraph_annotations,
+from torchtitan.distributed.cuda_graph import (
+    cuda_graph_teardown,
+    get_cuda_graph_annotations,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
@@ -36,11 +36,11 @@ from torchtitan.observability.profiler import _EXPORT_SUPPORTS_ANNOTATIONS, Prof
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
 class TestKernelAnnotationsE2E(TestCase):
-    """E2E test: trace fwd+bwd → insert annotations → cudagraph → profile → check trace."""
+    """E2E test: trace fwd+bwd → insert annotations → CUDA graph → profile → check trace."""
 
     def test_profiler_trace_has_module_fqn_annotations(self):
         """After the full pipeline (minimal_fx_tracer → insert_kernel_annotations
-        → cudagraph → profile), the profiler trace should contain
+        → CUDA graph → profile), the profiler trace should contain
         ``module_fqn`` fields on graphed kernel events."""
         if _is_tools_id_unavailable():
             self.skipTest("cudaGraphNodeGetToolsId not available")
@@ -90,7 +90,7 @@ class TestKernelAnnotationsE2E(TestCase):
         self.assertIn("norm", fqns_in_graph)
         self.assertIn("ffn", fqns_in_graph)
 
-        # Apply passes (annotation + cudagraph).
+        # Apply passes (annotation + CUDA graph).
         passes = construct_default_graph_passes(traced)
         traced.gm = apply_graph_passes(traced.gm, traced.example_inputs, passes)
 
@@ -99,7 +99,7 @@ class TestKernelAnnotationsE2E(TestCase):
         run_traced(traced, module=model)(x, labels)  # replay
 
         # Check annotations were captured.
-        annotations = get_cudagraph_annotations()
+        annotations = get_cuda_graph_annotations()
         self.assertGreater(len(annotations), 0, "No annotations captured")
 
         all_fqns = set()
@@ -168,7 +168,7 @@ class TestKernelAnnotationsE2E(TestCase):
 
         # Cleanup.
         os.unlink(trace_path)
-        cudagraph_teardown()
+        cuda_graph_teardown()
 
 
 class TestTraceAnnotationExport(TestCase):
@@ -187,7 +187,7 @@ class TestTraceAnnotationExport(TestCase):
             tempfile.TemporaryDirectory() as tmp,
             patch("torch.distributed.get_rank", return_value=0),
             patch(
-                "torchtitan.observability.profiler.get_cudagraph_annotations",
+                "torchtitan.observability.profiler.get_cuda_graph_annotations",
                 return_value=self.ANNOTATIONS,
             ),
             patch(

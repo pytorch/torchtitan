@@ -17,15 +17,20 @@ import torch
 import tyro
 from torch.utils.data import default_collate
 
-from torchtitan.components.data.collators import Collator, TrainerBatch
+from torchtitan.components.data.collators import Collator
 from torchtitan.components.data.dataset import (
     DatasetConfig as GrainDatasetConfig,
     SampleProcessor,
     SingleDatasetConfig,
 )
 from torchtitan.components.data.sources import HuggingFaceStreamingSource
-from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
+from torchtitan.components.data.types import (
+    DatasetBuildContext,
+    DatasetIterationPolicy,
+    TrainingMicrobatch,
+)
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
+from torchtitan.models.flux.utils import IMAGE_LATENT_SIZE_RATIO, LATENT_CHANNELS
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +42,29 @@ class FluxSample(TypedDict):
     prompt: str
     image: torch.Tensor
     timestep: NotRequired[float]
+
+
+@dataclass(kw_only=True, slots=True)
+class FluxTrainingMicrobatch(TrainingMicrobatch):
+    """One DP-local image-text microbatch for Flux training or validation."""
+
+    labels: torch.Tensor
+    t5: torch.Tensor
+    clip: torch.Tensor
+    prompt: list[str]
+    num_valid_tokens: int
+    timestep: torch.Tensor | None = None
+
+    def as_input_dict(self) -> dict[str, Any]:
+        inputs: dict[str, Any] = {
+            "labels": self.labels,
+            "t5": self.t5,
+            "clip": self.clip,
+            "prompt": self.prompt,
+        }
+        if self.timestep is not None:
+            inputs["timestep"] = self.timestep
+        return inputs
 
 
 def _process_cc12m_image(
@@ -207,22 +235,35 @@ class FluxCollator(Collator):
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         del config
-        self._num_rows_per_batch, remainder = divmod(
-            context.num_tokens_per_batch, context.max_context_length
+        self._num_rows_per_microbatch, remainder = divmod(
+            context.num_tokens_per_microbatch, context.max_context_length
         )
-        if remainder or self._num_rows_per_batch == 0:
+        if remainder or self._num_rows_per_microbatch == 0:
             raise ValueError(
-                "Flux token batches must be a positive multiple of "
+                "Flux token microbatches must be a positive multiple of "
                 "max_context_length"
             )
 
-    def num_rows_per_batch(self) -> int:
-        return self._num_rows_per_batch
+    def num_rows_per_microbatch(self) -> int:
+        return self._num_rows_per_microbatch
 
-    def __call__(self, rows: Sequence[FluxSample]) -> TrainerBatch:
-        batch = default_collate(list(rows))
-        batch["labels"] = batch.pop("image")
-        return batch
+    def __call__(self, rows: Sequence[FluxSample]) -> FluxTrainingMicrobatch:
+        collated = default_collate(list(rows))
+        images = collated["image"]
+        num_valid_tokens = (
+            images.shape[0]
+            * LATENT_CHANNELS
+            * (images.shape[-2] // IMAGE_LATENT_SIZE_RATIO)
+            * (images.shape[-1] // IMAGE_LATENT_SIZE_RATIO)
+        )
+        return FluxTrainingMicrobatch(
+            labels=images,
+            t5=collated["t5"],
+            clip=collated["clip"],
+            prompt=collated["prompt"],
+            num_valid_tokens=num_valid_tokens,
+            timestep=collated.get("timestep"),
+        )
 
 
 DATASETS: dict[str, SingleDatasetConfig] = {

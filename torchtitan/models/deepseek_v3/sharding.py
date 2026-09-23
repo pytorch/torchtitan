@@ -20,9 +20,11 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     set_gqa_inner_attention_local_spmd,
     token_id_placement,
-    token_id_sequence_parallel_placement,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.models.deepseek_v3.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -31,14 +33,6 @@ if TYPE_CHECKING:
         DeepSeekV3Model,
         DeepSeekV3TransformerBlock,
     )
-
-
-# Routed-expert layout for the shared ``GroupedExperts`` (w1/w2/w3).
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
-    "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
-}
 
 
 def set_deepseek_v3_sharding_config(
@@ -143,11 +137,11 @@ def _set_deepseek_v3_layer_sharding(
 
     # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
+        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
 
 
@@ -165,20 +159,20 @@ def _set_deepseek_v3_mtp_sharding(
     norm = norm_config(enable_sp=enable_sp)
 
     for mtp_layer_cfg in config.mtp_layers:
-        _set_deepseek_v3_layer_sharding(
-            mtp_layer_cfg,
-            enable_sp=enable_sp,
-            enable_ep=enable_ep,
-        )
         if enable_sp:
             mtp_layer_cfg.sharding_config = ShardingConfig(
                 in_src_shardings={
                     "mtp_input_valid_mask": token_id_placement(),
                 },
                 in_dst_shardings={
-                    "mtp_input_valid_mask": token_id_sequence_parallel_placement(),
+                    "mtp_input_valid_mask": token_id_placement(enable_sp=enable_sp),
                 },
             )
+        _set_deepseek_v3_layer_sharding(
+            mtp_layer_cfg,
+            enable_sp=enable_sp,
+            enable_ep=enable_ep,
+        )
         mtp_layer_cfg.enorm.sharding_config = norm
         mtp_layer_cfg.hnorm.sharding_config = norm
         mtp_layer_cfg.mtp_norm.sharding_config = pre_lm_head_norm_config(

@@ -4,17 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 """HuggingFace checkpoint adapter for unquantized Kimi K3 weights."""
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.models.utils import MoEStateDictAdapter
 
-from .model import KimiK3Model
+if TYPE_CHECKING:
+    from .model import KimiK3Model
 
 
 _UNUSED_HF_LAYER_ZERO_ATTN_RES_KEYS = {
@@ -135,6 +138,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
+        state_dict = self._native_fused_linears_to_hf(state_dict)
         to_hf_map = {
             tt_key: hf_key
             for mapping in (
@@ -376,4 +380,4 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 "KimiK3StateDictAdapter received an incomplete set of "
                 f"routed-expert weights: {expert_weights_by_layer.keys()}."
             )
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)

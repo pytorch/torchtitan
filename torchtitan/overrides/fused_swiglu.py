@@ -22,7 +22,7 @@ import triton
 import triton.language as tl
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.activation import ActivationFn, SwiGLU
+from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -61,7 +61,7 @@ def _silu_and_mul_forward_kernel(
     BLOCK_N: tl.constexpr,
 ) -> None:
     """Compute ``silu(gate) * up`` for optionally offset-limited rows."""
-    row_start = tl.program_id(0) * BLOCK_M
+    row_start = tl.program_id(0).to(tl.int64) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_OFFSETS:
         row_limit = tl.load(offsets + NUM_OFFSETS - 1)
@@ -116,7 +116,7 @@ def _silu_and_mul_backward_kernel(
     BLOCK_N: tl.constexpr,
 ) -> None:
     """Backward for ``_silu_and_mul_forward_kernel`` over defined rows."""
-    row_start = tl.program_id(0) * BLOCK_M
+    row_start = tl.program_id(0).to(tl.int64) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_OFFSETS:
         row_limit = tl.load(offsets + NUM_OFFSETS - 1)
@@ -323,11 +323,11 @@ silu_and_mul_op.register_autograd(
 )
 
 
-class FusedSwiGLU(ActivationFn):
+class FusedSwiGLU(BinaryActivationFn):
     """SwiGLU activation implemented by the fused Triton operation."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ActivationFn.Config):
+    class Config(BinaryActivationFn.Config):
         pass
 
     def __init__(self, config: Config) -> None:
