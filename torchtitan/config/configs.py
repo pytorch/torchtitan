@@ -22,14 +22,19 @@ have no suitable home, e.g. the training token-budget settings, and those can
 be placed here. Discuss with the maintainers first if you intend to add one.
 
 The command-line surface is frozen either way, so annotate a new field with
-``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
+``tyro.conf.Suppress``, as ``Trainer.Config.model`` does. See
 ``torchtitan/config/README.md``.
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Annotated, get_args, Literal, TypeAlias
 
 import torch
+import tyro
+
+
+FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
+_FSDP_SYMM_MEM_SCOPES = get_args(FSDPSymmMemScope)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -160,10 +165,12 @@ class ParallelismConfig:
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
 
-    enable_fsdp_symm_mem: bool = False
+    fsdp_symm_mem_scope: Annotated[FSDPSymmMemScope, tyro.conf.Suppress] = None
     """
-    Whether to enable FSDP2 symmetric-memory communication optimizations for
-    all FSDP modules after `fully_shard` has been applied.
+    Which FSDP modules use symmetric-memory communication. None disables it.
+    "dense" skips any module with routed experts. An MoE transformer block is
+    one FSDP module, so its attention parameters are skipped along with its
+    experts.
     """
 
     tensor_parallel_degree: int = 1
@@ -318,7 +325,13 @@ class ParallelismConfig:
                 f"is set; got {lookahead!r} for pipeline degree "
                 f"{self.pipeline_parallel_degree}"
             )
-        if self.enable_fsdp_symm_mem and (
+        if self.fsdp_symm_mem_scope not in _FSDP_SYMM_MEM_SCOPES:
+            raise ValueError(
+                "parallelism.fsdp_symm_mem_scope must be one of: "
+                f"{list(_FSDP_SYMM_MEM_SCOPES)} "
+                f"(got {self.fsdp_symm_mem_scope!r})"
+            )
+        if self.fsdp_symm_mem_scope is not None and (
             not torch.cuda.is_available()
             or (
                 torch.version.hip is None
@@ -326,7 +339,7 @@ class ParallelismConfig:
             )
         ):
             raise ValueError(
-                "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
+                "For NVIDIA GPUs, parallelism.fsdp_symm_mem_scope is only supported "
                 "for compute capability 9.0 or newer."
             )
         # Import lazily so loading configs.py does not pull in pipelining.
@@ -343,6 +356,7 @@ class ParallelismConfig:
     expert_parallel_degree: int = 1
     """
     Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+    For MoE models, this must be at least tensor_parallel_degree.
 
     Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
     (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.
@@ -353,9 +367,6 @@ class ParallelismConfig:
 
 @dataclass(kw_only=True, slots=True)
 class CompileConfig:
-    enable: bool = False
-    """Whether to apply torch.compile"""
-
     enable_async_tensor_parallel: bool = False
     """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
 
@@ -372,13 +383,8 @@ class CompileConfig:
                 f"Unknown compile.components entries {unknown}; "
                 f"allowed values are {sorted(allowed)}"
             )
-        if self.enable_async_tensor_parallel and not (
-            self.enable and "model" in self.components
-        ):
-            raise ValueError(
-                "Async TP requires 'model' in --compile.components and "
-                "--compile.enable"
-            )
+        if self.enable_async_tensor_parallel and "model" not in self.components:
+            raise ValueError("Async TP requires 'model' in --compile.components.")
 
 
 @dataclass(kw_only=True, slots=True)
