@@ -18,8 +18,8 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_spmd,
 )
 from torchtitan.models.common.moe_sharding import (
-    expert_param_placement_dense,
     expert_param_placement_sparse,
+    set_moe_block_padding_mask_sharding,
     set_moe_sharding_config,
 )
 from torchtitan.models.gpt_oss.model import Attention
@@ -113,22 +113,18 @@ def _set_gpt_oss_layer_sharding(
 
     # MoE FFN (all GPT-OSS blocks are MoE).
     if layer_cfg.moe is not None:
+        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
         )
-        w13 = layer_cfg.moe.routed_experts.w13
-        w2 = layer_cfg.moe.routed_experts.w2
-        assert w13.sharding_config is not None
-        assert w2.sharding_config is not None
-        w13.sharding_config.state_shardings["bias"] = (
-            expert_param_placement_sparse()
-            if enable_ep
-            else expert_param_placement_dense(tp_placement=spmd.S(2))
-        )
-        w2.sharding_config.state_shardings["bias"] = (
-            expert_param_placement_sparse()
-            if enable_ep
-            else expert_param_placement_dense(tp_placement=spmd.R)
-        )
+        if enable_ep:
+            w13 = layer_cfg.moe.routed_experts.w13
+            w2 = layer_cfg.moe.routed_experts.w2
+            assert w13.sharding_config is not None
+            assert w2.sharding_config is not None
+            w13.sharding_config.state_shardings[
+                "bias"
+            ] = expert_param_placement_sparse()
+            w2.sharding_config.state_shardings["bias"] = expert_param_placement_sparse()
