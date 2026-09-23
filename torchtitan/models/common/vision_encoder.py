@@ -29,11 +29,7 @@ import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import (
-    spmd_dense_sp_enabled,
-    spmd_mesh_group,
-    spmd_mesh_size,
-)
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
@@ -47,62 +43,11 @@ RopeApply = Callable[
 ]
 
 
-def validate_vision_sequence_parallel_input(x_TD: torch.Tensor) -> None:
-    """Validate that packed vision tokens can be sharded evenly over TP."""
-    if not spmd_dense_sp_enabled():
-        return
-
-    tp_size = spmd_mesh_size(MeshAxisName.TP)
-    if x_TD.shape[0] % tp_size != 0:
-        raise ValueError(
-            "Vision sequence parallelism requires the packed patch-token count "
-            f"({x_TD.shape[0]}) to be divisible by the TP degree ({tp_size})."
-        )
-
-
-def shard_vision_sequence(x_TD: torch.Tensor) -> torch.Tensor:
-    """Shard packed vision tokens over TP when dense SP is enabled."""
-    if not spmd_dense_sp_enabled():
-        return x_TD
-
-    tp_group = spmd_mesh_group(MeshAxisName.TP)
-    if tp_group is None:
-        return x_TD
-
-    validate_vision_sequence_parallel_input(x_TD)
-    return spmd.redistribute(
-        x_TD,
-        tp_group,
-        src=spmd.I,
-        dst=spmd.S(0),
-        backward_options={"op_dtype": x_TD.dtype},
-    )
-
-
-def gather_vision_sequence(x_TD: torch.Tensor) -> torch.Tensor:
-    """Gather TP-sharded vision tokens when dense SP is enabled."""
-    if not spmd_dense_sp_enabled():
-        return x_TD
-
-    tp_group = spmd_mesh_group(MeshAxisName.TP)
-    if tp_group is None:
-        return x_TD
-
-    return spmd.redistribute(
-        x_TD,
-        tp_group,
-        src=spmd.S(0),
-        dst=spmd.I,
-        backward_options={"op_dtype": x_TD.dtype},
-    )
-
-
 class InvariantRowParallelLinear(Linear):
-    """Row-parallel vision output projection that performs ``P -> I``.
+    """Row-parallel vision projection with an invariant TP output.
 
-    Vision transformer blocks use ``RowParallelLinear`` and follow dense SP.
-    Output heads use this class because merged vision-token counts need not be
-    divisible by TP, so their externally visible output cannot be ``S(0)``.
+    Vision residual activations remain invariant even when decoder sequence
+    parallelism is enabled, so this boundary always performs ``P -> I``.
     """
 
     @dataclass(kw_only=True, slots=True)

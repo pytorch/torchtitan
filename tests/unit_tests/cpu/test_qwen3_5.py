@@ -7,7 +7,6 @@
 from typing import cast
 
 import pytest
-import spmd_types as spmd
 
 pytest.importorskip("fla")
 
@@ -68,16 +67,11 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     )
 
 
-@pytest.mark.parametrize(
-    ("enable_sp", "output_tp"),
-    [(False, spmd.I), (True, spmd.S(0))],
-)
-def test_qwen35_vision_projections_follow_dense_sp(
-    enable_sp: bool,
-    output_tp: spmd.PerMeshAxisSpmdType,
-) -> None:
+def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
+    import spmd_types as spmd
+
     from torchtitan.distributed.parallel_dims import MeshAxisName
-    from torchtitan.models.common.linear import Linear, RowParallelLinear
+    from torchtitan.models.common.linear import Linear
     from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
@@ -86,29 +80,22 @@ def test_qwen35_vision_projections_follow_dense_sp(
     assert vision_encoder is not None
 
     assert type(vision_encoder.block.mlp.fc1) is Linear.Config
-    assert type(vision_encoder.block.mlp.fc2) is RowParallelLinear.Config
-    assert type(vision_encoder.block.attn.proj) is RowParallelLinear.Config
+    assert type(vision_encoder.block.mlp.fc2) is InvariantRowParallelLinear.Config
+    assert type(vision_encoder.block.attn.proj) is InvariantRowParallelLinear.Config
     assert type(vision_encoder.merger.fc1) is Linear.Config
     assert type(vision_encoder.merger.fc2) is InvariantRowParallelLinear.Config
 
-    set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=False)
+    set_qwen35_sharding_config(config, enable_sp=True, enable_ep=False)
     for projection in (
         vision_encoder.block.mlp.fc2,
         vision_encoder.block.attn.proj,
+        vision_encoder.merger.fc2,
     ):
         sharding = projection.sharding_config
         assert sharding is not None
         assert sharding.out_dst_shardings is None
         assert sharding.out_src_shardings is not None
-        assert isinstance(sharding.out_src_shardings, spmd.SpmdType)
-        assert sharding.out_src_shardings.local_type[MeshAxisName.TP] == output_tp
-
-    merger_output_sharding = vision_encoder.merger.fc2.sharding_config
-    assert merger_output_sharding is not None
-    assert isinstance(merger_output_sharding.out_src_shardings, spmd.SpmdType)
-    assert (
-        merger_output_sharding.out_src_shardings.local_type[MeshAxisName.TP] == spmd.I
-    )
+        assert sharding.out_src_shardings.local_type[MeshAxisName.TP] == spmd.I
 
 
 @pytest.mark.parametrize("enable_sp", [False, True])

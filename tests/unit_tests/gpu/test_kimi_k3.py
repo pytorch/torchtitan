@@ -107,62 +107,6 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
-    def test_vision_projection_layouts_follow_sequence_parallelism(self):
-        import spmd_types as spmd
-
-        from torchtitan.distributed.parallel_dims import MeshAxisName
-        from torchtitan.models.common.linear import RowParallelLinear
-        from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
-        from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
-
-        for enable_sp, output_tp in ((False, spmd.I), (True, spmd.S(0))):
-            with self.subTest(enable_sp=enable_sp):
-                config = _small_model_config()
-                set_kimi_k3_sharding_config(
-                    config,
-                    enable_sp=enable_sp,
-                    enable_ep=False,
-                )
-                vision = config.vision_encoder
-                for projection in (
-                    vision.block.attn.proj,
-                    vision.block.mlp.fc2,
-                ):
-                    self.assertIs(type(projection), RowParallelLinear.Config)
-                    sharding = projection.sharding_config
-                    self.assertIsNotNone(sharding)
-                    assert sharding is not None
-                    self.assertIsInstance(sharding.out_src_shardings, spmd.SpmdType)
-                    assert isinstance(sharding.out_src_shardings, spmd.SpmdType)
-                    self.assertEqual(
-                        sharding.out_src_shardings.local_type[MeshAxisName.TP],
-                        output_tp,
-                    )
-
-                final_projection = vision.projector.linear_2
-                self.assertIs(type(final_projection), InvariantRowParallelLinear.Config)
-                final_sharding = final_projection.sharding_config
-                self.assertIsNotNone(final_sharding)
-                assert final_sharding is not None
-                self.assertIsInstance(final_sharding.out_src_shardings, spmd.SpmdType)
-                assert isinstance(final_sharding.out_src_shardings, spmd.SpmdType)
-                self.assertEqual(
-                    final_sharding.out_src_shardings.local_type[MeshAxisName.TP],
-                    spmd.I,
-                )
-
-                post_norm_sharding = vision.projector.post_norm.sharding_config
-                self.assertIsNotNone(post_norm_sharding)
-                assert post_norm_sharding is not None
-                self.assertIsNotNone(post_norm_sharding.in_src_shardings)
-                assert post_norm_sharding.in_src_shardings is not None
-                self.assertEqual(
-                    post_norm_sharding.in_src_shardings["input"].local_type[
-                        MeshAxisName.TP
-                    ],
-                    spmd.I,
-                )
-
     def test_flex_attention_mask(self):
         config = _small_model_config()
         model = config.build()

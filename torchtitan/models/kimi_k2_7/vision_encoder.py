@@ -29,8 +29,6 @@ from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
-    gather_vision_sequence,
-    shard_vision_sequence,
     VisionTransformerBlock,
 )
 from torchtitan.protocols.module import Module, ModuleDict
@@ -439,7 +437,6 @@ class MoonViTEncoder(Module):
 
         learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = self.patch_embed(pixel_values) + learned_pos
-        x = shard_vision_sequence(x)
 
         # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
@@ -458,7 +455,6 @@ class MoonViTEncoder(Module):
                 attention_mask=attention_mask,
             )
 
-        x = gather_vision_sequence(x)
         x = self.final_norm(x)
 
         # Temporal pool + spatial merge, then project to the LLM hidden size.

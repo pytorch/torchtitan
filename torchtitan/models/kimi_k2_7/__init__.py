@@ -18,7 +18,6 @@ from torchtitan.models.common import (
     Embedding,
     Linear,
     RMSNorm,
-    RowParallelLinear,
     Sigmoid,
     Softmax,
     TransformerBlock,
@@ -104,17 +103,6 @@ def _vl_linear(in_features: int, out_features: int) -> Linear.Config:
 
 def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> RowParallelLinear.Config:
-    return RowParallelLinear.Config(
-        in_features=in_features,
-        out_features=out_features,
-        bias=True,
-        param_init=_LINEAR_INIT,
-    )
-
-
-def _vision_invariant_row_parallel_linear(
-    in_features: int, out_features: int
 ) -> InvariantRowParallelLinear.Config:
     return InvariantRowParallelLinear.Config(
         in_features=in_features,
@@ -188,9 +176,7 @@ def _vision_encoder_config(
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
             linear_1=_vl_linear(merged_dim, merged_dim),
-            linear_2=_vision_invariant_row_parallel_linear(
-                merged_dim, text_hidden_size
-            ),
+            linear_2=_vision_row_parallel_linear(merged_dim, text_hidden_size),
         ),
     )
 

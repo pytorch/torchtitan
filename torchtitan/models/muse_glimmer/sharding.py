@@ -73,11 +73,6 @@ def set_muse_glimmer_sharding_config(
         _set_muse_glimmer_layer_sharding(layer_cfg, enable_sp=enable_sp)
 
     if config.vision_encoder is not None:
-        set_muse_glimmer_vision_sharding_config(
-            config.vision_encoder,
-            config.vision_adapter,
-            enable_sp=enable_sp,
-        )
         _set_multimodal_sharding(config, enable_sp=enable_sp)
 
 
@@ -209,15 +204,13 @@ def _set_attention_sharding(attention, *, enable_sp: bool) -> None:
 def set_muse_glimmer_vision_sharding_config(
     encoder_cfg: "MuseGlimmerVisionEncoder.Config",
     adapter_cfg: "MuseGlimmerVisionAdapter.Config | None" = None,
-    *,
-    enable_sp: bool,
 ) -> None:
     """Fill ``sharding_config`` on the Muse Glimmer vision encoder (+ optional adapter).
 
-    Transformer-block residuals follow the decoder's SP setting. The encoder
-    gathers its final output before the per-image permutation and downsampling.
-    The learned positional grid and local pre/post-processing stay invariant
-    across TP and replicated across CP.
+    Vision activations are invariant across TP and replicated across CP. The
+    shared block/linear/norm helpers carry TP sharding and explicit CP layouts;
+    only the Muse-specific learned positional grid, RoPE frequencies, patch
+    ``conv1``, and local permutation boundaries are declared here.
 
     Must be called BEFORE the configs are built (``config.build()``): the built
     modules copy these configs into ``Module.parallelize``.
@@ -249,7 +242,6 @@ def set_muse_glimmer_vision_sharding_config(
     # per-image vision activation, so it flows {DP: V, CP: R, TP: I}.
     set_vision_transformer_block_sharding_config(
         encoder_cfg.block,
-        enable_sp=enable_sp,
         rope_cache_dp=spmd.V,
         include_cp_axis=True,
     )

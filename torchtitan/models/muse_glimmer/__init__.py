@@ -26,6 +26,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -251,8 +252,8 @@ def _vision_linear(in_features: int, out_features: int, *, bias: bool) -> Linear
 
 def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> RowParallelLinear.Config:
-    return RowParallelLinear.Config(
+) -> InvariantRowParallelLinear.Config:
+    return InvariantRowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -373,6 +374,11 @@ def _muse_glimmer_config(
             param_init=_LINEAR_INIT,
         )
         perception_emb_norm = _scaleless_norm(dim, _NORM_EPS)
+
+    # When the model owns the vision stack, fill the encoder/adapter sharding
+    # configs so ``model.parallelize`` applies their TP.
+    if vision_encoder is not None:
+        set_muse_glimmer_vision_sharding_config(vision_encoder, vision_adapter)
 
     return MuseGlimmerModel.Config(
         max_context_length=max_context_length,

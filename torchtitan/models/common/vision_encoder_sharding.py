@@ -74,30 +74,11 @@ def invariant_norm_config(*, include_cp_axis: bool = False) -> ShardingConfig:
         in_src_shardings={
             "input": _vision_activation_placement(include_cp_axis=include_cp_axis),
         },
-        out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
-    )
-
-
-def vision_norm_config(
-    *,
-    enable_sp: bool,
-    include_cp_axis: bool = False,
-) -> ShardingConfig:
-    """Vision norm with invariant state and the configured activation layout."""
-    activation_tp = spmd.S(0) if enable_sp else spmd.I
-    activation_layout = _vision_activation_placement(
-        tp=activation_tp,
-        include_cp_axis=include_cp_axis,
-    )
-    return ShardingConfig(
-        state_shardings={
-            "weight": _vision_state_placement(
-                tp=spmd.I, include_cp_axis=include_cp_axis
-            ),
-            "bias": _vision_state_placement(tp=spmd.I, include_cp_axis=include_cp_axis),
+        in_dst_shardings={
+            "input": _vision_activation_placement(include_cp_axis=include_cp_axis),
         },
-        in_src_shardings={"input": activation_layout},
-        out_src_shardings=activation_layout,
+        out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
+        out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
     )
 
 
@@ -152,12 +133,8 @@ def vision_colwise_config(
     )
 
 
-def vision_rowwise_config(
-    *,
-    output_tp: spmd.PerMeshAxisSpmdType,
-    include_cp_axis: bool = False,
-) -> ShardingConfig:
-    """Sharding contract for a vision row projection returning ``output_tp``."""
+def vision_rowwise_config(*, include_cp_axis: bool = False) -> ShardingConfig:
+    """Sharding contract for an invariant-output vision row projection."""
     input_layout = _vision_activation_placement(
         tp=spmd.S(1), include_cp_axis=include_cp_axis
     )
@@ -174,33 +151,23 @@ def vision_rowwise_config(
         in_dst_shardings={
             "input": input_layout,
         },
-        out_src_shardings=_vision_activation_placement(
-            tp=output_tp, include_cp_axis=include_cp_axis
-        ),
+        out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
     )
 
 
 def set_vision_transformer_block_sharding_config(
     block: "VisionTransformerBlock.Config",
     *,
-    enable_sp: bool,
     rope_cache_dp: spmd.PerMeshAxisSpmdType,
     include_cp_axis: bool = False,
 ) -> None:
     """Set TP sharding for the common vision transformer block."""
-    activation_tp = spmd.S(0) if enable_sp else spmd.I
-    block.norm1.sharding_config = vision_norm_config(
-        enable_sp=enable_sp, include_cp_axis=include_cp_axis
-    )
-    block.norm2.sharding_config = vision_norm_config(
-        enable_sp=enable_sp, include_cp_axis=include_cp_axis
-    )
+    block.norm1.sharding_config = invariant_norm_config(include_cp_axis=include_cp_axis)
+    block.norm2.sharding_config = invariant_norm_config(include_cp_axis=include_cp_axis)
 
     block.attn.sharding_config = ShardingConfig(
         in_src_shardings={
-            "x": _vision_activation_placement(
-                tp=activation_tp, include_cp_axis=include_cp_axis
-            ),
+            "x": _vision_activation_placement(include_cp_axis=include_cp_axis),
             "rope_cache": _vision_activation_placement(
                 dp=rope_cache_dp, include_cp_axis=include_cp_axis
             ),
@@ -226,7 +193,7 @@ def set_vision_transformer_block_sharding_config(
         input_tp=spmd.R, include_cp_axis=include_cp_axis
     )
     block.attn.proj.sharding_config = vision_rowwise_config(
-        output_tp=activation_tp, include_cp_axis=include_cp_axis
+        include_cp_axis=include_cp_axis
     )
     if include_cp_axis:
         attention_layout = _vision_activation_placement(
@@ -250,8 +217,8 @@ def set_vision_transformer_block_sharding_config(
         set_gqa_inner_attention_local_spmd(block.attn.inner_attention)
 
     block.mlp.fc1.sharding_config = vision_colwise_config(
-        input_tp=activation_tp, include_cp_axis=include_cp_axis
+        include_cp_axis=include_cp_axis
     )
     block.mlp.fc2.sharding_config = vision_rowwise_config(
-        output_tp=activation_tp, include_cp_axis=include_cp_axis
+        include_cp_axis=include_cp_axis
     )
