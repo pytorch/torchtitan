@@ -54,7 +54,7 @@ _QUANTIZABLE_LINEAR_CLASSES = (
 def _validate_quantizable_linear(
     config: Linear.Config,
     fqn: str,
-) -> type[Linear]:
+) -> None:
     owner = config._owner
     assert owner is not None
     if owner not in _QUANTIZABLE_LINEAR_CLASSES:
@@ -63,8 +63,6 @@ def _validate_quantizable_linear(
             f"Quantization does not support {owner.__qualname__} at {fqn!r}; "
             f"supported Linear classes are {supported}."
         )
-    assert issubclass(owner, Linear)
-    return owner
 
 
 class QuantizationConverter(ModelConfigConverter):
@@ -169,10 +167,10 @@ class Float8LinearConverter(QuantizationConverter):
         assert Float8Linear is not None
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
             if self.filter_fn(linear_config, fqn):
-                config_cls = get_quantized_linear(
-                    Float8Linear,
-                    _validate_quantizable_linear(linear_config, fqn),
-                ).Config
+                _validate_quantizable_linear(linear_config, fqn)
+                owner = linear_config._owner
+                assert owner is not None and issubclass(owner, Linear)
+                config_cls = get_quantized_linear(Float8Linear, owner).Config
                 new_config = config_cls(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,
@@ -368,10 +366,10 @@ class MXFP8LinearConverter(QuantizationConverter):
             fqn for fqn in target_fqns if any(selector in fqn for selector in selectors)
         }
         for fqn, config, parent, attr in targets:
-            config_cls = get_quantized_linear(
-                MXFP8Linear,
-                _validate_quantizable_linear(config, fqn),
-            ).Config
+            _validate_quantizable_linear(config, fqn)
+            owner = config._owner
+            assert owner is not None and issubclass(owner, Linear)
+            config_cls = get_quantized_linear(MXFP8Linear, owner).Config
             new_config = config_cls(
                 in_features=config.in_features,
                 out_features=config.out_features,
@@ -497,10 +495,10 @@ class NVFP4LinearConverter(QuantizationConverter):
         fqns = self.config.fqns
         for fqn, config, parent, attr in model_config.traverse(Linear.Config):
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                config_cls = get_quantized_linear(
-                    NVFP4Linear,
-                    _validate_quantizable_linear(config, fqn),
-                ).Config
+                _validate_quantizable_linear(config, fqn)
+                owner = config._owner
+                assert owner is not None and issubclass(owner, Linear)
+                config_cls = get_quantized_linear(NVFP4Linear, owner).Config
                 new_config = config_cls(
                     in_features=config.in_features,
                     out_features=config.out_features,

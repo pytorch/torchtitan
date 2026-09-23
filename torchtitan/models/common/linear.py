@@ -205,6 +205,8 @@ class RowParallelLinear(Linear):
             )
             # The selected local compute may be native, LoRA, or quantized.
             # Its row-sharded operands and bias jointly produce a partial output.
+            # TODO: Remove this suppression once spmd_types recognizes the
+            # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
                 output = self._unflatten_output(self._linear(input, weight, bias))
             if spmd.is_type_checking():
