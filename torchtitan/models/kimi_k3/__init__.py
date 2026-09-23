@@ -21,12 +21,14 @@ from torchtitan.models.common import (
     FeedForward,
     Linear,
     RouterGateLinear,
+    RowParallelLinear,
     Sigmoid,
     SiTUGLU,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
+    make_shared_expert_ffn_config,
     make_token_dispatcher_config,
 )
 from torchtitan.models.common.moe import (
@@ -172,7 +174,11 @@ def _mla_config(
             num_heads * (qk_nope_head_dim + v_head_dim),
         ),
         gate=_linear(dim, num_heads * v_head_dim),
-        wo=_linear(num_heads * v_head_dim, dim),
+        wo=RowParallelLinear.Config(
+            in_features=num_heads * v_head_dim,
+            out_features=dim,
+            param_init=_LINEAR_INIT,
+        ),
         inner_attention=inner_attention,
     )
 
@@ -219,7 +225,11 @@ def _kda_config(
             eps=1e-5,
             param_init=_NORM_INIT,
         ),
-        output_proj=_linear(projection_dim, dim),
+        output_proj=RowParallelLinear.Config(
+            in_features=projection_dim,
+            out_features=dim,
+            param_init=_LINEAR_INIT,
+        ),
         param_init={
             "A_log": _a_log_init,
             "dt_bias": nn.init.zeros_,
@@ -280,9 +290,14 @@ def _latent_moe_config(
         ),
         routed_norm=_norm(latent_dim),
         routed_up=_linear(latent_dim, dim),
-        shared_experts=_feed_forward_config(
-            dim=dim,
-            hidden_dim=num_shared_experts * expert_hidden_dim,
+        shared_experts=replace(
+            make_shared_expert_ffn_config(
+                dim=dim,
+                hidden_dim=num_shared_experts * expert_hidden_dim,
+                w1_param_init=_LINEAR_INIT,
+                w2w3_param_init=_LINEAR_INIT,
+            ),
+            activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
         ),
         load_balance_coeff=None,
     )
@@ -323,16 +338,8 @@ def _vision_encoder_config(
             proj=_linear(qkv_dim, dim),
         ),
         mlp=VisionMLP.Config(
-            fc1=_linear(
-                dim,
-                hidden_dim,
-                param_init=_fan_in_linear_init(dim),
-            ),
-            fc2=_linear(
-                hidden_dim,
-                dim,
-                param_init=_fan_in_linear_init(hidden_dim),
-            ),
+            fc1=_linear(dim, hidden_dim, param_init=_fan_in_linear_init(dim)),
+            fc2=_linear(hidden_dim, dim, param_init=_fan_in_linear_init(hidden_dim)),
             act_fn=GELU.Config(approximate="tanh"),
         ),
     )
