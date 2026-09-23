@@ -298,6 +298,13 @@ def annotate_module_fqns(model: nn.Module) -> None:
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
 
 
+def annotate_graph_trainer_model(model: Decoder) -> None:
+    """Attach the annotations consumed by GraphTrainer passes."""
+    if any(getattr(layer, "moe", None) is not None for layer in model.config.layers):
+        annotate_moe_ep_regions()
+    annotate_module_fqns(model)
+
+
 def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:
     """Match one module FQN against a component-wise fnmatch pattern."""
     pattern_parts = pattern.split(".")

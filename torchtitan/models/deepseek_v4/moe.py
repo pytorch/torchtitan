@@ -58,6 +58,7 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
             )
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None):
+        super()._init_self_buffers(buffer_device=buffer_device)
         if self.hash:
             if buffer_device is None:
                 buffer_device = self.tid2eid.device

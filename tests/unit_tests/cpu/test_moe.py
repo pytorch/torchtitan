@@ -6,33 +6,43 @@
 
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
+
+import spmd_types as spmd
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import _per_axis_types
+from torchtitan.models.common.activation import Sigmoid, SiTUGLU, Softmax, SqrtSoftplus
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
 )
-from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.decoder_sharding import token_id_placement
+from torchtitan.models.common.linear import RouterGateLinear
+from torchtitan.models.common.moe import (
+    MicrobatchWiseLoadBalanceLoss,
+    TokenChoiceTopKRouter,
+)
+from torchtitan.models.common.moe_sharding import (
+    _moe_sharding_config,
+    _router_sharding_config,
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.models.common.nn_modules import RMSNorm
-
-
-class _RecordingGroupedLinear(GroupedLinear):
-    recorded_weight: torch.Tensor
-
-    def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
-        self.recorded_weight = weight_EOI
-        return super()._grouped_mm(
-            input_RI=input_RI,
-            weight_EOI=weight_EOI,
-            offsets_E=offsets_E,
-        )
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 class _PassthroughRoutedExperts(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.num_tokens_per_expert_E = None
+
     def forward(
         self,
         x_TD,
@@ -40,33 +50,22 @@ class _PassthroughRoutedExperts(nn.Module):
         topk_expert_ids_TK,
         num_local_tokens_per_expert_E,
     ):
+        self.num_tokens_per_expert_E = num_local_tokens_per_expert_E
         return x_TD
 
 
-class _FixedRouter(nn.Module):
-    def __init__(self, num_experts: int, top_k: int):
+class _CapturingAuxLoss(nn.Module):
+    def __init__(self):
         super().__init__()
-        self.num_experts = num_experts
-        self.top_k = top_k
+        self.routing_map_TE = None
 
-    def forward(self, x_TD, expert_bias_E):
-        num_tokens = x_TD.shape[0]
-        topk_scores_TK = x_TD.new_ones(num_tokens, self.top_k)
-        topk_expert_ids_TK = torch.zeros(
-            num_tokens, self.top_k, dtype=torch.int64, device=x_TD.device
-        )
-        routing_map_TE = torch.zeros(
-            num_tokens,
-            self.num_experts,
-            dtype=torch.bool,
-            device=x_TD.device,
-        ).scatter_(-1, topk_expert_ids_TK, True)
-        return topk_scores_TK, topk_expert_ids_TK, routing_map_TE
+    def forward(self, scores_TE, routing_map_TE, *, carrier, padding_mask_T=None):
+        del scores_TE, padding_mask_T
+        self.routing_map_TE = routing_map_TE
+        return carrier
 
 
 class _IdentityDispatcher(nn.Module):
-    """Return dispatched and combined rows without changing their order."""
-
     def dispatch(
         self,
         x_TD,
@@ -74,19 +73,15 @@ class _IdentityDispatcher(nn.Module):
         topk_expert_ids_TK,
         num_local_tokens_per_expert_E,
     ):
-        """Return the input rows and supplied per-expert counts."""
         del topk_scores_TK, topk_expert_ids_TK
         return x_TD, num_local_tokens_per_expert_E, None
 
     def combine(self, routed_output_RD, metadata, x_TD):
-        """Return the routed rows presented to the combine boundary."""
         del metadata, x_TD
         return routed_output_RD
 
 
 class _AddOneW13(nn.Module):
-    """Produce a gate row that is visibly different from the input."""
-
     def forward(self, x_RD, offsets_E):
         del offsets_E
         return torch.stack((x_RD + 1, x_RD), dim=-2)
@@ -105,80 +100,40 @@ class _IdentityW2(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
-    def test_grouped_linear_structured_output(self):
-        grouped = _RecordingGroupedLinear(
-            GroupedLinear.Config(
-                group_size=2,
-                in_features=8,
-                out_features=(2, 8),
+    def test_make_router_config_requires_score_func(self):
+        with self.assertRaisesRegex(TypeError, "score_func"):
+            make_router_config(
+                dim=4,
+                num_experts=4,
+                gate_param_init={"weight": nn.init.zeros_},
             )
-        )
-        with torch.no_grad():
-            identity = torch.eye(8)
-            grouped.weight[0].copy_(torch.stack((identity, identity)))
-            grouped.weight[1].copy_(torch.stack((2 * identity, 2 * identity)))
 
-        input = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)
-        output = grouped(
-            input,
-            torch.tensor([2, 3], dtype=torch.int32),
-        )
+    def test_token_choice_router_requires_score_func(self):
+        with self.assertRaisesRegex(TypeError, "score_func"):
+            TokenChoiceTopKRouter.Config(
+                num_experts=4,
+                gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            )
 
-        self.assertEqual(output.shape, (3, 2, 8))
-        self.assertEqual(grouped.recorded_weight.shape, (2, 16, 8))
-        self.assertEqual(
-            grouped.recorded_weight.untyped_storage().data_ptr(),
-            grouped.weight.untyped_storage().data_ptr(),
-        )
-        torch.testing.assert_close(
-            output,
-            torch.stack((input, input), dim=1)
-            * input.new_tensor([1, 1, 2]).reshape(-1, 1, 1),
-        )
-
-    def test_grouped_linear_uses_local_weight_shape(self):
-        """Local expert and feature shards determine the runtime output shape."""
-        grouped = GroupedLinear.Config(
-            group_size=2,
-            in_features=8,
-            out_features=(2, 8),
-        ).build()
-        identity_OI = torch.eye(8, dtype=torch.bfloat16)[:4]
-        grouped.weight = nn.Parameter(
-            torch.stack((identity_OI, 2 * identity_OI)).unsqueeze(0)
-        )
-
-        input_RI = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)
-        output_R2O = grouped(
-            input_RI,
-            torch.tensor([3], dtype=torch.int32),
-        )
-
-        self.assertEqual(output_R2O.shape, (3, 2, 4))
-        torch.testing.assert_close(
-            output_R2O,
-            torch.stack((input_RI[:, :4], 2 * input_RI[:, :4]), dim=1),
-        )
-
-    def test_routed_experts_own_structured_linears(self):
-        init = {
-            "w1_EFD": nn.init.zeros_,
-            "w2_EDF": nn.init.zeros_,
-            "w3_EFD": nn.init.ones_,
-        }
+    def test_routed_experts_use_configured_activation(self):
+        """Routed experts build and execute their configured binary activation."""
+        activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
         config = make_routed_experts_config(
             dim=4,
             hidden_dim=8,
             num_experts=2,
             top_k=1,
-            param_init=init,
+            param_init={},
             comm_backend="standard",
         )
-        routed_experts = config.build()
+        config.activation_fn = activation_fn
+        experts = config.build()
+        gate_RF = torch.randn(3, 8)
+        up_RF = torch.randn(3, 8)
 
-        self.assertEqual(routed_experts.w13.weight.shape, (2, 2, 8, 4))
-        self.assertEqual(routed_experts.w2.weight.shape, (2, 4, 8))
-        self.assertEqual(set(routed_experts.state_dict()), {"w13.weight", "w2.weight"})
+        expected_RF = activation_fn.build()(gate_RF, up_RF)
+        actual_RF = experts.activation_fn(gate_RF, up_RF)
+        torch.testing.assert_close(actual_RF, expected_RF)
 
     def test_routed_experts_own_postprocess_before_combine(self):
         config = replace(
@@ -200,53 +155,116 @@ class TestMoE(unittest.TestCase):
         assert isinstance(routed_experts.expert_output_postprocess, RMSNorm)
         with torch.no_grad():
             routed_experts.expert_output_postprocess.weight.fill_(3.0)
-        x = torch.arange(8, dtype=torch.float32).reshape(2, 4).requires_grad_()
+        x_TD = torch.arange(8, dtype=torch.float32).reshape(2, 4).requires_grad_()
 
-        output = routed_experts(
-            x,
+        output_TD = routed_experts(
+            x_TD,
             torch.ones(2, 1),
             torch.zeros(2, 1, dtype=torch.int64),
             torch.tensor([2, 0]),
         )
-        expected = F.rms_norm(
-            x + 1,
+        expected_TD = F.rms_norm(
+            x_TD + 1,
             (4,),
             routed_experts.expert_output_postprocess.weight,
             routed_experts.expert_output_postprocess.eps,
         )
-        torch.testing.assert_close(output, expected)
+        torch.testing.assert_close(output_TD, expected_TD)
         self.assertIn("expert_output_postprocess.weight", routed_experts.state_dict())
 
-        output.sum().backward()
-        self.assertIsNotNone(x.grad)
+        output_TD.sum().backward()
+        self.assertIsNotNone(x_TD.grad)
         self.assertIsNotNone(routed_experts.expert_output_postprocess.weight.grad)
 
-    def test_routed_expert_config_validates_projection_contract(self):
-        config = make_routed_experts_config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-            top_k=1,
-            param_init={
-                "w1_EFD": nn.init.zeros_,
-                "w2_EDF": nn.init.zeros_,
-                "w3_EFD": nn.init.ones_,
-            },
-            comm_backend="standard",
+    def test_token_choice_router_uses_normalization_epsilon(self):
+        x_TD = torch.zeros(1, 4)
+        expert_bias_E = torch.tensor([4.0, 3.0, 2.0, 1.0])
+        route_norm_epsilon = 1.0
+        route_scale = 4.0
+
+        for route_norm in (False, True):
+            with self.subTest(route_norm=route_norm):
+                config = make_router_config(
+                    dim=4,
+                    num_experts=4,
+                    score_func=Sigmoid.Config(),
+                    gate_param_init={"weight": nn.init.zeros_},
+                    top_k=2,
+                    route_norm=route_norm,
+                    route_norm_epsilon=route_norm_epsilon,
+                    route_scale=route_scale,
+                )
+                router = config.build()
+                with torch.no_grad():
+                    router.gate.weight.zero_()
+
+                (
+                    actual_topk_scores_TK,
+                    actual_topk_expert_ids_TK,
+                    _,
+                ) = router(x_TD, expert_bias_E=expert_bias_E)
+                actual_scores_TE = torch.zeros_like(x_TD).scatter(
+                    dim=-1,
+                    index=actual_topk_expert_ids_TK,
+                    src=actual_topk_scores_TK,
+                )
+                expected_scores_TE = torch.tensor(
+                    [[1.0, 1.0, 0.0, 0.0]] if route_norm else [[2.0, 2.0, 0.0, 0.0]]
+                )
+
+                torch.testing.assert_close(
+                    actual_scores_TE,
+                    expected_scores_TE,
+                    rtol=0,
+                    atol=0,
+                )
+
+    def test_token_choice_router_uses_configured_score_functions(self):
+        x_TD = torch.tensor([[-2.0, 0.0, 1.0, 3.0]], dtype=torch.bfloat16)
+        x_fp32_TD = x_TD.float()
+        cases = (
+            ("sigmoid", Sigmoid.Config(), torch.sigmoid(x_fp32_TD)),
+            ("softmax", Softmax.Config(), F.softmax(x_fp32_TD, dim=-1)),
+            (
+                "sqrtsoftplus",
+                SqrtSoftplus.Config(),
+                F.softplus(x_fp32_TD).sqrt(),
+            ),
         )
 
-        with self.assertRaisesRegex(ValueError, "same number of experts"):
-            replace(
-                config,
-                w2=replace(config.w2, group_size=3),
-            )
-        with self.assertRaisesRegex(ValueError, "gate and up projections"):
-            replace(
-                config,
-                w13=replace(config.w13, out_features=8),
-            )
+        for name, score_func, expected_scores_TE in cases:
+            with self.subTest(score_func=name):
+                config = make_router_config(
+                    dim=4,
+                    num_experts=4,
+                    gate_param_init={"weight": nn.init.zeros_},
+                    score_func=score_func,
+                    top_k=4,
+                )
+                router = config.build()
+                with torch.no_grad():
+                    router.gate.weight.copy_(torch.eye(4))
 
-    def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
+                (
+                    actual_topk_scores_TK,
+                    actual_topk_expert_ids_TK,
+                    _,
+                ) = router(x_TD)
+                actual_scores_TE = torch.zeros_like(expected_scores_TE).scatter(
+                    dim=-1,
+                    index=actual_topk_expert_ids_TK,
+                    src=actual_topk_scores_TK,
+                )
+
+                self.assertIs(actual_topk_scores_TK.dtype, torch.float32)
+                torch.testing.assert_close(
+                    actual_scores_TE,
+                    expected_scores_TE,
+                    rtol=0,
+                    atol=0,
+                )
+
+    def _build_moe(self):
         num_experts = 2
         dim = 4
         top_k = 1
@@ -256,6 +274,7 @@ class TestMoE(unittest.TestCase):
                 dim=dim,
                 num_experts=num_experts,
                 gate_param_init={"weight": nn.init.zeros_},
+                score_func=Sigmoid.Config(),
                 top_k=top_k,
             ),
             routed_experts=make_routed_experts_config(
@@ -263,34 +282,233 @@ class TestMoE(unittest.TestCase):
                 hidden_dim=8,
                 num_experts=num_experts,
                 top_k=top_k,
-                param_init={
-                    "w1_EFD": nn.init.zeros_,
-                    "w2_EDF": nn.init.zeros_,
-                    "w3_EFD": nn.init.ones_,
-                },
+                param_init={},
                 comm_backend="standard",
             ),
         ).build()
-        moe.router = _FixedRouter(num_experts, top_k)
+        with torch.no_grad():
+            moe.router.gate.weight.zero_()
         moe.routed_experts = _PassthroughRoutedExperts()
+        return moe
+
+    def test_eval_forward_does_not_accumulate_tokens_per_expert(self):
+        dim = 4
+        top_k = 1
+        moe = self._build_moe()
 
         x_TD = torch.randn(6, dim)
         moe.train()
         moe(x_TD)
-        torch.testing.assert_close(
-            moe.tokens_per_expert_E,
-            moe.tokens_per_expert_E.new_tensor([2 * 3 * top_k, 0]),
-        )
-        training_counts = moe.tokens_per_expert_E.clone()
+        self.assertEqual(moe.router.tokens_per_expert_E.sum().item(), 2 * 3 * top_k)
+        training_counts = moe.router.tokens_per_expert_E.clone()
 
         moe.eval()
         with torch.no_grad():
             moe(x_TD)
 
         torch.testing.assert_close(
-            moe.tokens_per_expert_E,
+            moe.router.tokens_per_expert_E,
             training_counts,
         )
+
+    def test_padding_is_excluded_from_counts_but_still_dispatched(self):
+        moe = self._build_moe()
+        x_TD = torch.randn(6, 4)
+        padding_mask_T = torch.tensor([False, False, False, True, True, True])
+
+        moe.train()
+        moe(x_TD, padding_mask_T=padding_mask_T)
+
+        self.assertEqual(moe.router.tokens_per_expert_E.sum().item(), 3)
+        self.assertEqual(moe.routed_experts.num_tokens_per_expert_E.sum().item(), 6)
+
+    def test_router_masks_padding_only_for_aux_loss(self):
+        router = make_router_config(
+            dim=4,
+            num_experts=2,
+            score_func=Sigmoid.Config(),
+            gate_param_init={"weight": nn.init.zeros_},
+            top_k=1,
+        ).build()
+        router.init_states()
+        aux_loss = _CapturingAuxLoss()
+        router.aux_loss = aux_loss
+        router.train()
+
+        padding_mask_T = torch.tensor([False, False, True, True])
+        _, _, routing_map_TE = router(
+            torch.randn(4, 4),
+            padding_mask_T=padding_mask_T,
+        )
+
+        self.assertTrue(routing_map_TE[padding_mask_T].any())
+        self.assertIsNotNone(aux_loss.routing_map_TE)
+        self.assertFalse(aux_loss.routing_map_TE[padding_mask_T].any())
+        torch.testing.assert_close(
+            aux_loss.routing_map_TE[~padding_mask_T],
+            routing_map_TE[~padding_mask_T],
+        )
+        torch.testing.assert_close(
+            router.tokens_per_expert_E,
+            aux_loss.routing_map_TE.sum(dim=0).to(torch.float32),
+        )
+
+    def test_router_validates_padding_mask(self):
+        router = make_router_config(
+            dim=4,
+            num_experts=2,
+            score_func=Sigmoid.Config(),
+            gate_param_init={"weight": nn.init.zeros_},
+            top_k=1,
+        ).build()
+        x_TD = torch.randn(4, 4)
+
+        with self.assertRaisesRegex(ValueError, "dtype bool"):
+            router(x_TD, padding_mask_T=torch.zeros(4))
+        with self.assertRaisesRegex(ValueError, "routing-map token axis"):
+            router(x_TD, padding_mask_T=torch.zeros(3, dtype=torch.bool))
+
+    def test_padding_mask_sharding_follows_input_token_layout(self):
+        for enable_ep, enable_sp in ((False, False), (True, False), (True, True)):
+            with self.subTest(enable_ep=enable_ep, enable_sp=enable_sp):
+                moe_config = _moe_sharding_config(
+                    enable_ep=enable_ep,
+                    enable_sp=enable_sp,
+                )
+                assert moe_config.in_src_shardings is not None
+                assert moe_config.in_dst_shardings is not None
+                self.assertEqual(
+                    _per_axis_types(moe_config.in_src_shardings["padding_mask_T"]),
+                    _per_axis_types(token_id_placement(enable_sp=enable_sp)),
+                )
+                self.assertEqual(
+                    _per_axis_types(moe_config.in_dst_shardings["padding_mask_T"]),
+                    _per_axis_types(
+                        token_id_placement(enable_sp=enable_sp and enable_ep)
+                    ),
+                )
+                self.assertEqual(
+                    moe_config.in_src_shardings["x_TD"].partition_spec[0],
+                    moe_config.in_src_shardings["padding_mask_T"].partition_spec[0],
+                )
+                self.assertEqual(
+                    moe_config.in_dst_shardings["x_TD"].partition_spec[0],
+                    moe_config.in_dst_shardings["padding_mask_T"].partition_spec[0],
+                )
+
+                router_config = _router_sharding_config(
+                    enable_ep=enable_ep,
+                    enable_sp=enable_sp,
+                )
+                assert router_config.in_src_shardings is not None
+                assert router_config.in_dst_shardings is not None
+                self.assertEqual(
+                    router_config.in_src_shardings,
+                    moe_config.in_dst_shardings,
+                )
+                self.assertEqual(
+                    router_config.in_dst_shardings["x_TD"].partition_spec[0],
+                    router_config.in_dst_shardings["padding_mask_T"].partition_spec[0],
+                )
+                self.assertEqual(
+                    _per_axis_types(router_config.in_dst_shardings["padding_mask_T"]),
+                    _per_axis_types(token_id_placement(enable_sp=enable_ep)),
+                )
+
+    def test_moe_block_sequence_shards_padding_mask(self):
+        x_src = token_id_placement()
+        x_dst = token_id_placement(enable_sp=True)
+        block_cfg = SimpleNamespace(
+            sharding_config=ShardingConfig(
+                in_src_shardings={"x": x_src},
+                in_dst_shardings={"x": x_dst},
+            )
+        )
+
+        set_moe_block_padding_mask_sharding(block_cfg, enable_sp=True)
+
+        config = block_cfg.sharding_config
+        assert config.in_src_shardings is not None
+        assert config.in_dst_shardings is not None
+        self.assertIs(config.in_src_shardings["x"], x_src)
+        self.assertIs(config.in_dst_shardings["x"], x_dst)
+        self.assertEqual(
+            _per_axis_types(config.in_src_shardings["padding_mask"]),
+            _per_axis_types(token_id_placement()),
+        )
+        self.assertEqual(
+            _per_axis_types(config.in_dst_shardings["padding_mask"]),
+            _per_axis_types(token_id_placement(enable_sp=True)),
+        )
+
+    def test_moe_without_ep_keeps_routed_weights_replicated(self):
+        def make_config():
+            return SimpleNamespace(
+                sharding_config=None,
+                router=SimpleNamespace(
+                    sharding_config=None,
+                    aux_loss=MicrobatchWiseLoadBalanceLoss.Config(coeff=1e-3),
+                    gate=SimpleNamespace(sharding_config=None),
+                ),
+                shared_experts=SimpleNamespace(
+                    sharding_config=None,
+                    w13=SimpleNamespace(sharding_config=None),
+                    w2=SimpleNamespace(sharding_config=None),
+                ),
+                routed_experts=SimpleNamespace(
+                    sharding_config=None,
+                    w13=SimpleNamespace(sharding_config=None),
+                    w2=SimpleNamespace(sharding_config=None),
+                ),
+            )
+
+        def tp_type(layout):
+            return _per_axis_types(layout)[MeshAxisName.TP]
+
+        moe_config = make_config()
+        set_moe_sharding_config(
+            moe_config,
+            enable_ep=False,
+            enable_sp=False,
+        )
+
+        root = moe_config.sharding_config
+        assert root is not None
+        assert root.in_dst_shardings is not None
+        self.assertEqual(tp_type(root.in_dst_shardings["x_TD"]), spmd.R)
+        self.assertEqual(tp_type(root.out_src_shardings), spmd.R)
+
+        shared = moe_config.shared_experts
+        assert shared.sharding_config.in_dst_shardings is not None
+        self.assertEqual(tp_type(shared.sharding_config.in_dst_shardings["x"]), spmd.R)
+        self.assertEqual(
+            tp_type(shared.w13.sharding_config.state_shardings["weight"]), spmd.S(1)
+        )
+        self.assertEqual(
+            tp_type(shared.w13.sharding_config.out_src_shardings), spmd.S(2)
+        )
+        self.assertEqual(
+            tp_type(shared.w2.sharding_config.state_shardings["weight"]), spmd.S(1)
+        )
+        self.assertEqual(tp_type(shared.w2.sharding_config.out_src_shardings), spmd.P)
+        self.assertEqual(tp_type(shared.w2.sharding_config.out_dst_shardings), spmd.R)
+
+        routed = moe_config.routed_experts
+        assert routed.sharding_config.in_dst_shardings is not None
+        for name in ("x_TD", "topk_scores_TK", "topk_expert_ids_TK"):
+            self.assertEqual(
+                tp_type(routed.sharding_config.in_dst_shardings[name]), spmd.R
+            )
+        self.assertEqual(
+            tp_type(
+                routed.sharding_config.in_dst_shardings["num_local_tokens_per_expert_E"]
+            ),
+            spmd.R,
+        )
+        self.assertEqual(tp_type(routed.sharding_config.out_src_shardings), spmd.R)
+        self.assertEqual(tp_type(routed.sharding_config.out_dst_shardings), spmd.R)
+        self.assertIsNone(routed.w13.sharding_config)
+        self.assertIsNone(routed.w2.sharding_config)
 
 
 if __name__ == "__main__":

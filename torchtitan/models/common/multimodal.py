@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Model-agnostic vision<->text fusion for VLMs.
+"""Model-agnostic multimodal model support.
 
 ``get_vision_positions`` and ``scatter_vision_embeds`` support span-based
 fusion over a full token sequence. ``build_vision_bank_indices`` and
@@ -12,8 +12,111 @@ fusion over a full token sequence. ``build_vision_bank_indices`` and
 packed-bank row for every placeholder token.
 """
 
+from typing import Self
+
 import spmd_types as spmd
 import torch
+
+from torchtitan.config import (
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+
+from .decoder import Decoder
+
+
+class MultimodalModel(Decoder):
+    """Language model with modality-specific encoders."""
+
+    multimodal_encoder_fqns: tuple[str, ...] = ()
+
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> Self:
+        from torchtitan.distributed.utils import get_spmd_context
+
+        with get_spmd_context(parallel_dims=parallel_dims):
+            self._parallelize(parallel_dims)
+            encoders = [
+                encoder
+                for encoder_fqn in self.multimodal_encoder_fqns
+                if (encoder := getattr(self, encoder_fqn)) is not None
+            ]
+            if ac_config is not None:
+                policy = ac_config.build(dump_folder=dump_folder)
+                policy.apply(self)
+                for encoder in encoders:
+                    policy.apply(encoder)
+
+            if compile_config is not None and "model" in compile_config.components:
+                from torchtitan.distributed.compile import apply_compile
+
+                apply_compile(
+                    self,
+                    compile_config=compile_config,
+                    parallel_dims=parallel_dims,
+                )
+                for encoder in encoders:
+                    apply_compile(
+                        encoder,
+                        compile_config=compile_config,
+                        parallel_dims=parallel_dims,
+                    )
+
+            if not skip_dp:
+                self._apply_fsdp(
+                    parallel_dims=parallel_dims,
+                    training=training,
+                    parallelism=parallelism,
+                )
+        return self
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            apply_fsdp_to_multimodal_encoder,
+            resolve_fsdp_mesh,
+        )
+
+        if not parallel_dims.pp_enabled:
+            dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+            for encoder_fqn in self.multimodal_encoder_fqns:
+                encoder = getattr(self, encoder_fqn)
+                if encoder is not None:
+                    apply_fsdp_to_multimodal_encoder(
+                        encoder,
+                        dp_mesh,
+                        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                        reshard_after_forward_policy=(
+                            parallelism.fsdp_reshard_after_forward
+                        ),
+                        pp_enabled=parallel_dims.pp_enabled,
+                        cpu_offload=training.enable_cpu_offload,
+                        dp_mesh_dims=dp_mesh_dims,
+                    )
+        super()._apply_fsdp(
+            parallel_dims=parallel_dims,
+            training=training,
+            parallelism=parallelism,
+        )
 
 
 def get_vision_positions(
