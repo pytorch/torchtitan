@@ -57,6 +57,16 @@ into `main`. Scheduled runs also execute the complete suite with Real PG.
   pushes affecting Kimi K3 on `main`. The lane uses Real PG and currently runs
   the Kimi K3 multimodal FSDP test.
 
+#### keep-going
+
+A job normally stops at the first failing suite, so the suites after it never
+report. The `keep-going` pull request label (or `[keep-going]` in the PR body)
+runs the remaining suites anyway and fails the job at the end, which surfaces
+every failure in one run instead of one per rerun. Pushes to `main` and
+scheduled runs always behave this way. Individual test flavors within a suite
+already continue on failure; the label covers the suites that follow, such as
+the FLUX tests in the model job.
+
 Feature tests provide depth of infrastructure composability. Fake-PG runs check
 that feature combinations configure, transform, and complete training, while
 Real-PG runs additionally cover real collectives and distributed state. Model
