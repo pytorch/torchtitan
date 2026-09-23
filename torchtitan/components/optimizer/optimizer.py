@@ -176,10 +176,15 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         model: nn.Module,
         param_group_configs: list[ParamGroupConfig],
         impl_kwargs: dict[str, Any],
+        *,
+        unmatched: set[str] | None = None,
     ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
         """Build PyTorch param groups from model parameters, partitioned by optimizer.
 
         Each parameter is assigned to the first matching ParamGroupConfig pattern.
+        A pattern that matches nothing raises, unless ``unmatched`` is given: then it
+        is recorded there and skipped, since a pipeline stage may hold none of a
+        pattern's parameters.
 
         Returns two dicts keyed by optimizer name and aligned by index: the param
         group dicts to pass to the optimizer constructor, and the regex pattern of
@@ -205,10 +210,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                     claimed.add(name)
 
             if not params:
-                raise ValueError(
-                    f"Optimizer param_groups pattern '{pg.pattern}' "
-                    f"matched no parameters"
-                )
+                if unmatched is None:
+                    raise ValueError(
+                        f"Optimizer param_groups pattern '{pg.pattern}' "
+                        f"matched no parameters"
+                    )
+                unmatched.add(pg.pattern)
+                continue
 
             groups[pg.optimizer_name].append(
                 {
@@ -229,9 +237,14 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         self.optimizers = []
         self.model_parts = model_parts
 
+        matched: set[str] = set()
         for part_idx, model in enumerate(self.model_parts):
+            unmatched: set[str] = set()
             groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
-                model, param_group_configs, impl_kwargs
+                model, param_group_configs, impl_kwargs, unmatched=unmatched
+            )
+            matched.update(
+                pg.pattern for pg in param_group_configs if pg.pattern not in unmatched
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
                 optimizer = self._resolve_optimizer_factory(opt_name)(
@@ -243,6 +256,14 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
 
+        # A pipeline stage may hold none of a pattern's parameters; a pattern
+        # no model part matches is a mistake in the config.
+        for pg in param_group_configs:
+            if pg.pattern not in matched:
+                raise ValueError(
+                    f"Optimizer param_groups pattern '{pg.pattern}' "
+                    f"matched no parameters"
+                )
         self._validate_params(all_params)
 
         if config.implementation == "fused_opt_states_bf16":
