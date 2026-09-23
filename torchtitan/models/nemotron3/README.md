@@ -5,10 +5,8 @@ Nemotron-3 is a family of hybrid Mamba-Transformer Mixture-of-Experts (MoE) mode
 ## Supported Flavors
 
 - `nemotron_debugmodel`: CI/local testing flavor
-- `nemotron_4b`: 4B hybrid Mamba-MoE model (32 experts, top-4 routing)
-- `nemotron_31b`: 31.6B total / 3.2B active parameter Nano model (128 experts, top-6 routing)
-- `nemotron_120b`: 120B Super hybrid Mamba-MoE model (128 experts, top-8 routing)
-- `nemotron_550b`: 550B Ultra hybrid Mamba-MoE model (256 experts, top-8 routing)
+- `nemotron_4b`: 3.97B dense hybrid model, 42 layers of Mamba-2 / MLP / attention (no MoE)
+- `nemotron_31b`: 31.6B total / ~3.2B active Nano MoE model, 52 layers (23 Mamba / 23 MoE / 6 attention, 128 experts, top-6 routing)
 
 ## Download Tokenizer
 
@@ -27,13 +25,30 @@ MODULE=nemotron3 CONFIG=nemotron_4b ./run_train.sh
 
 # Nemotron-3 Nano 31B
 MODULE=nemotron3 CONFIG=nemotron_31b ./run_train.sh
-
-# Nemotron-3 Super 120B
-MODULE=nemotron3 CONFIG=nemotron_120b ./run_train.sh
-
-# Nemotron-3 Ultra 550B
-MODULE=nemotron3 CONFIG=nemotron_550b ./run_train.sh
 ```
+
+## Fused Mamba-2 scan
+
+The Mamba-2 chunked scan uses `mamba-ssm`'s Triton kernel when it is installed
+and the model is on GPU, falling back to a pure-PyTorch reference otherwise
+(CPU, or no `mamba-ssm`). The kernel is Triton-only, so it runs on both CUDA
+and ROCm -- measured on 8x MI355X (gfx950), 31B at 8192 context:
+
+| | PyTorch reference | Fused Triton |
+|---|---|---|
+| MFU | 0.63% | **2.65%** |
+| tokens/sec | 724 | **3,042** |
+| peak memory | 114.3 GiB | **67.1 GiB** |
+
+Install it without the Mamba-1 CUDA extension (which is unrelated and does not
+build on ROCm):
+
+```bash
+MAMBA_FORCE_BUILD=FALSE MAMBA_SKIP_CUDA_BUILD=TRUE pip install --no-build-isolation mamba-ssm
+```
+
+Set `NEMOTRON_DISABLE_FUSED_MAMBA=1` to force the reference path (for A/B
+timing or bisecting numerics).
 
 See [`config_registry.py`](./config_registry.py) for available configuration options.
 
