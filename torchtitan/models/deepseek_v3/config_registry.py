@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -55,16 +54,16 @@ def deepseek_v3_mxfp8_linear_converter_config(
 def deepseek_v3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_spec = model_registry("debugmodel", seq_len=seq_len)
+    model_config = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
@@ -76,17 +75,14 @@ def deepseek_v3_debugmodel(
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -95,10 +91,10 @@ def deepseek_v3_debugmodel_mtp(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry("debugmodel", seq_len=seq_len, num_mtp_layers=1)
+    config.model = model_registry("debugmodel", seq_len=seq_len, num_mtp_layers=1)
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=MTPLoss.Config(
-            global_vocab_size=decoder_vocab_size(config.model_spec),
+            global_vocab_size=decoder_vocab_size(config.model),
         ),
     )
     return config
@@ -115,9 +111,9 @@ def deepseek_v3_debugmodel_mxfp8(
     # pad_multiple=128 is required by the CuTeDSL quantization kernel
     # on sm_100 (e.g. B200)
     model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
+        config.compile is not None and "model" in config.compile.components
     )
-    config.model_spec = model_registry(
+    config.model = model_registry(
         "debugmodel",
         seq_len=seq_len,
         converters=[
@@ -133,11 +129,26 @@ def deepseek_v3_debugmodel_mxfp8(
     return config
 
 
+def deepseek_v3_debugmodel_float8_grouped(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
+    config.compile = CompileConfig(components=["model"])
+    config.model = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+        converters=[
+            Float8GroupedExpertsConverter.Config(model_compile_enabled=True),
+        ],
+    )
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model_spec = model_registry(
+    config.model = model_registry(
         "debugmodel",
         seq_len=seq_len,
         moe_comm_backend="hybridep",
@@ -147,15 +158,15 @@ def deepseek_v3_debugmodel_hybridep(
 
 
 def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("16B", seq_len=seq_len, attn_backend="flex")
+    model_config = model_registry("16B", seq_len=seq_len, attn_backend="flex")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/deepseek-moe-16b-base",
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
@@ -166,8 +177,8 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
@@ -175,15 +186,15 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
             pipeline_parallel_schedule="Interleaved1F1B",
             expert_parallel_degree=8,
         ),
-        checkpoint=CheckpointManager.Config(interval=10),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        compile=CompileConfig(enable=True, components=["loss"]),
+        compile=CompileConfig(components=["loss"]),
     )
 
 
 def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
     config = deepseek_v3_16b(seq_len=seq_len)
-    config.model_spec = model_registry(
+    config.model = model_registry(
         "16B",
         seq_len=seq_len,
         attn_backend="flex",
@@ -195,7 +206,7 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
 
 
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry(
+    model_config = model_registry(
         "671B",
         seq_len=seq_len,
         attn_backend="flex",
@@ -203,11 +214,11 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/DeepSeek-V3.1-Base",
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
@@ -219,8 +230,8 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,
         ),
@@ -228,9 +239,9 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             pipeline_parallel_schedule="Interleaved1F1B",
             expert_parallel_degree=2,
         ),
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        compile=CompileConfig(enable=True, components=["loss"]),
+        compile=CompileConfig(components=["loss"]),
     )
 
 
@@ -241,9 +252,9 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
     # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
     # build time, so use the plain deepseek_v3_671b config there.
     model_compile_enabled = (
-        config.compile.enable and "model" in config.compile.components
+        config.compile is not None and "model" in config.compile.components
     )
-    config.model_spec = model_registry(
+    config.model = model_registry(
         "671B",
         seq_len=seq_len,
         attn_backend="flex",

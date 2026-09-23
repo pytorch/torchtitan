@@ -27,27 +27,6 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 logger = logging.getLogger(__name__)
 
 
-def validate_converter_order(converters: list) -> None:
-    """Validate that quantization/QAT converters precede LoRA.
-
-    Raises ``ValueError`` if a quantization converter appears after a LoRA
-    converter in the list.
-    """
-    from torchtitan.config.transform import LoRAConverter, QuantizationConverter
-
-    _BEFORE_LORA = (QuantizationConverter.Config,)
-
-    seen_lora = False
-    for converter in converters:
-        if isinstance(converter, LoRAConverter.Config):
-            seen_lora = True
-        elif seen_lora and isinstance(converter, _BEFORE_LORA):
-            raise ValueError(
-                f"{type(converter).__name__} must be applied before "
-                f"LoRAConverter. Reorder the converters list."
-            )
-
-
 class MoEStateDictAdapter(StateDictAdapter):
     """
     StateDictAdapter for MoE models.

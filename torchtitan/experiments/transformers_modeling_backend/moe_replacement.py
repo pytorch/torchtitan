@@ -13,7 +13,7 @@ Two-phase replacement:
   Phase 2 (parallelize time): ``build_and_swap_native_moe`` calls
       ``set_moe_sharding_config`` on each stored config, builds the Titan MoE,
       initializes it, and swaps it into the layer. Actual parallelization
-      happens later via ``model.parallelize(parallel_dims)``.
+      happens later via ``model._parallelize(parallel_dims)``.
 """
 
 import logging
@@ -29,6 +29,7 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
     _hf_activation_placement,
     _hf_sequence_parallel_placement,
 )
+from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_moe_config,
@@ -110,6 +111,12 @@ def build_and_swap_native_moe(
             each MoE-enabled layer (from ``prepare_native_moe_configs``).
         parallel_dims: Parallel dimensions for EP/TP mesh resolution.
     """
+    if parallel_dims.ep < parallel_dims.tp:
+        raise ValueError(
+            f"MoE models require expert_parallel_degree ({parallel_dims.ep}) to be "
+            "greater than or equal to tensor_parallel_degree "
+            f"({parallel_dims.tp})."
+        )
     enable_ep = parallel_dims.ep_enabled
     enable_sp = parallel_dims.tp_enabled
 
@@ -118,12 +125,10 @@ def build_and_swap_native_moe(
         if moe_config is None:
             continue
 
-        _, expert_layout = _get_expert_param_info()
         set_moe_sharding_config(
             moe_config,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=expert_layout,
         )
         root_sharding = moe_config.sharding_config
         assert root_sharding is not None
@@ -537,7 +542,9 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_experts=params["num_experts"],
         gate_param_init=_LINEAR_INIT,
         top_k=params["top_k"],
-        score_func=params["score_func"],
+        score_func=(
+            Sigmoid.Config() if params["score_func"] == "sigmoid" else Softmax.Config()
+        ),
         route_norm=params["route_norm"],
         route_scale=params["route_scale"],
         **router_kwargs,

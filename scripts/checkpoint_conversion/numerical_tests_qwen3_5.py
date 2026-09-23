@@ -91,9 +91,9 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     # trips the .apply_chat_template call on environments without transformers stubs.
     processor: Any = AutoProcessor.from_pretrained(hf_model_path)
 
-    model_config = model_registry(model_flavor).model
-    # pyrefly: ignore [missing-attribute]
+    model_config = model_registry(model_flavor)
     encoder_config = model_config.vision_encoder
+    assert encoder_config is not None
     patch_size = encoder_config.patch_size
     temporal_patch_size = encoder_config.temporal_patch_size
     merge_size = encoder_config.spatial_merge_size
@@ -270,7 +270,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
     """Run TT model, return last-token logits per sample."""
     print(f"Loading TorchTitan model on {device} ...")
 
-    model_config = model_registry(model_flavor).model
+    model_config = model_registry(model_flavor)
     with torch.device("meta"):
         model = model_config.build()
     model.to_empty(device="cpu")

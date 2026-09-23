@@ -15,7 +15,7 @@ from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
 
 
-class ActivationFn(Function[torch.Tensor], ABC):
+class BinaryActivationFn(Function[torch.Tensor], ABC):
     """Base class for configurable two-input activation functions."""
 
     @dataclass(kw_only=True, slots=True)
@@ -32,11 +32,84 @@ class ActivationFn(Function[torch.Tensor], ABC):
         pass
 
 
-class SwiGLU(ActivationFn):
+class UnaryActivationFn(Function[torch.Tensor], ABC):
+    """Base class for configurable one-input activation functions."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+        pass
+
+    @abstractmethod
+    def __call__(
+        self,
+        x: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        pass
+
+
+class Sigmoid(UnaryActivationFn):
+    """Sigmoid activation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(UnaryActivationFn.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs
+        return torch.sigmoid(x)
+
+
+class Softmax(UnaryActivationFn):
+    """Softmax activation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(UnaryActivationFn.Config):
+        dim: int = -1
+
+    def __init__(self, config: Config) -> None:
+        self.dim = config.dim
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs
+        return F.softmax(x, dim=self.dim)
+
+
+class SqrtSoftplus(UnaryActivationFn):
+    """Square root of softplus activation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(UnaryActivationFn.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs
+        return F.softplus(x).sqrt()
+
+
+class SwiGLU(BinaryActivationFn):
     """SwiGLU activation."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ActivationFn.Config):
+    class Config(BinaryActivationFn.Config):
         pass
 
     def __init__(self, config: Config) -> None:
@@ -52,11 +125,11 @@ class SwiGLU(ActivationFn):
         return F.silu(gate) * up
 
 
-class SiTUGLU(ActivationFn):
+class SiTUGLU(BinaryActivationFn):
     """Kimi's SiTU-GLU activation, evaluated in FP32."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ActivationFn.Config):
+    class Config(BinaryActivationFn.Config):
         beta: float = 1.0
         linear_beta: float | None = None
 

@@ -12,6 +12,7 @@ from functools import partial
 from torch.nn import init
 
 from torchtitan.config.override import _REGISTRY, apply_overrides, OverrideConfig
+from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
@@ -29,7 +30,7 @@ _E = 4
 _FUSED_SWIGLU = "torchtitan.overrides.fused_swiglu.fused_swiglu"
 _DEEPEP_OVERRIDE = (
     "torchtitan.overrides.moe_token_dispatcher.deepep_override",
-    {"cudagraphable": True},
+    {"cuda_graph_compatible": True},
 )
 
 # The @override decorators register once, at the imports above. Capture the
@@ -63,6 +64,7 @@ def _moe_config(comm_backend: str):
         dim=_DIM,
         num_experts=_E,
         gate_param_init={"weight": partial(init.trunc_normal_, std=0.02)},
+        score_func=Sigmoid.Config(),
         top_k=1,
     )
     return make_moe_config(num_experts=_E, router=router, routed_experts=routed_experts)
@@ -97,7 +99,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         self.assertIsInstance(
             cfg.routed_experts.token_dispatcher, DeepEPTokenDispatcher.Config
         )
-        self.assertTrue(cfg.routed_experts.token_dispatcher.cudagraphable)
+        self.assertTrue(cfg.routed_experts.token_dispatcher.cuda_graph_compatible)
 
     def test_non_deepep_dispatcher_flip_is_noop(self):
         cfg = _moe_config("standard")
@@ -120,20 +122,24 @@ class TestInferenceMoEOverrides(unittest.TestCase):
             return (
                 type(ge.inner_experts.activation_fn).__qualname__,
                 type(ge.token_dispatcher).__qualname__,
-                ge.token_dispatcher.cudagraphable,
+                ge.token_dispatcher.cuda_graph_compatible,
             )
 
         a = _moe_config("deepep").routed_experts
         a.inner_experts.activation_fn = fused_swiglu(a.inner_experts.activation_fn)
-        a.token_dispatcher = deepep_override(a.token_dispatcher, cudagraphable=True)
+        a.token_dispatcher = deepep_override(
+            a.token_dispatcher, cuda_graph_compatible=True
+        )
 
         b = _moe_config("deepep").routed_experts
-        b.token_dispatcher = deepep_override(b.token_dispatcher, cudagraphable=True)
+        b.token_dispatcher = deepep_override(
+            b.token_dispatcher, cuda_graph_compatible=True
+        )
         b.inner_experts.activation_fn = fused_swiglu(b.inner_experts.activation_fn)
 
         self.assertEqual(summarize(a), summarize(b))
         self.assertIsInstance(a.inner_experts.activation_fn, FusedSwiGLU.Config)
-        self.assertTrue(a.token_dispatcher.cudagraphable)
+        self.assertTrue(a.token_dispatcher.cuda_graph_compatible)
 
     def test_trainer_uses_only_experts_fusion(self):
         cfg = _moe_config("deepep")
@@ -145,7 +151,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         self.assertIsInstance(
             cfg.routed_experts.inner_experts.activation_fn, FusedSwiGLU.Config
         )
-        self.assertFalse(cfg.routed_experts.token_dispatcher.cudagraphable)
+        self.assertFalse(cfg.routed_experts.token_dispatcher.cuda_graph_compatible)
 
 
 if __name__ == "__main__":

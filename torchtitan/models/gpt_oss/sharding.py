@@ -17,22 +17,16 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_gqa_inner_attention_local_spmd,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    expert_param_placement_sparse,
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.models.gpt_oss.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
-
-
-# Routed-expert layout for ``GptOssGroupedExperts`` (mlp1/mlp2 fused
-# weights + biases): mlp1 colwise, mlp2 rowwise, mlp2_bias replicated.
-_GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "mlp1_weight_EGD": spmd.S(1),
-    "mlp1_bias_EG": spmd.S(1),
-    "mlp2_weight_EDF": spmd.S(2),
-    "mlp2_bias_ED": spmd.R,
-}
 
 
 def partial_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
@@ -119,9 +113,21 @@ def _set_gpt_oss_layer_sharding(
 
     # MoE FFN (all GPT-OSS blocks are MoE).
     if layer_cfg.moe is not None:
+        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
         )
+        if enable_ep:
+            layer_cfg.moe.routed_experts.inner_experts.sharding_config = ShardingConfig(
+                state_shardings={
+                    name: expert_param_placement_sparse()
+                    for name in (
+                        "mlp1_weight_EGD",
+                        "mlp1_bias_EG",
+                        "mlp2_weight_EDF",
+                        "mlp2_bias_ED",
+                    )
+                }
+            )

@@ -36,7 +36,10 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_spmd,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
     set_vision_transformer_block_sharding_config,
@@ -103,12 +106,6 @@ def _conv_weight_sharding() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
     )
-
-
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w13_E2FD": spmd.S(2),
-    "w2_EDF": spmd.S(2),
-}
 
 
 def set_qwen35_sharding_config(
@@ -194,11 +191,11 @@ def _set_qwen35_layer_sharding(
         )
 
     if layer_cfg.moe is not None:
+        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
         )
         _set_shared_expert_gate_sharding(
             # pyrefly: ignore [missing-attribute]
@@ -214,11 +211,11 @@ def _set_shared_expert_gate_sharding(
 ) -> None:
     """Shard Qwen3.5's shared-expert sigmoid gate.
 
-    The common MoE sharding handles the shared FFN (w13/w2) and the
+    The common MoE sharding handles the shared FFN (w1/w2/w3) and the
     module-boundary gather that feeds the gate a Replicate ``x``. Here we only
     add the gate: its weight and local output are Replicate. With SP, the output
     is sliced into the sequence-sharded layout produced by the shared FFN. With
-    SP disabled, it remains Replicate and scales the shared FFN's Partial output.
+    SP disabled, it remains Replicate and scales the shared FFN output.
     ``getattr`` keeps this a no-op when the MoE has no shared expert (``None``);
     Qwen3.5's shared expert always carries the gate.
     """
