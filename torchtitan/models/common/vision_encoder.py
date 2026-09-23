@@ -23,12 +23,15 @@ Shape suffixes:
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from torchtitan.models.common import Linear
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.protocols.module import Module
 
@@ -38,6 +41,53 @@ compiled_create_block_mask = torch.compile(create_block_mask)
 RopeApply = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
 ]
+
+
+class InvariantRowParallelLinear(Linear):
+    """Row-parallel vision projection with an invariant TP output.
+
+    Vision residual activations remain invariant even when decoder sequence
+    parallelism is enabled, so this boundary always performs ``P -> I``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        weight, bias = self._flatten_weight_and_bias()
+        if bias is not None and tp_group is not None:
+            bias = spmd.convert(
+                bias,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.P,
+                expert_mode=True,
+            )
+            # The selected local compute may be native, LoRA, or quantized.
+            # Its row-sharded operands and bias jointly produce a partial output.
+            # TODO: Remove this suppression once spmd_types recognizes the
+            # rowwise F.linear type combination [V, V, P] -> P.
+            with spmd.no_typecheck():
+                output = self._unflatten_output(self._linear(input, weight, bias))
+            if spmd.is_type_checking():
+                spmd.assert_local_type_like(
+                    output,
+                    input,
+                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
+                )
+        else:
+            output = self._unflatten_output(self._linear(input, weight, bias))
+        if tp_group is None:
+            return output
+        return spmd.redistribute(
+            output,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.I,
+            backward_options={"op_dtype": output.dtype},
+        )
 
 
 def create_block_diagonal_mask(

@@ -785,6 +785,7 @@ class FusedMLAAttention(Attention):
         if not x.is_cuda:
             return super().forward(x, attention_masks, positions)
 
+        x = self._gather_tp_input(x)
         num_tokens = x.shape[0]
         if self.q_lora_rank == 0:
             q = self.wq(x)
