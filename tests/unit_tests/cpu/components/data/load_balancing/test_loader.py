@@ -6,10 +6,10 @@
 
 import json
 from collections.abc import Iterable
-from dataclasses import fields
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import get_type_hints
-from unittest.mock import patch
+from unittest.mock import ANY, MagicMock, patch
 
 import grain.python as grain
 
@@ -19,9 +19,16 @@ import tyro
 
 from torchtitan.components.data.collators import HAS_PIN_MEMORY, TextCollator
 from torchtitan.components.data.dataset import SingleDatasetConfig
-from torchtitan.components.data.load_balancing.loader import (
-    LoadBalancingDataLoader,
+from torchtitan.components.data.load_balancing.coordinator import (
+    CoordinatedWindow,
+    InputCoordinator,
     ReplicatedInputCoordinator,
+)
+from torchtitan.components.data.load_balancing.loader import LoadBalancingDataLoader
+from torchtitan.components.data.load_balancing.planner import (
+    BinAssignment,
+    PackableItem,
+    PackingBin,
 )
 from torchtitan.components.data.loader import DataloaderExhaustedError, GrainDataLoader
 from torchtitan.components.data.packing import ConcatThenSplitPackingConfig
@@ -29,6 +36,7 @@ from torchtitan.components.data.sources import IndexedJsonlSource
 from torchtitan.components.data.types import (
     OptimizerStepLayout,
     TokenizedTrainingMicrobatch,
+    TrainingMicrobatch,
 )
 from torchtitan.hf_datasets.text_datasets import TextProcessor
 
@@ -60,6 +68,60 @@ class _WordTokenizer:
     def encode(self, text: str, *, add_bos: bool, add_eos: bool) -> list[int]:
         tokens = [int(token) for token in text.split()]
         return ([1] if add_bos else []) + tokens + ([self.eos_id] if add_eos else [])
+
+
+class _FixedInputCoordinator(InputCoordinator):
+    @dataclass(kw_only=True, slots=True)
+    class Config(InputCoordinator.Config):
+        microbatch: TrainingMicrobatch
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        dp_world_size,
+        dp_rank,
+        dp_mesh,
+        child_loader_factory,
+        document_capacity,
+    ) -> None:
+        del dp_world_size, dp_mesh, child_loader_factory
+        self._microbatch = config.microbatch
+        self._dp_rank = dp_rank
+        self._document_capacity = document_capacity
+
+    def collect(self, *, layout, itemize):
+        assert layout.num_microbatches == 1
+        stable_id = (self._dp_rank, 0)
+        item = itemize(stable_id, self._microbatch)
+        return CoordinatedWindow(
+            items=(item,),
+            bins=(
+                PackingBin(
+                    stable_id=stable_id,
+                    token_capacity=item.num_tokens,
+                    document_capacity=self._document_capacity,
+                    logical_dp_rank=self._dp_rank,
+                    accumulation_index=0,
+                    pp_microbatch_index=0,
+                ),
+            ),
+            local_payloads={stable_id: self._microbatch},
+            local_bin_ids=(stable_id,),
+        )
+
+    def distribute(self, window, assignments):
+        item_id = assignments[0].item_ids[0]
+        return [window.local_payloads[item_id]]
+
+    def state_dict(self):
+        return {}
+
+    def load_state_dict(self, state_dict):
+        del state_dict
+
+    def close(self):
+        pass
 
 
 def _batch(
@@ -111,6 +173,7 @@ def _build_loader(
     *,
     dp_world_size: int,
     dp_rank: int,
+    optimizer_step_layout: OptimizerStepLayout | None = None,
 ):
     return config.build(
         dp_world_size=dp_world_size,
@@ -118,19 +181,76 @@ def _build_loader(
         tokenizer=_WordTokenizer(),
         max_context_length=8,
         num_tokens_per_microbatch=8,
+        optimizer_step_layout=optimizer_step_layout
+        or OptimizerStepLayout(num_accumulation_steps=1, num_pp_microbatches=1),
     )
 
 
-def _markers(step) -> list[int]:
-    return [
-        int(microbatch.input[0])
-        for group in step.microbatch_groups
-        for microbatch in group
+def _markers(microbatches) -> list[int]:
+    return [int(microbatch.input[0]) for microbatch in microbatches]
+
+
+def test_replicated_coordinator_collects_and_distributes_window() -> None:
+    streams = {
+        0: [_batch((8,), 10), _batch((4, 4), 11)],
+        1: [_batch((2, 2, 2, 2), 20), _batch((1,) * 8, 21)],
+    }
+    built_logical_ranks = []
+
+    def build_child(logical_dp_rank: int):
+        built_logical_ranks.append(logical_dp_rank)
+        return _FakeChild(streams[logical_dp_rank])
+
+    coordinator = ReplicatedInputCoordinator.Config(group_size=2).build(
+        dp_world_size=2,
+        dp_rank=0,
+        child_loader_factory=build_child,
+        document_capacity=8,
+    )
+    layout = OptimizerStepLayout(num_accumulation_steps=2, num_pp_microbatches=1)
+
+    def itemize(stable_id, microbatch):
+        marker = int(microbatch.input[0])
+        cost_by_marker = {10: 64, 11: 32, 20: 16, 21: 8}
+        num_documents_by_marker = {10: 1, 11: 2, 20: 4, 21: 8}
+        return PackableItem(
+            stable_id=stable_id,
+            num_tokens=8,
+            num_documents=num_documents_by_marker[marker],
+            cost=cost_by_marker[marker],
+            payload_bytes=0,
+            original_bin_id=stable_id,
+        )
+
+    window = coordinator.collect(layout=layout, itemize=itemize)
+    assignments = (
+        BinAssignment(bin_id=(0, 0), item_ids=((0, 0),)),
+        BinAssignment(bin_id=(1, 0), item_ids=((0, 1),)),
+        BinAssignment(bin_id=(0, 1), item_ids=((1, 1),)),
+        BinAssignment(bin_id=(1, 1), item_ids=((1, 0),)),
+    )
+
+    output = coordinator.distribute(window, assignments)
+
+    assert built_logical_ranks == [0, 1]
+    assert [item.stable_id for item in window.items] == [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
     ]
+    assert [bin_.stable_id for bin_ in window.bins] == [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+    ]
+    assert _markers(output) == [10, 21]
 
 
-def test_group_size_one_stably_orders_complete_microbatches() -> None:
+def test_iterates_planned_step_as_a_flat_microbatch_stream() -> None:
     streams = {0: [_batch((1,) * 8, 1), _batch((8,), 2)]}
+    layout = OptimizerStepLayout(num_accumulation_steps=2, num_pp_microbatches=1)
 
     def build_child(config, **kwargs):
         assert config.num_prefetch_microbatches == 1
@@ -139,15 +259,15 @@ def test_group_size_one_stably_orders_complete_microbatches() -> None:
     with patch.object(
         GrainDataLoader.Config, "build", autospec=True, side_effect=build_child
     ):
-        loader = _build_loader(_wrapper_config(), dp_world_size=1, dp_rank=0)
-        step = next(
-            loader.iter_optimizer_steps(
-                OptimizerStepLayout(num_accumulation_steps=2, num_pp_microbatches=1)
-            )
+        loader = _build_loader(
+            _wrapper_config(),
+            dp_world_size=1,
+            dp_rank=0,
+            optimizer_step_layout=layout,
         )
+        iterator = iter(loader)
 
-    assert _markers(step) == [2, 1]
-    assert len(step.microbatch_groups) == 2
+        assert [int(next(iterator).input[0]) for _ in range(2)] == [2, 1]
 
 
 def test_replicated_group_assigns_exact_candidate_union_across_ranks() -> None:
@@ -166,13 +286,21 @@ def test_replicated_group_assigns_exact_candidate_union_across_ranks() -> None:
         GrainDataLoader.Config, "build", autospec=True, side_effect=build_child
     ):
         rank_0 = _build_loader(
-            _wrapper_config(group_size=2), dp_world_size=2, dp_rank=0
+            _wrapper_config(group_size=2),
+            dp_world_size=2,
+            dp_rank=0,
+            optimizer_step_layout=layout,
         )
         rank_1 = _build_loader(
-            _wrapper_config(group_size=2), dp_world_size=2, dp_rank=1
+            _wrapper_config(group_size=2),
+            dp_world_size=2,
+            dp_rank=1,
+            optimizer_step_layout=layout,
         )
-        rank_0_step = next(rank_0.iter_optimizer_steps(layout))
-        rank_1_step = next(rank_1.iter_optimizer_steps(layout))
+        rank_0_iterator = iter(rank_0)
+        rank_1_iterator = iter(rank_1)
+        rank_0_step = [next(rank_0_iterator) for _ in range(layout.num_microbatches)]
+        rank_1_step = [next(rank_1_iterator) for _ in range(layout.num_microbatches)]
 
     assert _markers(rank_0_step) == [10, 21]
     assert _markers(rank_1_step) == [11, 20]
@@ -225,10 +353,14 @@ def test_independent_grain_replicas_preserve_the_ordinary_candidate_union(
                         tokenizer=_WordTokenizer(),
                         max_context_length=4,
                         num_tokens_per_microbatch=4,
+                        optimizer_step_layout=layout,
                     )
                 )
 
-        steps = [next(loader.iter_optimizer_steps(layout)) for loader in loaders]
+        steps = []
+        for loader in loaders:
+            iterator = iter(loader)
+            steps.append([next(iterator) for _ in range(layout.num_microbatches)])
     finally:
         for loader in loaders:
             loader.close()
@@ -241,8 +373,7 @@ def test_independent_grain_replicas_preserve_the_ordinary_candidate_union(
                 tuple(microbatch.positions.tolist()),
                 tuple(microbatch.padding_mask.tolist()),
             )
-            for group in step.microbatch_groups
-            for microbatch in group
+            for microbatch in step
         ]
 
     balanced_union = contents(steps[0]) + contents(steps[1])
@@ -266,17 +397,18 @@ def test_shadow_mode_returns_the_ordinary_assignment() -> None:
             _wrapper_config(mode="shadow", group_size=2),
             dp_world_size=2,
             dp_rank=0,
+            optimizer_step_layout=OptimizerStepLayout(
+                num_accumulation_steps=2, num_pp_microbatches=1
+            ),
         )
-        step = next(
-            loader.iter_optimizer_steps(
-                OptimizerStepLayout(num_accumulation_steps=2, num_pp_microbatches=1)
-            )
-        )
+        iterator = iter(loader)
+        step = [next(iterator) for _ in range(2)]
 
     assert _markers(step) == [10, 11]
     metrics = loader.drain_metrics()
     assert metrics["data_load/baseline_predicted_cost"] == 96
     assert metrics["data_load/balanced_predicted_cost"] == 80
+    assert "data_load/replicated_read_amplification" not in metrics
     assert loader.drain_metrics() == {}
 
 
@@ -290,17 +422,14 @@ def test_larger_group_uses_original_dp_world_size_and_logical_ranks() -> None:
     with patch.object(
         GrainDataLoader.Config, "build", autospec=True, side_effect=build_child
     ):
+        layout = OptimizerStepLayout(num_accumulation_steps=1, num_pp_microbatches=1)
         loader = _build_loader(
-            _wrapper_config(group_size=4), dp_world_size=8, dp_rank=5
+            _wrapper_config(group_size=4),
+            dp_world_size=8,
+            dp_rank=5,
+            optimizer_step_layout=layout,
         )
-        step = next(
-            loader.iter_optimizer_steps(
-                OptimizerStepLayout(
-                    num_accumulation_steps=1,
-                    num_pp_microbatches=1,
-                )
-            )
-        )
+        step = [next(iter(loader))]
 
     assert [call["dp_rank"] for call in build_calls] == [4, 5, 6, 7]
     assert [call["dp_world_size"] for call in build_calls] == [8, 8, 8, 8]
@@ -317,10 +446,15 @@ def test_partial_child_exhaustion_returns_no_step() -> None:
     with patch.object(
         GrainDataLoader.Config, "build", autospec=True, side_effect=build_child
     ):
-        loader = _build_loader(_wrapper_config(), dp_world_size=1, dp_rank=0)
-        iterator = loader.iter_optimizer_steps(
-            OptimizerStepLayout(num_accumulation_steps=2, num_pp_microbatches=1)
+        loader = _build_loader(
+            _wrapper_config(),
+            dp_world_size=1,
+            dp_rank=0,
+            optimizer_step_layout=OptimizerStepLayout(
+                num_accumulation_steps=2, num_pp_microbatches=1
+            ),
         )
+        iterator = iter(loader)
 
         with pytest.raises(DataloaderExhaustedError):
             next(iterator)
@@ -392,10 +526,64 @@ def test_replicated_coordinator_accepts_user_supplied_dataset_and_tokenizer() ->
             tokenizer=object(),
             max_context_length=8,
             num_tokens_per_microbatch=8,
+            optimizer_step_layout=OptimizerStepLayout(
+                num_accumulation_steps=1, num_pp_microbatches=1
+            ),
         )
 
     assert build_child.call_count == 2
     loader.close()
+
+
+def test_loader_passes_dp_mesh_to_input_coordinator() -> None:
+    coordinator = MagicMock()
+    dp_mesh = object()
+    config = _wrapper_config()
+
+    with patch.object(
+        ReplicatedInputCoordinator.Config,
+        "build",
+        return_value=coordinator,
+    ) as build_coordinator:
+        loader = config.build(
+            dp_world_size=2,
+            dp_rank=1,
+            dp_mesh=dp_mesh,
+            tokenizer=_WordTokenizer(),
+            max_context_length=8,
+            num_tokens_per_microbatch=8,
+            optimizer_step_layout=OptimizerStepLayout(
+                num_accumulation_steps=1, num_pp_microbatches=1
+            ),
+        )
+
+    build_coordinator.assert_called_once_with(
+        dp_world_size=2,
+        dp_rank=1,
+        dp_mesh=dp_mesh,
+        child_loader_factory=ANY,
+        document_capacity=8,
+    )
+    loader.close()
+
+
+def test_loader_delegates_input_ownership_and_distribution() -> None:
+    config = LoadBalancingDataLoader.Config(
+        dataloader=_child_config(),
+        coordinator=_FixedInputCoordinator.Config(
+            microbatch=_batch((8,), 42),
+        ),
+    )
+
+    with patch.object(
+        GrainDataLoader.Config,
+        "build",
+        side_effect=AssertionError("the coordinator did not request a child"),
+    ):
+        loader = _build_loader(config, dp_world_size=1, dp_rank=0)
+        output = next(iter(loader))
+
+    assert int(output.input[0]) == 42
 
 
 def test_wrapper_derives_document_capacity_only_from_child() -> None:
@@ -420,5 +608,8 @@ def test_all_wrapper_configuration_is_suppressed_from_tyro() -> None:
 
 def test_load_balancing_dataloader_is_publicly_exported() -> None:
     import torchtitan.components.data as data
+    import torchtitan.components.data.load_balancing as load_balancing
 
     assert data.LoadBalancingDataLoader is LoadBalancingDataLoader
+    assert load_balancing.CoordinatedWindow is CoordinatedWindow
+    assert load_balancing.InputCoordinator is InputCoordinator

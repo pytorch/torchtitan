@@ -33,8 +33,6 @@ from torchtitan.components.data.sources import (
 from torchtitan.components.data.types import (
     DatasetBuildContext,
     DatasetIterationPolicy,
-    OptimizerStepBatch,
-    OptimizerStepLayout,
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
 )
@@ -53,8 +51,6 @@ __all__ = [
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",
     "LoadBalancingDataLoader",
-    "OptimizerStepBatch",
-    "OptimizerStepLayout",
     "RandomAccessDataSource",
     "ReplicatedInputCoordinator",
     "SampleProcessor",

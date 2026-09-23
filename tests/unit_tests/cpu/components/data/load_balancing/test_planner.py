@@ -4,25 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import pytest
-
 from torchtitan.components.data.load_balancing.planner import (
     LoadBalancePlan,
     PackableItem,
     PackingBin,
-    validate_plan,
     WholeMicrobatchBalancer,
 )
 
 
-def _bin(rank: int, accumulation: int) -> PackingBin:
+def _bin(rank: int, accumulation: int, pp_microbatch: int = 0) -> PackingBin:
     return PackingBin(
-        stable_id=(rank, accumulation, 0),
+        stable_id=(rank, accumulation, pp_microbatch),
         token_capacity=8,
         document_capacity=4,
         logical_dp_rank=rank,
         accumulation_index=accumulation,
-        pp_microbatch_index=0,
+        pp_microbatch_index=pp_microbatch,
     )
 
 
@@ -73,8 +70,7 @@ def test_single_rank_orders_whole_microbatches_heavy_to_light_stably() -> None:
     plan = WholeMicrobatchBalancer.Config().build().plan(items, bins)
 
     assert _item_ids_by_slot(plan, bins) == [(1,), (2,), (0,)]
-    assert plan.objective <= plan.baseline_objective
-    validate_plan(plan, items, bins)
+    assert plan.predicted_cost <= plan.baseline_predicted_cost
 
 
 def test_two_rank_plan_groups_heavy_microbatches_in_the_same_slots() -> None:
@@ -88,10 +84,25 @@ def test_two_rank_plan_groups_heavy_microbatches_in_the_same_slots() -> None:
 
     plan = WholeMicrobatchBalancer.Config().build().plan(items, bins)
 
-    assert plan.baseline_objective.synchronized_cost == 19
-    assert plan.objective.synchronized_cost == 18
+    assert plan.baseline_predicted_cost == 19
+    assert plan.predicted_cost == 18
     assert _item_ids_by_slot(plan, bins) == [(0,), (2,), (3,), (1,)]
-    validate_plan(plan, items, bins)
+
+
+def test_pp_balances_total_rank_cost_within_the_accumulation_step() -> None:
+    bins = [_bin(rank, 0, pp) for pp in range(2) for rank in range(2)]
+    items = [
+        _item(0, 64, bins[0]),
+        _item(1, 32, bins[2]),
+        _item(2, 16, bins[1]),
+        _item(3, 8, bins[3]),
+    ]
+
+    plan = WholeMicrobatchBalancer.Config().build().plan(items, bins)
+
+    assert plan.baseline_predicted_cost == 96
+    assert plan.predicted_cost == 72
+    assert _item_ids_by_slot(plan, bins) == [(0,), (1,), (3,), (2,)]
 
 
 def test_already_balanced_plan_is_unchanged() -> None:
@@ -107,6 +118,20 @@ def test_already_balanced_plan_is_unchanged() -> None:
 
     assert plan.is_unchanged
     assert _item_ids_by_slot(plan, bins) == [(0,), (1,), (2,), (3,)]
+
+
+def test_multi_rank_exact_metric_tie_keeps_baseline() -> None:
+    bins = [_bin(rank, accumulation) for accumulation in range(2) for rank in range(2)]
+    items = [
+        _item(0, 5, bins[2]),
+        _item(1, 5, bins[3]),
+        _item(2, 5, bins[0]),
+        _item(3, 5, bins[1]),
+    ]
+
+    plan = WholeMicrobatchBalancer.Config().build().plan(items, bins)
+
+    assert plan.is_unchanged
 
 
 def test_plan_is_independent_of_input_order() -> None:
@@ -137,21 +162,4 @@ def test_plan_prefers_to_keep_larger_payload_on_its_original_rank() -> None:
     plan = WholeMicrobatchBalancer.Config().build().plan(items, bins)
 
     assert _item_ids_by_slot(plan, bins) == [(0,), (2,), (3,), (1,)]
-    assert plan.objective.moved_payload_bytes == 2
-
-
-def test_validate_plan_rejects_capacity_violation() -> None:
-    bin_ = _bin(0, 0)
-    item = _item(0, 1, bin_)
-    invalid_bin = PackingBin(
-        stable_id=bin_.stable_id,
-        token_capacity=7,
-        document_capacity=bin_.document_capacity,
-        logical_dp_rank=bin_.logical_dp_rank,
-        accumulation_index=bin_.accumulation_index,
-        pp_microbatch_index=bin_.pp_microbatch_index,
-    )
-    plan = WholeMicrobatchBalancer.Config().build().plan([item], [bin_])
-
-    with pytest.raises(ValueError, match="token capacity"):
-        validate_plan(plan, [item], [invalid_bin])
+    assert plan.moved_payload_bytes == 2

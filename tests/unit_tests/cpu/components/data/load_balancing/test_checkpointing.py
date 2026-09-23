@@ -19,10 +19,10 @@ import torch.multiprocessing as mp
 
 from torchtitan.components.data.collators import HAS_PIN_MEMORY, TextCollator
 from torchtitan.components.data.dataset import SingleDatasetConfig
-from torchtitan.components.data.load_balancing.loader import (
-    LoadBalancingDataLoader,
+from torchtitan.components.data.load_balancing.coordinator import (
     ReplicatedInputCoordinator,
 )
+from torchtitan.components.data.load_balancing.loader import LoadBalancingDataLoader
 from torchtitan.components.data.loader import DataloaderExhaustedError, GrainDataLoader
 from torchtitan.components.data.packing import ConcatThenSplitPackingConfig
 from torchtitan.components.data.sources import IndexedJsonlSource
@@ -130,6 +130,7 @@ def _build(
     dp_world_size: int = 1,
     dp_rank: int = 0,
     tokenizer=None,
+    optimizer_step_layout: OptimizerStepLayout | None = None,
 ) -> LoadBalancingDataLoader:
     return config.build(
         dp_world_size=dp_world_size,
@@ -137,7 +138,17 @@ def _build(
         tokenizer=_WordTokenizer() if tokenizer is None else tokenizer,
         max_context_length=4,
         num_tokens_per_microbatch=4,
+        optimizer_step_layout=optimizer_step_layout
+        or OptimizerStepLayout(num_accumulation_steps=1, num_pp_microbatches=1),
     )
+
+
+def _next_step(iterator, layout: OptimizerStepLayout):
+    return [next(iterator) for _ in range(layout.num_microbatches)]
+
+
+def _markers(microbatches) -> list[int]:
+    return [int(microbatch.input[0]) for microbatch in microbatches]
 
 
 def _actual_config(dataset_path: str) -> LoadBalancingDataLoader.Config:
@@ -186,31 +197,25 @@ def _distributed_checkpoint_worker(
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=_WordTokenizer(),
+            optimizer_step_layout=layout,
         )
-        source_iterator = source.iter_optimizer_steps(layout)
-        next(source_iterator)
+        source_iterator = iter(source)
+        _next_step(source_iterator, layout)
         dcp.save({"dataloader": source}, checkpoint_id=checkpoint_dir)
-        expected = next(source_iterator)
+        expected = _next_step(source_iterator, layout)
 
         restored = _build(
             _actual_config(dataset_path),
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=_WordTokenizer(),
+            optimizer_step_layout=layout,
         )
         dcp.load({"dataloader": restored}, checkpoint_id=checkpoint_dir)
-        actual = next(restored.iter_optimizer_steps(layout))
+        actual = _next_step(iter(restored), layout)
 
-        expected_inputs = [
-            microbatch.input.tolist()
-            for group in expected.microbatch_groups
-            for microbatch in group
-        ]
-        actual_inputs = [
-            microbatch.input.tolist()
-            for group in actual.microbatch_groups
-            for microbatch in group
-        ]
+        expected_inputs = [microbatch.input.tolist() for microbatch in expected]
+        actual_inputs = [microbatch.input.tolist() for microbatch in actual]
         assert actual_inputs == expected_inputs
     finally:
         if source is not None:
@@ -253,19 +258,21 @@ def _torch_checkpointing_round_trip_worker(
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=_WordTokenizer(),
+            optimizer_step_layout=layout,
         )
-        source_iterator = source.iter_optimizer_steps(layout)
-        next(source_iterator)
+        source_iterator = iter(source)
+        _next_step(source_iterator, layout)
 
         save_manager = BackendCheckpointManager.Config.with_sync_save().build()
         save_manager.save(checkpoint_dir, {"dataloader": source.state_dict()})
-        expected = next(source_iterator)
+        expected = _next_step(source_iterator, layout)
 
         restored = _build(
             _actual_config(dataset_path),
             dp_world_size=world_size,
             dp_rank=rank,
             tokenizer=_WordTokenizer(),
+            optimizer_step_layout=layout,
         )
         load_manager = BackendCheckpointManager.Config.with_sync_save().build()
         loaded = load_manager.load(
@@ -274,18 +281,10 @@ def _torch_checkpointing_round_trip_worker(
             strict=True,
         )
         restored.load_state_dict(loaded["dataloader"])
-        actual = next(restored.iter_optimizer_steps(layout))
+        actual = _next_step(iter(restored), layout)
 
-        expected_inputs = [
-            microbatch.input.tolist()
-            for group in expected.microbatch_groups
-            for microbatch in group
-        ]
-        actual_inputs = [
-            microbatch.input.tolist()
-            for group in actual.microbatch_groups
-            for microbatch in group
-        ]
+        expected_inputs = [microbatch.input.tolist() for microbatch in expected]
+        actual_inputs = [microbatch.input.tolist() for microbatch in actual]
         assert actual_inputs == expected_inputs
     finally:
         if save_manager is not None:
@@ -299,21 +298,13 @@ def _torch_checkpointing_round_trip_worker(
         dist.destroy_process_group()
 
 
-def _markers(step) -> list[int]:
-    return [
-        int(microbatch.input[0])
-        for group in step.microbatch_groups
-        for microbatch in group
-    ]
-
-
 def test_state_after_returned_step_points_to_next_window() -> None:
     child = _StatefulChild([_batch(1), _batch(2), _batch(3)])
     layout = OptimizerStepLayout(num_accumulation_steps=2, num_pp_microbatches=1)
 
     with patch.object(GrainDataLoader.Config, "build", return_value=child):
-        loader = _build(_config())
-        next(loader.iter_optimizer_steps(layout))
+        loader = _build(_config(), optimizer_step_layout=layout)
+        _next_step(iter(loader), layout)
         state = loader.state_dict()
 
     rank_state = state["physical_dp_rank_0"]
@@ -329,15 +320,15 @@ def test_checkpoint_restore_continues_exactly() -> None:
         "build",
         side_effect=lambda **kwargs: _StatefulChild(streams),
     ):
-        source = _build(_config())
-        source_iterator = source.iter_optimizer_steps(layout)
-        next(source_iterator)
+        source = _build(_config(), optimizer_step_layout=layout)
+        source_iterator = iter(source)
+        _next_step(source_iterator, layout)
         state = source.state_dict()
-        expected = next(source_iterator)
+        expected = _next_step(source_iterator, layout)
 
-        restored = _build(_config())
+        restored = _build(_config(), optimizer_step_layout=layout)
         restored.load_state_dict(state)
-        actual = next(restored.iter_optimizer_steps(layout))
+        actual = _next_step(iter(restored), layout)
 
     assert _markers(actual) == _markers(expected)
     assert restored.state_dict()["physical_dp_rank_0"]["children"][
@@ -391,12 +382,11 @@ def test_merged_distributed_checkpoint_selects_physical_rank_state() -> None:
 
 def test_partial_exhaustion_matches_default_loader_cursor_behavior() -> None:
     child = _StatefulChild([_batch(1)])
+    layout = OptimizerStepLayout(num_accumulation_steps=2, num_pp_microbatches=1)
 
     with patch.object(GrainDataLoader.Config, "build", return_value=child):
-        loader = _build(_config())
-        iterator = loader.iter_optimizer_steps(
-            OptimizerStepLayout(num_accumulation_steps=2, num_pp_microbatches=1)
-        )
+        loader = _build(_config(), optimizer_step_layout=layout)
+        iterator = iter(loader)
 
         with pytest.raises(DataloaderExhaustedError):
             next(iterator)
@@ -462,17 +452,19 @@ def test_checkpoint_can_resume_with_a_different_step_layout() -> None:
     ):
         source = _build(_config())
         state = source.state_dict()
-        target = _build(_config())
+        target = _build(
+            _config(),
+            optimizer_step_layout=OptimizerStepLayout(
+                num_accumulation_steps=2, num_pp_microbatches=1
+            ),
+        )
         target.load_state_dict(state)
 
-    step = next(
-        target.iter_optimizer_steps(
-            OptimizerStepLayout(
-                num_accumulation_steps=2,
-                num_pp_microbatches=1,
-            )
-        )
+    layout = OptimizerStepLayout(
+        num_accumulation_steps=2,
+        num_pp_microbatches=1,
     )
+    step = _next_step(iter(target), layout)
     assert _markers(step) == [1, 2]
 
 

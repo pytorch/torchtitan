@@ -29,22 +29,37 @@ Validation loaders and TorchFT are not supported initially.
 
 ## Optimizer-step interface
 
-`OptimizerStepLayout` describes the number of gradient-accumulation and
-pipeline-parallel microbatches in one optimizer step. `OptimizerStepBatch`
-contains the corresponding accumulation-major, PP-minor nested list.
+`OptimizerStepLayout` describes the fixed number of gradient-accumulation and
+pipeline-parallel microbatches in one optimizer step. The trainer supplies it
+when constructing the dataloader. `LoadBalancingDataLoader` uses the layout to
+plan a complete step, then yields the planned microbatches through the ordinary
+flat iterator in accumulation-major, PP-minor order.
 
-`BaseDataLoader.iter_optimizer_steps()` adapts an ordinary flat dataloader by
-reading and grouping the same microbatches the trainer previously grouped.
-`LoadBalancingDataLoader` overrides this method to plan the complete step.
+The trainer continues to group that flat stream before forwarding it to the
+existing forward/backward path. This changes where planning happens, not when
+the dataloader is consumed: the trainer already read the complete group before
+starting computation.
 
-The trainer obtains one complete `OptimizerStepBatch`, validates its shape,
-and passes each group to the existing forward/backward path. This changes where
-grouping happens, not when the ordinary dataloader is consumed: the old trainer
-also read the complete group before starting computation.
+## Input coordinator
 
-## Replicated coordinator
+Input coordination is a paired operation around the tensor-independent
+planner:
 
-For effective DP degree `D`, group size `G`, and physical rank `r`:
+```text
+coordinator.collect(itemize) -> balancer.plan -> coordinator.distribute
+```
+
+`collect()` obtains the candidate payloads, invokes an injected itemization
+callback to produce `PackableItem` metadata, and constructs the output bins.
+`distribute()` realizes the selected assignment and returns this rank's
+microbatches in execution order. The coordinator also owns its child loaders,
+checkpoint state, and cleanup. Construction receives the actual DP
+`DeviceMesh` so a communication-backed implementation can use the correct
+group under composed parallelism.
+
+The current `ReplicatedInputCoordinator` implements this contract without
+communication. For effective DP degree `D`, group size `G`, and physical rank
+`r`:
 
 ```text
 group_start = (r // G) * G
@@ -74,20 +89,25 @@ metadata. For the current whole-microbatch strategy it:
 
 1. Builds the ordinary assignment.
 2. Sorts microbatches by descending estimated cost.
-3. Places similarly expensive microbatches in the same synchronized slot.
-4. Uses stable IDs for deterministic tie-breaking.
-5. Keeps the ordinary assignment unless the candidate objective is better.
-6. Validates exact item coverage and bin capacities.
+3. Places similarly expensive microbatches in the same gradient accumulation
+   step.
+4. Uses capacity-constrained LPT to balance each DP rank's total PP microbatch
+   cost within that accumulation step.
+5. Uses stable IDs to assign deterministic PP positions without treating PP
+   indices as synchronization boundaries.
+6. Keeps the ordinary assignment unless the candidate score is better. A
+   single-rank group uses the heavy-first candidate when the scores tie.
 
-The objective minimizes synchronized cost, then worst DP skew, moved payload
-bytes, and finally a stable tie-breaker.
+The score minimizes the sum of per-accumulation maximum DP-rank totals, then
+worst DP skew, then moved payload bytes.
 
 The adapter/planner boundary is intentionally generic so a future strategy can
 operate on document segments without coupling the planner to text tensors.
 
 ## Checkpointing
 
-The wrapper checkpoints only child-loader cursor state and the topology needed
+The loader delegates checkpoint handling to the coordinator. The replicated
+coordinator checkpoints only child-loader cursor state and the topology needed
 to interpret it:
 
 ```text
@@ -113,23 +133,25 @@ The wrapper reports:
 - source-fetch, inspection, and planner time;
 - ordinary and balanced predicted synchronized cost;
 - candidate payload bytes and hypothetical moved bytes;
-- replicated-read amplification; and
 - unchanged-plan count.
 
-The trainer drains these metrics once per optimizer step and includes them in
-its normal metrics output.
+The trainer retains the latest per-step observation and includes it in its next
+normal metrics output.
 
 ## Testing
 
-Unit tests cover optimizer-step grouping, planner determinism and exact
-coverage, packed-text inspection, group sizes larger than two, shadow and
-balance behavior, lifecycle cleanup, and checkpoint continuation. Integration
-tests exercise two-rank DCP and `torch_checkpointing` round trips. Shadow and
-balance modes have also completed ten-step, two-GPU training runs.
+Unit tests cover fixed optimizer-step layouts, flat iteration, planner
+determinism and exact coverage, packed-text inspection, group sizes larger than
+two, shadow and balance behavior, lifecycle cleanup, and checkpoint
+continuation. Integration tests exercise two-rank DCP and `torch_checkpointing`
+round trips. Shadow and balance modes have also completed ten-step, two-GPU
+training runs.
 
 ## Future work
 
 - Segment-level balancing and materialization.
-- Payload exchange so each process reads only its own logical stream.
+- An all-to-all coordinator whose `collect()` exchanges metadata and whose
+  `distribute()` exchanges reassigned payloads, so each process reads only its
+  own logical stream.
 - Topology-independent checkpoint state for changing group size on resume.
 - Performance evaluation with representative production data.

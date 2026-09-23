@@ -5,13 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.nn as nn
 
-from torchtitan.components.data.types import OptimizerStepBatch, TrainingMicrobatch
+from torchtitan.components.data.types import TrainingMicrobatch
 
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown, CUDAGraphWrapper
@@ -508,10 +509,10 @@ class GraphTrainer(Trainer):
         super().__init__(config)
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
-    def train_step(self, step_batch: OptimizerStepBatch) -> None:
+    def train_step(self, data_iterator: Iterator[TrainingMicrobatch]) -> None:
         PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
             self
         )
         if self.engine._graph_gradient_state is not None:
             self.engine._graph_gradient_state.validate_grad_bindings()
-        super().train_step(step_batch)
+        super().train_step(data_iterator)

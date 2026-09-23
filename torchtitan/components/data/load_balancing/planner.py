@@ -27,20 +27,6 @@ class PackableItem:
     payload_bytes: int
     original_bin_id: StableId
 
-    def __post_init__(self) -> None:
-        if not self.stable_id:
-            raise ValueError("item stable_id must not be empty")
-        if self.num_tokens <= 0:
-            raise ValueError("item num_tokens must be greater than 0")
-        if self.num_documents <= 0:
-            raise ValueError("item num_documents must be greater than 0")
-        if self.cost < 0:
-            raise ValueError("item cost must be nonnegative")
-        if self.payload_bytes < 0:
-            raise ValueError("item payload_bytes must be nonnegative")
-        if not self.original_bin_id:
-            raise ValueError("item original_bin_id must not be empty")
-
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class PackingBin:
@@ -53,20 +39,6 @@ class PackingBin:
     accumulation_index: int
     pp_microbatch_index: int
 
-    def __post_init__(self) -> None:
-        if not self.stable_id:
-            raise ValueError("bin stable_id must not be empty")
-        if self.token_capacity <= 0:
-            raise ValueError("bin token_capacity must be greater than 0")
-        if self.document_capacity is not None and self.document_capacity <= 0:
-            raise ValueError("bin document_capacity must be greater than 0")
-        if self.logical_dp_rank < 0:
-            raise ValueError("bin logical_dp_rank must be nonnegative")
-        if self.accumulation_index < 0:
-            raise ValueError("bin accumulation_index must be nonnegative")
-        if self.pp_microbatch_index < 0:
-            raise ValueError("bin pp_microbatch_index must be nonnegative")
-
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class BinAssignment:
@@ -76,24 +48,15 @@ class BinAssignment:
     item_ids: tuple[StableId, ...]
 
 
-@dataclass(frozen=True, order=True, kw_only=True, slots=True)
-class LoadBalancePlanObjective:
-    """Lexicographic optimizer-step objective."""
-
-    synchronized_cost: int
-    worst_dp_skew: int
-    moved_payload_bytes: int
-    stable_tiebreaker: tuple[tuple[StableId, tuple[tuple[int, StableId], ...]], ...]
-
-
 @dataclass(frozen=True, kw_only=True, slots=True)
 class LoadBalancePlan:
-    """A validated assignment and its ordinary baseline."""
+    """Selected assignments, ordinary baseline, and reporting metrics."""
 
     assignments: tuple[BinAssignment, ...]
     baseline_assignments: tuple[BinAssignment, ...]
-    objective: LoadBalancePlanObjective
-    baseline_objective: LoadBalancePlanObjective
+    predicted_cost: int
+    baseline_predicted_cost: int
+    moved_payload_bytes: int
 
     @property
     def is_unchanged(self) -> bool:
@@ -110,54 +73,8 @@ def _bin_order(bin_: PackingBin) -> tuple[int, int, int, StableId]:
     )
 
 
-def _validate_inputs(
-    items: Sequence[PackableItem], bins: Sequence[PackingBin]
-) -> tuple[dict[StableId, PackableItem], dict[StableId, PackingBin]]:
-    if not items:
-        raise ValueError("planner requires at least one item")
-    if not bins:
-        raise ValueError("planner requires at least one bin")
-
-    items_by_id = {item.stable_id: item for item in items}
-    if len(items_by_id) != len(items):
-        raise ValueError("item stable IDs must be unique")
-    bins_by_id = {bin_.stable_id: bin_ for bin_ in bins}
-    if len(bins_by_id) != len(bins):
-        raise ValueError("bin stable IDs must be unique")
-
-    unknown_original_bins = {
-        item.original_bin_id for item in items if item.original_bin_id not in bins_by_id
-    }
-    if unknown_original_bins:
-        raise ValueError(
-            f"items reference unknown original bins: {unknown_original_bins}"
-        )
-
-    coordinates = {
-        (
-            bin_.logical_dp_rank,
-            bin_.accumulation_index,
-            bin_.pp_microbatch_index,
-        )
-        for bin_ in bins
-    }
-    if len(coordinates) != len(bins):
-        raise ValueError("bin execution coordinates must be unique")
-
-    ranks_by_slot: dict[tuple[int, int], set[int]] = defaultdict(set)
-    for bin_ in bins:
-        ranks_by_slot[(bin_.accumulation_index, bin_.pp_microbatch_index)].add(
-            bin_.logical_dp_rank
-        )
-    expected_ranks = next(iter(ranks_by_slot.values()))
-    if any(ranks != expected_ranks for ranks in ranks_by_slot.values()):
-        raise ValueError("every execution slot must contain the same logical DP ranks")
-
-    return items_by_id, bins_by_id
-
-
 def _ordinary_assignments(
-    items: Sequence[PackableItem], bins_by_id: dict[StableId, PackingBin]
+    items: Sequence[PackableItem], bins: Sequence[PackingBin]
 ) -> tuple[BinAssignment, ...]:
     item_ids_by_bin: dict[StableId, list[StableId]] = defaultdict(list)
     for item in items:
@@ -167,114 +84,64 @@ def _ordinary_assignments(
             bin_id=bin_.stable_id,
             item_ids=tuple(sorted(item_ids_by_bin[bin_.stable_id])),
         )
-        for bin_ in sorted(bins_by_id.values(), key=_bin_order)
+        for bin_ in sorted(bins, key=_bin_order)
     )
 
 
-def _validate_assignments(
+def _score_assignments(
     assignments: Sequence[BinAssignment],
     items_by_id: dict[StableId, PackableItem],
     bins_by_id: dict[StableId, PackingBin],
-) -> None:
-    assigned_bin_ids = [assignment.bin_id for assignment in assignments]
-    if len(set(assigned_bin_ids)) != len(assigned_bin_ids):
-        raise ValueError("plan assigns a bin more than once")
-    if set(assigned_bin_ids) != set(bins_by_id):
-        raise ValueError("plan must assign every bin exactly once")
+) -> tuple[int, int, int]:
+    """Return accumulation cost, worst DP skew, and moved payload bytes.
 
-    assigned_item_ids = [
-        item_id for assignment in assignments for item_id in assignment.item_ids
-    ]
-    if len(set(assigned_item_ids)) != len(assigned_item_ids):
-        raise ValueError("plan assigns an item more than once")
-    if set(assigned_item_ids) != set(items_by_id):
-        raise ValueError("plan must assign every item exactly once")
-
-    for assignment in assignments:
-        bin_ = bins_by_id[assignment.bin_id]
-        assigned_items = [items_by_id[item_id] for item_id in assignment.item_ids]
-        if sum(item.num_tokens for item in assigned_items) > bin_.token_capacity:
-            raise ValueError(f"bin {bin_.stable_id} exceeds token capacity")
-        if (
-            bin_.document_capacity is not None
-            and sum(item.num_documents for item in assigned_items)
-            > bin_.document_capacity
-        ):
-            raise ValueError(f"bin {bin_.stable_id} exceeds document capacity")
-
-
-def _evaluate_assignments(
-    assignments: Sequence[BinAssignment],
-    items_by_id: dict[StableId, PackableItem],
-    bins_by_id: dict[StableId, PackingBin],
-) -> LoadBalancePlanObjective:
-    costs_by_slot: dict[tuple[int, int], list[int]] = defaultdict(list)
+    One gradient-accumulation iteration invokes the PP schedule once, so PP
+    microbatch costs are summed per DP rank before taking the slowest rank.
+    """
+    costs_by_accumulation_and_rank: dict[tuple[int, int], int] = defaultdict(int)
     moved_payload_bytes = 0
-    original_ranks = {
-        item.stable_id: bins_by_id[item.original_bin_id].logical_dp_rank
-        for item in items_by_id.values()
-    }
     assignment_by_bin = {assignment.bin_id: assignment for assignment in assignments}
 
-    stable_tiebreaker: list[tuple[StableId, tuple[tuple[int, StableId], ...]]] = []
     for bin_ in sorted(bins_by_id.values(), key=_bin_order):
-        assignment = assignment_by_bin[bin_.stable_id]
-        assigned_items = [items_by_id[item_id] for item_id in assignment.item_ids]
+        assigned_items = [
+            items_by_id[item_id]
+            for item_id in assignment_by_bin[bin_.stable_id].item_ids
+        ]
         bin_cost = sum(item.cost for item in assigned_items)
-        costs_by_slot[(bin_.accumulation_index, bin_.pp_microbatch_index)].append(
-            bin_cost
-        )
+        costs_by_accumulation_and_rank[
+            (bin_.accumulation_index, bin_.logical_dp_rank)
+        ] += bin_cost
         moved_payload_bytes += sum(
             item.payload_bytes
             for item in assigned_items
-            if original_ranks[item.stable_id] != bin_.logical_dp_rank
-        )
-        stable_tiebreaker.append(
-            (
-                bin_.stable_id,
-                tuple((-item.cost, item.stable_id) for item in assigned_items),
-            )
+            if bins_by_id[item.original_bin_id].logical_dp_rank != bin_.logical_dp_rank
         )
 
-    synchronized_cost = sum(max(costs) for costs in costs_by_slot.values())
-    worst_dp_skew = max(max(costs) - min(costs) for costs in costs_by_slot.values())
-    return LoadBalancePlanObjective(
-        synchronized_cost=synchronized_cost,
-        worst_dp_skew=worst_dp_skew,
-        moved_payload_bytes=moved_payload_bytes,
-        stable_tiebreaker=tuple(stable_tiebreaker),
+    logical_ranks = sorted({bin_.logical_dp_rank for bin_ in bins_by_id.values()})
+    accumulation_indices = sorted(
+        {bin_.accumulation_index for bin_ in bins_by_id.values()}
     )
-
-
-def validate_plan(
-    plan: LoadBalancePlan,
-    items: Iterable[PackableItem],
-    bins: Iterable[PackingBin],
-) -> None:
-    """Validate exact coverage, capacities, baseline, and objective values."""
-    item_list = list(items)
-    bin_list = list(bins)
-    items_by_id, bins_by_id = _validate_inputs(item_list, bin_list)
-    _validate_assignments(plan.assignments, items_by_id, bins_by_id)
-    _validate_assignments(plan.baseline_assignments, items_by_id, bins_by_id)
-
-    expected_baseline = _ordinary_assignments(item_list, bins_by_id)
-    if plan.baseline_assignments != expected_baseline:
-        raise ValueError("plan baseline does not match the ordinary assignment")
-    if plan.objective != _evaluate_assignments(
-        plan.assignments, items_by_id, bins_by_id
-    ):
-        raise ValueError("plan objective does not match its assignment")
-    if plan.baseline_objective != _evaluate_assignments(
-        plan.baseline_assignments, items_by_id, bins_by_id
-    ):
-        raise ValueError("plan baseline objective does not match its assignment")
-    if plan.objective > plan.baseline_objective:
-        raise ValueError("planned objective is worse than the ordinary assignment")
+    costs_by_accumulation = [
+        [
+            costs_by_accumulation_and_rank[(accumulation_index, logical_rank)]
+            for logical_rank in logical_ranks
+        ]
+        for accumulation_index in accumulation_indices
+    ]
+    synchronized_cost = sum(max(costs) for costs in costs_by_accumulation)
+    worst_dp_skew = max(max(costs) - min(costs) for costs in costs_by_accumulation)
+    return synchronized_cost, worst_dp_skew, moved_payload_bytes
 
 
 class WholeMicrobatchBalancer(Configurable):
-    """Assign one indivisible microbatch to every execution bin."""
+    """Balance indivisible microbatches across accumulation steps and DP ranks.
+
+    Microbatches are sorted by descending cost and divided into one cohort per
+    gradient-accumulation step. Within each cohort, capacity-constrained Longest
+    Processing Time assignment places the next heaviest microbatch on the
+    currently lightest DP rank. Each rank receives exactly one item for every
+    PP microbatch position, but PP positions do not affect the cost objective.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -288,43 +155,42 @@ class WholeMicrobatchBalancer(Configurable):
         items: Iterable[PackableItem],
         bins: Iterable[PackingBin],
     ) -> LoadBalancePlan:
-        """Return the better of the ordinary and canonical balanced plans."""
+        """Return the better of the ordinary and balanced assignments."""
         item_list = list(items)
         bin_list = list(bins)
-        items_by_id, bins_by_id = _validate_inputs(item_list, bin_list)
-        if len(item_list) != len(bin_list):
-            raise ValueError("whole-microbatch planning requires one item per bin")
+        items_by_id = {item.stable_id: item for item in item_list}
+        bins_by_id = {bin_.stable_id: bin_ for bin_ in bin_list}
 
-        baseline_assignments = _ordinary_assignments(item_list, bins_by_id)
-        if any(len(assignment.item_ids) != 1 for assignment in baseline_assignments):
-            raise ValueError(
-                "whole-microbatch planning requires one original item per bin"
-            )
-        _validate_assignments(baseline_assignments, items_by_id, bins_by_id)
-        baseline_objective = _evaluate_assignments(
+        baseline_assignments = _ordinary_assignments(item_list, bin_list)
+        baseline_score = _score_assignments(
             baseline_assignments, items_by_id, bins_by_id
         )
 
         candidate_assignments = self._build_candidate(item_list, bin_list, bins_by_id)
-        _validate_assignments(candidate_assignments, items_by_id, bins_by_id)
-        candidate_objective = _evaluate_assignments(
+        candidate_score = _score_assignments(
             candidate_assignments, items_by_id, bins_by_id
         )
-        if candidate_objective < baseline_objective:
-            assignments = candidate_assignments
-            objective = candidate_objective
-        else:
-            assignments = baseline_assignments
-            objective = baseline_objective
 
-        plan = LoadBalancePlan(
+        num_ranks = len({bin_.logical_dp_rank for bin_ in bin_list})
+        # Scores compare accumulation cost, DP skew, then moved bytes. With one
+        # visible rank these values always tie, so retain the canonical
+        # heavy-first ordering to align independent ranks by accumulation step.
+        use_candidate = candidate_score < baseline_score or (
+            num_ranks == 1 and candidate_score == baseline_score
+        )
+        assignments, score = (
+            (candidate_assignments, candidate_score)
+            if use_candidate
+            else (baseline_assignments, baseline_score)
+        )
+
+        return LoadBalancePlan(
             assignments=assignments,
             baseline_assignments=baseline_assignments,
-            objective=objective,
-            baseline_objective=baseline_objective,
+            predicted_cost=score[0],
+            baseline_predicted_cost=baseline_score[0],
+            moved_payload_bytes=score[2],
         )
-        validate_plan(plan, item_list, bin_list)
-        return plan
 
     def _build_candidate(
         self,
@@ -332,49 +198,68 @@ class WholeMicrobatchBalancer(Configurable):
         bins: Sequence[PackingBin],
         bins_by_id: dict[StableId, PackingBin],
     ) -> tuple[BinAssignment, ...]:
+        """Build a deterministic two-level accumulation and DP assignment."""
         ordered_bins = sorted(bins, key=_bin_order)
-        logical_ranks = sorted({bin_.logical_dp_rank for bin_ in bins})
-        num_ranks = len(logical_ranks)
         ordered_items = sorted(items, key=lambda item: (-item.cost, item.stable_id))
-        assignments: list[BinAssignment] = []
+        item_offset = 0
+        item_id_by_bin: dict[StableId, StableId] = {}
 
-        for start in range(0, len(ordered_bins), num_ranks):
-            slot_bins = ordered_bins[start : start + num_ranks]
-            slot_items = ordered_items[start : start + num_ranks]
-            remaining_items = list(slot_items)
-            assigned_by_rank: dict[int, PackableItem] = {}
-
-            for logical_rank in logical_ranks:
-                same_owner_items = [
-                    item
-                    for item in remaining_items
-                    if bins_by_id[item.original_bin_id].logical_dp_rank == logical_rank
-                ]
-                if same_owner_items:
-                    kept_item = min(
-                        same_owner_items,
-                        key=lambda item: (-item.payload_bytes, item.stable_id),
-                    )
-                    assigned_by_rank[logical_rank] = kept_item
-                    remaining_items.remove(kept_item)
-
-            remaining_ranks = [
-                logical_rank
-                for logical_rank in logical_ranks
-                if logical_rank not in assigned_by_rank
+        for accumulation_index in sorted(
+            {bin_.accumulation_index for bin_ in ordered_bins}
+        ):
+            # Taking a full accumulation step at a time groups globally heavy
+            # work into the same sequential trainer iteration.
+            accumulation_bins = [
+                bin_
+                for bin_ in ordered_bins
+                if bin_.accumulation_index == accumulation_index
             ]
-            ordered_remaining_items = sorted(
-                remaining_items, key=lambda remaining_item: remaining_item.stable_id
-            )
-            for logical_rank, item in zip(remaining_ranks, ordered_remaining_items):
-                assigned_by_rank[logical_rank] = item
+            cohort = ordered_items[item_offset : item_offset + len(accumulation_bins)]
+            item_offset += len(accumulation_bins)
 
-            assignments.extend(
-                BinAssignment(
-                    bin_id=bin_.stable_id,
-                    item_ids=(assigned_by_rank[bin_.logical_dp_rank].stable_id,),
+            bins_by_rank: dict[int, list[PackingBin]] = defaultdict(list)
+            for bin_ in accumulation_bins:
+                bins_by_rank[bin_.logical_dp_rank].append(bin_)
+
+            assigned_items_by_rank: dict[int, list[PackableItem]] = {
+                logical_rank: [] for logical_rank in bins_by_rank
+            }
+            assigned_cost_by_rank = {logical_rank: 0 for logical_rank in bins_by_rank}
+
+            # Capacity-constrained LPT: place the next heaviest item on the
+            # lightest rank, preferring its original owner when loads tie.
+            for item in cohort:
+                original_rank = bins_by_id[item.original_bin_id].logical_dp_rank
+                eligible_ranks = [
+                    logical_rank
+                    for logical_rank, assigned_items in assigned_items_by_rank.items()
+                    if len(assigned_items) < len(bins_by_rank[logical_rank])
+                ]
+                selected_rank = min(
+                    eligible_ranks,
+                    key=lambda logical_rank: (
+                        assigned_cost_by_rank[logical_rank],
+                        logical_rank != original_rank,
+                        logical_rank,
+                    ),
                 )
-                for bin_ in slot_bins
-            )
+                assigned_items_by_rank[selected_rank].append(item)
+                assigned_cost_by_rank[selected_rank] += item.cost
 
-        return tuple(assignments)
+            # PP indices only provide deterministic positions within the
+            # accumulation step; they are not part of the cost objective.
+            for logical_rank, rank_bins in bins_by_rank.items():
+                rank_items = sorted(
+                    assigned_items_by_rank[logical_rank],
+                    key=lambda item: item.stable_id,
+                )
+                for bin_, item in zip(sorted(rank_bins, key=_bin_order), rank_items):
+                    item_id_by_bin[bin_.stable_id] = item.stable_id
+
+        return tuple(
+            BinAssignment(
+                bin_id=bin_.stable_id,
+                item_ids=(item_id_by_bin[bin_.stable_id],),
+            )
+            for bin_ in ordered_bins
+        )

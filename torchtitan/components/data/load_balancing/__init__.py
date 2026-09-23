@@ -6,17 +6,17 @@
 
 """Optimizer-step load balancing for data components."""
 
-from torchtitan.components.data.load_balancing.loader import (
-    LoadBalancingDataLoader,
+from torchtitan.components.data.load_balancing.coordinator import (
+    CoordinatedWindow,
+    InputCoordinator,
     ReplicatedInputCoordinator,
 )
+from torchtitan.components.data.load_balancing.loader import LoadBalancingDataLoader
 from torchtitan.components.data.load_balancing.planner import (
     BinAssignment,
     LoadBalancePlan,
-    LoadBalancePlanObjective,
     PackableItem,
     PackingBin,
-    validate_plan,
     WholeMicrobatchBalancer,
 )
 from torchtitan.components.data.load_balancing.text import (
@@ -28,8 +28,9 @@ from torchtitan.components.data.load_balancing.text import (
 
 __all__ = [
     "BinAssignment",
+    "CoordinatedWindow",
+    "InputCoordinator",
     "LoadBalancePlan",
-    "LoadBalancePlanObjective",
     "LoadBalancingDataLoader",
     "PackedTextMicrobatchMetadata",
     "PackableItem",
@@ -38,5 +39,4 @@ __all__ = [
     "ReplicatedInputCoordinator",
     "TokenizedTextPackingAdapter",
     "WholeMicrobatchBalancer",
-    "validate_plan",
 ]

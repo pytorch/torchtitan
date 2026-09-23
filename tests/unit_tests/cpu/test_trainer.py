@@ -12,10 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from torchtitan.components.data.loader import DataloaderExhaustedError
+from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import (
-    OptimizerStepBatch,
-    OptimizerStepLayout,
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
 )
@@ -107,7 +105,7 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
     )
 
 
-def test_optimizer_step_generator_preserves_groups_and_records_tokens() -> None:
+def test_microbatch_generator_keeps_latest_dataloader_metrics() -> None:
     labels = torch.ones(1, dtype=torch.long)
     microbatch = TokenizedTrainingMicrobatch(
         input=torch.ones(1),
@@ -128,38 +126,36 @@ def test_optimizer_step_generator_preserves_groups_and_records_tokens() -> None:
                 ntokens_since_last_log=0,
                 data_loading_times=[],
             ),
-            gradient_accumulation_steps=2,
-            num_pp_microbatches=2,
+            _dataloader_metrics={},
         ),
     )
-    step = OptimizerStepBatch(
-        microbatch_groups=[[microbatch, microbatch], [microbatch, microbatch]]
-    )
-    layouts = []
-
-    def iter_optimizer_steps(layout):
-        layouts.append(layout)
-        return iter([step])
-
-    drain_metrics = MagicMock(return_value={"data_load/balanced_predicted_cost": 12.0})
-    dataloader = SimpleNamespace(
-        iter_optimizer_steps=iter_optimizer_steps,
-        drain_metrics=drain_metrics,
+    drain_metrics = MagicMock(
+        side_effect=[
+            {"data_load/balanced_predicted_cost": 12.0},
+            {"data_load/balanced_predicted_cost": 7.0},
+        ]
     )
 
-    output = next(Trainer.optimizer_step_generator(trainer, dataloader))
+    class Dataloader:
+        def __iter__(self):
+            return iter([microbatch, microbatch])
 
-    assert output is step
-    assert output.microbatch_groups[0][0].labels is labels
-    assert layouts == [
-        OptimizerStepLayout(num_accumulation_steps=2, num_pp_microbatches=2)
-    ]
-    assert trainer.metrics_processor.ntokens_since_last_log == 8
-    assert trainer._dataloader_metrics == {"data_load/balanced_predicted_cost": 12.0}
-    drain_metrics.assert_called_once_with()
+        def drain_metrics(self):
+            return drain_metrics()
+
+    dataloader = Dataloader()
+
+    iterator = Trainer.microbatch_generator(trainer, cast(BaseDataLoader, dataloader))
+    output = next(iterator)
+    next(iterator)
+
+    assert output.labels is labels
+    assert trainer.metrics_processor.ntokens_since_last_log == 4
+    assert trainer._dataloader_metrics == {"data_load/balanced_predicted_cost": 7.0}
+    assert drain_metrics.call_count == 2
 
 
-def test_optimizer_step_generator_maps_natural_exhaustion() -> None:
+def test_microbatch_generator_maps_natural_exhaustion() -> None:
     trainer = cast(
         Trainer,
         SimpleNamespace(
@@ -172,43 +168,23 @@ def test_optimizer_step_generator_maps_natural_exhaustion() -> None:
                 ntokens_since_last_log=0,
                 data_loading_times=[],
             ),
-            gradient_accumulation_steps=1,
-            num_pp_microbatches=1,
+            _dataloader_metrics={},
         ),
     )
-    dataloader = SimpleNamespace(iter_optimizer_steps=lambda layout: iter(()))
+
+    class EmptyDataloader:
+        def __iter__(self):
+            return iter(())
+
+        def drain_metrics(self):
+            return {}
 
     with pytest.raises(DataloaderExhaustedError):
-        next(Trainer.optimizer_step_generator(trainer, dataloader))
-
-
-def test_optimizer_step_generator_rejects_wrong_step_shape() -> None:
-    microbatch = _batch()
-    trainer = cast(
-        Trainer,
-        SimpleNamespace(
-            config=SimpleNamespace(
-                training=SimpleNamespace(
-                    num_tokens_per_microbatch_per_dp_rank=1,
-                )
-            ),
-            metrics_processor=SimpleNamespace(
-                ntokens_since_last_log=0,
-                data_loading_times=[],
-            ),
-            gradient_accumulation_steps=2,
-            num_pp_microbatches=1,
-        ),
-    )
-    dataloader = SimpleNamespace(
-        iter_optimizer_steps=lambda layout: iter(
-            [OptimizerStepBatch(microbatch_groups=[[microbatch]])]
-        ),
-        drain_metrics=lambda: {},
-    )
-
-    with pytest.raises(ValueError, match="expected optimizer-step shape 2 x 1"):
-        next(Trainer.optimizer_step_generator(trainer, dataloader))
+        next(
+            Trainer.microbatch_generator(
+                trainer, cast(BaseDataLoader, EmptyDataloader())
+            )
+        )
 
 
 def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage(
@@ -750,17 +726,13 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             _deferred_cuda_graph_options=None,
         ),
     )
-    layout = OptimizerStepLayout(
-        num_accumulation_steps=3,
-        num_pp_microbatches=1,
-    )
-    step_batch = layout.group_microbatches([_batch() for _ in range(3)])
+    data_iterator = iter([_batch() for _ in range(3)])
 
     with patch(
         "torchtitan.training_engine.dist_utils.clip_grad_norm_",
         return_value=torch.tensor(4.0),
     ):
-        Trainer.train_step(_training_loop(trainer), step_batch)
+        Trainer.train_step(_training_loop(trainer), data_iterator)
 
     metrics_processor.log.assert_called_once_with(
         1,
@@ -780,7 +752,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     ):
         Trainer.train_step(
             _training_loop(trainer),
-            step_batch=layout.group_microbatches([_batch() for _ in range(3)]),
+            data_iterator=iter([_batch() for _ in range(3)]),
         )
 
     metrics_processor.log.assert_not_called()
