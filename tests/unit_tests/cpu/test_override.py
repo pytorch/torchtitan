@@ -224,7 +224,7 @@ class TestOverride(unittest.TestCase):
 
     def test_non_configurable_target_raises(self):
         # `target` must be a Configurable.Config subclass; a plain class (e.g.
-        # ModelSpec) or non-type is rejected at registration.
+        # model config) or non-type is rejected at registration.
         with self.assertRaisesRegex(TypeError, "Configurable.Config subclass"):
 
             @override(target=dict)
@@ -536,33 +536,22 @@ class _Model(Configurable):
 
 
 class _TrainerCfgHolder(Configurable):
-    """Stand-in for Trainer.Config holding a ModelSpec under `model_spec`."""
+    """Stand-in for Trainer.Config holding a model config."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        model_spec: object = None
+        model: _Model.Config
 
     def __init__(self, config: Config):
         self.config = config
 
 
-def _make_spec():
-    from torchtitan.protocols.model_spec import ModelSpec
-
-    return ModelSpec(
-        name="m",
-        flavor="f",
-        model=_Model.Config(),
-        max_context_length=4096,
-        parallelize_fn=lambda: None,
-        pipelining_fn=None,
-        post_optimizer_build_fn=None,
-        state_dict_adapter=None,
-    )
+def _make_model_config():
+    return _Model.Config()
 
 
-class TestModelSpecTraversal(unittest.TestCase):
-    """Overrides reach the model via ModelSpec.traverse with full-path FQNs."""
+class TestModelConfigTraversal(unittest.TestCase):
+    """Overrides reach the model config with full-path FQNs."""
 
     def setUp(self):
         clear_overrides()
@@ -571,29 +560,29 @@ class TestModelSpecTraversal(unittest.TestCase):
         clear_overrides()
 
     def test_fqns_are_full_path_from_root(self):
-        root = _TrainerCfgHolder.Config(model_spec=_make_spec())
+        root = _TrainerCfgHolder.Config(model=_make_model_config())
         model_fqns = [fqn for fqn, *_ in root.traverse(_Model.Config)]
         comp_fqns = [fqn for fqn, *_ in root.traverse(ComponentA.Config)]
         # The model config and its components keep the path from the root.
-        self.assertEqual(model_fqns, ["model_spec.model"])
-        self.assertEqual(comp_fqns, ["model_spec.model.block"])
+        self.assertEqual(model_fqns, ["model"])
+        self.assertEqual(comp_fqns, ["model.block"])
 
-    def test_component_override_through_model_spec(self):
+    def test_component_override_through_model_config(self):
         @override(target=ComponentA.Config)
         def blk(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim)
 
-        spec = _make_spec()
-        root = _TrainerCfgHolder.Config(model_spec=spec)
+        model = _make_model_config()
+        root = _TrainerCfgHolder.Config(model=model)
         replacements = apply_overrides(
             OverrideConfig(imports=[f"{__name__}.blk"]), root
         )
         self.assertEqual(len(replacements), 1)
-        self.assertIsInstance(spec.model.block, ComponentB.Config)
+        self.assertIsInstance(model.block, ComponentB.Config)
 
     def test_whole_model_vs_component_conflict_detected(self):
-        # Regression: a whole-model override (FQN "model_spec.model") and a
-        # component override ("model_spec.model.block") must be flagged as an
+        # Regression: a whole-model override (FQN "model") and a component
+        # override ("model.block") must be flagged as an
         # ancestor conflict, not silently lose the component override.
         @override(target=_Model.Config)
         def whole(cfg: _Model.Config) -> _Model.Config:
@@ -603,7 +592,7 @@ class TestModelSpecTraversal(unittest.TestCase):
         def blk(cfg: ComponentA.Config) -> ComponentB.Config:
             return ComponentB.Config(dim=cfg.dim)
 
-        root = _TrainerCfgHolder.Config(model_spec=_make_spec())
+        root = _TrainerCfgHolder.Config(model=_make_model_config())
         with self.assertRaisesRegex(ValueError, "ancestor"):
             apply_overrides(
                 OverrideConfig(imports=[f"{__name__}.whole", f"{__name__}.blk"]),

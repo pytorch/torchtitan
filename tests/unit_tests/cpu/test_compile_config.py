@@ -11,19 +11,16 @@ from torchtitan.config import CompileConfig
 
 def test_compile_config_default() -> None:
     config = CompileConfig()
-    assert config.enable is False
     assert config.components == ["model", "loss"]
 
 
 def test_compile_config_model_only() -> None:
-    config = CompileConfig(enable=True, components=["model"])
-    assert config.enable is True
+    config = CompileConfig(components=["model"])
     assert config.components == ["model"]
 
 
 def test_compile_config_loss_only() -> None:
-    config = CompileConfig(enable=True, components=["loss"])
-    assert config.enable is True
+    config = CompileConfig(components=["loss"])
     assert config.components == ["loss"]
 
 
@@ -37,25 +34,9 @@ def test_compile_config_rejects_unknown_component() -> None:
         CompileConfig(components=["foo"])
 
 
-def test_compile_config_rejects_unknown_component_when_disabled() -> None:
-    with pytest.raises(ValueError, match=r"nope.*allowed values are.*loss.*model"):
-        CompileConfig(enable=False, components=["nope"])
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"enable_async_tensor_parallel": True},
-        {
-            "enable": True,
-            "enable_async_tensor_parallel": True,
-            "components": ["loss"],
-        },
-    ],
-)
-def test_compile_config_async_tp_requires_model_compile(kwargs: dict) -> None:
+def test_compile_config_async_tp_requires_model_compile() -> None:
     with pytest.raises(
         ValueError,
-        match="Async TP requires 'model' in --compile.components and --compile.enable",
+        match="Async TP requires 'model' in --compile.components",
     ):
-        CompileConfig(**kwargs)
+        CompileConfig(enable_async_tensor_parallel=True, components=["loss"])
