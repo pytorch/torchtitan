@@ -38,7 +38,14 @@ class TestFSDPEmbedding(DTensorTestBase):
     @with_comms
     def test_padding_lifecycle(self):
         parallel_dims = ParallelDims(
-            dp_replicate=1, dp_shard=2, cp=1, tp=2, pp=1, ep=1, world_size=4
+            dp_replicate=1,
+            dp_shard=2,
+            cp=1,
+            tp=2,
+            pp=1,
+            ep=1,
+            world_size=4,
+            enable_sequence_parallel=False,
         )
         fsdp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
         runtime_mesh = parallel_dims.spmd_dense_mesh()

@@ -536,6 +536,7 @@ def test_training_engine_owns_cuda_graph_warmup() -> None:
             config=SimpleNamespace(
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
+                parallelism=SimpleNamespace(enable_sequence_parallel=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
             ),
             parallel_dims=SimpleNamespace(pp_enabled=False),
@@ -594,6 +595,7 @@ def test_training_engine_skips_cuda_graph_warmup_when_unsupported() -> None:
             config=SimpleNamespace(
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
+                parallelism=SimpleNamespace(enable_sequence_parallel=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
             ),
             parallel_dims=SimpleNamespace(pp_enabled=False),

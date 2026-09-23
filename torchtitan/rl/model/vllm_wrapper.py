@@ -329,6 +329,7 @@ class VLLMModelWrapper(Module):
             pp=training_parallelism.pipeline_parallel_degree,
             ep=training_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
+            enable_sequence_parallel=training_parallelism.enable_sequence_parallel,
         )
 
         # Fill sharding configs on the config BEFORE build so every sub-module

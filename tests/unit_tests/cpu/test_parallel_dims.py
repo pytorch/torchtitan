@@ -56,6 +56,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=True,
         )
         self.assertEqual(parallel_dims.dp_replicate, 2)
         self.assertEqual(parallel_dims.dp_shard, 2)
@@ -64,6 +65,7 @@ class TestParallelDimsValidation(unittest.TestCase):
         self.assertEqual(parallel_dims.pp, 1)
         self.assertEqual(parallel_dims.ep, 1)
         self.assertEqual(parallel_dims.world_size, 8)
+        self.assertTrue(parallel_dims.sp_enabled)
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
     def test_from_config(self):
@@ -75,6 +77,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             tensor_parallel_degree=2,
             pipeline_parallel_degree=1,
             expert_parallel_degree=1,
+            enable_sequence_parallel=False,
         )
         parallel_dims = ParallelDims.from_config(config, world_size=8)
         self.assertEqual(parallel_dims.dp_replicate, 2)
@@ -84,6 +87,7 @@ class TestParallelDimsValidation(unittest.TestCase):
         self.assertEqual(parallel_dims.pp, 1)
         self.assertEqual(parallel_dims.ep, 1)
         self.assertEqual(parallel_dims.world_size, 8)
+        self.assertFalse(parallel_dims.sp_enabled)
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
     def test_auto_calculate_dp_shard(self):
@@ -96,6 +100,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=False,
         )
         self.assertEqual(parallel_dims.dp_shard, 2)
 
@@ -111,6 +116,7 @@ class TestParallelDimsValidation(unittest.TestCase):
                 pp=1,
                 ep=1,
                 world_size=10,  # Invalid: 2*2*1*2*1 = 8, not 10
+                enable_sequence_parallel=False,
             )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -125,6 +131,7 @@ class TestParallelDimsValidation(unittest.TestCase):
                 pp=1,
                 ep=1,
                 world_size=1,
+                enable_sequence_parallel=False,
             )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -139,6 +146,7 @@ class TestParallelDimsValidation(unittest.TestCase):
                 pp=1,
                 ep=1,
                 world_size=1,
+                enable_sequence_parallel=False,
             )
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
@@ -153,12 +161,14 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=True,
         )
         self.assertTrue(parallel_dims.dp_enabled)
         self.assertTrue(parallel_dims.dp_replicate_enabled)
         self.assertTrue(parallel_dims.dp_shard_enabled)
         self.assertFalse(parallel_dims.cp_enabled)
         self.assertTrue(parallel_dims.tp_enabled)
+        self.assertTrue(parallel_dims.sp_enabled)
         self.assertFalse(parallel_dims.pp_enabled)
         self.assertFalse(parallel_dims.ep_enabled)
         self.assertTrue(parallel_dims.fsdp_enabled)
@@ -172,11 +182,13 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=2,
+            enable_sequence_parallel=True,
         )
         self.assertFalse(parallel_dims.dp_enabled)
         self.assertTrue(parallel_dims.cp_enabled)
         self.assertTrue(parallel_dims.dp_cp_enabled)
         self.assertTrue(parallel_dims.fsdp_enabled)
+        self.assertFalse(parallel_dims.sp_enabled)
 
         # Test with EP enabled (EP must not contribute to world_size)
         parallel_dims = ParallelDims(
@@ -187,6 +199,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=2,
             world_size=2,
+            enable_sequence_parallel=False,
         )
         self.assertTrue(parallel_dims.ep_enabled)
 
@@ -199,6 +212,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=2,
             ep=1,
             world_size=2,
+            enable_sequence_parallel=False,
         )
         self.assertTrue(parallel_dims.pp_enabled)
 
@@ -213,6 +227,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=2,
             ep=1,
             world_size=48,
+            enable_sequence_parallel=False,
         )
         # Should be cp * tp * pp = 2 * 3 * 2 = 12
         self.assertEqual(parallel_dims.non_data_parallel_size, 12)
@@ -228,6 +243,7 @@ class TestParallelDimsValidation(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=16,
+            enable_sequence_parallel=False,
         )
         # Should be tp * (cp * 2) = 4 * 4 = 16
         self.assertEqual(parallel_dims.seq_len_divisor, 16)
@@ -513,6 +529,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
         parallel_dims.build_mesh()
 
@@ -531,6 +548,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
         # Don't call build_mesh explicitly
         self.assertEqual(len(parallel_dims._single_axis_meshes), 0)
@@ -555,6 +573,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
 
         # Test mesh building
@@ -622,6 +641,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
         parallel_dims.build_mesh()
 
@@ -642,6 +662,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=2,
             world_size=2,  # 1 * 2 * 1 * 1 * 1 = 2
+            enable_sequence_parallel=False,
         )
         self.assertTrue(parallel_dims.ep_enabled)
 
@@ -654,6 +675,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             pp=1,
             ep=2,
             world_size=4,  # 2 * 2 * 1 * 1 * 1 = 4
+            enable_sequence_parallel=False,
         )
         self.assertTrue(parallel_dims.ep_enabled)
         self.assertTrue(parallel_dims.dp_replicate_enabled)
@@ -671,6 +693,7 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
                 pp=1,
                 ep=3,
                 world_size=4,
+                enable_sequence_parallel=False,
             )
 
 
@@ -690,6 +713,7 @@ class TestDenseStorageAxes(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=False,
         )
         pd.build_mesh()
         return pd
@@ -726,6 +750,7 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                enable_sequence_parallel=False,
             )
             pd.build_mesh()
 
@@ -759,6 +784,7 @@ class TestOneDimensionalMeshesSkipFakeAxes(DTensorTestBase):
                 pp=1,
                 ep=2,
                 world_size=8,
+                enable_sequence_parallel=False,
             )
             pd.build_mesh()
 
@@ -797,6 +823,7 @@ class TestParallelDimsWorld8MeshOperations(DTensorTestBase):
                 pp=1,
                 ep=1,
                 world_size=8,
+                enable_sequence_parallel=False,
             )
 
             # Test mesh building

@@ -115,6 +115,7 @@ def _common_setup(config):
         pp=pp,
         ep=parallelism.expert_parallel_degree,
         world_size=world_size,
+        enable_sequence_parallel=parallelism.enable_sequence_parallel,
     )
     parallel_dims.build_mesh()
 

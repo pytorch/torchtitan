@@ -130,7 +130,7 @@ def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:
     )
     try:
         mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
-        model_config = model_registry("0.8B", seq_len=256, attn_backend="varlen").model
+        model_config = model_registry("0.8B", seq_len=256, attn_backend="varlen")
         assert isinstance(model_config, Qwen35Model.Config)
         model_adapter = Qwen35StateDictAdapter(model_config, hf_assets_path=None)
         state_dict, expected, layouts = {}, {}, {}
@@ -167,7 +167,14 @@ def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:
             model_adapter,
             layouts,
             ParallelDims(
-                dp_replicate=1, dp_shard=1, cp=1, tp=2, pp=1, ep=1, world_size=2
+                dp_replicate=1,
+                dp_shard=1,
+                cp=1,
+                tp=2,
+                pp=1,
+                ep=1,
+                world_size=2,
+                enable_sequence_parallel=False,
             ),
         )
         restored = adapter.from_hf(model_adapter.to_hf(state_dict))

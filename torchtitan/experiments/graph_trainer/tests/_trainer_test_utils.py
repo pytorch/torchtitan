@@ -49,6 +49,7 @@ def single_device_parallel_dims() -> Iterator[ParallelDims]:
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
         parallel_dims.build_mesh()
         yield parallel_dims
@@ -132,6 +133,7 @@ def build_minimal_trainer(
             debug=DebugConfig(),
             training=TrainingConfig(),
             parallelism=SimpleNamespace(
+                enable_sequence_parallel=False,
                 pipeline_parallel_degree=1,
                 fsdp_reshard_after_forward=fsdp_reshard_after_forward,
             ),
@@ -145,7 +147,7 @@ def build_minimal_trainer(
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
             training=TrainingConfig(),
-            parallelism=SimpleNamespace(),
+            parallelism=SimpleNamespace(enable_sequence_parallel=False),
         )
 
     engine.config = trainer.config

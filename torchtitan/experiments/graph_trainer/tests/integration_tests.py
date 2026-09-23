@@ -363,13 +363,14 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         # === aot_fx_trace mode tests ===
         # Note: standard DSv3 MoE load-balancing introduces CUDA-to-CPU
         # transfers incompatible with CUDA graph capture, so this fused test
-        # explicitly disables the CUDA graph pass.
+        # explicitly disables CUDA graphs in both the trainer and graph passes.
         #
         # TODO: Re-enable FSDP bucketing when its stable topological sort
         # supports the fused MLA Q kernel's mutating custom-op boundary.
         OverrideDefinitions(
             [
                 [
+                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.mode aot_fx_trace",
