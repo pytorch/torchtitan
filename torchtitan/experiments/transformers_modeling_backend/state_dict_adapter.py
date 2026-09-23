@@ -9,7 +9,7 @@
 Two complementary pieces live here:
 
 - ``HFTransformerStateDictAdapter`` -- the ``StateDictAdapter`` plugged into the
-  ModelSpec. HFTransformerModel wraps an HF ForCausalLM as ``self.model``, so the
+  model class. HFTransformerModel wraps an HF ForCausalLM as ``self.model``, so the
   only difference between TorchTitan FQNs and HF safetensors keys is a ``model.``
   prefix (plus tied-embedding handling). Used by the checkpoint system.
 
@@ -21,14 +21,17 @@ Two complementary pieces live here:
   ``GroupedExperts``' stable logical checkpoint names.
 """
 
+from __future__ import annotations
+
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
-from .model import HFTransformerModel
+if TYPE_CHECKING:
+    from .model import HFTransformerModel
 
 # Mapping from titan key -> original HF key for keys where the reverse
 # regex would produce a different result than the original (e.g. a

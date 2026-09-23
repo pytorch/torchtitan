@@ -10,10 +10,9 @@ import contextlib
 import logging
 import math
 import os
-from abc import abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
-from typing import Protocol, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -356,41 +355,33 @@ def set_batch_invariance(enable: bool) -> None:
     )
 
 
-class SpmdContext(Protocol):
-    @abstractmethod
-    def __call__(self) -> contextlib.AbstractContextManager[None]:
-        pass
-
-
+@contextlib.contextmanager
 def get_spmd_context(
     *,
     parallel_dims: "ParallelDims | None" = None,
     spmd_typechecking: bool = False,
-) -> SpmdContext:
-    @contextlib.contextmanager
-    def context():
-        with contextlib.ExitStack() as stack:
-            if parallel_dims is not None:
-                if not parallel_dims._single_axis_meshes:
-                    parallel_dims.build_mesh()
-                from torchtitan.distributed.spmd_types import (
-                    set_current_spmd_mesh,
-                    set_spmd_meshes,
-                    spmd_dense_mesh,
-                )
+) -> Iterator[None]:
+    with contextlib.ExitStack() as stack:
+        if parallel_dims is not None:
+            if not parallel_dims._single_axis_meshes:
+                parallel_dims.build_mesh()
+            from torchtitan.distributed.spmd_types import (
+                set_current_spmd_mesh,
+                set_spmd_meshes,
+            )
 
-                set_spmd_meshes(
-                    dense_mesh=parallel_dims.spmd_dense_mesh(),
-                    sparse_mesh=parallel_dims.spmd_sparse_mesh(),
-                )
+            dense_mesh = parallel_dims.spmd_dense_mesh()
+            set_spmd_meshes(
+                dense_mesh=dense_mesh,
+                sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+                dense_sp_enabled=parallel_dims.sp_enabled,
+            )
 
-                stack.enter_context(set_current_spmd_mesh(spmd_dense_mesh()))
-            if spmd_typechecking:
-                stack.enter_context(spmd_typecheck(local=False))
+            stack.enter_context(set_current_spmd_mesh(dense_mesh))
+        if spmd_typechecking:
+            stack.enter_context(spmd_typecheck(local=False))
 
-            yield
-
-    return context
+        yield
 
 
 def init_fake_mode(

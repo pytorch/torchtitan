@@ -197,6 +197,8 @@ def run_single_test(
     *,
     use_fake_pg: bool = False,
     export_numerics: bool = False,
+    gpu_arch_type: str = "cuda",
+    gpu_arch: str = "a10g",
     # ``gpu_ids`` is set only in parallel mode; sequential runs leave the
     # child process to use all visible GPUs.
     gpu_ids: list[int] | None = None,
@@ -250,12 +252,17 @@ def run_single_test(
             assert config_fn is not None and config is not None
             execution_mode = "fake_pg" if use_fake_pg else "real_pg"
             golden_numerics_path = Path(
-                test_flavor.golden_numerics_path.format(execution_mode=execution_mode)
+                test_flavor.golden_numerics_path.format(
+                    execution_mode=execution_mode, gpu_arch=gpu_arch
+                )
             )
             if export_numerics:
                 steps = config.training.steps
                 metrics = ("loss", "grad_norm")
-                result_path = Path(output_dir) / golden_numerics_path.name
+                result_path = Path(output_dir) / golden_numerics_path.relative_to(
+                    "tests/assets/losses"
+                )
+                result_path.parent.mkdir(parents=True, exist_ok=True)
                 result_arg = f"--export-result={result_path}"
             else:
                 steps, metrics = _read_golden_spec(golden_numerics_path)
@@ -428,6 +435,8 @@ def run_tests(
                     args.output_dir,
                     use_fake_pg=execution_mode == "fake_pg",
                     export_numerics=export_numerics,
+                    gpu_arch_type=getattr(args, "gpu_arch_type", "cuda"),
+                    gpu_arch=getattr(args, "gpu_arch", "a10g"),
                     gpu_ids=gpus,
                 )
             finally:
@@ -453,6 +462,8 @@ def run_tests(
                     args.output_dir,
                     use_fake_pg=execution_mode == "fake_pg",
                     export_numerics=export_numerics,
+                    gpu_arch_type=getattr(args, "gpu_arch_type", "cuda"),
+                    gpu_arch=getattr(args, "gpu_arch", "a10g"),
                 )
             except Exception as e:
                 logger.error(str(e))
@@ -493,6 +504,17 @@ def main():
         default="cuda",
         choices=["cuda", "rocm"],
         help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+    )
+    parser.add_argument(
+        "--gpu_arch",
+        default=None,
+        choices=["a10g", "h100", "b200", "mi350x"],
+        help=(
+            "Specific GPU model, used to select the matching golden numerics "
+            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm and 'a10g' "
+            "otherwise, so a caller can't silently resolve ROCm goldens "
+            "under an A10G path by omitting this flag."
+        ),
     )
     parser.add_argument(
         "--test_suite",
@@ -542,6 +564,8 @@ def main():
         "Use --no-parallel to force sequential execution (default: parallel).",
     )
     args = parser.parse_args()
+    if args.gpu_arch is None:
+        args.gpu_arch = "mi350x" if args.gpu_arch_type == "rocm" else "a10g"
 
     try:
         test_suites = _parse_test_suites(args.test_suite)

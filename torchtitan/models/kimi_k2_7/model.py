@@ -8,6 +8,8 @@
 https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b0638a0/python/sglang/srt/models/kimi_k25.py
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -15,7 +17,8 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -30,6 +33,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    MultimodalModel,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -39,10 +43,24 @@ from torchtitan.models.deepseek_v3.model import (
 )
 
 from .sharding import set_kimi_k2_5_sharding_config
+from .state_dict_adapter import KimiK25StateDictAdapter
 from .vision_encoder import KimiK25VisionEncoder
 
 
-class KimiK25Model(DeepSeekV3Model):
+class KimiK25Model(MultimodalModel, DeepSeekV3Model):
+    state_dict_adapter_cls = KimiK25StateDictAdapter
+    multimodal_encoder_fqns = ("vision_encoder",)
+
+    @classmethod
+    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+        from torchtitan.models.kimi_k2_7.qk_clip import register_qk_clip_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+        register_qk_clip_hook(optimizers, model_parts, parallel_dims)
+
+    pipeline_first_stage_module_fqns = ("vision_encoder",)
+
     """Kimi K2.5: DeepSeekV3 language model with a MoonViT3d vision encoder.
 
     Forward pass flow::
@@ -105,6 +123,33 @@ class KimiK25Model(DeepSeekV3Model):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
 
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> KimiK25Model:
+        if parallel_dims.cp_enabled:
+            raise NotImplementedError(
+                "Context Parallel is not yet supported for Kimi K2.5: vision "
+                "scatter needs the full sequence before CP would shard it."
+            )
+
+        return super().parallelize(
+            parallel_dims=parallel_dims,
+            training=training,
+            parallelism=parallelism,
+            compile_config=compile_config,
+            ac_config=ac_config,
+            dump_folder=dump_folder,
+            skip_dp=skip_dp,
+        )
+
     def preprocess_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
@@ -113,8 +158,10 @@ class KimiK25Model(DeepSeekV3Model):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch."""
+        del kwargs
         # Function-local import avoids a circular import.
         from torchtitan.distributed.context_parallel.api import (
             prepare_context_parallel_input,
@@ -122,7 +169,7 @@ class KimiK25Model(DeepSeekV3Model):
 
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions", None)
-        padding_mask = batch.pop("padding_mask", None)
+        padding_mask = batch.get("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(
@@ -219,6 +266,7 @@ class KimiK25Model(DeepSeekV3Model):
         special_tokens: dict[str, int] | None = None,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        padding_mask: torch.Tensor | None = None,
     ):
         """Forward pass for Kimi K2.5.
 
@@ -259,7 +307,7 @@ class KimiK25Model(DeepSeekV3Model):
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
-            x = layer(x, attention_masks, positions)
+            x = layer(x, attention_masks, positions, padding_mask=padding_mask)
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:
