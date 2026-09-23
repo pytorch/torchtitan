@@ -29,7 +29,11 @@ import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.distributed.spmd_types import (
+    spmd_dense_sp_enabled,
+    spmd_mesh_group,
+    spmd_mesh_size,
+)
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
@@ -43,11 +47,25 @@ RopeApply = Callable[
 ]
 
 
-class InvariantRowParallelLinear(Linear):
-    """Row-parallel vision projection with an invariant TP output.
+def validate_vision_sequence_parallel_input(x_TD: torch.Tensor) -> None:
+    """Validate that packed vision tokens can be sharded evenly over TP."""
+    if not spmd_dense_sp_enabled():
+        return
 
-    Vision residual activations remain invariant even when decoder sequence
-    parallelism is enabled, so this boundary always performs ``P -> I``.
+    tp_size = spmd_mesh_size(MeshAxisName.TP)
+    if x_TD.shape[0] % tp_size != 0:
+        raise ValueError(
+            "Vision sequence parallelism requires the packed patch-token count "
+            f"({x_TD.shape[0]}) to be divisible by the TP degree ({tp_size})."
+        )
+
+
+class InvariantRowParallelLinear(Linear):
+    """Row-parallel vision output projection that performs ``P -> I``.
+
+    Vision transformer blocks use ``RowParallelLinear`` and follow dense SP.
+    Output heads use this class because merged vision-token counts need not be
+    divisible by TP, so their externally visible output cannot be ``S(0)``.
     """
 
     @dataclass(kw_only=True, slots=True)

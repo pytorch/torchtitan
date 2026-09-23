@@ -49,6 +49,8 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_config,
     vision_invariant_linear_config,
     vision_rowwise_config,
+    vision_sequence_parallel_input_config,
+    vision_sequence_parallel_output_config,
 )
 from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
 from torchtitan.protocols.sharding import ShardingConfig
@@ -135,7 +137,7 @@ def set_qwen35_sharding_config(
             out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
             local_spmd=True,
         )
-        _set_vision_encoder_sharding(config.vision_encoder)
+        _set_vision_encoder_sharding(config.vision_encoder, enable_sp=enable_sp)
         # The first layer restores the decoder layout after replicated vision scatter.
         first_layer_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     for layer_idx, layer_cfg in enumerate(config.layers):
@@ -256,12 +258,15 @@ def set_sigmoid_gated_feed_forward_sharding_config(
     )
 
 
-def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
+def _set_vision_encoder_sharding(
+    ve_cfg: "Qwen35VisionEncoder.Config",
+    *,
+    enable_sp: bool,
+) -> None:
     """Sharding for the vision encoder.
 
-    All activations flow without SP in the vision encoder.
-    Linear layers are ColwiseParallel/RowwiseParallel for memory savings.
-    Norms are Replicate. pos_embed is Replicate via state_shardings.
+    Transformer-block residuals follow the decoder's SP setting. The encoder
+    gathers its final output before the patch merger and decoder fusion.
     """
     ve_cfg.sharding_config = ShardingConfig(
         state_shardings={"pos_embed": SpmdType({DP: spmd.R, TP: spmd.I})},
@@ -274,8 +279,15 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     )
 
     ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()
+    ve_cfg.sequence_parallel_input.sharding_config = (
+        vision_sequence_parallel_input_config(enable_sp=enable_sp)
+    )
+    ve_cfg.sequence_parallel_output.sharding_config = (
+        vision_sequence_parallel_output_config(enable_sp=enable_sp)
+    )
     set_vision_transformer_block_sharding_config(
         ve_cfg.block,
+        enable_sp=enable_sp,
         rope_cache_dp=spmd.V,
     )
 
@@ -283,7 +295,7 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     merger = ve_cfg.merger
     merger.norm.sharding_config = invariant_norm_config()
     merger.fc1.sharding_config = vision_colwise_config()
-    merger.fc2.sharding_config = vision_rowwise_config()
+    merger.fc2.sharding_config = vision_rowwise_config(output_tp=spmd.I)
 
 
 def _set_full_attention_sharding(

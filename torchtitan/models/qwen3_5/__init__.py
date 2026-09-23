@@ -111,6 +111,17 @@ def _linear(in_features: int, out_features: int) -> Linear.Config:
 
 def _vision_row_parallel_linear(
     in_features: int, out_features: int
+) -> RowParallelLinear.Config:
+    return RowParallelLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        param_init=_LINEAR_INIT,
+    )
+
+
+def _vision_invariant_row_parallel_linear(
+    in_features: int, out_features: int
 ) -> InvariantRowParallelLinear.Config:
     return InvariantRowParallelLinear.Config(
         in_features=in_features,
@@ -201,7 +212,9 @@ def _qwen35_vision_encoder_config(
             merged_hidden_size=merged_hidden_size,
             norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
             fc1=_linear(merged_hidden_size, merged_hidden_size),
-            fc2=_vision_row_parallel_linear(merged_hidden_size, out_hidden_size),
+            fc2=_vision_invariant_row_parallel_linear(
+                merged_hidden_size, out_hidden_size
+            ),
         ),
         param_init=_POS_EMBED_INIT,
     )
