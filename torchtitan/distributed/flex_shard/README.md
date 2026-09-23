@@ -13,20 +13,32 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   `DeviceMesh` axes using PyTorch DTensor placements plus `BlockShard` or
   `Owned`, and optionally the order in which several axes shard one tensor
   dimension.
-- `BlockShard` shards complete fixed-size blocks along one tensor dimension. It
+- `BlockShard` shards complete contiguous blocks along one tensor dimension. It
   preserves the tensor's rank and global shape and never creates a tensor view.
 - `Owned` assigns a complete subgroup-local logical tensor to one dynamically
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
+- `BlockShard.block_sizes` is a nonempty tuple describing a repeating sequence
+  of independently shardable block sizes. Use `(R,)` for uniform blocks.
+  For example, `(128, 64)` partitions
+  384 rows into four blocks of 128, 64, 128, and 64 rows. Blocks are distributed
+  by count, so ranks can own different numbers of rows. DistMuon runs
+  Newton-Schulz and the aspect-ratio learning-rate adjustment independently
+  for each block. Kimi's shared `wkv_a` projection uses `(512, 64)` to distribute
+  its KV latent and RoPE key matrices separately.
 - `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
   values in `compute_sharding_by_fqn`. DistMuon's `BlockShard` path accepts
-  only a 2D parameter `[M * R, C]` with contiguous local DTensor storage. The
-  placement must target tensor dimension 0 with `block_size=R`; the leading
-  dimension must be nonzero and divisible by `R`. Each consecutive `R` rows
-  forms one independent `[R, C]` matrix. FlexShard routes the flat 2D compute
-  tensor, and DistMuon applies a zero-copy local `[M_local, R, C]` view
-  immediately before Muon compute. A native batch-first 3D `[M, R, C]`
+  only a 2D parameter with contiguous local DTensor storage. The placement
+  must target tensor dimension 0; the leading dimension must be nonzero and
+  divisible by the sum of `block_sizes`.
+  With `block_sizes=(R,)`, each consecutive `R` rows forms one independent
+  `[R, C]` matrix. Multiple block sizes allow these matrices to have different
+  row counts. FlexShard routes the flat 2D compute tensor using the block
+  boundaries. DistMuon's planning code constructs zero-copy strided
+  `[M, R, C]` views directly from each rank's compute shape and logical starting
+  row. For `(R,)`, the view is equivalent to unflattening the row dimension.
+  A native batch-first 3D `[M, R, C]`
   parameter uses `Shard(0)` to distribute complete matrices, or `Owned` to
   assign the complete batch to one rank. A single 2D matrix without
   `BlockShard` uses whole-matrix compute such as `Owned`. The builder validates
