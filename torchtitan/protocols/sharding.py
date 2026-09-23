@@ -7,7 +7,7 @@
 """Sharding types for config-based parallelization.
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module.parallelize(parallel_dims)``. All placements use
+and read by ``Module._parallelize(parallel_dims)``. All placements use
 ``SpmdType`` so they are self-documenting and support multi-dimensional
 meshes.
 """
@@ -34,7 +34,7 @@ class ShardingConfig:
     """Declarative sharding for a Module's states and activations.
 
     All placements use ``SpmdType`` keyed by mesh axis names. At
-    ``parallelize()`` time, parameters and buffers are locally sharded and
+    ``_parallelize()`` time, parameters and buffers are locally sharded and
     annotated, while activation layouts drive explicit redistributions.
 
     Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
