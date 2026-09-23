@@ -82,6 +82,67 @@ def invariant_norm_config(*, include_cp_axis: bool = False) -> ShardingConfig:
     )
 
 
+def vision_norm_config(
+    *,
+    enable_sp: bool,
+    include_cp_axis: bool = False,
+) -> ShardingConfig:
+    """Vision norm with invariant state and the configured activation layout."""
+    activation_tp = spmd.S(0) if enable_sp else spmd.I
+    activation_layout = _vision_activation_placement(
+        tp=activation_tp,
+        include_cp_axis=include_cp_axis,
+    )
+    return ShardingConfig(
+        state_shardings={
+            "weight": _vision_state_placement(
+                tp=spmd.I, include_cp_axis=include_cp_axis
+            ),
+            "bias": _vision_state_placement(tp=spmd.I, include_cp_axis=include_cp_axis),
+        },
+        in_src_shardings={"input": activation_layout},
+        in_dst_shardings={"input": activation_layout},
+        out_src_shardings=activation_layout,
+        out_dst_shardings=activation_layout,
+    )
+
+
+def vision_sequence_parallel_input_config(
+    *,
+    enable_sp: bool,
+    include_cp_axis: bool = False,
+) -> ShardingConfig:
+    """Shard embedded vision tokens before the transformer block stack."""
+    input_layout = _vision_activation_placement(include_cp_axis=include_cp_axis)
+    output_layout = _vision_activation_placement(
+        tp=spmd.S(0) if enable_sp else spmd.I,
+        include_cp_axis=include_cp_axis,
+    )
+    return ShardingConfig(
+        in_src_shardings={"input": input_layout},
+        in_dst_shardings={"input": output_layout},
+        out_src_shardings=output_layout,
+    )
+
+
+def vision_sequence_parallel_output_config(
+    *,
+    enable_sp: bool,
+    include_cp_axis: bool = False,
+) -> ShardingConfig:
+    """Gather vision tokens after the transformer block stack."""
+    input_layout = _vision_activation_placement(
+        tp=spmd.S(0) if enable_sp else spmd.I,
+        include_cp_axis=include_cp_axis,
+    )
+    output_layout = _vision_activation_placement(include_cp_axis=include_cp_axis)
+    return ShardingConfig(
+        in_src_shardings={"input": input_layout},
+        in_dst_shardings={"input": output_layout},
+        out_src_shardings=output_layout,
+    )
+
+
 def vision_invariant_linear_config(*, include_cp_axis: bool = False) -> ShardingConfig:
     """Unsharded linear whose state and activations are invariant at TP."""
     return ShardingConfig(
@@ -134,9 +195,11 @@ def vision_colwise_config(
 
 
 def vision_partial_bias_rowwise_config(
-    *, include_cp_axis: bool = False
+    *,
+    output_tp: spmd.PerMeshAxisSpmdType,
+    include_cp_axis: bool = False,
 ) -> ShardingConfig:
-    """Partial-bias rowwise vision linear returning a TP-invariant activation."""
+    """Partial-bias rowwise vision linear returning ``output_tp``."""
     input_layout = _vision_activation_placement(
         tp=spmd.S(1), include_cp_axis=include_cp_axis
     )
@@ -156,7 +219,9 @@ def vision_partial_bias_rowwise_config(
         out_src_shardings=_vision_activation_placement(
             tp=spmd.P, include_cp_axis=include_cp_axis
         ),
-        out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
+        out_dst_shardings=_vision_activation_placement(
+            tp=output_tp, include_cp_axis=include_cp_axis
+        ),
         local_spmd=True,
     )
 
@@ -164,16 +229,24 @@ def vision_partial_bias_rowwise_config(
 def set_vision_transformer_block_sharding_config(
     block: "VisionTransformerBlock.Config",
     *,
+    enable_sp: bool,
     rope_cache_dp: spmd.PerMeshAxisSpmdType,
     include_cp_axis: bool = False,
 ) -> None:
     """Set TP sharding for the common vision transformer block."""
-    block.norm1.sharding_config = invariant_norm_config(include_cp_axis=include_cp_axis)
-    block.norm2.sharding_config = invariant_norm_config(include_cp_axis=include_cp_axis)
+    activation_tp = spmd.S(0) if enable_sp else spmd.I
+    block.norm1.sharding_config = vision_norm_config(
+        enable_sp=enable_sp, include_cp_axis=include_cp_axis
+    )
+    block.norm2.sharding_config = vision_norm_config(
+        enable_sp=enable_sp, include_cp_axis=include_cp_axis
+    )
 
     block.attn.sharding_config = ShardingConfig(
         in_src_shardings={
-            "x": _vision_activation_placement(include_cp_axis=include_cp_axis),
+            "x": _vision_activation_placement(
+                tp=activation_tp, include_cp_axis=include_cp_axis
+            ),
             "rope_cache": _vision_activation_placement(
                 dp=rope_cache_dp, include_cp_axis=include_cp_axis
             ),
@@ -199,7 +272,7 @@ def set_vision_transformer_block_sharding_config(
         input_tp=spmd.R, include_cp_axis=include_cp_axis
     )
     block.attn.proj.sharding_config = vision_partial_bias_rowwise_config(
-        include_cp_axis=include_cp_axis
+        output_tp=activation_tp, include_cp_axis=include_cp_axis
     )
     if include_cp_axis:
         attention_layout = _vision_activation_placement(
@@ -223,8 +296,8 @@ def set_vision_transformer_block_sharding_config(
         set_gqa_inner_attention_local_spmd(block.attn.inner_attention)
 
     block.mlp.fc1.sharding_config = vision_colwise_config(
-        include_cp_axis=include_cp_axis
+        input_tp=activation_tp, include_cp_axis=include_cp_axis
     )
     block.mlp.fc2.sharding_config = vision_partial_bias_rowwise_config(
-        include_cp_axis=include_cp_axis
+        output_tp=activation_tp, include_cp_axis=include_cp_axis
     )

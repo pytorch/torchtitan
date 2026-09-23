@@ -25,10 +25,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
+from torchtitan.models.common.nn_modules import GELU, Identity, LayerNorm, RMSNorm
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
+    validate_vision_sequence_parallel_input,
     VisionTransformerBlock,
 )
 from torchtitan.protocols.module import Module, ModuleDict
@@ -339,6 +340,12 @@ class MoonViTEncoder(Module):
         block: VisionTransformerBlock.Config
         final_norm: LayerNorm.Config | RMSNorm.Config
         projector: Module.Config
+        sequence_parallel_input: Identity.Config = field(
+            default_factory=Identity.Config
+        )
+        sequence_parallel_output: Identity.Config = field(
+            default_factory=Identity.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -358,6 +365,8 @@ class MoonViTEncoder(Module):
         self.layers = ModuleDict(
             {str(idx): config.block.build() for idx in range(config.num_layers)}
         )
+        self.sequence_parallel_input = config.sequence_parallel_input.build()
+        self.sequence_parallel_output = config.sequence_parallel_output.build()
         self.final_norm = config.final_norm.build()
         self.projector = config.projector.build()
 
@@ -437,6 +446,8 @@ class MoonViTEncoder(Module):
 
         learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = self.patch_embed(pixel_values) + learned_pos
+        validate_vision_sequence_parallel_input(x)
+        x = self.sequence_parallel_input(x)
 
         # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
@@ -455,6 +466,7 @@ class MoonViTEncoder(Module):
                 attention_mask=attention_mask,
             )
 
+        x = self.sequence_parallel_output(x)
         x = self.final_norm(x)
 
         # Temporal pool + spatial merge, then project to the LLM hidden size.
