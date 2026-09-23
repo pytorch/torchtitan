@@ -6,7 +6,6 @@
 
 from dataclasses import replace
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
@@ -19,7 +18,6 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
 from . import model_registry
@@ -39,7 +37,7 @@ MUSE_GLIMMER_SPECIAL_TOKENS = {
 
 
 def _muse_glimmer_mm_dataloader(
-    model_spec: ModelSpec, dataset_name: str
+    model_config: MuseGlimmerModel.Config, dataset_name: str
 ) -> GrainDataLoader.Config:
     """Build the shared multimodal dataloader config, taking the vision-patch
     geometry from the model's own vision encoder.
@@ -47,7 +45,7 @@ def _muse_glimmer_mm_dataloader(
     ``patch_size``/``temporal_patch_size``/``spatial_merge_size`` must match the
     encoder exactly: they drive the image-placeholder token count the shared
     dataset inserts, which must equal the encoder's downsampled output token
-    count. Deriving them from ``model_spec`` keeps loader and encoder aligned.
+    count. Deriving them from ``model_config`` keeps loader and encoder aligned.
     ``patch_order="raster"`` matches the encoder's raster patch layout (row-major
     grid); ``build_mrope_positions=False`` since Muse Glimmer uses 1D ComplexRoPE
     on the LLM side, not MRoPE.
@@ -68,9 +66,6 @@ def _muse_glimmer_mm_dataloader(
     )
     from torchtitan.hf_datasets.multimodal.utils.image import resize_to_pixel_budget
 
-    model_config = model_spec.model
-    if not isinstance(model_config, MuseGlimmerModel.Config):
-        raise ValueError("Muse Glimmer requires MuseGlimmerModel.Config")
     encoder = model_config.vision_encoder
     if encoder is None:
         raise ValueError("Multimodal Muse Glimmer must own a vision encoder")
@@ -100,7 +95,7 @@ def _muse_glimmer_mm_dataloader(
     return GrainDataLoader.Config(
         dataset=dataset,
         collator=MultiModalCollator.Config(
-            max_images_per_batch=8,
+            max_images_per_microbatch=8,
             patch_size=processor.patch_size,
             temporal_patch_size=processor.temporal_patch_size,
             spatial_merge_size=processor.spatial_merge_size,
@@ -113,19 +108,19 @@ def _muse_glimmer_mm_dataloader(
 def muse_glimmer_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_spec = model_registry("debugmodel", seq_len=seq_len, attn_backend="flex")
+    model_config = model_registry("debugmodel", seq_len=seq_len, attn_backend="flex")
     # The output soft-cap lives in the SoftCappedLinear lm_head, so it is applied
     # per-chunk inside ChunkedLossWrapper just as it would be in the full model
     # forward.
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
@@ -138,15 +133,12 @@ def muse_glimmer_debugmodel(
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
@@ -178,7 +170,7 @@ def muse_glimmer_debugmodel_mm(
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=mm_model_spec,
+        model=mm_model_spec,
         dataloader=_muse_glimmer_mm_dataloader(mm_model_spec, "cc12m-test"),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -194,35 +186,32 @@ def muse_glimmer_debugmodel_mm(
             disable_cuda_graphs=True,
         ),
         parallelism=ParallelismConfig(),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
 
 def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("30B", seq_len=seq_len, attn_backend="flex")
+    model_config = model_registry("30B", seq_len=seq_len, attn_backend="flex")
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
         # per-chunk.
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         parallelism=ParallelismConfig(
@@ -231,34 +220,31 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
 
 def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
-    model_spec = model_registry("30B_mm", seq_len=seq_len, attn_backend="flex")
+    model_config = model_registry("30B_mm", seq_len=seq_len, attn_backend="flex")
     return Trainer.Config(
         # ChunkedLossWrapper avoids materializing the full [T, vocab] logits;
         # the soft-cap is in the SoftCappedLinear lm_head, so it is still applied
         # per-chunk.
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Muse-Glimmer-30B",
         tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
-        model_spec=model_spec,
-        dataloader=_muse_glimmer_mm_dataloader(model_spec, "cc12m"),
+        model=model_config,
+        dataloader=_muse_glimmer_mm_dataloader(model_config, "cc12m"),
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
@@ -268,9 +254,6 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=500,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )

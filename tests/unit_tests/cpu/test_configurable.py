@@ -149,18 +149,29 @@ class TestConfigurable(unittest.TestCase):
         self.assertEqual(d2["inner"]["b"], 2)
 
     def test_to_dict_converts_callable_in_plain_dataclass(self):
-        """to_dict converts callables nested in plain dataclasses."""
+        """Plain dataclasses preserve callable conversion and nested serializers."""
+
+        @dataclass(kw_only=True, slots=True)
+        class CustomConfig(Configurable.Config):
+            value: int
+
+            def to_dict(self):
+                return {"serialized_value": self.value}
 
         @dataclass(frozen=True)
         class PlainRecipe:
             filter_fn: Callable
+            config: CustomConfig
 
         @dataclass(kw_only=True, slots=True)
         class Holder(Configurable.Config):
             recipe: PlainRecipe | None = None
 
-        value = Holder(recipe=PlainRecipe(filter_fn=lambda row: True)).to_dict()
+        value = Holder(
+            recipe=PlainRecipe(filter_fn=lambda row: True, config=CustomConfig(value=3))
+        ).to_dict()
         self.assertIsInstance(value["recipe"]["filter_fn"], str)
+        self.assertEqual(value["recipe"]["config"], {"serialized_value": 3})
         json.dumps(value)
 
     def test_traverse_recurse_descends_into_matching_configs(self):
