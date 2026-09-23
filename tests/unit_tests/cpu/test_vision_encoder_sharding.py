@@ -16,6 +16,8 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import (
+    gather_vision_sequence,
+    shard_vision_sequence,
     validate_vision_sequence_parallel_input,
     VisionAttention,
     VisionMLP,
@@ -23,8 +25,6 @@ from torchtitan.models.common.vision_encoder import (
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     set_vision_transformer_block_sharding_config,
-    vision_sequence_parallel_input_config,
-    vision_sequence_parallel_output_config,
 )
 
 
@@ -97,26 +97,51 @@ def test_vision_block_follows_sequence_parallel_layout(
     )
 
 
-@pytest.mark.parametrize(
-    ("enable_sp", "activation_tp"),
-    [(False, spmd.I), (True, spmd.S(0))],
-)
-def test_vision_sequence_parallel_boundaries(
-    enable_sp: bool,
-    activation_tp: spmd.PerMeshAxisSpmdType,
-) -> None:
-    input_config = vision_sequence_parallel_input_config(enable_sp=enable_sp)
-    output_config = vision_sequence_parallel_output_config(enable_sp=enable_sp)
+def test_vision_sequence_parallel_boundaries() -> None:
+    x = torch.randn(4, 8)
+    tp_group = object()
+    with (
+        patch.object(vision_encoder_module, "spmd_dense_sp_enabled", return_value=True),
+        patch.object(vision_encoder_module, "spmd_mesh_group", return_value=tp_group),
+        patch.object(vision_encoder_module, "spmd_mesh_size", return_value=2),
+        patch.object(
+            vision_encoder_module.spmd,
+            "redistribute",
+            side_effect=lambda tensor, *_args, **_kwargs: tensor,
+        ) as redistribute,
+    ):
+        assert shard_vision_sequence(x) is x
+        assert gather_vision_sequence(x) is x
 
-    assert input_config.in_src_shardings is not None
-    assert input_config.in_dst_shardings is not None
-    assert _tp_type(input_config.in_src_shardings["input"]) == spmd.I
-    assert _tp_type(input_config.in_dst_shardings["input"]) == activation_tp
+    shard_call, gather_call = redistribute.call_args_list
+    assert shard_call.args[0] is x
+    assert shard_call.args[1] is tp_group
+    assert shard_call.kwargs == {
+        "src": spmd.I,
+        "dst": spmd.S(0),
+        "backward_options": {"op_dtype": x.dtype},
+    }
+    assert gather_call.args[0] is x
+    assert gather_call.args[1] is tp_group
+    assert gather_call.kwargs == {
+        "src": spmd.S(0),
+        "dst": spmd.I,
+        "backward_options": {"op_dtype": x.dtype},
+    }
 
-    assert output_config.in_src_shardings is not None
-    assert output_config.in_dst_shardings is not None
-    assert _tp_type(output_config.in_src_shardings["input"]) == activation_tp
-    assert _tp_type(output_config.in_dst_shardings["input"]) == spmd.I
+
+def test_vision_sequence_parallel_boundaries_are_noops_when_disabled() -> None:
+    x = torch.randn(3, 8)
+    with (
+        patch.object(
+            vision_encoder_module, "spmd_dense_sp_enabled", return_value=False
+        ),
+        patch.object(vision_encoder_module.spmd, "redistribute") as redistribute,
+    ):
+        assert shard_vision_sequence(x) is x
+        assert gather_vision_sequence(x) is x
+
+    redistribute.assert_not_called()
 
 
 def test_vision_sequence_parallel_requires_even_token_shards() -> None:

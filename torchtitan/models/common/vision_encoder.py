@@ -60,6 +60,43 @@ def validate_vision_sequence_parallel_input(x_TD: torch.Tensor) -> None:
         )
 
 
+def shard_vision_sequence(x_TD: torch.Tensor) -> torch.Tensor:
+    """Shard packed vision tokens over TP when dense SP is enabled."""
+    if not spmd_dense_sp_enabled():
+        return x_TD
+
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x_TD
+
+    validate_vision_sequence_parallel_input(x_TD)
+    return spmd.redistribute(
+        x_TD,
+        tp_group,
+        src=spmd.I,
+        dst=spmd.S(0),
+        backward_options={"op_dtype": x_TD.dtype},
+    )
+
+
+def gather_vision_sequence(x_TD: torch.Tensor) -> torch.Tensor:
+    """Gather TP-sharded vision tokens when dense SP is enabled."""
+    if not spmd_dense_sp_enabled():
+        return x_TD
+
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x_TD
+
+    return spmd.redistribute(
+        x_TD,
+        tp_group,
+        src=spmd.S(0),
+        dst=spmd.I,
+        backward_options={"op_dtype": x_TD.dtype},
+    )
+
+
 class InvariantRowParallelLinear(Linear):
     """Row-parallel vision output projection that performs ``P -> I``.
 
