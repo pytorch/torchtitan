@@ -71,11 +71,11 @@ jobs:
           if [[ "$GITHUB_REF" == "refs/heads/main" ||
                 "$GITHUB_EVENT_NAME" == "schedule" ]]; then
             keep_going=true
-          elif [[ "$GITHUB_REF" =~ ^refs/tags/ciflow/[^/]+/[0-9a-f]{40}$ ]]; then
-            # A CIFlow tag ends in the PR head SHA, which is the only handle on
+          elif [[ "$GITHUB_REF" =~ ^refs/tags/ciflow/[^/]+/([0-9]+)$ ]]; then
+            # A CIFlow tag ends in the PR number, which is the only handle on
             # the PR that a tag push gets.
-            if gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF##*/}/pulls" \
-                 --jq '.[] | .labels[].name, .body' \
+            if gh api "repos/${GITHUB_REPOSITORY}/pulls/${BASH_REMATCH[1]}" \
+                 --jq '.labels[].name, .body' \
                | grep -qE '^keep-going$|\[keep-going\]'; then
               keep_going=true
             fi
