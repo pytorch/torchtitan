@@ -62,7 +62,9 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
         1. Convert between the HF shape and the torchtitan shape.
         2. Split the GroupedExperts' weight into separate expert's wegiht.
         """
-        state_dict = self._native_fused_linears_to_hf(state_dict)
+        state_dict = self._to_logical_expert_state(
+            self._native_fused_linears_to_hf(state_dict)
+        )
 
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
@@ -208,4 +210,6 @@ class Qwen3StateDictAdapter(MoEStateDictAdapter):
                     continue
                 state_dict[new_key] = value
 
-        return self._native_fused_linears_from_hf(state_dict)
+        return self._native_fused_linears_from_hf(
+            self._to_native_expert_state(state_dict)
+        )

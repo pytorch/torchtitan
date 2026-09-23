@@ -54,8 +54,9 @@ class GroupedExperts(Module):
     ``w13_E2FD`` has shape ``(E, 2, F, D)``. The projection axis stores gate
     before up, matching DistMoE's native layout, and the two middle dimensions
     form a zero-copy ``(E, 2F, D)`` grouped-GEMM operand.
-    State-dict hooks expose the logical ``w1_EFD`` and ``w3_EFD`` checkpoint
-    keys while retaining the fused parameter internally.
+    The native state dict retains ``w13_E2FD`` so parameter, optimizer, and EMA
+    state use one FQN. Model adapters expose logical W1/W3 keys at external
+    checkpoint boundaries.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -80,15 +81,7 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.dim, config.hidden_dim)
         )
         self.activation_fn = config.activation_fn.build()
-        self.register_state_dict_post_hook(self._split_w13_on_save)
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
-
-    @staticmethod
-    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Expose fused experts under the logical w1/w3 checkpoint keys."""
-        w13_E2FD = state_dict.pop(f"{prefix}w13_E2FD")
-        state_dict[f"{prefix}w1_EFD"] = w13_E2FD[:, 0].contiguous()
-        state_dict[f"{prefix}w3_EFD"] = w13_E2FD[:, 1].contiguous()
 
     @staticmethod
     def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:

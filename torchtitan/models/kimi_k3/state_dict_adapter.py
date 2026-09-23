@@ -138,7 +138,9 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
-        state_dict = self._native_fused_linears_to_hf(state_dict)
+        state_dict = self._to_logical_expert_state(
+            self._native_fused_linears_to_hf(state_dict)
+        )
         to_hf_map = {
             tt_key: hf_key
             for mapping in (
@@ -380,4 +382,6 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 "KimiK3StateDictAdapter received an incomplete set of "
                 f"routed-expert weights: {expert_weights_by_layer.keys()}."
             )
-        return self._native_fused_linears_from_hf(state_dict)
+        return self._native_fused_linears_from_hf(
+            self._to_native_expert_state(state_dict)
+        )
