@@ -9,10 +9,10 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from torchtitan.overrides.kimi_rmsnorm_gated import (
-    _triton_kimi_rms_norm_gated_backward_op,
-    _triton_kimi_rms_norm_gated_op,
-    triton_kimi_rms_norm_gated,
+from torchtitan.overrides.kimi_gated_rmsnorm import (
+    _triton_kimi_gated_rms_norm_backward_op,
+    _triton_kimi_gated_rms_norm_op,
+    triton_kimi_gated_rms_norm,
 )
 
 
@@ -22,7 +22,7 @@ _PROJECT_ATOL = 0.0
 _MAX_REFERENCE_RELATIVE_ERROR = 0.1
 
 
-def _kimi_rms_norm_gated_reference(
+def _kimi_gated_rms_norm_reference(
     input: torch.Tensor,
     gate: torch.Tensor,
     weight: torch.Tensor,
@@ -37,7 +37,7 @@ def _kimi_rms_norm_gated_reference(
     return (normalized * gate.float().sigmoid()).to(input_dtype)
 
 
-def _kimi_rms_norm_gated_golden(
+def _kimi_gated_rms_norm_golden(
     input: torch.Tensor,
     gate: torch.Tensor,
     weight: torch.Tensor,
@@ -100,7 +100,7 @@ def _assert_matches_golden(
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-class TestTritonKimiRMSNormGatedNumerics(unittest.TestCase):
+class TestTritonKimiGatedRMSNormNumerics(unittest.TestCase):
     def _run_case(
         self,
         shape: tuple[int, ...],
@@ -135,7 +135,7 @@ class TestTritonKimiRMSNormGatedNumerics(unittest.TestCase):
         golden_input = input_data.double().requires_grad_()
         golden_gate = gate_data.double().requires_grad_()
         golden_weight = weight_data.double().requires_grad_()
-        golden_output = _kimi_rms_norm_gated_golden(
+        golden_output = _kimi_gated_rms_norm_golden(
             golden_input,
             golden_gate,
             golden_weight,
@@ -149,7 +149,7 @@ class TestTritonKimiRMSNormGatedNumerics(unittest.TestCase):
         reference_input = input_data.detach().clone().requires_grad_()
         reference_gate = gate_data.detach().clone().requires_grad_()
         reference_weight = weight_data.detach().clone().requires_grad_()
-        reference_output = _kimi_rms_norm_gated_reference(
+        reference_output = _kimi_gated_rms_norm_reference(
             reference_input,
             reference_gate,
             reference_weight,
@@ -163,7 +163,7 @@ class TestTritonKimiRMSNormGatedNumerics(unittest.TestCase):
         target_input = input_data.detach().clone().requires_grad_()
         target_gate = gate_data.detach().clone().requires_grad_()
         target_weight = weight_data.detach().clone().requires_grad_()
-        target_output = triton_kimi_rms_norm_gated(
+        target_output = triton_kimi_gated_rms_norm(
             target_input,
             target_gate,
             target_weight,
@@ -235,7 +235,7 @@ class TestTritonKimiRMSNormGatedNumerics(unittest.TestCase):
             requires_grad=True,
         )
         torch.library.opcheck(
-            _triton_kimi_rms_norm_gated_op,
+            _triton_kimi_gated_rms_norm_op,
             (input, gate, weight, _EPS),
             test_utils=(
                 "test_schema",
@@ -243,9 +243,9 @@ class TestTritonKimiRMSNormGatedNumerics(unittest.TestCase):
                 "test_autograd_registration",
             ),
         )
-        output, inverse_rms = _triton_kimi_rms_norm_gated_op(input, gate, weight, _EPS)
+        output, inverse_rms = _triton_kimi_gated_rms_norm_op(input, gate, weight, _EPS)
         torch.library.opcheck(
-            _triton_kimi_rms_norm_gated_backward_op,
+            _triton_kimi_gated_rms_norm_backward_op,
             (torch.randn_like(output), input, gate, weight, inverse_rms),
             test_utils=("test_schema", "test_faketensor"),
         )
@@ -267,9 +267,9 @@ class TestTritonKimiRMSNormGatedNumerics(unittest.TestCase):
             requires_grad=True,
         )
         grad_output = torch.randn_like(input)
-        compiled = torch.compile(triton_kimi_rms_norm_gated, fullgraph=True)
+        compiled = torch.compile(triton_kimi_gated_rms_norm, fullgraph=True)
 
-        expected = triton_kimi_rms_norm_gated(input, gate, weight, _EPS)
+        expected = triton_kimi_gated_rms_norm(input, gate, weight, _EPS)
         expected_grads = torch.autograd.grad(
             expected,
             (input, gate, weight),

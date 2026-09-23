@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
 from attn_gym.linear.kda import bound_gate, chunk_kda
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
 from attn_gym.linear.short_conv import causal_conv1d
@@ -24,7 +23,7 @@ from torchtitan.models.common.attention import (
     VarlenMetadata,
 )
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.nn_modules import Conv1d
+from torchtitan.models.common.nn_modules import Conv1d, GatedRMSNorm
 from torchtitan.protocols.module import Module
 
 # Shape suffixes:
@@ -33,8 +32,8 @@ from torchtitan.protocols.module import Module
 # W = convolution kernel width.
 
 
-class KimiRMSNormGated(Module):
-    """Per-head RMSNorm followed by a sigmoid output gate."""
+class KimiGatedRMSNorm(GatedRMSNorm):
+    """Kimi K3 gated RMSNorm: ``rms_norm(x, weight) * sigmoid(gate)``."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -42,19 +41,19 @@ class KimiRMSNormGated(Module):
         eps: float = 1e-5
 
     def __init__(self, config: Config):
-        super().__init__()
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
+        super().__init__(
+            GatedRMSNorm.Config(
+                dim=config.dim,
+                eps=config.eps,
+                activation_fn=torch.sigmoid,
+            )
+        )
 
     def forward(self, x_THV: torch.Tensor, gate_THV: torch.Tensor) -> torch.Tensor:
-        input_dtype = x_THV.dtype
-        normalized_THV = F.rms_norm(
-            x_THV.float(),
-            (x_THV.shape[-1],),
-            self.weight.float(),
-            self.eps,
-        )
-        return (normalized_THV * gate_THV.float().sigmoid()).to(input_dtype)
+        return super().forward(x_THV, gate_THV)
+
+
+KimiRMSNormGated = KimiGatedRMSNorm
 
 
 class KDAKernel(Module):
@@ -207,7 +206,7 @@ class KDA(Module):
         beta: Linear.Config
         output_gate: Linear.Config
         inner_kda: Module.Config
-        output_norm: KimiRMSNormGated.Config
+        output_norm: KimiGatedRMSNorm.Config
         output_proj: Linear.Config
 
         def __post_init__(self):

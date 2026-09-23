@@ -39,10 +39,12 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
+from .kda import InnerKDA, KDA, KDAKernel, KimiGatedRMSNorm
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
+
+KimiRMSNormGated = KimiGatedRMSNorm
 
 __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
@@ -216,7 +218,7 @@ def _kda_config(
             head_dim=head_dim,
             kernel=KDAKernel.Config(),
         ),
-        output_norm=KimiRMSNormGated.Config(
+        output_norm=KimiGatedRMSNorm.Config(
             dim=head_dim,
             eps=1e-5,
             param_init=_NORM_INIT,

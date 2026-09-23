@@ -22,7 +22,7 @@ from torch import nn
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common import Conv1d, Linear
+from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear
 from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.protocols.module import Module
 
@@ -55,11 +55,8 @@ def _causal_conv1d_varlen(
     return out_BTD.squeeze(0)
 
 
-class RMSNormGated(Module):
-    """Gated RMSNorm: ``silu(gate) * weight * norm(x)``.
-
-    Takes ``(x, gate)`` separately. Weight is ones-initialized.
-    """
+class Qwen35GatedRMSNorm(GatedRMSNorm):
+    """Qwen3.5 gated RMSNorm: ``rms_norm(x, weight) * silu(gate)``."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -67,19 +64,20 @@ class RMSNormGated(Module):
         eps: float = 1e-6
 
     def __init__(self, config: Config):
-        super().__init__()
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
+        super().__init__(
+            GatedRMSNorm.Config(
+                dim=config.dim,
+                eps=config.eps,
+                activation_fn=F.silu,
+                round_normalized_to_input_dtype=True,
+            )
+        )
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        # Upcast to float32 for numerical stability in pow/rsqrt
-        input_dtype = x.dtype
-        x = x.float()
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        x = (self.weight.float() * x).to(input_dtype)
-        x = x * F.silu(gate.float())
-        return x.to(input_dtype)
+        return super().forward(x, gate)
+
+
+RMSNormGated = Qwen35GatedRMSNorm
 
 
 @torch.library.custom_op(
@@ -377,7 +375,7 @@ class GatedDeltaNet(Module):
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
         inner_gated_delta_net: Module.Config
-        norm: RMSNormGated.Config
+        norm: Qwen35GatedRMSNorm.Config
         out_proj: Linear.Config
 
     def __init__(self, config: Config):

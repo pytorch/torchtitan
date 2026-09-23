@@ -45,6 +45,7 @@ from .multimodal import MultimodalModel
 from .nn_modules import (
     Conv1d,
     Conv2d,
+    GatedRMSNorm,
     GELU,
     GroupNorm,
     Identity,
@@ -69,6 +70,7 @@ __all__ = [
     "FlexInnerAttention",
     "QKVLinear",
     "GELU",
+    "GatedRMSNorm",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_efficient_causal_mask_mod_for_packed_document",

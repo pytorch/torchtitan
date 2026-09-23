@@ -38,12 +38,14 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 
-from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet, RMSNormGated
+from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet, Qwen35GatedRMSNorm
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
 
 from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
+
+RMSNormGated = Qwen35GatedRMSNorm
 
 __all__ = [
     "Qwen35Model",
@@ -299,7 +301,7 @@ def _qwen35_deltanet_config(
         inner_gated_delta_net=InnerGatedDeltaNet.Config(
             kernel=GatedDeltaKernel.Config(),
         ),
-        norm=RMSNormGated.Config(
+        norm=Qwen35GatedRMSNorm.Config(
             dim=value_head_dim,
             eps=1e-6,
             param_init={"weight": nn.init.ones_},

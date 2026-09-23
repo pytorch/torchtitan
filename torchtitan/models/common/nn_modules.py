@@ -16,9 +16,12 @@ Each ``Config`` only exposes the fields that current callsites set;
 add more if a new callsite needs them.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from torchtitan.protocols.module import Module
 
@@ -148,6 +151,40 @@ class RMSNorm(nn.RMSNorm, Module):
         )
 
 
+class GatedRMSNorm(Module):
+    """Apply RMSNorm followed by an elementwise unary gate activation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int
+        eps: float
+        activation_fn: Callable[[torch.Tensor], torch.Tensor]
+        round_normalized_to_input_dtype: bool = False
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.eps = config.eps
+        self.activation_fn = config.activation_fn
+        self.round_normalized_to_input_dtype = config.round_normalized_to_input_dtype
+        self.weight = nn.Parameter(torch.empty(config.dim))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        input_dtype = x.dtype
+        normalized = F.rms_norm(
+            x.float(),
+            (x.shape[-1],),
+            self.weight.float(),
+            self.eps,
+        )
+        if self.round_normalized_to_input_dtype:
+            normalized = normalized.to(input_dtype)
+        return (normalized * self.activation_fn(gate.float())).to(input_dtype)
+
+
 class SiLU(nn.SiLU, Module):
     """Configurable nn.SiLU."""
 
@@ -163,6 +200,7 @@ __all__ = [
     "Conv1d",
     "Conv2d",
     "GELU",
+    "GatedRMSNorm",
     "GroupNorm",
     "Identity",
     "LayerNorm",

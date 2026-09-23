@@ -233,7 +233,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 GatedDeltaKernel,
                 GatedDeltaNet,
                 InnerGatedDeltaNet,
-                RMSNormGated,
+                Qwen35GatedRMSNorm,
             )
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
@@ -275,7 +275,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             inner_gated_delta_net=InnerGatedDeltaNet.Config(
                 kernel=GatedDeltaKernel.Config(),
             ),
-            norm=RMSNormGated.Config(dim=value_head_dim),
+            norm=Qwen35GatedRMSNorm.Config(dim=value_head_dim),
             out_proj=Linear.Config(
                 in_features=value_dim,
                 out_features=dim,

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Fused Triton RMSNorm-gate override for Kimi K3.
+"""Fused Triton gated RMSNorm override for Kimi K3.
 
 For each token and attention head, the stock module casts the input, weight,
 and gate to FP32 and computes
@@ -24,13 +24,13 @@ import triton.language as tl
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.decoder_sharding import attention_activation_placement
-from torchtitan.models.kimi_k3.kda import KimiRMSNormGated
+from torchtitan.models.kimi_k3.kda import KimiGatedRMSNorm
 
 
 __all__ = [
-    "TritonKimiRMSNormGated",
-    "triton_kimi_rms_norm_gated",
-    "triton_kimi_rmsnorm_gated",
+    "TritonKimiGatedRMSNorm",
+    "triton_kimi_gated_rms_norm",
+    "triton_kimi_gated_rmsnorm",
 ]
 
 
@@ -49,7 +49,7 @@ def _num_warps(block_size: int) -> int:
 
 
 @triton.jit
-def _kimi_rms_norm_gated_forward_kernel(
+def _kimi_gated_rms_norm_forward_kernel(
     input_ptr,
     gate_ptr,
     weight_ptr,
@@ -76,7 +76,7 @@ def _kimi_rms_norm_gated_forward_kernel(
 
 
 @triton.jit
-def _kimi_rms_norm_gated_input_gate_grad_kernel(
+def _kimi_gated_rms_norm_input_gate_grad_kernel(
     grad_output_ptr,
     input_ptr,
     gate_ptr,
@@ -121,7 +121,7 @@ def _kimi_rms_norm_gated_input_gate_grad_kernel(
 
 
 @triton.jit
-def _kimi_rms_norm_gated_weight_grad_partial_kernel(
+def _kimi_gated_rms_norm_weight_grad_partial_kernel(
     grad_output_ptr,
     input_ptr,
     gate_ptr,
@@ -162,7 +162,7 @@ def _kimi_rms_norm_gated_weight_grad_partial_kernel(
 
 
 @triton.jit
-def _kimi_rms_norm_gated_weight_grad_reduce_kernel(
+def _kimi_gated_rms_norm_weight_grad_reduce_kernel(
     partial_grad_weight_ptr,
     grad_weight_ptr,
     num_partials,
@@ -188,8 +188,8 @@ def _kimi_rms_norm_gated_weight_grad_reduce_kernel(
     )
 
 
-@torch.library.triton_op("torchtitan::triton_kimi_rms_norm_gated", mutates_args={})
-def _triton_kimi_rms_norm_gated_op(
+@torch.library.triton_op("torchtitan::triton_kimi_gated_rms_norm", mutates_args={})
+def _triton_kimi_gated_rms_norm_op(
     input: torch.Tensor,
     gate: torch.Tensor,
     weight: torch.Tensor,
@@ -202,13 +202,13 @@ def _triton_kimi_rms_norm_gated_op(
     block_size = triton.next_power_of_2(num_cols)
     if block_size > _MAX_BLOCK_SIZE:
         raise ValueError(
-            f"Triton KimiRMSNormGated supports at most {_MAX_BLOCK_SIZE} columns, "
+            f"Triton KimiGatedRMSNorm supports at most {_MAX_BLOCK_SIZE} columns, "
             f"got {num_cols}"
         )
     num_rows = input.numel() // num_cols
     output = torch.empty_like(input)
     inverse_rms = torch.empty(num_rows, dtype=torch.float32, device=input.device)
-    torch.library.wrap_triton(_kimi_rms_norm_gated_forward_kernel)[(num_rows,)](
+    torch.library.wrap_triton(_kimi_gated_rms_norm_forward_kernel)[(num_rows,)](
         input,
         gate,
         weight,
@@ -223,9 +223,9 @@ def _triton_kimi_rms_norm_gated_op(
 
 
 @torch.library.triton_op(
-    "torchtitan::triton_kimi_rms_norm_gated_backward", mutates_args={}
+    "torchtitan::triton_kimi_gated_rms_norm_backward", mutates_args={}
 )
-def _triton_kimi_rms_norm_gated_backward_op(
+def _triton_kimi_gated_rms_norm_backward_op(
     grad_output: torch.Tensor,
     input: torch.Tensor,
     gate: torch.Tensor,
@@ -239,7 +239,7 @@ def _triton_kimi_rms_norm_gated_backward_op(
 
     grad_input = torch.empty_like(input)
     grad_gate = torch.empty_like(gate)
-    torch.library.wrap_triton(_kimi_rms_norm_gated_input_gate_grad_kernel)[(num_rows,)](
+    torch.library.wrap_triton(_kimi_gated_rms_norm_input_gate_grad_kernel)[(num_rows,)](
         grad_output,
         input,
         gate,
@@ -260,7 +260,7 @@ def _triton_kimi_rms_norm_gated_backward_op(
         device=input.device,
     )
     num_col_blocks = triton.cdiv(num_cols, _DW_BLOCK_N)
-    torch.library.wrap_triton(_kimi_rms_norm_gated_weight_grad_partial_kernel)[
+    torch.library.wrap_triton(_kimi_gated_rms_norm_weight_grad_partial_kernel)[
         (num_col_blocks, num_partials)
     ](
         grad_output,
@@ -277,7 +277,7 @@ def _triton_kimi_rms_norm_gated_backward_op(
 
     grad_weight = torch.empty_like(weight)
     reduce_block_m = triton.next_power_of_2(num_partials)
-    torch.library.wrap_triton(_kimi_rms_norm_gated_weight_grad_reduce_kernel)[
+    torch.library.wrap_triton(_kimi_gated_rms_norm_weight_grad_reduce_kernel)[
         (num_col_blocks,)
     ](
         partial_grad_weight,
@@ -291,19 +291,19 @@ def _triton_kimi_rms_norm_gated_backward_op(
     return grad_input, grad_gate, grad_weight
 
 
-def _triton_kimi_rms_norm_gated_setup_context(ctx, inputs, output) -> None:
+def _triton_kimi_gated_rms_norm_setup_context(ctx, inputs, output) -> None:
     input, gate, weight, _eps = inputs
     _output, inverse_rms = output
     ctx.save_for_backward(input, gate, weight, inverse_rms)
 
 
-def _triton_kimi_rms_norm_gated_autograd_backward(
+def _triton_kimi_gated_rms_norm_autograd_backward(
     ctx,
     grad_output: torch.Tensor,
     _grad_inverse_rms: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, None]:
     input, gate, weight, inverse_rms = ctx.saved_tensors
-    grad_input, grad_gate, grad_weight = _triton_kimi_rms_norm_gated_backward_op(
+    grad_input, grad_gate, grad_weight = _triton_kimi_gated_rms_norm_backward_op(
         grad_output.contiguous(),
         input,
         gate,
@@ -313,20 +313,20 @@ def _triton_kimi_rms_norm_gated_autograd_backward(
     return grad_input, grad_gate, grad_weight, None
 
 
-_triton_kimi_rms_norm_gated_op.register_autograd(
-    _triton_kimi_rms_norm_gated_autograd_backward,
-    setup_context=_triton_kimi_rms_norm_gated_setup_context,
+_triton_kimi_gated_rms_norm_op.register_autograd(
+    _triton_kimi_gated_rms_norm_autograd_backward,
+    setup_context=_triton_kimi_gated_rms_norm_setup_context,
 )
 
 
-def triton_kimi_rms_norm_gated(
+def triton_kimi_gated_rms_norm(
     input: torch.Tensor,
     gate: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
 ) -> torch.Tensor:
     """Apply per-row RMS normalization, weight scaling, and sigmoid gating."""
-    output, _inverse_rms = _triton_kimi_rms_norm_gated_op(
+    output, _inverse_rms = _triton_kimi_gated_rms_norm_op(
         input.contiguous(),
         gate.contiguous(),
         weight.contiguous(),
@@ -335,11 +335,11 @@ def triton_kimi_rms_norm_gated(
     return output
 
 
-class TritonKimiRMSNormGated(KimiRMSNormGated):
-    """Kimi K3 RMSNorm and sigmoid gate implemented by a fused Triton kernel."""
+class TritonKimiGatedRMSNorm(KimiGatedRMSNorm):
+    """Kimi K3 gated RMSNorm implemented by a fused Triton kernel."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(KimiRMSNormGated.Config):
+    class Config(KimiGatedRMSNorm.Config):
         pass
 
     def forward(
@@ -354,7 +354,7 @@ class TritonKimiRMSNormGated(KimiRMSNormGated):
         ):
             return super().forward(x_THV, gate_THV)
 
-        return triton_kimi_rms_norm_gated(
+        return triton_kimi_gated_rms_norm(
             x_THV,
             gate_THV,
             self.weight,
@@ -363,18 +363,18 @@ class TritonKimiRMSNormGated(KimiRMSNormGated):
 
 
 @override(
-    target=KimiRMSNormGated.Config,
+    target=KimiGatedRMSNorm.Config,
     exact=True,
-    description="Fuse Kimi K3 RMSNorm, weight scaling, and sigmoid output gate.",
+    description="Fuse Kimi K3 gated RMSNorm with Triton.",
 )
-def triton_kimi_rmsnorm_gated(
-    cfg: KimiRMSNormGated.Config,
-) -> TritonKimiRMSNormGated.Config:
+def triton_kimi_gated_rmsnorm(
+    cfg: KimiGatedRMSNorm.Config,
+) -> TritonKimiGatedRMSNorm.Config:
     sharding_config = cfg.sharding_config
     if sharding_config is not None:
         if sharding_config.state_shardings.get("weight") is None:
             raise ValueError(
-                "Triton KimiRMSNormGated requires a weight sharding contract"
+                "Triton KimiGatedRMSNorm requires a weight sharding contract"
             )
         activation = attention_activation_placement()
         input_shardings = {
@@ -391,6 +391,6 @@ def triton_kimi_rmsnorm_gated(
         )
     return derive(
         cfg,
-        TritonKimiRMSNormGated.Config,
+        TritonKimiGatedRMSNorm.Config,
         sharding_config=sharding_config,
     )
