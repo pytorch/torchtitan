@@ -1,0 +1,151 @@
+<svg xmlns="http://www.w3.org/2000/svg" font-family="IBM Plex Sans, Helvetica Neue, Arial, sans-serif" font-size="12.5" viewBox="0 0 1460 690" role="img" aria-label="Forward and backward data flow of one Kimi K3 pipeline stage with the block cache on, next to the same stage with the cache off">
+    <defs>
+      <marker id="mf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" class="mk-fwd" fill="#1f2328"/>
+      </marker>
+      <marker id="mb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" class="mk-bwd" fill="#d92d20"/>
+      </marker>
+      <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect width="6" height="6" fill="#eef9f0"/>
+        <line x1="0" y1="0" x2="0" y2="6" class="hatch-line" stroke="#2f9e44" stroke-width="1.2"/>
+      </pattern>
+    </defs>
+
+    <!-- ===================== panel 1: cache on ===================== -->
+    <text x="20" y="30" class="title" fill="#1f2328" font-size="15" font-weight="600">attn_res_cache on</text>
+    <text x="180" y="30" class="sub" fill="#5f6b76" font-size="12">stage s on rank r; a hop carries the blocks the next rank has not seen</text>
+
+    <!-- input / output labels -->
+    <text x="365" y="72" text-anchor="middle" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h, Δ  from stage s−1</text>
+    <text x="365" y="604" text-anchor="middle" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h′, Δ′  to stage s+1</text>
+    <text x="665" y="604" text-anchor="middle" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">∇h′, ∇Δ′  from stage s+1</text>
+    <text x="665" y="72" text-anchor="middle" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">∇h, ∇Δ  to stage s−1</text>
+
+    <!-- forward column -->
+    <rect x="260" y="90" width="210" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44"/>
+    <text x="365" y="115" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">P2P recv</text>
+
+    <rect x="260" y="190" width="210" height="50" rx="8" class="ent" fill="#ffffff" stroke="#1f2328"/>
+    <text x="365" y="211" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">assemble</text>
+    <text x="365" y="228" text-anchor="middle" class="sym" fill="#1f2328" font-family="IBM Plex Mono, Consolas, monospace">B = store ⊕ Δ  (leaf)</text>
+
+    <rect x="260" y="300" width="210" height="60" rx="8" class="ent" fill="#ffffff" stroke="#1f2328"/>
+    <text x="365" y="324" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">layers l..m</text>
+    <text x="365" y="343" text-anchor="middle" class="sym" fill="#1f2328" font-family="IBM Plex Mono, Consolas, monospace">first layer of a block: B ← B ⊕ h</text>
+
+    <rect x="260" y="420" width="210" height="50" rx="8" class="ent" fill="#ffffff" stroke="#1f2328"/>
+    <text x="365" y="441" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">pack Δ′</text>
+    <text x="365" y="458" text-anchor="middle" class="sym" fill="#1f2328" font-family="IBM Plex Mono, Consolas, monospace">columns the next rank lacks</text>
+
+    <rect x="260" y="530" width="210" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44"/>
+    <text x="365" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">P2P send</text>
+
+    <text x="260" y="660" class="cap f" font-size="13" font-weight="600" letter-spacing="0.08em" fill="#d9760a">FORWARD</text>
+
+    <!-- forward arrows -->
+    <line x1="365" y1="130" x2="365" y2="188" class="fwd" stroke="#1f2328" marker-end="url(#mf)"/>
+    <text x="373" y="164" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h, Δ</text>
+    <line x1="365" y1="240" x2="365" y2="298" class="fwd" stroke="#1f2328" marker-end="url(#mf)"/>
+    <text x="373" y="274" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h, B</text>
+    <line x1="365" y1="360" x2="365" y2="418" class="fwd" stroke="#1f2328" marker-end="url(#mf)"/>
+    <text x="373" y="394" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h′, B′</text>
+    <line x1="365" y1="470" x2="365" y2="528" class="fwd" stroke="#1f2328" marker-end="url(#mf)"/>
+    <text x="373" y="516" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h′, Δ′</text>
+
+    <!-- rank store -->
+    <rect x="20" y="190" width="170" height="170" rx="8" class="ent" fill="#ffffff" stroke="#1f2328"/>
+    <text x="105" y="214" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">rank store</text>
+    <text x="105" y="236" text-anchor="middle" class="sym" fill="#1f2328" font-family="IBM Plex Mono, Consolas, monospace">blocks B ≤ s−P</text>
+    <text x="105" y="254" text-anchor="middle" class="sym" fill="#1f2328" font-family="IBM Plex Mono, Consolas, monospace">deposits ∇B</text>
+    <text x="105" y="278" text-anchor="middle" class="sub" fill="#5f6b76" font-size="12">keyed (micro-batch, block)</text>
+    <text x="105" y="296" text-anchor="middle" class="sub" fill="#5f6b76" font-size="12">one per rank, shared by</text>
+    <text x="105" y="312" text-anchor="middle" class="sub" fill="#5f6b76" font-size="12">the rank's stages</text>
+    <text x="105" y="340" text-anchor="middle" class="note" fill="#1f6fb2" font-size="11.5">freed after the rank's last stage</text>
+
+    <line x1="190" y1="208" x2="258" y2="208" class="fwd" stroke="#1f2328" marker-end="url(#mf)"/>
+    <text x="224" y="203" text-anchor="middle" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">held B</text>
+    <line x1="260" y1="232" x2="192" y2="232" class="fwd" stroke="#1f2328" marker-end="url(#mf)"/>
+    <text x="224" y="247" text-anchor="middle" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">cache Δ</text>
+    <polyline points="260,330 224,330 224,300 192,300" class="fwd" stroke="#1f2328" marker-end="url(#mf)"/>
+    <text x="222" y="346" text-anchor="middle" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">commit new B</text>
+
+    <!-- backward column -->
+    <rect x="560" y="530" width="210" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44"/>
+    <text x="665" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">P2P recv</text>
+
+    <rect x="560" y="420" width="210" height="50" rx="8" class="ent" fill="#ffffff" stroke="#1f2328"/>
+    <text x="665" y="441" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">collect</text>
+    <text x="665" y="458" text-anchor="middle" class="sym" fill="#1f2328" font-family="IBM Plex Mono, Consolas, monospace">∇Δ′ += deposits of own B</text>
+
+    <rect x="560" y="190" width="210" height="50" rx="8" class="ent" fill="#ffffff" stroke="#1f2328"/>
+    <text x="665" y="211" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">split ∇B</text>
+    <text x="665" y="228" text-anchor="middle" class="sym" fill="#1f2328" font-family="IBM Plex Mono, Consolas, monospace">Δ part → wire, stored → deposit</text>
+
+    <rect x="560" y="90" width="210" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44"/>
+    <text x="665" y="115" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">P2P send</text>
+
+    <text x="560" y="660" class="cap b" font-size="13" font-weight="600" letter-spacing="0.08em" fill="#d92d20">BACKWARD</text>
+
+    <!-- backward arrows -->
+    <line x1="665" y1="530" x2="665" y2="472" class="bwd" stroke="#d92d20" marker-end="url(#mb)"/>
+    <text x="673" y="506" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">∇h′, ∇Δ′</text>
+    <line x1="560" y1="445" x2="472" y2="352" class="bwd" stroke="#d92d20" marker-end="url(#mb)"/>
+    <text x="500" y="418" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">backward</text>
+    <line x1="470" y1="312" x2="558" y2="220" class="bwd" stroke="#d92d20" marker-end="url(#mb)"/>
+    <text x="478" y="258" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">∇h, ∇B</text>
+    <line x1="665" y1="190" x2="665" y2="132" class="bwd" stroke="#d92d20" marker-end="url(#mb)"/>
+    <text x="673" y="164" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">∇h, ∇Δ</text>
+
+    <!-- store <-> backward: deposits in (from split), deposits out (to collect) -->
+    <polyline points="560,200 520,200 520,160 105,160 105,188" class="bwd" stroke="#d92d20" marker-end="url(#mb)"/>
+    <text x="480" y="154" text-anchor="end" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">deposit stored ∇B</text>
+    <polyline points="105,360 105,500 600,500 600,472" class="bwd" stroke="#d92d20" marker-end="url(#mb)"/>
+    <text x="230" y="494" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">deposits, counted against the tables</text>
+
+    <!-- notes -->
+    <text x="790" y="323" class="note" fill="#1f6fb2" font-size="11.5">last stage: aggregation</text>
+    <text x="790" y="339" class="note" fill="#1f6fb2" font-size="11.5">on (h, B), no send</text>
+    <text x="790" y="212" class="note" fill="#1f6fb2" font-size="11.5">tables: the same on</text>
+    <text x="790" y="228" class="note" fill="#1f6fb2" font-size="11.5">every rank, no collective</text>
+
+    <!-- divider -->
+    <line x1="960" y1="20" x2="960" y2="670" stroke="#d9d4c7" stroke-dasharray="4 6"/>
+
+    <!-- ===================== panel 2: cache off ===================== -->
+    <text x="1000" y="30" class="title" fill="#1f2328" font-size="15" font-weight="600">attn_res_cache off</text>
+    <text x="1160" y="30" class="sub" fill="#5f6b76" font-size="12">the whole stack on every hop</text>
+
+    <text x="1145" y="72" text-anchor="middle" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h, B  from stage s−1</text>
+    <text x="1145" y="604" text-anchor="middle" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h′, B′  to stage s+1</text>
+    <text x="1370" y="604" text-anchor="middle" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">∇h′, ∇B′  from stage s+1</text>
+    <text x="1370" y="72" text-anchor="middle" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">∇h, ∇B  to stage s−1</text>
+
+    <rect x="1040" y="90" width="210" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44"/>
+    <text x="1145" y="115" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">P2P recv</text>
+    <rect x="1040" y="300" width="210" height="60" rx="8" class="ent" fill="#ffffff" stroke="#1f2328"/>
+    <text x="1145" y="324" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">layers l..m</text>
+    <text x="1145" y="343" text-anchor="middle" class="sym" fill="#1f2328" font-family="IBM Plex Mono, Consolas, monospace">B is the leaf, nothing assembled</text>
+    <rect x="1040" y="530" width="210" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44"/>
+    <text x="1145" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">P2P send</text>
+    <text x="1040" y="660" class="cap f" font-size="13" font-weight="600" letter-spacing="0.08em" fill="#d9760a">FORWARD</text>
+
+    <line x1="1145" y1="130" x2="1145" y2="298" class="fwd" stroke="#1f2328" marker-end="url(#mf)"/>
+    <text x="1153" y="220" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h, B</text>
+    <line x1="1145" y1="360" x2="1145" y2="528" class="fwd" stroke="#1f2328" marker-end="url(#mf)"/>
+    <text x="1153" y="450" class="lf" fill="#d9760a" font-family="IBM Plex Mono, Consolas, monospace">h′, B′</text>
+
+    <rect x="1290" y="530" width="160" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44"/>
+    <text x="1370" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">P2P recv</text>
+    <rect x="1290" y="90" width="160" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44"/>
+    <text x="1370" y="115" text-anchor="middle" class="t" fill="#1f2328" font-size="13.5" font-weight="600">P2P send</text>
+    <text x="1290" y="660" class="cap b" font-size="13" font-weight="600" letter-spacing="0.08em" fill="#d92d20">BACKWARD</text>
+
+    <polyline points="1370,530 1370,345 1252,345" class="bwd" stroke="#d92d20" marker-end="url(#mb)"/>
+    <text x="1378" y="445" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">∇h′, ∇B′</text>
+    <polyline points="1250,315 1330,315 1330,132" class="bwd" stroke="#d92d20" marker-end="url(#mb)"/>
+    <text x="1338" y="225" class="lb" fill="#d92d20" font-family="IBM Plex Mono, Consolas, monospace">∇h, ∇B</text>
+
+    <text x="1040" y="392" class="note" fill="#1f6fb2" font-size="11.5">no store, no deposits;</text>
+    <text x="1040" y="408" class="note" fill="#1f6fb2" font-size="11.5">B grows with the stage index</text>
+  </svg>
