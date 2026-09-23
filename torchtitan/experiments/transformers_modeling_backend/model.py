@@ -1222,8 +1222,9 @@ class HFTransformerModel(BaseModel):
         """Build the attention mask (when positions are present), CP-shard, return."""
         del max_num_documents, max_context_length
         # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
+        from torchtitan.distributed.context_parallel import ContextParallelPartitioner
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
         )
 
         batch: dict[str, Any] = dict(input_dict)
@@ -1236,12 +1237,16 @@ class HFTransformerModel(BaseModel):
                     batch["attention_masks"] = masks
 
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                None,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+            cp_mesh = parallel_dims.get_mesh("cp")
+            partitioner = ContextParallelPartitioner(
+                input_dict=batch,
+                input_shardings=None,
+                cp_mesh=cp_mesh,
+                load_balancer_config=parallelism.context_parallel_load_balancer,
+            )
+            batch = partitioner.shard_inputs(batch)
+            batch = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(
+                batch, partitioner, KVAllGatherCPFlexInnerAttention.Config()
             )
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types
         from torchtitan.models.common.decoder_sharding import decoder_input_sharding

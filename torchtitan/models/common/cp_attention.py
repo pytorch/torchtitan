@@ -10,25 +10,27 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, TYPE_CHECKING
+from typing import Any, cast, Literal
 
 import spmd_types as spmd
 
 import torch
+from torch.nn.attention.flex_attention import BlockMask
+from torch.utils import _pytree as pytree
 
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.distributed.context_parallel import ContextParallelPartitioner
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 
-if TYPE_CHECKING:
-    from torch.distributed.device_mesh import DeviceMesh
-
 __all__ = [
     "CPInnerAttention",
     "KVAllGatherCPFlexInnerAttention",
+    "LoadBalancedCPInnerAttention",
     "UlyssesCPInnerAttention",
     "UlyssesCPFlexInnerAttention",
     "UlyssesCPVarlenInnerAttention",
@@ -36,29 +38,46 @@ __all__ = [
 
 _TOKEN_DIM = 0
 _HEAD_DIM = 1
+_BLOCK_MASK_QUERY_DIM = 2
 
 
 class CPInnerAttention(ABC):
-    """Inner attention that owns its context-parallel behavior."""
+    """Inner attention that owns its context-parallel implementation.
+
+    Subclasses implement the CP attention algorithm and tensor movement.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         pass
 
+
+class LoadBalancedCPInnerAttention(CPInnerAttention):
+    """CP attention backend that aligns metadata with its token partition."""
+
     @classmethod
     @abstractmethod
-    def cp_shard(
+    def cp_shard_metadata(
         cls,
         input_dict: dict[str, Any],
-        input_shardings: dict[str, Any] | None,
-        cp_mesh: "DeviceMesh",
-        load_balancer_type: str | None,
-        ptrr_mask_key: str | None,
+        partitioner: ContextParallelPartitioner,
+        config: CPInnerAttention.Config,
     ) -> dict[str, Any]:
-        """Shard model inputs for this attention implementation."""
+        """Shard metadata to match the model-input token partition.
+
+        Args:
+            input_dict: Model-forward inputs containing any attention metadata.
+            partitioner: The current batch's CP partition, shared with model
+                input sharding.
+            config: The attention instance's configuration.
+
+        Returns:
+            ``input_dict`` with backend-owned metadata updated as required by
+            the attention layout.
+        """
 
 
-class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
+class KVAllGatherCPFlexInnerAttention(LoadBalancedCPInnerAttention, FlexInnerAttention):
     """FlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
@@ -71,25 +90,71 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
     @classmethod
-    def cp_shard(
+    def cp_shard_metadata(
         cls,
         input_dict: dict[str, Any],
-        input_shardings: dict[str, Any] | None,
-        cp_mesh: "DeviceMesh",
-        load_balancer_type: str | None,
-        ptrr_mask_key: str | None,
+        partitioner: ContextParallelPartitioner,
+        config: CPInnerAttention.Config,
     ) -> dict[str, Any]:
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
+        """Shard BlockMask metadata for K/V all-gather context parallelism.
 
-        return prepare_context_parallel_input(
-            input_dict,
-            input_shardings,
-            cp_mesh,
-            load_balancer_type,
-            ptrr_mask_key,
+        ``attention_masks`` may be a single ``BlockMask`` or a mapping whose
+        values include ``BlockMask``, ``VarlenMetadata``, or ``None``. Every
+        ``BlockMask`` is sharded along its Q sequence dimension using the same
+        shared partitioner as the named model inputs. The mapping structure
+        and all non-``BlockMask`` metadata are preserved.
+
+        Args:
+            input_dict: Model-forward inputs containing ``attention_masks`` as
+                a ``BlockMask`` or a mapping containing ``BlockMask`` values.
+            partitioner: The current batch's shared CP partition.
+
+        Returns:
+            The same ``input_dict`` object, mutated in place with each
+            ``BlockMask`` replaced by its query-sharded value. When no attention
+            masks or ``BlockMask`` values are present, it is returned
+            unchanged.
+        """
+        del config
+        attention_masks = input_dict.get("attention_masks")
+        if attention_masks is None:
+            return input_dict
+
+        if not isinstance(attention_masks, (BlockMask, Mapping)):
+            raise ValueError(
+                "K/V all-gather context parallelism requires BlockMask metadata, "
+                f"but got {type(attention_masks).__name__}."
+            )
+
+        # Collect only BlockMask leaves so they can be sharded in one collective.
+        block_masks = [
+            mask
+            for mask in pytree.tree_leaves(
+                attention_masks,
+                is_leaf=lambda value: isinstance(value, BlockMask),
+            )
+            if isinstance(mask, BlockMask)
+        ]
+        if not block_masks:
+            return input_dict
+
+        sharded_masks = cast(
+            "tuple[BlockMask, ...]",
+            partitioner.shard_buffers(
+                block_masks,
+                (_BLOCK_MASK_QUERY_DIM,) * len(block_masks),
+            ),
         )
+        sharded_mask_iter = iter(sharded_masks)
+        # Replace BlockMask leaves in traversal order and preserve other metadata.
+        input_dict["attention_masks"] = pytree.tree_map(
+            lambda value: (
+                next(sharded_mask_iter) if isinstance(value, BlockMask) else value
+            ),
+            attention_masks,
+            is_leaf=lambda value: isinstance(value, BlockMask),
+        )
+        return input_dict
 
     def forward(
         self,
@@ -117,36 +182,11 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
 
 
 class UlyssesCPInnerAttention(CPInnerAttention):
-    """Move CP sharding between the token and head dimensions."""
+    """Move CP sharding from tokens to heads while keeping metadata global."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config):
         pass
-
-    @classmethod
-    def cp_shard(
-        cls,
-        input_dict: dict[str, Any],
-        input_shardings: dict[str, Any] | None,
-        cp_mesh: "DeviceMesh",
-        load_balancer_type: str | None,
-        ptrr_mask_key: str | None,
-    ) -> dict[str, Any]:
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
-        attention_masks = input_dict.pop("attention_masks", None)
-        prepare_context_parallel_input(
-            input_dict,
-            input_shardings,
-            cp_mesh,
-            None,
-            None,
-        )
-        if attention_masks is not None:
-            input_dict["attention_masks"] = attention_masks
-        return input_dict
 
     def forward(
         self,

@@ -6,7 +6,7 @@
 
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import ANY, Mock, patch
 
 import spmd_types as spmd
 import torch
@@ -77,14 +77,22 @@ def test_hf_no_mask_when_get_attention_masks_returns_none(monkeypatch):
 def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     calls = []
 
-    def prepare(batch, input_shardings, cp_mesh, *_args):
-        assert input_shardings is None
-        assert cp_mesh == "cp_mesh"
-        calls.append("cp")
+    class Partitioner:
+        def shard_inputs(self, input_dict):
+            calls.append("cp_input")
+            return input_dict
+
+    partitioner = Partitioner()
+
+    create_partitioner = Mock(return_value=partitioner)
+
+    def shard_metadata(batch, received_partitioner, _config):
+        assert received_partitioner is partitioner
+        calls.append("cp_metadata")
         return batch
 
     def annotate(_parallel_dims, batch, input_sharding):
-        assert calls == ["cp"]
+        assert calls == ["cp_input", "cp_metadata"]
         assert set(batch) == {"input", "labels", "positions"}
         assert input_sharding["input"].local_type[MeshAxisName.TP] is spmd.R
         assert input_sharding["labels"].local_type[MeshAxisName.TP] is spmd.I
@@ -93,8 +101,13 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         return batch
 
     monkeypatch.setattr(
-        "torchtitan.distributed.context_parallel.api.prepare_context_parallel_input",
-        prepare,
+        "torchtitan.distributed.context_parallel.ContextParallelPartitioner",
+        create_partitioner,
+    )
+    monkeypatch.setattr(
+        "torchtitan.models.common.cp_attention."
+        "KVAllGatherCPFlexInnerAttention.cp_shard_metadata",
+        shard_metadata,
     )
     monkeypatch.setattr(
         "torchtitan.distributed.spmd_types.annotate_input_spmd_types", annotate
@@ -119,8 +132,14 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     _, _, extra_kwargs = model.preprocess_inputs(
         batch,
         parallel_dims=parallel_dims,
-        parallelism=ParallelismConfig(),
+        parallelism=ParallelismConfig(context_parallel_load_balancer=None),
     )
 
-    assert calls == ["cp", "spmd"]
+    create_partitioner.assert_called_once_with(
+        input_dict=ANY,
+        input_shardings=None,
+        cp_mesh="cp_mesh",
+        load_balancer_config=None,
+    )
+    assert calls == ["cp_input", "cp_metadata", "spmd"]
     assert extra_kwargs["attention_masks"] is dense_attention_mask
