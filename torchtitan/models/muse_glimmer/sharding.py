@@ -26,8 +26,6 @@ from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
     set_vision_transformer_block_sharding_config,
     vision_invariant_linear_config,
-    vision_sequence_parallel_input_config,
-    vision_sequence_parallel_output_config,
 )
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -223,18 +221,6 @@ def set_muse_glimmer_vision_sharding_config(
     )
     encoder_cfg.ln_pre.sharding_config = invariant_norm_config(include_cp_axis=True)
     encoder_cfg.ln_post.sharding_config = invariant_norm_config(include_cp_axis=True)
-    encoder_cfg.sequence_parallel_input.sharding_config = (
-        vision_sequence_parallel_input_config(
-            enable_sp=enable_sp,
-            include_cp_axis=True,
-        )
-    )
-    encoder_cfg.sequence_parallel_output.sharding_config = (
-        vision_sequence_parallel_output_config(
-            enable_sp=enable_sp,
-            include_cp_axis=True,
-        )
-    )
 
     # Per-block TP via the shared helper (norms, q/k/v/proj, fc1/fc2, and the
     # inner-attention local SPMD region), same as qwen3_5/kimi_k2_7. ``rope_cache`` is a

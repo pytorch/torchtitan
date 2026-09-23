@@ -74,11 +74,7 @@ def invariant_norm_config(*, include_cp_axis: bool = False) -> ShardingConfig:
         in_src_shardings={
             "input": _vision_activation_placement(include_cp_axis=include_cp_axis),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(include_cp_axis=include_cp_axis),
-        },
         out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
-        out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
     )
 
 
@@ -101,45 +97,7 @@ def vision_norm_config(
             "bias": _vision_state_placement(tp=spmd.I, include_cp_axis=include_cp_axis),
         },
         in_src_shardings={"input": activation_layout},
-        in_dst_shardings={"input": activation_layout},
         out_src_shardings=activation_layout,
-        out_dst_shardings=activation_layout,
-    )
-
-
-def vision_sequence_parallel_input_config(
-    *,
-    enable_sp: bool,
-    include_cp_axis: bool = False,
-) -> ShardingConfig:
-    """Shard embedded vision tokens before the transformer block stack."""
-    input_layout = _vision_activation_placement(include_cp_axis=include_cp_axis)
-    output_layout = _vision_activation_placement(
-        tp=spmd.S(0) if enable_sp else spmd.I,
-        include_cp_axis=include_cp_axis,
-    )
-    return ShardingConfig(
-        in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": output_layout},
-        out_src_shardings=output_layout,
-    )
-
-
-def vision_sequence_parallel_output_config(
-    *,
-    enable_sp: bool,
-    include_cp_axis: bool = False,
-) -> ShardingConfig:
-    """Gather vision tokens after the transformer block stack."""
-    input_layout = _vision_activation_placement(
-        tp=spmd.S(0) if enable_sp else spmd.I,
-        include_cp_axis=include_cp_axis,
-    )
-    output_layout = _vision_activation_placement(include_cp_axis=include_cp_axis)
-    return ShardingConfig(
-        in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": output_layout},
-        out_src_shardings=output_layout,
     )
 
 
