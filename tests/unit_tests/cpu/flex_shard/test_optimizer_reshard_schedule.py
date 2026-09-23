@@ -62,7 +62,7 @@ class TestMuonPlanConstruction(unittest.TestCase):
                 [{"params": params, "param_names": names}],
                 compute_sharding_by_fqn={
                     name: ComputeLayout(
-                        {"dp_shard": BlockShard(dim=0, block_size=matrix_rows)}
+                        {"dp_shard": BlockShard(dim=0, block_sizes=(matrix_rows,))}
                     )
                     for name in names
                 },

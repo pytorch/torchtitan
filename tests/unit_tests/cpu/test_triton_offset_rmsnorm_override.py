@@ -30,7 +30,7 @@ class TestTritonOffsetRMSNormOverride(unittest.TestCase):
         _REGISTRY.setdefault(_OVERRIDE_TARGET, _OFFSET_RMSNORM_OVERRIDE)
 
     def test_override_replaces_all_qwen35_offset_norms(self):
-        config = model_registry("debugmodel", attn_backend="flex").model
+        config = model_registry("debugmodel", attn_backend="flex")
         num_offset_norms = len(list(config.traverse(OffsetRMSNorm.Config)))
 
         replacements = apply_overrides(

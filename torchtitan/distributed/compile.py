@@ -42,13 +42,16 @@ _regional_inductor_enabled: bool = False
 def apply_compile(
     model: nn.Module,
     *,
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     parallel_dims: ParallelDims,
 ) -> None:
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    if compile_config is None:
+        return
+
     _maybe_enable_async_tp(
         compile_config,
         parallel_dims.get_dense_tp_mesh() if parallel_dims.tp_enabled else None,
@@ -76,11 +79,15 @@ def apply_compile(
 
 
 def _maybe_enable_async_tp(
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     tp_mesh: DeviceMesh | None,
 ) -> None:
     """Configure Inductor's async TP pass for the provided TP mesh."""
-    if not compile_config.enable_async_tensor_parallel or tp_mesh is None:
+    if (
+        compile_config is None
+        or not compile_config.enable_async_tensor_parallel
+        or tp_mesh is None
+    ):
         return
 
     group_name = tp_mesh.get_group().group_name

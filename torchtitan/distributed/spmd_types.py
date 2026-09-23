@@ -39,6 +39,7 @@ __all__ = [
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
+    "spmd_dense_sp_enabled",
     "spmd_mesh_group",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
@@ -111,10 +112,12 @@ def set_spmd_meshes(
     *,
     dense_mesh: DeviceMesh,
     sparse_mesh: DeviceMesh | None,
+    dense_sp_enabled: bool,
 ) -> None:
     """Register the SPMD meshes for dense and sparse runtime regions."""
     _MESH_TLS.dense_mesh = dense_mesh
     _MESH_TLS.sparse_mesh = sparse_mesh
+    _MESH_TLS.dense_sp_enabled = dense_sp_enabled
 
 
 def spmd_dense_mesh() -> DeviceMesh:
@@ -122,6 +125,11 @@ def spmd_dense_mesh() -> DeviceMesh:
     mesh = getattr(_MESH_TLS, "dense_mesh", None)
     assert mesh is not None, "SPMD dense mesh has not been registered"
     return mesh
+
+
+def spmd_dense_sp_enabled() -> bool:
+    """Return whether sequence parallelism is enabled in the dense region."""
+    return getattr(_MESH_TLS, "dense_sp_enabled", False)
 
 
 def spmd_sparse_mesh() -> DeviceMesh | None:
@@ -260,7 +268,7 @@ def annotate_replicated_parameters(
 ) -> None:
     """Annotate undistributed model parameters as replicated.
 
-    Call this before state-sharding modules with ``Module.parallelize``. That
+    Call this before state-sharding modules with ``Module._parallelize``. That
     replaces declared parameters with their model-parallel shards, while these
     annotations remain on parameters without a ``ShardingConfig`` for FSDP.
     """

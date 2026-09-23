@@ -24,13 +24,18 @@ config = apply_transforms(
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.
 
-Use `transform_model_config_` when there is no trainer config, such as with a bare
-`ModelSpec`. It rewrites the model config in place and returns the root. It does
-not copy or validate the config.
+Legacy `ModelConfigConverter` instances passed to `model_registry` run before
+all model config transforms. In particular, apply quantization in
+`model_registry` before applying `LoRATransform`; running a converter over a
+LoRA-transformed tree can replace an adapter config.
+
+Use `transform_model_config_` when there is no trainer config. It rewrites the
+model config in place and returns the root. It does not copy or validate the
+config.
 
 ```python
-spec = model_registry("0.6B", attn_backend="varlen")
-spec.model = transform_model_config_(spec.model, [LMHeadCastTransform()])
+model_config = model_registry("0.6B", attn_backend="varlen")
+model_config = transform_model_config_(model_config, [LMHeadCastTransform()])
 ```
 
 ## What belongs here
@@ -52,6 +57,11 @@ attention algorithm and metadata format.
 
 This package may import other `torchtitan` packages. Those packages must not
 import this package. Recipes import and apply transforms.
+
+Model registry functions temporarily violate this direction while they accept
+and apply the legacy `ModelConfigConverter` interface. This dependency will be
+removed when config registries move to `torchtitan_recipes` and converters are
+replaced by `ModelConfigTransform`.
 
 Keep shared types outside this package. For example, `CPInnerAttention` lives
 with the attention code. Only the transform that installs it belongs here.
