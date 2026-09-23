@@ -21,10 +21,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.nn_modules import GELU, LayerNorm
+from torchtitan.models.common.nn_modules import GELU, Identity, LayerNorm
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
+    validate_vision_sequence_parallel_input,
     VisionTransformerBlock,
 )
 from torchtitan.protocols.module import Module, ModuleDict
@@ -319,6 +320,12 @@ class Qwen35VisionEncoder(Module):
         block: VisionTransformerBlock.Config
         rotary_pos_emb: VisionRotaryEmbedding.Config
         merger: PatchMerger.Config
+        sequence_parallel_input: Identity.Config = field(
+            default_factory=Identity.Config
+        )
+        sequence_parallel_output: Identity.Config = field(
+            default_factory=Identity.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -343,6 +350,8 @@ class Qwen35VisionEncoder(Module):
             {str(idx): config.block.build() for idx in range(config.num_layers)}
         )
 
+        self.sequence_parallel_input = config.sequence_parallel_input.build()
+        self.sequence_parallel_output = config.sequence_parallel_output.build()
         self.merger = config.merger.build()
 
     def compute_position_embeddings(
@@ -422,6 +431,8 @@ class Qwen35VisionEncoder(Module):
         x = self.patch_embed(pixel_values)
         learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = x + learned_pos
+        validate_vision_sequence_parallel_input(x)
+        x = self.sequence_parallel_input(x)
 
         # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
@@ -440,4 +451,5 @@ class Qwen35VisionEncoder(Module):
                 attention_mask=attention_mask,
             )
 
+        x = self.sequence_parallel_output(x)
         return self.merger(x)

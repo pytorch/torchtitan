@@ -28,6 +28,11 @@ import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import (
+    spmd_dense_sp_enabled,
+    spmd_mesh_size,
+)
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.protocols.module import Module
@@ -38,6 +43,19 @@ compiled_create_block_mask = torch.compile(create_block_mask)
 RopeApply = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]
 ]
+
+
+def validate_vision_sequence_parallel_input(x_TD: torch.Tensor) -> None:
+    """Validate that packed vision tokens can be sharded evenly over TP."""
+    if not spmd_dense_sp_enabled():
+        return
+
+    tp_size = spmd_mesh_size(MeshAxisName.TP)
+    if x_TD.shape[0] % tp_size != 0:
+        raise ValueError(
+            "Vision sequence parallelism requires the packed patch-token count "
+            f"({x_TD.shape[0]}) to be divisible by the TP degree ({tp_size})."
+        )
 
 
 def create_block_diagonal_mask(
