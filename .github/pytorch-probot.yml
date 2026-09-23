@@ -1,5 +1,8 @@
 ciflow_push_tags:
   - ciflow/b200
+  - ciflow/fake-pg
   - ciflow/h100.8
+  - ciflow/real-pg
   - ciflow/rl
+  - ciflow/rocm
 labeler_config: labeler.yml

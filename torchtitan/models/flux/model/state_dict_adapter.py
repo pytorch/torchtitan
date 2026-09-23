@@ -4,17 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import re
 from collections import defaultdict
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
-from .model import FluxModel
+if TYPE_CHECKING:
+    from .model import FluxModel
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +167,7 @@ class FluxStateDictAdapter(StateDictAdapter):
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """Convert TorchTitan DCP state dict to HuggingFace safetensors format."""
+        state_dict = self._native_fused_linears_to_hf(state_dict)
 
         to_hf_map_direct = {
             v: k for k, v in self.from_hf_map_direct.items() if v is not None
@@ -294,4 +298,4 @@ class FluxStateDictAdapter(StateDictAdapter):
             value = torch.cat(combine_values, dim=0)
             state_dict[tt_fqn] = value
 
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)

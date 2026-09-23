@@ -7,7 +7,7 @@
 """ShardingConfig-based TP setup for HF model modules.
 
 Sets ``_sharding_config`` on every HF sub-module so that a single
-``model.parallelize(parallel_dims)`` call handles all TP distribution
+``model._parallelize(parallel_dims)`` call handles all TP distribution
 and forward wrapping via the Module protocol.
 
 The flex-attention kernel uses a local SPMD region (via ``_attach_flex_kernel``)
@@ -15,7 +15,7 @@ to declare the q/k/v layouts around the flex HOP, mirroring Titan's attention.
 Other HF internals operate on plain tensors carrying local SPMD annotations.
 
 MoE layers are already Titan Module instances with ShardingConfig and
-are handled by ``model.parallelize()`` directly.
+are handled by ``model._parallelize()`` directly.
 """
 
 import inspect

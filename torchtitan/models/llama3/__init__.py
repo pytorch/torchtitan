@@ -9,7 +9,11 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
+
 from torchtitan.models.common import (
     ComplexRoPE,
     compute_ffn_hidden_dim,
@@ -26,17 +30,10 @@ from torchtitan.models.common.config_utils import (
     TpGemmBackend,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
-from torchtitan.models.utils import validate_converter_order
-
-from torchtitan.protocols.model import ModelConfigConverter
-from torchtitan.protocols.model_spec import ModelSpec
 
 from .model import Llama3Model, Llama3TransformerBlock
-from .parallelize import parallelize_llama
-from .state_dict_adapter import Llama3StateDictAdapter
 
 __all__ = [
-    "parallelize_llama",
     "Llama3Model",
     "llama3_configs",
 ]
@@ -114,11 +111,12 @@ def _debugmodel(
     tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
+    n_heads: int = 16,
 ) -> Llama3Model.Config:
     dim = 256
-    n_heads = 16
     n_layers = 6
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=2048,
         tok_embeddings=Embedding.Config(
@@ -157,6 +155,7 @@ def _1b(
     n_layers = 16
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
@@ -203,6 +202,7 @@ def _3b(
     n_layers = 28
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
@@ -249,6 +249,7 @@ def _8b(
     n_layers = 32
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
@@ -292,6 +293,7 @@ def _70b(
     n_layers = 80
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
@@ -335,6 +337,7 @@ def _405b(
     n_layers = 126
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
@@ -368,6 +371,9 @@ def _405b(
 
 llama3_configs = {
     "debugmodel": (_debugmodel, 131072),
+    # Preserve the debug model's dimensions and QKV GEMM shape, but use
+    # 32-wide heads so MXFP8 weight-scale tiles align with head boundaries.
+    "debugmodel_mxfp8": (partial(_debugmodel, n_heads=8), 131072),
     "1B": (_1b, 131072),
     "3B": (_3b, 131072),
     "8B": (_8b, 131072),
@@ -383,7 +389,7 @@ def model_registry(
     attn_backend: str = "flex",
     tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> Llama3Model.Config:
     get_config, max_context_len = llama3_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -397,16 +403,7 @@ def model_registry(
         seq_len=context_len,
     )
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
-    return ModelSpec(
-        name="llama3",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_llama,
-        pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=None,
-        state_dict_adapter=Llama3StateDictAdapter,
-    )
+    return config

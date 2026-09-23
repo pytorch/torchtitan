@@ -77,6 +77,9 @@ from torch._functorch.partitioners import (
 )
 from torch.fx._lazy_graph_module import _make_graph_module
 
+from torchtitan.experiments.graph_trainer.fsdp_patterns import (
+    find_fsdp_unshard_outputs_by_param,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     base_tensor_for_mutation_target,
     is_getitem_node,
@@ -327,11 +330,12 @@ def _forward_mutations_to_materialize(
 
 
 def _backward_passthrough_placeholders(
+    joint: fx.GraphModule,
     *,
     bwd_outputs: Sequence[object],
     backward_only_names: set[str],
 ) -> list[fx.Node]:
-    """Preserve metadata placeholders returned by backward directly.
+    """Preserve forward placeholders needed by backward.
 
     minimal_fx_tracer unwraps tensor subclasses into plain graph values. A
     DTensor gradient, for example, may flatten to ``(local_grad, device_mesh)``,
@@ -341,12 +345,18 @@ def _backward_passthrough_placeholders(
     will not select them; they still must be available to the extracted
     backward graph.
     """
+    backward_nodes = node_closure(bwd_outputs)
+    placeholders = list(joint.graph.find_nodes(op="placeholder"))
+    backward_placeholders = placeholder_dependencies(bwd_outputs)
+    backward_placeholders.update(
+        param
+        for param, outputs in find_fsdp_unshard_outputs_by_param(placeholders).items()
+        if any(output in backward_nodes for output in outputs)
+    )
     return unique_in_order(
         node
-        for node in bwd_outputs
-        if isinstance(node, fx.Node)
-        and node.op == "placeholder"
-        and node.name not in backward_only_names
+        for node in placeholders
+        if node in backward_placeholders and node.name not in backward_only_names
     )
 
 
@@ -508,9 +518,10 @@ def partition_joint_graph(
         backward_only_names=backward_only_names,
     )
 
-    # 2. Add metadata-only placeholders needed to rewrap backward outputs.
+    # 2. Add forward placeholders needed by backward.
     saved_values.extend(
         _backward_passthrough_placeholders(
+            joint,
             bwd_outputs=bwd_outputs,
             backward_only_names=backward_only_names,
         )
