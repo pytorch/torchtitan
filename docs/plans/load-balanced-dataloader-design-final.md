@@ -97,6 +97,8 @@ metadata. For the current whole-microbatch strategy it:
    indices as synchronization boundaries.
 6. Keeps the ordinary assignment unless the candidate score is better. A
    single-rank group uses the heavy-first candidate when the scores tie.
+7. Reorders the selected plan's complete accumulation steps by descending
+   synchronized cost so independent groups follow the same temporal convention.
 
 The score minimizes the sum of per-accumulation maximum DP-rank totals, then
 worst DP skew, then moved payload bytes.

@@ -133,6 +133,62 @@ def _score_assignments(
     return synchronized_cost, worst_dp_skew, moved_payload_bytes
 
 
+def _order_accumulation_steps_heavy_first(
+    assignments: Sequence[BinAssignment],
+    items_by_id: dict[StableId, PackableItem],
+    bins: Sequence[PackingBin],
+) -> tuple[BinAssignment, ...]:
+    """Order complete accumulation steps by descending synchronized cost."""
+    assignment_by_bin = {assignment.bin_id: assignment for assignment in assignments}
+    bins_by_coordinate = {
+        (
+            bin_.accumulation_index,
+            bin_.logical_dp_rank,
+            bin_.pp_microbatch_index,
+        ): bin_
+        for bin_ in bins
+    }
+    costs_by_accumulation_and_rank: dict[tuple[int, int], int] = defaultdict(int)
+    for bin_ in bins:
+        costs_by_accumulation_and_rank[
+            (bin_.accumulation_index, bin_.logical_dp_rank)
+        ] += sum(
+            items_by_id[item_id].cost
+            for item_id in assignment_by_bin[bin_.stable_id].item_ids
+        )
+
+    accumulation_indices = sorted({bin_.accumulation_index for bin_ in bins})
+    logical_ranks = sorted({bin_.logical_dp_rank for bin_ in bins})
+    source_accumulations = sorted(
+        accumulation_indices,
+        key=lambda accumulation_index: (
+            -max(
+                costs_by_accumulation_and_rank[(accumulation_index, logical_rank)]
+                for logical_rank in logical_ranks
+            ),
+            accumulation_index,
+        ),
+    )
+    source_by_destination = dict(zip(accumulation_indices, source_accumulations))
+
+    ordered_assignments = []
+    for destination_bin in sorted(bins, key=_bin_order):
+        source_bin = bins_by_coordinate[
+            (
+                source_by_destination[destination_bin.accumulation_index],
+                destination_bin.logical_dp_rank,
+                destination_bin.pp_microbatch_index,
+            )
+        ]
+        ordered_assignments.append(
+            BinAssignment(
+                bin_id=destination_bin.stable_id,
+                item_ids=assignment_by_bin[source_bin.stable_id].item_ids,
+            )
+        )
+    return tuple(ordered_assignments)
+
+
 class WholeMicrobatchBalancer(Configurable):
     """Balance indivisible microbatches across accumulation steps and DP ranks.
 
@@ -182,6 +238,14 @@ class WholeMicrobatchBalancer(Configurable):
             (candidate_assignments, candidate_score)
             if use_candidate
             else (baseline_assignments, baseline_score)
+        )
+        # Independent balancing groups do not communicate their schedules. Give
+        # every selected plan the same heavy-first temporal convention so costly
+        # accumulation steps tend to overlap globally instead of serializing.
+        assignments = _order_accumulation_steps_heavy_first(
+            assignments,
+            items_by_id,
+            bin_list,
         )
 
         return LoadBalancePlan(

@@ -120,18 +120,20 @@ def test_already_balanced_plan_is_unchanged() -> None:
     assert _item_ids_by_slot(plan, bins) == [(0,), (1,), (2,), (3,)]
 
 
-def test_multi_rank_exact_metric_tie_keeps_baseline() -> None:
+def test_multi_rank_selected_plan_is_ordered_heavy_first() -> None:
     bins = [_bin(rank, accumulation) for accumulation in range(2) for rank in range(2)]
     items = [
-        _item(0, 5, bins[2]),
-        _item(1, 5, bins[3]),
-        _item(2, 5, bins[0]),
-        _item(3, 5, bins[1]),
+        _item(0, 1, bins[0]),
+        _item(1, 1, bins[1]),
+        _item(2, 10, bins[2]),
+        _item(3, 10, bins[3]),
     ]
 
     plan = WholeMicrobatchBalancer.Config().build().plan(items, bins)
 
-    assert plan.is_unchanged
+    assert _item_ids_by_slot(plan, bins) == [(2,), (3,), (0,), (1,)]
+    assert plan.predicted_cost == plan.baseline_predicted_cost == 11
+    assert plan.moved_payload_bytes == 0
 
 
 def test_plan_is_independent_of_input_order() -> None:
