@@ -25,6 +25,8 @@ from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
+    gather_vision_sequence,
+    shard_vision_sequence,
     VisionTransformerBlock,
 )
 from torchtitan.protocols.module import Module, ModuleDict
@@ -422,6 +424,7 @@ class Qwen35VisionEncoder(Module):
         x = self.patch_embed(pixel_values)
         learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = x + learned_pos
+        x = shard_vision_sequence(x)
 
         # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
@@ -440,4 +443,5 @@ class Qwen35VisionEncoder(Module):
                 attention_mask=attention_mask,
             )
 
+        x = gather_vision_sequence(x)
         return self.merger(x)

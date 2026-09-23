@@ -41,6 +41,8 @@ from torchtitan.models.common import ComplexRoPE, Linear
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
+    gather_vision_sequence,
+    shard_vision_sequence,
     VisionTransformerBlock,
 )
 from torchtitan.protocols.module import Module, ModuleDict
@@ -484,14 +486,14 @@ class MuseGlimmerVisionEncoder(Module):
 
         # Phase 2: concatenate, build masks, run the transformer once.
         x = torch.cat(all_x, dim=0)
+        total_tokens = x.shape[0]
+        x = shard_vision_sequence(x)
         freqs_cis = torch.cat(all_freqs, dim=0)
         # Named to match the shared block's ``rope_cache`` arg, but here it is not
         # a persistent cache: these 2D-RoPE freqs are recomputed every forward
         # (per image in _make_2d_rope, then concatenated). Reshape to
         # [total_tokens, 1, head_dim//2] to broadcast over attention heads.
         rope_cache = freqs_cis.unsqueeze(1)
-        total_tokens = x.shape[0]
-
         sp_slens_cat = torch.cat(all_sp_slens) if all_sp_slens else None
         global_slens = _annotate_vision_activation_type(
             torch.tensor(all_global_slens, device=device, dtype=torch.int32)
@@ -520,6 +522,8 @@ class MuseGlimmerVisionEncoder(Module):
                 rope_apply=ComplexRoPE.apply_rotary_emb,
                 attention_mask=mask,
             )
+
+        x = gather_vision_sequence(x)
 
         # Phase 3: split per image, finalize each.
         all_features: list[torch.Tensor] = []
