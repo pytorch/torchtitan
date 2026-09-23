@@ -9,6 +9,7 @@
 `TrainingMicrobatch`es;
 """
 
+import heapq
 import logging
 import math
 from dataclasses import dataclass, replace
@@ -309,9 +310,8 @@ class Batcher(Configurable):
            bins, with each bin becoming one flat trainer input.
         2. Round the number of bins up to a multiple of D. With PP this target
            will be ``G * M * D``; the current M=1 target is ``G * D``.
-        3. Fill added slots by recursively splitting the highest-workload
-           multi-sample bin using two-way longest-processing-time scheduling.
-           Keep an empty bin only when no bin can be split.
+        3. Fill each added slot from the current highest-workload multi-sample
+           bins. Keep an empty bin only when no sample can be moved.
         4. Estimate each bin workload as ``sum(L**2)`` over its samples.
         5. Sort all bins by workload in descending order.
         6. Partition the sorted bins into consecutive D-wide groups, so the D
@@ -355,7 +355,7 @@ class Batcher(Configurable):
         # Step 2: make the current M=1 grid rectangular in D.
         target_num_bins = math.ceil(len(bins) / self._dp_degree) * self._dp_degree
 
-        # Step 3: prefer balanced LPT splits over fully padded bins.
+        # Step 3: redistribute samples from heavy bins before adding padding.
         self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
 
         # Steps 4-5: estimate full-attention work and order bins by that cost.
@@ -378,44 +378,80 @@ class Batcher(Configurable):
         """Estimate packed full-attention work as the sum of squared lengths."""
         return sum(self.num_tokens_to_pack(sample) ** 2 for sample in training_samples)
 
-    def _split_by_attention_workload(
-        self, training_samples: list[TrainingSample]
-    ) -> tuple[list[TrainingSample], list[TrainingSample]]:
-        """Split one bin into two with longest-processing-time scheduling."""
-        assert len(training_samples) > 1
-        splits: tuple[list[TrainingSample], list[TrainingSample]] = ([], [])
-        workloads = [0, 0]
-        for training_sample in sorted(
-            training_samples,
-            key=lambda sample: self.num_tokens_to_pack(sample) ** 2,
-            reverse=True,
-        ):
-            destination = 0 if workloads[0] <= workloads[1] else 1
-            splits[destination].append(training_sample)
-            workloads[destination] += self.num_tokens_to_pack(training_sample) ** 2
-        assert splits[0] and splits[1]
-        return splits
-
     def _expand_bins_by_splitting(
         self,
         bins: list[list[TrainingSample]],
         *,
         target_num_bins: int,
     ) -> None:
-        """Split the heaviest multi-sample bins until reaching the target count."""
+        """Fill new bins by redistributing samples from the heaviest donors.
+
+        A max-heap tracks each bin with more than one sample by attention
+        workload. For every required bin, repeatedly move the shortest sample
+        from the current heaviest donor while the move reduces the workload gap
+        between them. Filling also stops at the new bin's token or document
+        limit. Keeping one sample in every donor avoids replacing one empty bin
+        with another.
+
+        Every successful inner-loop iteration moves one sample. The outer loop
+        either appends a non-empty bin or stops and pads the remaining slots, so
+        neither loop can stall when no further redistribution is possible.
+        """
+        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        donor_heap = [
+            (-self._attention_workload(bin_), index)
+            for index, bin_ in enumerate(bins)
+            if len(bin_) > 1
+        ]
+        heapq.heapify(donor_heap)
+
         while len(bins) < target_num_bins:
-            candidates = [
-                (self._attention_workload(bin_), index)
-                for index, bin_ in enumerate(bins)
-                if len(bin_) > 1
-            ]
-            if not candidates:
+            new_bin: list[TrainingSample] = []
+            new_bin_num_tokens = 0
+            new_bin_workload = 0
+            skipped_donors: list[tuple[int, int]] = []
+
+            while donor_heap and (
+                self._max_num_documents is None
+                or len(new_bin) < self._max_num_documents
+            ):
+                negative_workload, donor_index = heapq.heappop(donor_heap)
+                donor = bins[donor_index]
+                sample_index = min(
+                    range(len(donor)),
+                    key=lambda index: self.num_tokens_to_pack(donor[index]),
+                )
+                sample = donor[sample_index]
+                num_tokens = self.num_tokens_to_pack(sample)
+                sample_workload = num_tokens**2
+                donor_workload = -negative_workload
+                if (
+                    new_bin_num_tokens + num_tokens > num_tokens_per_bin
+                    or sample_workload >= donor_workload - new_bin_workload
+                ):
+                    skipped_donors.append((negative_workload, donor_index))
+                    continue
+
+                donor.pop(sample_index)
+                new_bin.append(sample)
+                new_bin_num_tokens += num_tokens
+                new_bin_workload += sample_workload
+
+                if len(donor) > 1:
+                    heapq.heappush(
+                        donor_heap,
+                        (negative_workload + sample_workload, donor_index),
+                    )
+
+            for donor_entry in skipped_donors:
+                heapq.heappush(donor_heap, donor_entry)
+
+            if not new_bin:
                 break
-            _, donor_index = max(candidates)
-            bins[donor_index], new_bin = self._split_by_attention_workload(
-                bins[donor_index]
-            )
+
             bins.append(new_bin)
+            if len(new_bin) > 1:
+                heapq.heappush(donor_heap, (-new_bin_workload, len(bins) - 1))
 
         bins.extend([] for _ in range(target_num_bins - len(bins)))
 

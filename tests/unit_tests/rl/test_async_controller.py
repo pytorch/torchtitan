@@ -281,26 +281,40 @@ def test_batcher_uses_first_fit_decreasing_across_dp_ranks() -> None:
     ] == [[7, 5]]
 
 
-def test_batcher_splits_bins_with_two_way_lpt() -> None:
+def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
     batcher = Batcher.Config().build(
-        num_tokens_per_microbatch_per_dp_rank=32,
-        max_context_length=32,
+        num_tokens_per_microbatch_per_dp_rank=40,
+        max_context_length=40,
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
     )
     samples = _variable_length_group(
         0,
-        # Effective lengths and workloads are [8, 6, 5, 3] and
-        # [64, 36, 25, 9], respectively.
-        token_lengths=[9, 7, 6, 4],
+        token_lengths=[11] * 12,
     ).training_samples
+    bins = [samples[:4], samples[4:8], samples[8:]]
 
-    left, right = batcher._split_by_attention_workload(samples)
+    batcher._expand_bins_by_splitting(bins, target_num_bins=4)
 
-    assert sorted(
-        [batcher._attention_workload(left), batcher._attention_workload(right)]
-    ) == [64, 70]
+    assert [len(bin_) for bin_ in bins] == [3, 3, 3, 3]
+    assert [batcher._attention_workload(bin_) for bin_ in bins] == [300] * 4
+
+
+def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=10,
+        max_context_length=10,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+    )
+    samples = _variable_length_group(0, token_lengths=[6, 6]).training_samples
+    bins = [[samples[0]], [samples[1]]]
+
+    batcher._expand_bins_by_splitting(bins, target_num_bins=4)
+
+    assert bins == [[samples[0]], [samples[1]], [], []]
 
 
 def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
@@ -314,7 +328,7 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
     samples = _variable_length_group(
         0,
         # Effective lengths are [6, 6, 6, 4, 4, 4]. FFD produces three bins,
-        # then LPT splitting aligns the count to four DP inputs.
+        # then redistribution aligns the count to four DP inputs.
         token_lengths=[7, 7, 7, 5, 5, 5],
     ).training_samples
 
@@ -326,7 +340,7 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
 
     # Global sorting puts similarly expensive bins in each concurrent DP group.
     # Reversing the second group pairs its lighter bin with the first rank.
-    assert workloads == [[52, 52], [16, 36]]
+    assert workloads == [[52, 36], [32, 36]]
 
 
 def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
