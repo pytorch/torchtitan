@@ -23,6 +23,7 @@ Shape suffixes:
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
@@ -31,6 +32,7 @@ from torchtitan.models.common import Linear
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     spmd_dense_sp_enabled,
+    spmd_mesh_group,
     spmd_mesh_size,
 )
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
@@ -56,6 +58,43 @@ def validate_vision_sequence_parallel_input(x_TD: torch.Tensor) -> None:
             "Vision sequence parallelism requires the packed patch-token count "
             f"({x_TD.shape[0]}) to be divisible by the TP degree ({tp_size})."
         )
+
+
+def shard_vision_sequence(x_TD: torch.Tensor) -> torch.Tensor:
+    """Shard packed vision tokens over TP when dense SP is enabled."""
+    if not spmd_dense_sp_enabled():
+        return x_TD
+
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x_TD
+
+    validate_vision_sequence_parallel_input(x_TD)
+    return spmd.redistribute(
+        x_TD,
+        tp_group,
+        src=spmd.I,
+        dst=spmd.S(0),
+        backward_options={"op_dtype": x_TD.dtype},
+    )
+
+
+def gather_vision_sequence(x_TD: torch.Tensor) -> torch.Tensor:
+    """Gather TP-sharded vision tokens when dense SP is enabled."""
+    if not spmd_dense_sp_enabled():
+        return x_TD
+
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x_TD
+
+    return spmd.redistribute(
+        x_TD,
+        tp_group,
+        src=spmd.S(0),
+        dst=spmd.I,
+        backward_options={"op_dtype": x_TD.dtype},
+    )
 
 
 def create_block_diagonal_mask(

@@ -35,8 +35,6 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_config,
     vision_invariant_linear_config,
     vision_partial_bias_rowwise_config,
-    vision_sequence_parallel_input_config,
-    vision_sequence_parallel_output_config,
 )
 from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
@@ -123,13 +121,6 @@ def set_moonvit_sharding_config(
     )
 
     ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()
-    ve_cfg.sequence_parallel_input.sharding_config = (
-        vision_sequence_parallel_input_config(enable_sp=enable_sp)
-    )
-    ve_cfg.sequence_parallel_output.sharding_config = (
-        vision_sequence_parallel_output_config(enable_sp=enable_sp)
-    )
-
     set_vision_transformer_block_sharding_config(
         ve_cfg.block,
         enable_sp=enable_sp,
