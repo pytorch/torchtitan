@@ -85,11 +85,13 @@ jobs:
   # Run Fake PG when CIFlow pushes a ciflow/fake-pg tag for a ready PR.
   # Tag pushes are independent of the PR base, so stacked PRs are covered.
   # Reusable calls also run this job when execution_mode is fake_pg.
+  # A called workflow keeps the caller's event_name, so execution_mode being
+  # unset is what distinguishes a direct event from a reusable call.
   set-matrix-fake-pg:
     if: >-
-      ((github.event_name == 'push' &&
+      ((inputs.execution_mode == '' && github.event_name == 'push' &&
         startsWith(github.ref, 'refs/tags/ciflow/fake-pg/')) ||
-       (github.event_name == 'workflow_call' && inputs.execution_mode == 'fake_pg')) &&
+       inputs.execution_mode == 'fake_pg') &&
       (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
     uses: ./.github/workflows/set-matrix.yaml
     with:
@@ -102,13 +104,14 @@ jobs:
   # reusable calls run the full Real PG suite.
   set-matrix-real-pg:
     if: >-
-      ((github.event_name == 'push' &&
-        (github.ref == 'refs/heads/main' ||
-         startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') ||
-         startsWith(github.ref, 'refs/tags/ciflow/real-pg/'))) ||
-       github.event_name == 'schedule' ||
-       github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'workflow_call' && inputs.execution_mode == 'real_pg')) &&
+      ((inputs.execution_mode == '' &&
+        ((github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' ||
+           startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') ||
+           startsWith(github.ref, 'refs/tags/ciflow/real-pg/'))) ||
+         github.event_name == 'schedule' ||
+         github.event_name == 'workflow_dispatch')) ||
+       inputs.execution_mode == 'real_pg') &&
       (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
     uses: ./.github/workflows/set-matrix.yaml
     with:
@@ -193,7 +196,7 @@ jobs:
   integration-real-pg:
     name: 8 GPU Integration (Real PG - ${{ startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') && 'required subset' || 'full suite' }} - ${{ matrix.test_suite }})
     needs: [set-matrix-real-pg, keep-going]
-    if: ${{ (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
+    if: ${{ inputs.execution_mode != 'fake_pg' && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
