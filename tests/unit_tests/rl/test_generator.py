@@ -21,6 +21,7 @@ import math
 import os
 import shutil
 import tempfile
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -43,7 +44,10 @@ from torchtitan.rl.generator import (
     VLLMGenerator,
 )
 from torchtitan.rl.model.vllm_registry import register_to_vllm
-from torchtitan.rl.model.vllm_worker import TorchTitanGPUModelRunner
+from torchtitan.rl.model.vllm_worker import (
+    TorchTitanGPUModelRunner,
+    TorchTitanGPUWorker,
+)
 from torchtitan.rl.observability import metrics as m
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
@@ -441,6 +445,23 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
         TorchTitanGPUModelRunner._pad_for_sequence_parallelism(model_runner, 5)
         == expected_num_tokens
     )
+
+
+def test_only_weights_use_cumem_allocator(monkeypatch):
+    base_worker_cls = TorchTitanGPUWorker.__mro__[1]
+    monkeypatch.setattr(
+        base_worker_cls,
+        "_maybe_get_memory_pool_context",
+        lambda self, tag: nullcontext(tag),
+    )
+    worker = object.__new__(TorchTitanGPUWorker)
+
+    with worker._maybe_get_memory_pool_context("kv_cache") as value:
+        assert value is None
+    with worker._maybe_get_memory_pool_context("weights") as value:
+        assert value == "weights"
+    with worker._maybe_get_memory_pool_context("other") as value:
+        assert value is None
 
 
 def test_cuda_graph_default_mode_is_full():

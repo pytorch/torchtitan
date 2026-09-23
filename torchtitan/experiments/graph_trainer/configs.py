@@ -107,10 +107,11 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
     memory_policy: Literal[
-        "default", "full", "eager", "min_cut", "sac_and_offload"
+        "none", "default", "full", "eager", "min_cut", "sac_and_offload"
     ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
+        none: save forward activations without rematerialization.
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
         full: full recompute, saving layer outputs and operations selected by
             full_recompute_save_ops. With no selectors, this mirrors eager's
