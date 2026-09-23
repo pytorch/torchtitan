@@ -8,11 +8,12 @@
 
 ``Linear`` uses diamond inheritance (``nn.Linear`` + ``Module``) so that:
 - The module hierarchy stays flat (no extra wrapper layer).
-- All ``nn.Linear`` logic (forward, state_dict, etc.) is reused as-is.
+- Standard ``nn.Linear`` parameter and state-dict behavior is retained.
 - The ``Module`` protocol is satisfied and ``build()`` is inherited
   from ``Configurable.Config``.
 """
 
+import math
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -21,6 +22,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.protocols.module import Module
 
@@ -29,64 +31,159 @@ from torchtitan.protocols.module import Module
 
 
 class Linear(nn.Linear, Module):
-    """Configurable nn.Linear."""
+    """Configurable linear that can store multiple stacked projections.
+
+    A single projection keeps the standard ``[out_features, in_features]``
+    parameter shape. Multiple projections use
+    ``[num_linears, out_features, in_features]``, keeping each projection
+    contiguous for blockwise weight quantization, and return
+    ``[..., num_linears, out_features]``.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         in_features: int
         out_features: int
+        num_linears: int = 1
         bias: bool = False
 
     def __init__(self, config: Config):
         super().__init__(
             config.in_features,
-            config.out_features,
+            config.num_linears * config.out_features,
             bias=config.bias,
         )
+        self.out_features = config.out_features
+        self.num_linears = config.num_linears
+        if config.num_linears > 1:
+            self.weight = nn.Parameter(
+                self.weight.detach().unflatten(
+                    0, (config.num_linears, config.out_features)
+                ),
+                requires_grad=self.weight.requires_grad,
+            )
+            if self.bias is not None:
+                self.bias = nn.Parameter(
+                    self.bias.detach().unflatten(
+                        0, (config.num_linears, config.out_features)
+                    ),
+                    requires_grad=self.bias.requires_grad,
+                )
+
+    def reset_parameters(self) -> None:
+        # Flattening handles both ordinary and stacked projections while
+        # keeping fan-in equal to in_features.
+        nn.init.kaiming_uniform_(self.weight.flatten(0, -2), a=math.sqrt(5))
+        if self.bias is not None:
+            bound = 1 / math.sqrt(self.in_features)
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def _flatten_weight_and_bias(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Flatten stacked parameters for one linear operation."""
+        weight = self.weight.flatten(0, -2)
+        bias = None if self.bias is None else self.bias.flatten()
+        return weight, bias
+
+    def _unflatten_output(self, output: torch.Tensor) -> torch.Tensor:
+        """Restore the logical stacked output dimensions after a linear operation."""
+        if self.num_linears == 1:
+            return output
+        return output.unflatten(-1, self.weight.shape[:-1])
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        weight, bias = self._flatten_weight_and_bias()
+        output = F.linear(input, weight, bias)
+        return self._unflatten_output(output)
+
+    def extra_repr(self) -> str:
+        result = nn.Linear.extra_repr(self)
+        if self.num_linears > 1:
+            result += f", num_linears={self.num_linears}"
+        return result
+
+
+class CastLinear(Linear):
+    """``Linear`` whose forward matmul runs in ``compute_dtype``.
+
+    Inputs, weight, and bias are cast to ``compute_dtype`` before
+    ``F.linear`` and the output is returned in that dtype. The stored
+    parameters retain their original dtype, including under weight tying.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        compute_dtype: str = "float32"
+        """Dtype for the forward matmul (key into ``TORCH_DTYPE_MAP``)."""
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.compute_dtype = TORCH_DTYPE_MAP[config.compute_dtype]
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # The optimizer updates the weight each step, so training cannot cache
+        # the upcast copy. Inference may be able to cache it between syncs.
+        weight, bias = self._flatten_weight_and_bias()
+        output = F.linear(
+            input.to(self.compute_dtype),
+            weight.to(self.compute_dtype),
+            None if bias is None else bias.to(self.compute_dtype),
+        )
+        return self._unflatten_output(output)
 
 
 class GroupedLinear(Module):
     """A collection of linears selected by cumulative group offsets.
 
-    Structured output features let fused projections retain semantic axes in
-    parameter storage while presenting a flattened right operand to grouped
-    GEMM. For example, a fused gate/up projection stores ``[E, 2, F, D]`` and
-    returns ``[R, 2, F]`` without copying either tensor.
+    Like :class:`Linear`, ``num_linears`` retains a projection axis in parameter
+    storage. For example, a fused gate/up projection stores ``[E, 2, F, D]``
+    and returns ``[R, 2, F]`` while grouped GEMM consumes its zero-copy
+    ``[E, 2F, D]`` view.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
+        """Configure a grouped linear.
+
+        Attributes:
+            group_size: Number of independently selected linear weights.
+            in_features: Input features for each linear.
+            out_features: Output features for each linear.
+            num_linears: Number of projections stored per group. Values greater
+                than one retain a projection axis before ``out_features``.
+        """
+
         group_size: int
         in_features: int
-        out_features: int | tuple[int, ...]
+        out_features: int
+        num_linears: int = 1
 
     def __init__(self, config: Config):
         super().__init__()
-        output_shape = (
-            (config.out_features,)
-            if isinstance(config.out_features, int)
-            else config.out_features
-        )
-        if not output_shape or any(size <= 0 for size in output_shape):
-            raise ValueError(f"out_features must be positive, got {output_shape}")
-
         self.group_size = config.group_size
         self.in_features = config.in_features
         self.out_features = config.out_features
-        self.output_shape = output_shape
+        self.num_linears = config.num_linears
+        output_shape = (
+            (config.out_features,)
+            if config.num_linears == 1
+            else (config.num_linears, config.out_features)
+        )
         self.weight = nn.Parameter(
             torch.empty(config.group_size, *output_shape, config.in_features)
         )
 
     def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
-        """Apply each grouped linear to rows selected by ``offsets``.
+        """Apply each grouped linear to rows selected by cumulative offsets.
 
         Args:
-            input_RI: Input rows with shape ``[R, I]``.
-            offsets_E: Inclusive cumulative row counts for each expert.
+            input_RI: Input rows grouped by the selected linear.
+            offsets_E: Exclusive cumulative row end for each group.
 
         Returns:
-            Output rows with shape ``[R, *O]``.
+            Output rows with an optional ``num_linears`` axis before the output
+            feature axis.
         """
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
@@ -177,10 +274,11 @@ class RouterGateLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        output_TE = _RouterGateLinearFunction.apply(input, self.weight)
-        if self.bias is not None:
-            output_TE = output_TE + self.bias.float()
-        return output_TE
+        weight, bias = self._flatten_weight_and_bias()
+        output_TE = _RouterGateLinearFunction.apply(input, weight)
+        if bias is not None:
+            output_TE = output_TE + bias.float()
+        return self._unflatten_output(output_TE)
 
 
 class PartialBiasRowwiseLinear(Linear):
@@ -196,7 +294,7 @@ class PartialBiasRowwiseLinear(Linear):
         super().__init__(config)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        bias = self.bias
+        weight, bias = self._flatten_weight_and_bias()
         assert bias is not None
         tp_group = spmd_mesh_group("tp")
         if tp_group is not None:
@@ -207,10 +305,12 @@ class PartialBiasRowwiseLinear(Linear):
                 dst=spmd.P,
                 expert_mode=True,
             )
-        return F.linear(input, self.weight, bias)
+        output = F.linear(input, weight, bias)
+        return self._unflatten_output(output)
 
 
 __all__ = [
+    "CastLinear",
     "GroupedLinear",
     "Linear",
     "PartialBiasRowwiseLinear",

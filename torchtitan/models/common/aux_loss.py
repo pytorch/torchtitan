@@ -119,8 +119,8 @@ class AuxLoss(Module):
     class Config(Module.Config):
         coeff: float
         """Aux loss coefficient.  Scales the gradient contribution."""
-        reduce_mesh: str = "batch"
-        """Mesh the per-step metric is summed over: ``"batch"`` (dp) for
+        reduce_mesh: str = "dp"
+        """Mesh the per-step metric is summed over: ``"dp"`` for
         cp-identical losses like the microbatch-wise load-balance loss, ``"loss"``
         (dp+cp) for per-token-additive losses whose rank-local values add up
         across coordinates."""

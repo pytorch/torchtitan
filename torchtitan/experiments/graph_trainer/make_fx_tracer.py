@@ -375,7 +375,7 @@ class TracedResult:
         TODO: graph_trainer does not trace optimizers yet, so optimizer state
         tensors are not counted here. When optimizer tracing is enabled, they
         should be included since their addresses are also stable across steps,
-        avoiding cudagraph re-copying them every step.
+        avoiding CUDA graph re-copying them every step.
         """
         num_state = len(self.state_fqns) + len(self.graph_state.mappings)
         return sum(
@@ -454,7 +454,7 @@ def minimal_fx_tracer(
     ``_insert_runtime_asserts`` opts into materializing the ShapeEnv's deferred
     runtime asserts (from ``mark_unbacked()`` bounds and ``torch._check()``
     calls) into the graph as ``_assert_scalar`` nodes. Off by default because
-    cudagraph capture does not evaluate these nodes, and downstream graph
+    CUDA graph capture does not evaluate these nodes, and downstream graph
     passes generally don't need them.
 
     ``record_stack_traces`` controls whether make_fx records Python stack traces

@@ -30,7 +30,6 @@ from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
 
 # These are the public entrypoints for model-specific PP setup. Helpers in this
@@ -66,19 +65,18 @@ def _build_get_mesh_callback(
 
 
 def pipeline_llm(
-    model: nn.Module,
+    model: BaseModel,
     *,
     parallel_dims: ParallelDims,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
-    parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
-) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
 
     (
@@ -111,8 +109,7 @@ def pipeline_llm(
     # optimizer, and checkpointing
     for i, m in enumerate(model_parts):
         # apply SPMD-style PT-D techniques
-        m = parallelize_fn(
-            m,
+        m = m.parallelize(
             parallel_dims=parallel_dims,
             training=training,
             parallelism=parallelism,
@@ -145,14 +142,14 @@ def pipeline_llm(
 
 
 def pipeline_with_first_stage_modules(
-    model: nn.Module,
+    model: BaseModel,
     *,
     first_stage_module_fqns: Sequence[str],
     parallel_dims: ParallelDims,
     parallelism: ParallelismConfig,
     model_config: BaseModel.Config,
     **kwargs,
-) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
     """Co-locate additional model modules with the first pipeline stage.
 
     The auto-generated LLM stage split only knows about decoder modules
@@ -471,9 +468,9 @@ def _generate_llm_fqn_per_model_part(
 
 
 def _split_module(
-    whole_model: nn.Module,
+    whole_model: BaseModel,
     module_names: list[str],
-) -> nn.Module:
+) -> BaseModel:
     """
     Splits a whole model into a module based on the specified module names.
 
@@ -573,13 +570,13 @@ def _get_pp_rank_to_stage_indices_mapping(
 
 
 def _pipeline_module_split(
-    whole_model: nn.Module,
+    whole_model: BaseModel,
     pp_mesh: DeviceMesh,
     pp_schedule: str,
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
-) -> tuple[list[PipelineStage], list[nn.Module]]:
+) -> tuple[list[PipelineStage], list[BaseModel]]:
     """Create pipeline stages based on specified module names for each stage.
 
     Also used by Graph PP to split the model into per-stage chunks before
