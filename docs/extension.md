@@ -3,16 +3,16 @@ To support rapid experimentation with torchtitan, we provide several extension p
 The extension points and protocols mentioned in this note are subject to change.
 
 
-### `ModelSpec`
+### Models
 
-[`ModelSpec`](../torchtitan/protocols/model_spec.py) supports configuring high-level components in model training, including
-- definitions of model config and model class
-- model parallelization functions
-- loss functions
+[`BaseModel`](../torchtitan/protocols/model.py) defines the model-level training
+lifecycle. A concrete model owns its nested configuration, parallelization and
+pipeline behavior, checkpoint adapter, and optional optimizer hooks.
 
-The coarse level abstraction tries to hit a balance between flexible component swapping and a straightforward train script ([train.py](../torchtitan/train.py)).
-
-To register a model, define a `model_registry(flavor)` function in your model's `__init__.py` that returns a `ModelSpec`. Then define training configs in a `config_registry.py` module. See [torchtitan/models/llama3](../torchtitan/models/llama3/) for an example.
+To register a model, define a `model_registry(flavor)` function in the model's
+`__init__.py` that returns the selected `BaseModel.Config`. Then define training
+configs in a `config_registry.py` module. See
+[torchtitan/models/llama3](../torchtitan/models/llama3/) for an example.
 
 
 ### Train script
@@ -25,6 +25,8 @@ This is an ongoing effort, and the level of grouping is subject to change.
 ### Extending `Trainer.Config`
 
 To add custom configuration for an experiment, subclass `Trainer.Config` (or `Trainer` itself) and add new fields. Define config_registry functions that return your custom Config type.
+
+Fields added this way are ordinary command-line options, which is what experiments want. The freeze in [the configuration doc](../torchtitan/config/README.md) applies to core: a field added to a config under `torchtitan/` outside `experiments` needs `tyro.conf.Suppress`.
 
 #### Example
 

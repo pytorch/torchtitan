@@ -18,18 +18,23 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.models.common.activation import UnaryActivationFn
 from torchtitan.models.common.attention import (
-    FlexAttention,
-    FusedQKVLinear,
+    FlexInnerAttention,
     GQAttention,
     QKVLinear,
-    VarlenAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.dist_gemm import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import (
     GroupedExperts,
+    MicrobatchWiseLoadBalanceLoss,
     MoE,
     RoutedExperts,
     TokenChoiceTopKRouter,
@@ -41,17 +46,36 @@ from torchtitan.models.common.token_dispatcher import (
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
-    MinimalAsyncEPTokenDispatcher,
 )
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 
 
-def decoder_vocab_size(model_spec: ModelSpec) -> int:
+DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048
+
+
+def _make_fused_linear_init(gate_init: Callable, up_init: Callable) -> Callable:
+    """Build an initializer for a stacked gate/up linear weight."""
+
+    def _init(t: torch.Tensor) -> None:
+        gate_init(t[0])
+        up_init(t[1])
+
+    return _init
+
+
+def decoder_vocab_size(model_config: Module.Config) -> int:
     """Assert Decoder.Config type so lint is not annoyed."""
-    model_config = model_spec.model
     assert isinstance(model_config, Decoder.Config)
     return model_config.vocab_size
+
+
+# Which implementation runs the TP-parallel linear layers. "default" leaves the
+# collectives to the framework, as separate all-gather / reduce-scatter either side
+# of an ordinary GEMM. "dist_gemm" folds each collective into its adjacent GEMM
+# over symmetric memory, so communication overlaps compute -- the technique
+# Megatron exposes as --tp-comm-overlap. Further implementations (CuTeDSL, Triton)
+# would be additional values here.
+TpGemmBackend = Literal["default", "dist_gemm"]
 
 
 def get_attention_config(
@@ -61,25 +85,25 @@ def get_attention_config(
 
     Language models always use block_causal masking (the dataloaders always
     emit per-document positions), so every backend here is a masked attention
-    backend. ``ScaledDotProductAttention`` only supports a boolean ``is_causal``
+    backend. ``ScaledDotProductInnerAttention`` only supports a boolean ``is_causal``
     flag and cannot consume per-document positions, so it is not a valid
     language-model backend (it remains available for Flux, which builds it
     directly).
     """
     if backend == "flex":
-        return FlexAttention.Config()
+        return FlexInnerAttention.Config()
     elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
         if not has_cuda_capability(9, 0):
             raise ValueError(
-                "Flash backend of FlexAttention is only supported on Hopper or Blackwell"
+                "Flash backend of FlexInnerAttention is only supported on Hopper or Blackwell"
             )
-        return FlexAttention.Config(
+        return FlexInnerAttention.Config(
             block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
         )
     elif backend == "varlen":
-        return VarlenAttention.Config()
+        return VarlenInnerAttention.Config()
     elif backend == "sdpa":
         raise ValueError(
             "sdpa is no longer supported for language models; positions are "
@@ -89,42 +113,38 @@ def get_attention_config(
         raise ValueError(f"Unknown backend: {backend}")
 
 
-def _fused_qkv_param_init(
+def fused_qkv_param_init(
     base_param_init: dict[str, Callable],
     *,
     n_heads: int,
     n_kv_heads: int,
     head_dim: int,
 ) -> dict[str, Callable]:
-    """Init for the fused ``wqkv`` that is bit-identical to the stock separate
-    ``wq``/``wk``/``wv`` and independent of the sharding degree.
+    """Initialize fused ``wqkv`` from logical ``wq``/``wk``/``wv`` draws.
 
-    The non-fused module initializes ``wq``/``wk``/``wv`` as three separate
-    contiguous parameters. This reproduces those exact draws: it initializes q,
-    k, v as three contiguous tensors of the stock-weight shapes (in
-    ``QKVLinear``'s ``wq``/``wk``/``wv`` build order), then assembles them into
-    the fused ``(n_kv_heads, R, head_dim, dim)`` layout (``R = heads_per_kv + 2``)
-    -- the same concatenation ``_merge_qkv_on_load`` uses -- and copies into the
-    buffer.
+    Q, K, and V are initialized as separate contiguous tensors, then packed into
+    the fused ``(n_kv_heads, R, head_dim, dim)`` layout, where
+    ``R = heads_per_kv + 2``. This preserves logical initialization order and
+    matches the packing used when loading separate checkpoint tensors.
 
-    Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) param --
+    Parallelism-agnostic RNG: at init ``t`` is the (possibly sharded) matrix --
     e.g. a ``Shard(0)`` DTensor for the colwise wqkv. ``t.new_empty(...)``
     returns ``Replicate`` DTensors, so each ``base_init`` runs on the full tensor
     and draws the same values on every rank (the weights do not depend on the
     TP/FSDP degree). ``cat`` of ``Replicate`` stays ``Replicate``, and the final
-    ``copy_`` scatters it into the sharded ``t`` (each rank keeps its shard). So
-    the path is "init replicated, then shard," which both matches the non-fused
-    module and keeps RNG independent of the parallelism.
+    ``copy_`` scatters it into the sharded ``t`` (each rank keeps its shard).
+    This "init replicated, then shard" path keeps RNG independent of the
+    parallelism.
     """
     heads_per_kv = n_heads // n_kv_heads
 
     def _make_init(base_init: Callable) -> Callable:
         # ``tail`` is the per-row shape: () for bias, (in_features,) for weight.
-        # Building q/k/v with the exact stock shapes and drawing them in
-        # wq/wk/wv order keeps the RNG sequence identical to the non-fused module.
+        # Building q/k/v with their logical shapes preserves their independent
+        # initialization order before packing them into wqkv.
         def _init(t):
             tail = t.shape[1:]
-            # If t is a sharded DTensor, new_empty (with the full stock shape)
+            # If t is a sharded DTensor, new_empty (with the full logical shape)
             # returns Replicate DTensors, so base_init runs replicated and draws
             # the same values on every rank (parallelism-agnostic RNG).
             q = t.new_empty(n_heads * head_dim, *tail)
@@ -170,6 +190,18 @@ def _fused_qkv_param_init(
     return out
 
 
+def fused_gate_up_param_init(
+    gate_param_init: dict[str, Callable],
+    up_param_init: dict[str, Callable],
+) -> dict[str, Callable] | None:
+    """Initialize the logical gate and up slices of a fused ``w13`` weight."""
+    gate_init = gate_param_init.get("weight")
+    up_init = up_param_init.get("weight")
+    if gate_init is None or up_init is None:
+        return None
+    return {"weight": _make_fused_linear_init(gate_init, up_init)}
+
+
 def make_gqa_config(
     *,
     dim: int,
@@ -177,49 +209,53 @@ def make_gqa_config(
     wqkv_param_init: dict[str, Callable],
     wo_param_init: dict[str, Callable],
     inner_attention: Module.Config,
-    rope: RoPE.Config,
+    rope: RoPE.Config | None,
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
-    fuse_qkv: bool = False,
     qk_norm: RMSNorm.Config | None = None,
+    tp_gemm_backend: TpGemmBackend = "default",
 ) -> GQAttention.Config:
-    """Build a fully-specified GQAttention.Config."""
+    """Build a fully-specified GQAttention.Config.
+
+    ``rope=None`` builds a NoPE layer (no positional encoding); see
+    :class:`GQAttention`.
+
+    ``tp_gemm_backend`` selects which implementation runs the QKV and output
+    projections. ``"default"`` leaves the TP collectives to the framework, either
+    side of an ordinary GEMM. ``"dist_gemm"`` folds each into its adjacent GEMM
+    over symmetric memory.
+
+    ``"dist_gemm"`` folds the input all-gather into the wqkv GEMM. It also needs
+    CUDA and the spmd_types backend; those are rejected by
+    ``validate_dist_gemm_preconditions`` at sharding time, which is the first point
+    that sees the parallelism settings.
+    """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
-    rope = dataclasses.replace(rope)
+    rope = dataclasses.replace(rope) if rope is not None else None
 
-    if fuse_qkv:
-        qkv = FusedQKVLinear.Config(
-            head_dim=per_head_dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv,
-            wqkv=Linear.Config(
-                in_features=dim,
-                out_features=(n_heads + 2 * n_kv) * per_head_dim,
-                # Per-slice init so the fused wqkv is bit-identical to the stock
-                # separate wq/wk/wv (see _fused_qkv_param_init).
-                param_init=_fused_qkv_param_init(
-                    wqkv_param_init,
-                    n_heads=n_heads,
-                    n_kv_heads=n_kv,
-                    head_dim=per_head_dim,
-                ),
+    # The backend picks the projection classes; QKVLinear continues to own the
+    # fused output split for both implementations.
+    qkv_projection_cls, wo_cls = Linear, Linear
+    if tp_gemm_backend == "dist_gemm":
+        qkv_projection_cls = AsyncColumnParallelLinear
+        wo_cls = AsyncRowParallelLinear
+
+    qkv = QKVLinear.Config(
+        head_dim=per_head_dim,
+        n_heads=n_heads,
+        n_kv_heads=n_kv,
+        wqkv=qkv_projection_cls.Config(
+            in_features=dim,
+            out_features=(n_heads + 2 * n_kv) * per_head_dim,
+            param_init=fused_qkv_param_init(
+                wqkv_param_init,
+                n_heads=n_heads,
+                n_kv_heads=n_kv,
+                head_dim=per_head_dim,
             ),
-        )
-    else:
-        qkv = QKVLinear.Config(
-            head_dim=per_head_dim,
-            wq=Linear.Config(
-                in_features=dim,
-                out_features=n_heads * per_head_dim,
-                param_init=wqkv_param_init,
-            ),
-            wkv=Linear.Config(
-                in_features=dim,
-                out_features=n_kv * per_head_dim,
-                param_init=wqkv_param_init,
-            ),
-        )
+        ),
+    )
 
     return GQAttention.Config(
         n_heads=n_heads,
@@ -227,7 +263,7 @@ def make_gqa_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=Linear.Config(
+        wo=wo_cls.Config(
             in_features=n_heads * per_head_dim,
             out_features=dim,
             param_init=wo_param_init,
@@ -244,17 +280,27 @@ def make_ffn_config(
     hidden_dim: int,
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
+    tp_gemm_backend: TpGemmBackend = "default",
 ) -> FeedForward.Config:
-    """Build a fully-specified FeedForward.Config."""
+    """Build a fully-specified FeedForward.Config.
+
+    ``tp_gemm_backend="dist_gemm"`` overlaps the TP collectives with the GEMMs by
+    folding them in: one all-gather feeds w13, and w2 reduce-scatters. See
+    make_gqa_config.
+    """
+    w13_cls, w2_cls = Linear, Linear
+    if tp_gemm_backend == "dist_gemm":
+        w13_cls = AsyncColumnParallelLinear
+        w2_cls = AsyncRowParallelLinear
     return FeedForward.Config(
-        w1=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w1_param_init
+        w13=w13_cls.Config(
+            in_features=dim,
+            out_features=hidden_dim,
+            num_linears=2,
+            param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
-        w2=Linear.Config(
+        w2=w2_cls.Config(
             in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init
-        ),
-        w3=Linear.Config(
-            in_features=dim, out_features=hidden_dim, param_init=w2w3_param_init
         ),
     )
 
@@ -266,8 +312,14 @@ def make_moe_config(
     routed_experts: RoutedExperts.Config,
     shared_experts: FeedForward.Config | None = None,
     load_balance_coeff: float | None = 1e-3,
+    aux_loss_coeff: float | None = None,
 ) -> MoE.Config:
     """Build a fully-specified MoE.Config."""
+    if aux_loss_coeff is not None:
+        router = dataclasses.replace(
+            router,
+            aux_loss=MicrobatchWiseLoadBalanceLoss.Config(coeff=aux_loss_coeff),
+        )
     return MoE.Config(
         num_experts=num_experts,
         load_balance_coeff=load_balance_coeff,
@@ -282,18 +334,17 @@ def make_router_config(
     dim: int,
     num_experts: int,
     gate_param_init: dict[str, Callable],
+    score_func: UnaryActivationFn.Config,
     top_k: int = 1,
-    score_func: Literal["sigmoid", "softmax"] = "sigmoid",
     route_norm: bool = False,
+    route_norm_epsilon: float = 1e-20,
     route_scale: float = 1.0,
-    num_expert_groups: int | None = None,
-    num_limited_groups: int | None = None,
     bias: bool = False,
 ) -> TokenChoiceTopKRouter.Config:
     """Build a fully-specified TokenChoiceTopKRouter.Config."""
     return TokenChoiceTopKRouter.Config(
         num_experts=num_experts,
-        gate=Linear.Config(
+        gate=RouterGateLinear.Config(
             in_features=dim,
             out_features=num_experts,
             bias=bias,
@@ -302,9 +353,8 @@ def make_router_config(
         top_k=top_k,
         score_func=score_func,
         route_norm=route_norm,
+        route_norm_epsilon=route_norm_epsilon,
         route_scale=route_scale,
-        num_expert_groups=num_expert_groups,
-        num_limited_groups=num_limited_groups,
     )
 
 
@@ -313,10 +363,10 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     comm_backend: str,
+    hidden_dim: int,
     non_blocking_capacity_factor: float | None = None,
-    hidden_dim: int | None = None,
     num_max_tokens_per_rank: int | None = None,
-    cudagraphable: bool = False,
+    cuda_graph_compatible: bool = False,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -325,7 +375,6 @@ def make_token_dispatcher_config(
       dispatch when EP=1, i.e. ep_mesh is None at runtime)
     - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
     - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
-    - "minimal_async_ep": Uses MinimalAsyncEP for constrained DP>=EP
 
     DeepEP/HybridEP requires installation:
     https://github.com/deepseek-ai/DeepEP
@@ -334,32 +383,29 @@ def make_token_dispatcher_config(
     - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
     - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
     """
-    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/cudagraph knobs --
-    # HybridEP non_blocking_capacity_factor vs DeepEP cudagraphable + num_max_tokens_per_rank.
+    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/CUDA graph knobs --
+    # HybridEP non_blocking_capacity_factor vs DeepEP cuda_graph_compatible + num_max_tokens_per_rank.
     if comm_backend == "deepep":
         # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
-        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cudagraphable``
+        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cuda_graph_compatible``
         # selects the static no-host-sync expand layout (set on the generator by the
-        # deepep_override). ``num_max_tokens_per_rank`` is the per-rank EXPAND
-        # capacity: training infers it (the compact path auto-sizes), inference must set it
-        # >= the largest per-rank token count for droplessness.
+        # deepep_override). ``num_max_tokens_per_rank`` is the hard per-rank input-token
+        # bound. Runtime config derives it from the fixed training shape or inference
+        # scheduler/CUDA graph limits before the dispatcher is built.
         return DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            cudagraphable=cudagraphable,
+            cuda_graph_compatible=cuda_graph_compatible,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
-        )
-    elif comm_backend == "minimal_async_ep":
-        return MinimalAsyncEPTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
+            hidden_dim=hidden_dim,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
         )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
@@ -369,7 +415,7 @@ def make_token_dispatcher_config(
     else:
         raise ValueError(
             f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of 'standard', 'deepep', 'hybridep', 'minimal_async_ep'."
+            "Must be one of 'standard', 'deepep', or 'hybridep'."
         )
 
 
@@ -383,7 +429,7 @@ def make_routed_experts_config(
     comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
-    cudagraphable: bool = False,
+    cuda_graph_compatible: bool = False,
 ) -> RoutedExperts.Config:
     """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
     return RoutedExperts.Config(
@@ -400,6 +446,6 @@ def make_routed_experts_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
             hidden_dim=dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            cudagraphable=cudagraphable,
+            cuda_graph_compatible=cuda_graph_compatible,
         ),
     )

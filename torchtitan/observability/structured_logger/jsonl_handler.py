@@ -121,6 +121,10 @@ class TraceJsonlFormatter(logging.Formatter):
         if isinstance(value, (float, int)):
             log_dict["value"] = float(value)
 
+        context = getattr(record, str(ExtraFields.CONTEXT), None)
+        if context is not None:
+            log_dict["context"] = context
+
         # task_name pairs start/end records
         task_name = getattr(record, str(ExtraFields.TASK_NAME), None)
         if task_name is not None:

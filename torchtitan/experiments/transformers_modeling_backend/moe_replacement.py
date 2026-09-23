@@ -13,9 +13,11 @@ Two-phase replacement:
   Phase 2 (parallelize time): ``build_and_swap_native_moe`` calls
       ``set_moe_sharding_config`` on each stored config, builds the Titan MoE,
       initializes it, and swaps it into the layer. Actual parallelization
-      happens later via ``model.parallelize(parallel_dims)``.
+      happens later via ``model._parallelize(parallel_dims)``.
 """
 
+import logging
+from dataclasses import replace
 from functools import partial
 
 import spmd_types as spmd
@@ -23,6 +25,11 @@ import torch
 import torch.nn as nn
 
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
+    _hf_activation_placement,
+    _hf_sequence_parallel_placement,
+)
+from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_moe_config,
@@ -32,13 +39,24 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    dense_sequence_parallel_placement,
 )
 from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts, MoE
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
 from torchtitan.protocols.sharding import ShardingConfig
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
+
+
+class _HFBatchedMoE(MoE):
+    """Adapt HF's singleton batch to Titan MoE's flat token interface."""
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return super().forward(hidden_states.squeeze(0)).unsqueeze(0)
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +111,12 @@ def build_and_swap_native_moe(
             each MoE-enabled layer (from ``prepare_native_moe_configs``).
         parallel_dims: Parallel dimensions for EP/TP mesh resolution.
     """
+    if parallel_dims.ep < parallel_dims.tp:
+        raise ValueError(
+            f"MoE models require expert_parallel_degree ({parallel_dims.ep}) to be "
+            "greater than or equal to tensor_parallel_degree "
+            f"({parallel_dims.tp})."
+        )
     enable_ep = parallel_dims.ep_enabled
     enable_sp = parallel_dims.tp_enabled
 
@@ -101,29 +125,59 @@ def build_and_swap_native_moe(
         if moe_config is None:
             continue
 
-        _, expert_layout = _get_expert_param_info()
         set_moe_sharding_config(
             moe_config,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=expert_layout,
+        )
+        root_sharding = moe_config.sharding_config
+        assert root_sharding is not None
+        # Only the MoE root sees HF's singleton batch. Its children retain the
+        # standard Titan ``(tokens, hidden)`` layouts used inside MoE.forward.
+        hf_sp_layout = (
+            _hf_sequence_parallel_placement()
+            if enable_sp
+            else _hf_activation_placement(tp=spmd.I)
+        )
+        desired_input_layout = (
+            hf_sp_layout if enable_ep else _hf_activation_placement(tp=spmd.R)
+        )
+        output_layout = (
+            _hf_sequence_parallel_placement()
+            if enable_sp
+            else _hf_activation_placement(tp=spmd.P)
+        )
+        moe_config.sharding_config = replace(
+            root_sharding,
+            in_src_shardings={"hidden_states": hf_sp_layout},
+            in_dst_shardings={"hidden_states": desired_input_layout},
+            out_src_shardings=output_layout,
+            out_dst_shardings=hf_sp_layout,
         )
 
-        # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but leaves the
-        # SigmoidGatedFeedForward gate to model-specific code. Replicate it (weight
-        # and output), matching qwen3_5's _set_shared_expert_gate_sharding.
+        # set_moe_sharding_config shards the shared FFN (w1/w2/w3) but
+        # leaves the SigmoidGatedFeedForward gate to model-specific code.
         shared = moe_config.shared_experts
         if isinstance(shared, SigmoidGatedFeedForward.Config):
+            gate_output_layout = (
+                dense_sequence_parallel_placement()
+                if enable_sp
+                else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+            )
             shared.gate.sharding_config = ShardingConfig(
                 state_shardings={
                     "weight": dense_param_placement(tp=spmd.R),
                     "bias": dense_param_placement(tp=spmd.R),
                 },
-                out_dst_shardings=dense_activation_placement(tp=spmd.R),
+                out_src_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+                out_dst_shardings=gate_output_layout,
             )
 
         with torch.device("meta"):
             native_moe = moe_config.build()
+        # Preserve the Titan MoE state-dict paths while adapting its root
+        # forward boundary; an nn.Module wrapper would add another name level.
+        native_moe.__class__ = _HFBatchedMoE
 
         # Materialize meta params to real tensors, then initialize values.
         # This mirrors the trainer's flow: to_empty → init_states.
@@ -490,16 +544,28 @@ def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]
 
 def _build_moe_config(params: dict, config) -> MoE.Config:
     """Build a fully-specified MoE.Config from probed parameters."""
-    router = make_router_config(
+    router_config_factory = (
+        make_deepseek_v3_router_config
+        if params["num_expert_groups"] is not None
+        else make_router_config
+    )
+    router_kwargs = {}
+    if params["num_expert_groups"] is not None:
+        router_kwargs = {
+            "num_expert_groups": params["num_expert_groups"],
+            "num_limited_groups": params["num_limited_groups"],
+        }
+    router = router_config_factory(
         dim=params["dim"],
         num_experts=params["num_experts"],
         gate_param_init=_LINEAR_INIT,
         top_k=params["top_k"],
-        score_func=params["score_func"],
+        score_func=(
+            Sigmoid.Config() if params["score_func"] == "sigmoid" else Softmax.Config()
+        ),
         route_norm=params["route_norm"],
         route_scale=params["route_scale"],
-        num_expert_groups=params["num_expert_groups"],
-        num_limited_groups=params["num_limited_groups"],
+        **router_kwargs,
     )
 
     expert_init, _ = _get_expert_param_info()
@@ -522,13 +588,9 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
-            # SigmoidGatedFeedForward is a FeedForward subclass, so w1/w2/w3 stay flat
-            # (no nested ``ffn.`` level) and are directly shardable by
-            # set_moe_sharding_config.
             shared_experts = SigmoidGatedFeedForward.Config(
-                w1=ffn_config.w1,
+                w13=ffn_config.w13,
                 w2=ffn_config.w2,
-                w3=ffn_config.w3,
                 gate=Linear.Config(
                     in_features=shared_info["dim"],
                     out_features=1,

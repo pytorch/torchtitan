@@ -2,4 +2,3 @@ av
 einops
 pillow
 torchvision
-flash-linear-attention

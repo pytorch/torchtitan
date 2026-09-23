@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
+
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining.schedules import (
@@ -33,8 +35,9 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.model_spec import ParallelizeFunction
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_graph_pp_config(
@@ -74,9 +77,8 @@ def graph_pipeline_llm(
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
-    parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
-) -> tuple[GraphPipelineRuntime, list[nn.Module], bool, bool]:
+) -> tuple[GraphPipelineRuntime, list[BaseModel], bool, bool]:
     """Build a GraphPP pipeline schedule for GraphTrainer.
 
     Args:
@@ -85,11 +87,10 @@ def graph_pipeline_llm(
         training: Training config used for local batch size.
         parallelism: Parallelism config used for PP schedule and module split.
         compile_config: GraphTrainer compile config.
-        ac_config: Activation checkpointing config forwarded to ``parallelize_fn``.
+        ac_config: Activation checkpointing config forwarded to the model.
         dump_folder: Artifact/debug output directory.
         device: Local device for the stage.
         model_config: Model config consumed by stage graph passes.
-        parallelize_fn: Model-specific SPMD parallelization function.
         loss_fn: Loss function used by upstream PP metadata and GraphPP tracing.
 
     Returns:
@@ -126,12 +127,11 @@ def graph_pipeline_llm(
         parallelism.pipeline_parallel_schedule,
         len(module_names_per_stage),
     )
-    model_parts: list[nn.Module] = []
+    model_parts: list[BaseModel] = []
     stages: list[GraphPipelineStage] = []
     for stage_index in pp_rank_to_stage_indices:
         model_part = _split_module(model, module_names_per_stage[stage_index])
-        model_part = parallelize_fn(
-            model_part,
+        model_part = model_part.parallelize(
             parallel_dims=parallel_dims,
             training=training,
             parallelism=parallelism,
@@ -159,7 +159,7 @@ def graph_pipeline_llm(
 
     schedule = _build_pipeline_schedule(
         parallelism=parallelism,
-        local_batch_size=training.local_batch_size,
+        num_microbatches=parallelism.num_pp_microbatches,
         stages=stages,
         loss_fn=loss_fn,
         backward_requires_autograd=False,

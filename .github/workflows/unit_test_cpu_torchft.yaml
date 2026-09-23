@@ -5,10 +5,12 @@ on:
     branches: [ main ]
     paths:
       - 'torchtitan/experiments/torchft/**'
+      - 'torchtitan/components/checkpointer/**'
       - '.github/workflows/unit_test_cpu_torchft.yaml'
   pull_request:
     paths:
       - 'torchtitan/experiments/torchft/**'
+      - 'torchtitan/components/checkpointer/**'
       - '.github/workflows/unit_test_cpu_torchft.yaml'
 
 concurrency:

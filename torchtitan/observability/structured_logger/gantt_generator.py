@@ -13,13 +13,17 @@ assign tids online in the formatter.
 
 import heapq
 import json
+
+import logging
 import os
 from collections import defaultdict
 from glob import glob
 from typing import Any
 
 from torchtitan.observability.structured_logger.structured_logging import LogType
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def generate_gantt_trace(log_dir: str, output_path: str) -> dict:
@@ -39,7 +43,7 @@ def generate_gantt_trace(log_dir: str, output_path: str) -> dict:
     Example::
 
         # Actor with two nested spans per endpoint call:
-        @endpoint
+        @concurrent_endpoint
         async def generate(self, prompts):
             with log_trace_span("rl_generate"):
                 with log_trace_span("rl_engine_steps"):

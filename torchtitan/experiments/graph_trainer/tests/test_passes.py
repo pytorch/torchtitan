@@ -7,10 +7,12 @@
 import inspect
 import operator
 import sys
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from torch._decomp import get_decompositions
 from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch._guards import tracing
 from torch._inductor.fx_passes.bucketing import (
@@ -19,11 +21,13 @@ from torch._inductor.fx_passes.bucketing import (
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.traceback import preserve_node_meta
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
@@ -39,10 +43,13 @@ from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
 )
-from torchtitan.experiments.graph_trainer.cudagraph import (
+from torchtitan.experiments.graph_trainer.cuda_graph import (
     insert_kernel_annotations_pass,
-    is_cudagraphable,
-    is_full_cudagraphable,
+    is_cuda_graph_fully_compatible,
+    is_cuda_graph_node_compatible,
+)
+from torchtitan.experiments.graph_trainer.decompositions import (
+    apply_decompositions_pass,
 )
 from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
     _chunk_copied_meta,
@@ -77,21 +84,28 @@ from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     _FSDP_BUCKET_META,
+    _validate_transformer_block_bucket_counts,
     deduplicate_fsdp_unshard_chains_pass,
     get_transformer_block_bucket_counts,
+    get_transformer_block_layer_ids,
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+    GraphStateSpec,
     minimal_fx_tracer,
     run_traced,
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
+    _backward_side_nodes,
     _default_memory_policy_pass,
     _make_default_memory_policy,
     _make_full_memory_policy,
+    tag_min_cut_saved_values,
     tag_sac_policy,
+    tag_with_memory_policy_pass,
+    validate_memory_policy_config,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
@@ -106,7 +120,15 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_identity_slice_pass,
     remove_identity_view_pass,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    data_parallel,
+    FSDP_PARAM_FQNS_META,
+)
+from torchtitan.experiments.graph_trainer.subgraph_regions import (
+    apply_subgraph_region_annotations_pass,
+    SUBGRAPH_REGION,
+    SUBGRAPH_REGION_ROLE,
+)
 from torchtitan.experiments.graph_trainer.tests.test_cpu_offload import (  # noqa: F401
     TestCpuOffloadPass,
 )
@@ -132,11 +154,14 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             return SimpleNamespace(
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
-                model_spec=SimpleNamespace(model=SimpleNamespace(layers=[0, 1])),
-                parallelism=SimpleNamespace(enable_async_tensor_parallel=False),
+                model=SimpleNamespace(layers=[0, 1]),
+                parallelism=SimpleNamespace(),
             )
 
-        traced_result = SimpleNamespace(state_fqns=[])
+        traced_result = SimpleNamespace(
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
         with patch(
             "torchtitan.experiments.graph_trainer.common_utils."
             "get_default_transformer_block_buckets",
@@ -185,6 +210,16 @@ class TestFSDPUnshardDedupPass(TestCase):
             torch.ops.aten.view.default,
             args=(wait_1, [4]),
         )
+        fsdp_meta = {FSDP_PARAM_FQNS_META: ("linear.weight",)}
+        for node in (
+            all_gather_0,
+            wait_0,
+            unsharded_0,
+            all_gather_1,
+            wait_1,
+            unsharded_1,
+        ):
+            node.meta["custom"] = fsdp_meta
 
         params = graph.call_function(
             torch.ops.aten.add.Tensor,
@@ -253,18 +288,27 @@ class TestReassignCollectivePgsPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
     def _make_fsdp_model(self, dim=16, n_layers=3):
         """Create a toy model and apply simple_fsdp data_parallel."""
         model = ToyModel(dim, n_layers).cuda()
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         model = data_parallel(model, device_mesh=fsdp_mesh, mode="fully_shard")
         return model
 
     def _get_fsdp_pg_name(self):
         """Get the FSDP process group name from the mesh."""
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         return fsdp_mesh.get_group().group_name
 
     def _export_and_get_bw_graph(self, model, inputs):
@@ -476,17 +520,52 @@ class TestFsdpDenseSchedulerPass(TestCase):
             node.meta["autograd_backward"] = True
         return node
 
-    def _tag_fsdp_bucket(self, node, plan_fqns, direction):
-        node.meta[_FSDP_BUCKET_META] = {
-            "plan_fqns": tuple(plan_fqns),
-            "direction": direction,
-        }
+    def _tag_fsdp_chain(self, node, param_fqns, direction):
+        custom = dict(node.meta.get("custom", {}))
+        custom[FSDP_PARAM_FQNS_META] = tuple(param_fqns)
+        node.meta["custom"] = custom
         if direction == "bwd":
             node.meta["autograd_backward"] = True
         return node
 
+    def _tag_fsdp_bucket(self, node, plan_fqns, direction):
+        self._tag_fsdp_chain(node, plan_fqns, direction)
+        node.meta[_FSDP_BUCKET_META] = {
+            "plan_fqns": tuple(plan_fqns),
+            "direction": direction,
+        }
+        return node
+
     def _node_order(self, gm):
         return {node: i for i, node in enumerate(gm.graph.nodes)}
+
+    def _add_bucketed_ag_with_late_input(
+        self,
+        graph,
+        source,
+        *,
+        plan_fqn,
+        direction,
+        group_name="pg",
+    ):
+        prep = graph.call_function(torch.ops.aten.detach.default, args=(source,))
+        bucket = graph.call_function(
+            torch.ops.bucketing._pre_bucket_all_gather.default,
+            args=([prep], 2, torch.float32, [0], 0),
+        )
+        shard = graph.call_function(torch.ops.aten.slice.Tensor, args=(bucket, 0, 0, 1))
+        coll = graph.call_function(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+            args=(shard, 2, group_name),
+            kwargs={"out": bucket},
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, args=(coll,)
+        )
+        self._tag_fsdp_chain(prep, [plan_fqn], direction)
+        for node in (bucket, shard, coll, wait):
+            self._tag_fsdp_bucket(node, [plan_fqn], direction)
+        return prep, coll, wait
 
     def test_transformer_block_bucket_counts_follow_bucket_plan(self):
         counts = get_transformer_block_bucket_counts(
@@ -507,6 +586,377 @@ class TestFsdpDenseSchedulerPass(TestCase):
         )
 
         self.assertEqual(counts, {0: 1, 1: 2})
+
+    def test_transformer_block_layer_ids_follow_traced_state(self):
+        layer_ids = get_transformer_block_layer_ids(
+            [
+                "tok_embeddings.weight",
+                "layers.1.attention.wq.weight",
+                "layers.1.ffn_norm.weight",
+                "layers.4.moe.router.weight",
+                "norm.weight",
+            ],
+            n_layers=6,
+        )
+
+        self.assertEqual(layer_ids, frozenset({1, 4}))
+
+    def test_transformer_block_layer_ids_reject_out_of_range_layer(self):
+        with self.assertRaisesRegex(ValueError, r"references layers \[6\]"):
+            get_transformer_block_layer_ids(
+                ["layers.1.attention.weight", "layers.6.moe.router.weight"],
+                n_layers=6,
+            )
+
+    def test_fsdp_dense_scheduler_accepts_empty_local_stage(self):
+        _validate_transformer_block_bucket_counts(
+            {},
+            n_layers=2,
+            expected_bucket_counts={0: 1, 1: 1},
+            local_layer_ids=frozenset(),
+            require_backward_all_gathers=True,
+        )
+
+    def test_fsdp_dense_scheduler_rejects_collective_outside_local_stage(self):
+        graph = torch.fx.Graph()
+        node = graph.placeholder("x")
+        comms = {
+            1: {
+                "fwd_ag": [(node, node)],
+                "bwd_ag": [(node, node)],
+                "bwd_rs": [(node, node)],
+            }
+        }
+
+        with self.assertRaisesRegex(ValueError, r"outside local layers \[1\]"):
+            _validate_transformer_block_bucket_counts(
+                comms,
+                n_layers=2,
+                expected_bucket_counts={0: 1, 1: 1},
+                local_layer_ids=frozenset(),
+                require_backward_all_gathers=True,
+            )
+
+    def test_fsdp_dense_scheduler_prefetches_full_ac_ag_input_chains(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+
+        fwd_dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.0.attention",
+        )
+        fwd_buckets = [
+            self._add_bucketed_ag_with_late_input(
+                graph,
+                x,
+                plan_fqn=plan_fqn,
+                direction="fwd",
+            )
+            for plan_fqn in (
+                "layers.1.attention",
+                "layers.1.moe.routed_experts.inner_experts",
+            )
+        ]
+        fwd_dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(
+                torch.ops.aten.add.Tensor,
+                args=(fwd_buckets[0][2], fwd_buckets[1][2]),
+            ),
+            "layers.1.attention",
+        )
+        bwd_dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(fwd_dense1,)),
+            "layers.1.attention",
+            backward=True,
+        )
+        bwd_dense1.name = f"{bwd_dense1.name}_recomputed"
+        bwd_buckets = [
+            self._add_bucketed_ag_with_late_input(
+                graph,
+                x,
+                plan_fqn=plan_fqn,
+                direction="bwd",
+            )
+            for plan_fqn in (
+                "layers.0.attention",
+                "layers.0.moe.routed_experts.inner_experts",
+            )
+        ]
+        bwd_dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(
+                torch.ops.aten.add.Tensor,
+                args=(bwd_buckets[0][2], bwd_buckets[1][2]),
+            ),
+            "layers.0.attention",
+            backward=True,
+        )
+        bwd_dense0.name = f"{bwd_dense0.name}_recomputed"
+        graph.output((fwd_dense0, fwd_dense1, bwd_dense1, bwd_dense0))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset({0, 1}),
+            n_layers=2,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        for prep, coll, wait in fwd_buckets:
+            self.assertLess(order[prep], order[coll])
+            self.assertLess(order[coll], order[fwd_dense0])
+            self.assertLess(order[fwd_dense0], order[wait])
+        self.assertLess(order[fwd_buckets[0][1]], order[fwd_buckets[1][1]])
+        for prep, coll, wait in bwd_buckets:
+            self.assertLess(order[prep], order[coll])
+            self.assertLess(order[coll], order[bwd_dense1])
+            self.assertLess(order[bwd_dense1], order[wait])
+        self.assertLess(order[bwd_buckets[0][1]], order[bwd_buckets[1][1]])
+
+    def test_fsdp_dense_scheduler_prefetches_padded_ag_input_chain(self):
+        graph = torch.fx.Graph()
+        parameter = graph.placeholder("parameter")
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(parameter,)),
+            "layers.0.attention",
+        )
+        padded = graph.call_function(
+            torch.ops.aten.constant_pad_nd.default,
+            args=(parameter, [0, 1], 0.0),
+        )
+        bucket = graph.call_function(
+            torch.ops.bucketing._pre_bucket_all_gather.default,
+            args=([padded], 2, torch.float32, [0], 0),
+        )
+        shard = graph.call_function(torch.ops.aten.slice.Tensor, args=(bucket, 0, 0, 1))
+        coll = self._tag_fsdp_bucket(
+            graph.call_function(
+                torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+                args=(shard, 2, "pg"),
+                kwargs={"out": bucket},
+            ),
+            ["layers.1.attention"],
+            "fwd",
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, args=(coll,)
+        )
+        for node in (padded, bucket, shard, wait):
+            self._tag_fsdp_chain(node, ["layers.1.attention"], "fwd")
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(wait,)),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=2,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        self.assertLess(order[padded], order[bucket])
+        self.assertLess(order[bucket], order[shard])
+        self.assertLess(order[shard], order[coll])
+        self.assertLess(order[coll], order[dense0])
+        self.assertLess(order[dense0], order[wait])
+
+    def test_fsdp_dense_scheduler_prefetches_shared_ag_input_once(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.0.attention",
+        )
+        shared_prep = graph.call_function(torch.ops.aten.detach.default, args=(x,))
+        self._tag_fsdp_chain(
+            shared_prep,
+            [
+                "layers.1.attention",
+                "layers.1.moe.routed_experts.inner_experts",
+            ],
+            "fwd",
+        )
+        buckets = []
+        for plan_fqn in (
+            "layers.1.attention",
+            "layers.1.moe.routed_experts.inner_experts",
+        ):
+            bucket = graph.call_function(
+                torch.ops.bucketing._pre_bucket_all_gather.default,
+                args=([shared_prep], 2, torch.float32, [0], 0),
+            )
+            shard = graph.call_function(
+                torch.ops.aten.slice.Tensor, args=(bucket, 0, 0, 1)
+            )
+            coll = graph.call_function(
+                torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+                args=(shard, 2, "pg"),
+                kwargs={"out": bucket},
+            )
+            wait = graph.call_function(
+                torch.ops._c10d_functional.wait_tensor.default, args=(coll,)
+            )
+            for node in (bucket, shard, coll, wait):
+                self._tag_fsdp_bucket(node, [plan_fqn], "fwd")
+            buckets.append((coll, wait))
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(
+                torch.ops.aten.add.Tensor,
+                args=(buckets[0][1], buckets[1][1]),
+            ),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset({1}),
+            n_layers=2,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        for coll, wait in buckets:
+            self.assertLess(order[shared_prep], order[coll])
+            self.assertLess(order[coll], order[dense0])
+            self.assertLess(order[dense0], order[wait])
+        self.assertLess(order[buckets[0][0]], order[buckets[1][0]])
+
+    def test_fsdp_dense_scheduler_prefetches_ag_with_group_placeholder(self):
+        graph = torch.fx.Graph()
+        parameter = graph.placeholder("parameter")
+        group_name = graph.placeholder("group_name")
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(parameter,)),
+            "layers.0.attention",
+        )
+        prep, coll, wait = self._add_bucketed_ag_with_late_input(
+            graph,
+            parameter,
+            plan_fqn="layers.1.attention",
+            direction="fwd",
+            group_name=group_name,
+        )
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(wait,)),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=2,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        self.assertLess(order[group_name], order[prep])
+        self.assertLess(order[prep], order[coll])
+        self.assertLess(order[coll], order[dense0])
+        self.assertLess(order[dense0], order[wait])
+
+    def test_fsdp_dense_scheduler_rejects_late_getattr_without_reordering(self):
+        root = torch.nn.Module()
+        root.register_buffer("parameter", torch.ones(1))
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.0.attention",
+        )
+        parameter = graph.get_attr("parameter")
+        prep, coll, wait = self._add_bucketed_ag_with_late_input(
+            graph,
+            parameter,
+            plan_fqn="layers.1.attention",
+            direction="fwd",
+        )
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(wait,)),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(root, graph)
+        original_nodes = list(gm.graph.nodes)
+
+        with self.assertRaisesRegex(ValueError, "launch inputs are after dense region"):
+            schedule_fsdp_comms_to_dense_regions_pass(
+                gm,
+                moe_layer_ids=frozenset(),
+                n_layers=2,
+                strict=True,
+            )
+
+        self.assertEqual(list(gm.graph.nodes), original_nodes)
+        order = self._node_order(gm)
+        self.assertLess(order[dense0], order[parameter])
+        self.assertLess(order[parameter], order[prep])
+        self.assertLess(order[prep], order[coll])
+        self.assertLess(order[coll], order[wait])
+
+    def test_fsdp_dense_scheduler_does_not_move_independent_rs_producer(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+
+        dense2 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.2.attention",
+            backward=True,
+        )
+        dense1_early = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(dense2,)),
+            "layers.1.attention",
+            backward=True,
+        )
+        grad = graph.call_function(torch.ops.aten.neg.default, args=(x,))
+        grad.meta["autograd_backward"] = True
+        dense1_late = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(dense1_early,)),
+            "layers.1.attention",
+            backward=True,
+        )
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(dense1_late,)),
+            "layers.0.attention",
+            backward=True,
+        )
+        rs2 = self._tag_fsdp_bucket(
+            graph.call_function(
+                c10d.reduce_scatter_tensor.default,
+                args=(grad, "sum", 1, "pg"),
+            ),
+            ["layers.2"],
+            "bwd",
+        )
+        rs2_wait = graph.call_function(c10d.wait_tensor.default, args=(rs2,))
+        graph.output((dense0, rs2_wait))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=3,
+            strict=True,
+        )
+
+        gm.graph.lint()
+        order = self._node_order(gm)
+        self.assertLess(order[dense1_early], order[grad])
+        self.assertLess(order[grad], order[rs2])
+        self.assertLess(order[rs2], order[dense1_late])
 
     def test_fsdp_dense_scheduler_accepts_expected_bucket_counts(self):
         graph = torch.fx.Graph()
@@ -540,12 +990,65 @@ class TestFsdpDenseSchedulerPass(TestCase):
         rs0_wait = graph.call_function(c10d.wait_tensor.default, args=(rs0,))
         graph.output((fwd0, rs0_wait))
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        optional_bwd_ag_gm = deepcopy(gm)
 
         schedule_fsdp_comms_to_dense_regions_pass(
             gm,
             moe_layer_ids=frozenset(),
             n_layers=1,
             transformer_bucket_counts_by_layer={0: 1},
+            strict=True,
+        )
+
+        gm.graph.lint()
+        schedule_fsdp_comms_to_dense_regions_pass(
+            optional_bwd_ag_gm,
+            moe_layer_ids=frozenset(),
+            n_layers=1,
+            transformer_bucket_counts_by_layer={0: 1},
+            require_backward_all_gathers=False,
+            strict=True,
+        )
+        optional_bwd_ag_gm.graph.lint()
+
+    def test_fsdp_dense_scheduler_accepts_stage_local_no_reshard_counts(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+
+        fwd_ag = self._tag_fsdp_bucket(
+            graph.call_function(c10d.all_gather_into_tensor.default, args=(x, 1, "pg")),
+            ["layers.1"],
+            "fwd",
+        )
+        fwd_wait = graph.call_function(c10d.wait_tensor.default, args=(fwd_ag,))
+        fwd = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(fwd_wait,)),
+            "layers.1.attention",
+        )
+        bwd = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(fwd,)),
+            "layers.1.attention",
+            backward=True,
+        )
+        rs = self._tag_fsdp_bucket(
+            graph.call_function(
+                c10d.reduce_scatter_tensor.default, args=(bwd, "sum", 0, "pg")
+            ),
+            ["layers.1"],
+            "bwd",
+        )
+        rs_wait = graph.call_function(c10d.wait_tensor.default, args=(rs,))
+        graph.output(rs_wait)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=3,
+            transformer_bucket_counts_by_layer={0: 1, 1: 1, 2: 1},
+            local_layer_ids=frozenset({1}),
+            require_backward_all_gathers=False,
             strict=True,
         )
 
@@ -652,7 +1155,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=3, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=3,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -707,7 +1213,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=1, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=1,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -761,7 +1270,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=3, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=3,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -804,7 +1316,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=3, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=3,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -843,12 +1358,63 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset(), n_layers=2, strict=True
+            gm,
+            moe_layer_ids=frozenset(),
+            n_layers=2,
+            strict=True,
         )
 
         order = self._node_order(gm)
         self.assertLess(order[wait0], order[ag1])
         self.assertLess(order[unpack0], order[ag1])
+        self.assertLess(order[ag1], order[dense0])
+        self.assertLess(order[dense0], order[ag1_wait])
+
+    def test_fsdp_dense_scheduler_moves_padded_all_gather_chain(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+
+        dense0 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(x,)),
+            "layers.0.attention",
+        )
+        padded = graph.call_function(
+            torch.ops.aten.constant_pad_nd.default, args=(x, [0, 1], 0.0)
+        )
+        bucket = graph.call_function(
+            torch.ops.bucketing._pre_bucket_all_gather.default,
+            args=([padded], 2, torch.float32, [0], 0),
+        )
+        shard = graph.call_function(torch.ops.aten.slice.Tensor, args=(bucket, 0, 0, 1))
+        ag1 = self._tag_fsdp_bucket(
+            graph.call_function(
+                torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+                args=(shard, 2, "pg"),
+                kwargs={"out": bucket},
+            ),
+            ["layers.1"],
+            "fwd",
+        )
+        ag1_wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, args=(ag1,)
+        )
+        for node in (padded, bucket, shard, ag1_wait):
+            self._tag_fsdp_chain(node, ["layers.1"], "fwd")
+        dense1 = self._tag_fsdp_schedule_node(
+            graph.call_function(torch.ops.aten.relu.default, args=(ag1_wait,)),
+            "layers.1.attention",
+        )
+        graph.output((dense0, dense1))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        schedule_fsdp_comms_to_dense_regions_pass(
+            gm, moe_layer_ids=frozenset(), n_layers=2, strict=True
+        )
+
+        order = self._node_order(gm)
+        self.assertLess(order[padded], order[bucket])
+        self.assertLess(order[bucket], order[shard])
+        self.assertLess(order[shard], order[ag1])
         self.assertLess(order[ag1], order[dense0])
         self.assertLess(order[dense0], order[ag1_wait])
 
@@ -1031,8 +1597,9 @@ class TestFsdpDenseSchedulerPass(TestCase):
             backward=True,
         )
         rs2_wait = graph.call_function(c10d.wait_tensor.default, args=(rs2,))
+        alias = graph.call_function(torch.ops.aten.alias.default, args=(rs2_wait,))
         split = graph.call_function(
-            torch.ops.aten.split_with_sizes.default, args=(rs2_wait, [1])
+            torch.ops.aten.split_with_sizes.default, args=(alias, [1])
         )
         shard = graph.call_function(operator.getitem, args=(split, 0))
         dense1 = self._tag_fsdp_schedule_node(
@@ -1055,6 +1622,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
         order = self._node_order(gm)
         self.assertLess(order[rs2], order[dense1])
         self.assertGreater(order[rs2_wait], order[dense0])
+        self.assertGreater(order[alias], order[dense0])
         self.assertGreater(order[split], order[dense0])
         self.assertGreater(order[shard], order[dense0])
 
@@ -1197,7 +1765,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         schedule_fsdp_comms_to_dense_regions_pass(
-            gm, moe_layer_ids=frozenset({0}), n_layers=2, strict=True
+            gm,
+            moe_layer_ids=frozenset({0}),
+            n_layers=2,
+            strict=True,
         )
 
         order = self._node_order(gm)
@@ -1215,10 +1786,15 @@ class TestOverlapPgIsolationPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
     def _get_fsdp_pg_name(self):
-        fsdp_mesh = self.parallel_dims.get_mesh("fsdp")
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
         return fsdp_mesh.get_group().group_name
 
     def _count_all_ag_nodes(self, gm):
@@ -1362,6 +1938,30 @@ class TestApplySACPass(TestCase):
         """Return all call_function nodes from the graph."""
         return [n for n in gm.graph.nodes if n.op == "call_function"]
 
+    def test_none_policy_disables_activation_rematerialization(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 2))
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(memory_policy="none")
+        )
+        tag_with_memory_policy_pass(gm, config=config)
+        selective_activation_remat_pass(gm)
+
+        self.assertEqual(fwd.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertFalse(
+            any(
+                node.name.endswith("_recomputed")
+                for node in gm.graph.nodes
+                if node.op == "call_function"
+            )
+        )
+
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""
         gm = self._build_gm(
@@ -1503,6 +2103,9 @@ class TestApplySACPass(TestCase):
             args=(all_gather,),
         )
         view = graph.call_function(torch.ops.aten.view.default, args=(wait, [4]))
+        fsdp_meta = {FSDP_PARAM_FQNS_META: ("linear.weight",)}
+        for node in (all_gather, wait, view):
+            node.meta["custom"] = fsdp_meta
         out = graph.call_function(torch.ops.aten.add.Tensor, args=(view, x))
         graph.output(out)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -1618,8 +2221,8 @@ class TestApplySACPass(TestCase):
         self.assertIsNot(dup.meta["custom"], fwd_node.meta["custom"])
         self.assertEqual(dup.meta["custom"][_MODULE_FQN], "layers.0.attention_norm")
         # Mutating the dup's annotation must not leak into the original.
-        dup.meta["custom"]["cudagraph_partition"] = "cudagraph_9"
-        self.assertNotIn("cudagraph_partition", fwd_node.meta["custom"])
+        dup.meta["custom"]["cuda_graph_partition"] = "cuda_graph_9"
+        self.assertNotIn("cuda_graph_partition", fwd_node.meta["custom"])
 
 
 class TestFullMemoryPolicy(TestCase):
@@ -1694,6 +2297,93 @@ class TestFullMemoryPolicy(TestCase):
         node = self._get_call_function_nodes(gm)[0]
         self.assertEqual(policy_fn(node), CheckpointPolicy.MUST_RECOMPUTE)
 
+    def test_selected_module_ops_saved(self):
+        policy_fn = _make_full_memory_policy(
+            "layers.*.moe.router.gate :: aten.mm.default | "
+            "layers.*.attention.inner_attention :: higher_order.flex_attention"
+        )
+        cases = (
+            (
+                torch.ops.aten.mm.default,
+                "layers.3.moe.router.gate",
+                CheckpointPolicy.MUST_SAVE,
+            ),
+            (
+                torch.ops.aten.mm.default,
+                "layers.3.attention.wkv_a",
+                CheckpointPolicy.MUST_RECOMPUTE,
+            ),
+            (
+                torch.ops.aten._to_copy.default,
+                "layers.3.moe.router.gate",
+                CheckpointPolicy.MUST_RECOMPUTE,
+            ),
+            (
+                torch.ops.higher_order.flex_attention,
+                "layers.3.attention.inner_attention",
+                CheckpointPolicy.MUST_SAVE,
+            ),
+        )
+
+        for target, fqn, expected in cases:
+            with self.subTest(target=target, fqn=fqn):
+                gm = self._build_gm([target], layer_fqns=[fqn])
+                node = self._get_call_function_nodes(gm)[0]
+                self.assertEqual(policy_fn(node), expected)
+
+    def test_selected_module_op_can_target_one_layer(self):
+        policy_fn = _make_full_memory_policy(
+            "layers.7.attention.wo :: torch.ops.aten.mm.default"
+        )
+        for layer_id, expected in (
+            (7, CheckpointPolicy.MUST_SAVE),
+            (8, CheckpointPolicy.MUST_RECOMPUTE),
+        ):
+            gm = self._build_gm(
+                [torch.ops.aten.mm.default],
+                layer_fqns=[f"layers.{layer_id}.attention.wo"],
+            )
+            node = self._get_call_function_nodes(gm)[0]
+            self.assertEqual(policy_fn(node), expected)
+
+    def test_full_policy_uses_configured_save_ops(self):
+        gm = self._build_gm(
+            [torch.ops.aten.mm.default],
+            layer_fqns=["layers.3.moe.router.gate"],
+        )
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(
+                memory_policy="full",
+                full_recompute_save_ops=("layers.*.moe.router.gate :: aten.mm.default"),
+            )
+        )
+
+        tag_with_memory_policy_pass(gm, config=config)
+
+        node = self._get_call_function_nodes(gm)[0]
+        self.assertEqual(node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+    def test_save_ops_rejected_for_other_memory_policies(self):
+        compile_config = GraphTrainerCompileConfig(
+            memory_policy="default",
+            full_recompute_save_ops="layers.*.moe.router.gate::aten.mm.default",
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires.*memory_policy full"):
+            validate_memory_policy_config(compile_config)
+
+    def test_invalid_save_op_selectors_rejected(self):
+        invalid_values = (
+            "layers.*.moe.router.gate",
+            ":: aten.mm.default",
+            "layers.*.moe.router.gate ::",
+            "layers.*.moe.router.gate :: aten.not_an_op.default",
+            "layers.*.moe.router.gate :: aten.mm",
+        )
+        for value in invalid_values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                _make_full_memory_policy(value)
+
     def test_layer_boundary_forced_to_must_save(self):
         """Nodes at layer boundaries should still be forced to MUST_SAVE."""
         gm = self._build_gm(
@@ -1736,6 +2426,207 @@ class TestFullMemoryPolicy(TestCase):
                 CheckpointPolicy.MUST_RECOMPUTE,
                 f"node {node.name} in single layer should be MUST_RECOMPUTE",
             )
+
+
+class TestMinCutMemoryPolicy(TestCase):
+    @staticmethod
+    def _config():
+        return SimpleNamespace(
+            compile=GraphTrainerCompileConfig(memory_policy="min_cut")
+        )
+
+    @staticmethod
+    def _fake_prop(gm, *inputs):
+        with torch._subclasses.FakeTensorMode() as fake_mode:
+            fake_inputs = [
+                torch.empty(shape, device="cuda", dtype=dtype)
+                for shape, dtype in inputs
+            ]
+            FakeTensorProp(gm, mode=fake_mode).propagate_dont_convert_inputs(
+                *fake_inputs
+            )
+
+    @staticmethod
+    def _recomputed_nodes(gm):
+        return [node for node in gm.graph.nodes if node.name.endswith("_recomputed")]
+
+    @staticmethod
+    def _log_softmax_decomposition_table():
+        return get_decompositions([torch.ops.aten._log_softmax.default])
+
+    def test_view_cut_saves_its_base(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        weight = graph.placeholder("weight")
+        grad = graph.placeholder("grad")
+        mm = graph.call_function(torch.ops.aten.mm.default, args=(x, weight))
+        view = graph.call_function(torch.ops.aten.view.default, args=(mm, [4, 4]))
+        bwd = graph.call_function(torch.ops.aten.mm.default, args=(view, grad))
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_min_cut_saved_values(gm, _backward_side_nodes(gm), {view})
+
+        self.assertEqual(mm.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertEqual(view.meta["recompute"], CheckpointPolicy.MUST_RECOMPUTE)
+
+    def test_applies_to_whole_graph(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        a = graph.call_function(torch.ops.aten.sin.default, args=(x,))
+        b = graph.call_function(torch.ops.aten.cos.default, args=(a,))
+        loss = graph.call_function(torch.ops.aten.sum.default, args=(b,))
+        bwd = graph.call_function(torch.ops.aten.neg.default, args=(b,))
+        bwd.meta["autograd_backward"] = True
+        graph.output((loss, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self._fake_prop(gm, ((64, 64), torch.float32))
+
+        tag_with_memory_policy_pass(gm, config=self._config())
+        self.assertTrue(
+            any(
+                node.meta.get("recompute") == CheckpointPolicy.MUST_RECOMPUTE
+                for node in gm.graph.nodes
+            )
+        )
+        self.assertEqual(len(self._recomputed_nodes(gm)), 0)
+        selective_activation_remat_pass(gm)
+
+        self.assertGreaterEqual(len(self._recomputed_nodes(gm)), 1)
+
+    def test_decomposition_is_a_standalone_pass_before_min_cut(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        grad = graph.placeholder("grad")
+        log_probs = graph.call_function(
+            torch.ops.aten._log_softmax.default, args=(x, -1, False)
+        )
+        loss = graph.call_function(torch.ops.aten.sum.default, args=(log_probs,))
+        bwd = graph.call_function(
+            torch.ops.aten._log_softmax_backward_data.default,
+            args=(grad, log_probs, -1, torch.float32),
+        )
+        bwd.meta["autograd_backward"] = True
+        graph.output((loss, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self._fake_prop(gm, ((128, 1024), torch.float32), ((128, 1024), torch.float32))
+
+        apply_decompositions_pass(
+            gm,
+            decomposition_table=self._log_softmax_decomposition_table(),
+        )
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten._log_softmax.default
+                for node in gm.graph.nodes
+            )
+        )
+        self.assertEqual(len(self._recomputed_nodes(gm)), 0)
+
+        tag_with_memory_policy_pass(gm, config=self._config())
+        bwd = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._log_softmax_backward_data.default
+        )
+        self.assertIsInstance(bwd.args[1], torch.fx.Node)
+        self.assertEqual(bwd.args[1].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        selective_activation_remat_pass(gm)
+
+        bwd = next(
+            node
+            for node in gm.graph.nodes
+            if node.target == torch.ops.aten._log_softmax_backward_data.default
+        )
+        self.assertIsInstance(bwd.args[1], torch.fx.Node)
+        self.assertFalse(bwd.args[1].name.endswith("_recomputed"))
+
+    def test_min_cut_policy_respects_existing_checkpoint_policy(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        saved = graph.call_function(torch.ops.aten.sin.default, args=(x,))
+        recompute = graph.call_function(torch.ops.aten.cos.default, args=(saved,))
+        loss = graph.call_function(torch.ops.aten.sum.default, args=(recompute,))
+        bwd = graph.call_function(torch.ops.aten.neg.default, args=(recompute,))
+        bwd.meta["autograd_backward"] = True
+        graph.output((loss, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self._fake_prop(gm, ((64, 64), torch.float32))
+        saved.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        recompute.meta["recompute"] = CheckpointPolicy.PREFER_RECOMPUTE
+
+        tag_with_memory_policy_pass(gm, config=self._config())
+
+        self.assertEqual(saved.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertIn(
+            recompute.meta["recompute"],
+            (CheckpointPolicy.PREFER_RECOMPUTE, CheckpointPolicy.MUST_RECOMPUTE),
+        )
+        selective_activation_remat_pass(gm)
+        recomputed_targets = {node.target for node in self._recomputed_nodes(gm)}
+        self.assertIn(torch.ops.aten.cos.default, recomputed_targets)
+        self.assertNotIn(torch.ops.aten.sin.default, recomputed_targets)
+
+    def test_explicit_subgraph_decomposition_and_min_cut_policy(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        grad = graph.placeholder("grad")
+        log_probs = graph.call_function(
+            torch.ops.aten._log_softmax.default, args=(x, -1, False)
+        )
+        loss = graph.call_function(torch.ops.aten.sum.default, args=(log_probs,))
+        bwd = graph.call_function(
+            torch.ops.aten._log_softmax_backward_data.default,
+            args=(grad, log_probs, -1, torch.float32),
+        )
+        graph.output((loss, bwd))
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        self._fake_prop(gm, ((128, 1024), torch.float32), ((128, 1024), torch.float32))
+
+        for node in (log_probs, loss, bwd):
+            node.meta.setdefault("custom", {})
+            node.meta["custom"][SUBGRAPH_REGION] = "region"
+            node.meta["custom"][SUBGRAPH_REGION_ROLE] = "fw_bw_grad_accum"
+        bwd.meta["autograd_backward"] = True
+
+        apply_subgraph_region_annotations_pass(gm)
+        apply_decompositions_pass(
+            gm,
+            decomposition_table=self._log_softmax_decomposition_table(),
+            recurse=True,
+            apply_to_root=False,
+        )
+        submods = [
+            module
+            for module in gm.modules()
+            if isinstance(module, torch.fx.GraphModule) and module is not gm
+        ]
+        self.assertEqual(len(submods), 1)
+        submod = submods[0]
+        tag_with_memory_policy_pass(submod, config=self._config())
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten._log_softmax.default
+                for node in submod.graph.nodes
+            )
+        )
+        bwd = next(
+            node
+            for node in submod.graph.nodes
+            if node.target == torch.ops.aten._log_softmax_backward_data.default
+        )
+        self.assertIsInstance(bwd.args[1], torch.fx.Node)
+        self.assertEqual(bwd.args[1].meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+        selective_activation_remat_pass(submod)
+        bwd = next(
+            node
+            for node in submod.graph.nodes
+            if node.target == torch.ops.aten._log_softmax_backward_data.default
+        )
+        self.assertIsInstance(bwd.args[1], torch.fx.Node)
+        self.assertFalse(bwd.args[1].name.endswith("_recomputed"))
 
 
 class TestBucketingPrefetchOrder(FSDPTest):
@@ -1788,11 +2679,11 @@ class TestBucketingPrefetchOrder(FSDPTest):
     def _run_and_get_layer_ids(self, fsdp_reshard_after_forward: str):
         """Run a single forward+backward step and return bucketed AG layer ids."""
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            annotate_graph_trainer_model,
+        )
         from torchtitan.experiments.graph_trainer.llama3 import (
             model_registry as llama3_model_registry,
-        )
-        from torchtitan.experiments.graph_trainer.llama3.parallelize import (
-            annotate_llama,
         )
         from torchtitan.experiments.graph_trainer.simple_fsdp import (
             data_parallel,
@@ -1811,17 +2702,21 @@ class TestBucketingPrefetchOrder(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
-        model_spec = llama3_model_registry("debugmodel")
-        model_config = model_spec.model
+        model_config = llama3_model_registry("debugmodel")
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):
             model = model_config.build()
 
-        annotate_llama(model)
-        fsdp_mesh = parallel_dims.get_mesh("fsdp")
+        annotate_graph_trainer_model(model)
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            get_simple_fsdp_mesh,
+        )
+
+        fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
@@ -1841,35 +2736,35 @@ class TestBucketingPrefetchOrder(FSDPTest):
             GraphTrainer,
             tokenizer=HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer"),
             fsdp_reshard_after_forward=fsdp_reshard_after_forward,
+            parallel_dims=parallel_dims,
         )
 
-        inputs = torch.randint(
-            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device="cuda"
+        num_tokens = self.BATCH_SIZE * self.SEQ_LEN
+        inputs = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
+        labels = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
+        # The dataloader supplies per-document positions, which the trainer
+        # requires to build the block-causal FlexInnerAttention mask.
+        positions = torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32).repeat(
+            self.BATCH_SIZE
         )
-        labels = torch.randint(
-            0, vocab_size, (self.BATCH_SIZE, self.SEQ_LEN), device="cuda"
-        )
-        # The dataloader always supplies per-document positions, which the
-        # trainer requires to build the (block_causal) FlexAttention mask. A
-        # single document (sequential positions) is fine here.
-        positions = (
-            torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32)
-            .unsqueeze(0)
-            .expand(self.BATCH_SIZE, self.SEQ_LEN)
-        )
-        global_valid_tokens = torch.tensor(
-            self.BATCH_SIZE * self.SEQ_LEN, dtype=torch.float, device="cuda"
-        )
+        global_valid_tokens = torch.tensor(num_tokens, dtype=torch.float, device="cuda")
 
-        # One forward_backward_step triggers _make_fx_forward_backward_step
+        # One forward/backward microbatch triggers the graph-specific implementation.
         # which traces the model and applies all graph passes.
-        trainer.forward_backward_step(
-            input_dict={"input": inputs, "positions": positions},
-            labels=labels,
+        trainer.engine.forward_backward_microbatch(
+            microbatch_group=[
+                TokenizedTrainingMicrobatch(
+                    input=inputs,
+                    positions=positions,
+                    labels=labels,
+                    padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                    num_valid_tokens=labels.numel(),
+                )
+            ],
             global_valid_tokens=global_valid_tokens,
         )
 
-        layer_ids = self._get_bucketed_ag_layer_order(trainer._traced_step.gm)
+        layer_ids = self._get_bucketed_ag_layer_order(trainer.engine._traced_step.gm)
         self.assertGreater(len(layer_ids), 0, "No layer all_gather nodes found")
         return layer_ids
 
@@ -2178,7 +3073,7 @@ class TestChunkPasses(TestCase):
         graph.output(relu)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
-        dim = {"batch": 0, "seq": 1}[mode]
+        dim = 0
         fake_mode, sym_extent = self._symbolic_batch_fake_mode(input_shape[dim])
         x_shape = list(input_shape)
         x_shape[dim] = sym_extent
@@ -2947,16 +3842,16 @@ class TestChunkPasses(TestCase):
             )
 
     def test_chunk_seq_preserves_split_view_stride_scalar_live_in(self):
-        fake_mode, sym_seq = self._symbolic_batch_fake_mode(4)
+        fake_mode, sym_tokens = self._symbolic_batch_fake_mode(4)
         with fake_mode:
-            x_val = torch.empty(2, sym_seq, 256)
+            x_val = torch.empty(sym_tokens, 256)
 
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
         stride0 = graph.call_function(torch.ops.aten.sym_stride.int, args=(x, 0))
         view = graph.call_function(
             torch.ops.aten.as_strided.default,
-            args=(x, [2, sym_seq, 256], [stride0, 256, 1]),
+            args=(x, [sym_tokens, 256], [stride0, 1]),
         )
         graph.output(view)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
@@ -2970,20 +3865,18 @@ class TestChunkPasses(TestCase):
         self._chunk_seq(gm, module_patterns=["layers.*.moe"])
 
     def test_chunk_seq_keeps_parent_shape_template_full(self):
-        fake_mode, sym_seq = self._symbolic_batch_fake_mode(4)
+        fake_mode, sym_tokens = self._symbolic_batch_fake_mode(4)
         with fake_mode:
-            x_val = torch.empty(8, sym_seq, 256)
-            moe_val = torch.empty(8, sym_seq, 256)
-            template_flat_val = torch.empty(8 * sym_seq, 256)
-            template_val = torch.empty(8, sym_seq, 256)
+            x_val = torch.empty(sym_tokens, 256)
+            moe_val = torch.empty(sym_tokens, 256)
+            template_val = torch.empty(sym_tokens, 256)
 
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
-        seq = graph.call_function(torch.ops.aten.sym_size.int, args=(x, 1))
-        flat = graph.call_function(operator.mul, args=(8, seq))
+        num_tokens = graph.call_function(torch.ops.aten.sym_size.int, args=(x, 0))
         body_zeros = graph.call_function(
             torch.ops.aten.zeros.default,
-            args=([flat, 256],),
+            args=([num_tokens, 256],),
             kwargs={
                 "dtype": torch.bfloat16,
                 "device": torch.device("cpu"),
@@ -2991,12 +3884,12 @@ class TestChunkPasses(TestCase):
             },
         )
         body_view = graph.call_function(
-            torch.ops.aten.view.default, args=(body_zeros, [8, seq, 256])
+            torch.ops.aten.view.default, args=(body_zeros, [num_tokens, 256])
         )
         moe_out = graph.call_function(torch.ops.aten.add.Tensor, args=(x, body_view))
         template_flat = graph.call_function(
             torch.ops.aten.empty_strided.default,
-            args=([flat, 256], [256, 1]),
+            args=([num_tokens, 256], [256, 1]),
             kwargs={
                 "dtype": torch.bfloat16,
                 "device": torch.device("cpu"),
@@ -3004,12 +3897,12 @@ class TestChunkPasses(TestCase):
             },
         )
         template = graph.call_function(
-            torch.ops.aten.view.default, args=(template_flat, [8, seq, 256])
+            torch.ops.aten.view.default, args=(template_flat, [num_tokens, 256])
         )
         stride0 = graph.call_function(torch.ops.aten.sym_stride.int, args=(template, 0))
         parent_empty = graph.call_function(
             torch.ops.aten.empty_strided.default,
-            args=([8, seq, 256], [stride0, 256, 1]),
+            args=([num_tokens, 256], [stride0, 1]),
             kwargs={
                 "dtype": torch.bfloat16,
                 "device": torch.device("cpu"),
@@ -3020,12 +3913,11 @@ class TestChunkPasses(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         x.meta["val"] = x_val
-        seq.meta["val"] = sym_seq
-        flat.meta["val"] = 8 * sym_seq
-        body_zeros.meta["val"] = template_flat_val
+        num_tokens.meta["val"] = sym_tokens
+        body_zeros.meta["val"] = template_val
         body_view.meta["val"] = template_val
         moe_out.meta["val"] = moe_val
-        template_flat.meta["val"] = template_flat_val
+        template_flat.meta["val"] = template_val
         template.meta["val"] = template_val
         stride0.meta["val"] = template_val.stride(0)
         parent_empty.meta["val"] = template_val
@@ -3037,17 +3929,15 @@ class TestChunkPasses(TestCase):
 
         self.assertIs(stride0.args[0], template)
         self.assertIs(parent_empty.args[1][0], stride0)
-        self.assertIs(flat.args[0], 8)
-        self.assertIs(flat.args[1], seq)
         self.assertNotEqual(stride0.meta.get("chunked_region_role"), "body")
         self.assertNotEqual(template.meta.get("chunked_region_role"), "body")
 
-    def test_chunk_seq_matches_eager_symbolic_flatten_view_contract(self):
+    def test_chunk_seq_matches_eager_symbolic_view_contract(self):
         class FlatMoe(torch.nn.Module):
             def forward(self, x):
-                batch, seq, dim = x.shape
+                num_tokens, dim = x.shape
                 flat = x.view(-1, dim)
-                return (flat + 1).view(batch, seq, dim)
+                return (flat + 1).view(num_tokens, dim)
 
         class ChunkModel(torch.nn.Module):
             def __init__(self):
@@ -3065,7 +3955,6 @@ class TestChunkPasses(TestCase):
                 maybe_apply_ep_overlap_eager_chunking(
                     model,
                     GraphTrainerCompileConfig(
-                        enable=True,
                         ep_overlap=EpOverlapConfig(
                             enabled=True,
                             strategy="eager",
@@ -3075,7 +3964,7 @@ class TestChunkPasses(TestCase):
                     ),
                 )
 
-            x = torch.randn(2, 4, 8)
+            x = torch.randn(8, 8)
             mark_chunk_dynamic_dims(x, mode="seq")
             traced = minimal_fx_tracer(lambda inp: model(inp), module=model)(x)
             if strategy == "eager":
@@ -3094,50 +3983,32 @@ class TestChunkPasses(TestCase):
         eager_model, eager = trace_model("eager")
         graph_model, graph = trace_model("graph")
 
-        eager_clones = self._nodes_by_target(eager.gm, torch.ops.aten.clone.default)
-        graph_clones = [
-            node
-            for node in self._nodes_by_target(graph.gm, torch.ops.aten.clone.default)
-            if node.meta.get("chunked_region_role") == "chunk_input"
-        ]
-        self.assertEqual(len(eager_clones), 2)
-        self.assertEqual(len(graph_clones), 2)
-        self.assertEqual({node.meta.get("chunk_id") for node in graph_clones}, {0, 1})
-        self.assertEqual(
-            [tuple(node.meta["val"].shape) for node in graph_clones],
-            [tuple(node.meta["val"].shape) for node in eager_clones],
-        )
-        self.assertEqual(
-            [node.meta["val"].stride() for node in graph_clones],
-            [node.meta["val"].stride() for node in eager_clones],
-        )
-
         graph_body_targets = {
-            node.meta.get("chunk_id"): [
+            chunk_id: [
                 body.target
                 for body in graph.gm.graph.nodes
                 if body.meta.get("chunked_region_role") == "body"
-                and body.meta.get("chunk_id") == node.meta.get("chunk_id")
+                and body.meta.get("chunk_id") == chunk_id
             ]
-            for node in graph_clones
+            for chunk_id in (0, 1)
         }
         for targets in graph_body_targets.values():
             self.assertIn(torch.ops.aten.view.default, targets)
             self.assertIn(torch.ops.aten.add.Tensor, targets)
 
-        x_input = torch.randn(2, 4, 8)
+        x_input = torch.randn(8, 8)
         self.assertEqual(
             run_traced(graph, module=graph_model)(x_input),
             run_traced(eager, module=eager_model)(x_input),
         )
 
     def test_chunk_seq_rewrites_dependent_symbolic_scalar_live_in(self):
-        fake_mode, sym_seq = self._symbolic_batch_fake_mode(4)
+        fake_mode, sym_tokens = self._symbolic_batch_fake_mode(4)
         with fake_mode:
-            x_val = torch.empty(8, sym_seq, 256)
+            x_val = torch.empty(sym_tokens, 256)
             out_val = torch.empty_strided(
-                (8, sym_seq, 256),
-                (256 * torch.sym_max(1, sym_seq), 256, 1),
+                (sym_tokens, 256),
+                (256, 1),
             )
 
         graph = torch.fx.Graph()
@@ -3145,7 +4016,7 @@ class TestChunkPasses(TestCase):
         stride0 = graph.call_function(torch.ops.aten.sym_stride.int, args=(x, 0))
         empty = graph.call_function(
             torch.ops.aten.empty_strided.default,
-            args=([8, sym_seq, 256], [stride0, 256, 1]),
+            args=([sym_tokens, 256], [stride0, 1]),
             kwargs={
                 "dtype": torch.float32,
                 "device": torch.device("cpu"),
@@ -3167,9 +4038,9 @@ class TestChunkPasses(TestCase):
         self._chunk_seq(gm, module_patterns=["layers.*.moe"])
         concretize_ep_chunk_symbolic_shapes_pass(gm)
 
-        out = gm(torch.empty(8, 4, 256))
-        self.assertEqual(out.shape, (8, 4, 256))
-        self.assertEqual(out.stride(), (1024, 256, 1))
+        out = gm(torch.empty(8, 256))
+        self.assertEqual(out.shape, (8, 256))
+        self.assertEqual(out.stride(), (256, 1))
 
     def test_chunk_batch_rewrites_mixed_symbolic_scalar_live_in(self):
         from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -3374,17 +4245,19 @@ class TestChunkPasses(TestCase):
     def _compile_config_for_ep_overlap_test(self):
         from types import SimpleNamespace
 
-        traced_result = SimpleNamespace(num_static_inputs=2, state_fqns=[])
+        traced_result = SimpleNamespace(
+            num_static_inputs=2,
+            state_fqns=[],
+            graph_state=GraphStateSpec(),
+        )
         config = SimpleNamespace(
-            model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
+            model=SimpleNamespace(layers=[object()]),
             parallelism=SimpleNamespace(
-                enable_async_tensor_parallel=False,
                 expert_parallel_degree=1,
                 fsdp_reshard_after_forward="default",
                 pipeline_parallel_degree=1,
             ),
             compile=GraphTrainerCompileConfig(
-                enable=True,
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     chunk_dim="batch",
@@ -3414,7 +4287,7 @@ class TestChunkPasses(TestCase):
         return [
             pass_name(pass_fn)
             for pass_fn in compile_time_passes(
-                traced_result, config, use_cudagraph=False
+                traced_result, config, use_cuda_graph=False
             )
         ]
 
@@ -3482,7 +4355,7 @@ class TestChunkPasses(TestCase):
                     ValueError,
                     "Graph EP chunking does not support tensor_parallel_degree > 1",
                 ):
-                    compile_time_passes(traced_result, config, use_cudagraph=False)
+                    compile_time_passes(traced_result, config, use_cuda_graph=False)
 
     def test_fsdp_dense_region_scheduler_pass_gating(self):
         def transformer_batch_default(config):
@@ -3562,60 +4435,60 @@ class TestChunkPasses(TestCase):
 
     def test_prepare_ep_overlap_trace_inputs_marks_batch_dims(self):
         _traced_result, config = self._compile_config_for_ep_overlap_test()
-        x = torch.randn(4, 4)
-        labels = torch.ones(4, 4)
-        positions = torch.arange(4).repeat(4, 1)
+        x = torch.randn(8, 4)
+        labels = torch.ones(8)
+        positions = torch.arange(4).repeat(2)
         prepare_ep_overlap_trace_inputs(
             config.compile,
-            (x, labels, torch.tensor(16), {}, {"positions": positions}),
+            (x, labels, torch.tensor(8), {}, {"positions": positions}),
             {},
         )
         self.assertIn(0, x._dynamo_unbacked_indices)
         self.assertIn(0, labels._dynamo_unbacked_indices)
         self.assertIn(0, positions._dynamo_unbacked_indices)
-        self.assertEqual(x._dynamo_unbacked_bounds[0], (2, 4))
+        self.assertEqual(x._dynamo_unbacked_bounds[0], (4, 8))
 
     def test_prepare_ep_overlap_trace_inputs_marks_seq_dims(self):
         _traced_result, config = self._compile_config_for_ep_overlap_test()
         config.compile.ep_overlap.chunk_dim = "seq"
         config.compile.ep_overlap.module_fqn = "layers.*.moe"
-        x = torch.randn(4, 4)
-        positions = torch.arange(4).repeat(4, 1)
+        x = torch.randn(8, 4)
+        positions = torch.arange(4).repeat(2)
         prepare_ep_overlap_trace_inputs(
             config.compile,
-            (x, torch.ones(4, 4), torch.tensor(16), {}, {"positions": positions}),
+            (x, torch.ones(8), torch.tensor(8), {}, {"positions": positions}),
             {},
         )
-        self.assertIn(1, x._dynamo_unbacked_indices)
-        self.assertIn(1, positions._dynamo_unbacked_indices)
-        self.assertEqual(x._dynamo_unbacked_bounds[1], (2, 4))
+        self.assertIn(0, x._dynamo_unbacked_indices)
+        self.assertIn(0, positions._dynamo_unbacked_indices)
+        self.assertEqual(x._dynamo_unbacked_bounds[0], (4, 8))
 
     def test_prepare_ep_overlap_trace_inputs_bounds_seq_dim_to_original_half(self):
         _traced_result, config = self._compile_config_for_ep_overlap_test()
         config.compile.ep_overlap.chunk_dim = "seq"
         config.compile.ep_overlap.module_fqn = "layers.*.moe"
-        x = torch.randn(2, 32, 4)
-        labels = torch.ones(2, 32, dtype=torch.long)
+        x = torch.randn(64, 4)
+        labels = torch.ones(64, dtype=torch.long)
         prepare_ep_overlap_trace_inputs(
             config.compile,
             (x, labels, torch.tensor(64), {}, {}),
             {},
         )
 
-        self.assertEqual(x._dynamo_unbacked_bounds[1], (16, 32))
-        self.assertEqual(labels._dynamo_unbacked_bounds[1], (16, 32))
+        self.assertEqual(x._dynamo_unbacked_bounds[0], (32, 64))
+        self.assertEqual(labels._dynamo_unbacked_bounds[0], (32, 64))
 
     def test_seq_chunk_marker_traces_chunked_loss_backward(self):
         from torchtitan.components.loss import ChunkedLossWrapper
 
         torch.manual_seed(42)
-        batch, seq_len, dim, vocab_size = 2, 32, 4, 8
+        num_tokens, dim, vocab_size = 64, 4, 8
         lm_head = torch.nn.Linear(dim, vocab_size, bias=False)
         loss_fn = ChunkedLossWrapper(ChunkedLossWrapper.Config(num_chunks=8))
         loss_fn.lm_head = lm_head
 
-        hidden_states = torch.randn(batch, seq_len, dim, requires_grad=True)
-        labels = torch.randint(0, vocab_size, (batch, seq_len))
+        hidden_states = torch.randn(num_tokens, dim, requires_grad=True)
+        labels = torch.randint(0, vocab_size, (num_tokens,))
         mark_chunk_dynamic_dims(hidden_states, mode="seq")
         mark_chunk_dynamic_dims(labels, mode="seq")
 
@@ -3644,27 +4517,27 @@ class TestChunkPasses(TestCase):
 
         fake_mode = FakeTensorMode(allow_non_fake_inputs=True, shape_env=ShapeEnv())
         positions = fake_mode.from_tensor(
-            torch.arange(4).repeat(2, 1),
+            torch.arange(4).repeat(2),
             source=LocalSource("positions", is_input=True),
             symbolic_context=StatelessSymbolicContext(
-                dynamic_sizes=[DimDynamic.STATIC, DimDynamic.UNBACKED],
-                shape_ids={1: "torchtitan_chunk_seq"},
+                dynamic_sizes=[DimDynamic.UNBACKED],
+                shape_ids={0: "torchtitan_chunk_seq"},
             ),
         )
         block_mask = create_block_mask(
             lambda b, h, q_idx, kv_idx: q_idx >= kv_idx,
-            B=2,
+            B=1,
             H=None,
-            Q_LEN=4,
-            KV_LEN=4,
+            Q_LEN=8,
+            KV_LEN=8,
             device="cpu",
         )
 
         prepared = prepare_ep_overlap_trace_call_inputs(
             config.compile,
             (
-                torch.empty(2, 4),
-                torch.empty(2, 4),
+                torch.empty(8, 4),
+                torch.empty(8),
                 torch.tensor(8),
                 {"positions": positions, "attention_masks": block_mask},
             ),
@@ -3674,7 +4547,7 @@ class TestChunkPasses(TestCase):
         self.assertIsNotNone(prepared)
         prepared_args, _ = prepared
         rebound_mask = prepared_args[3]["attention_masks"]
-        seq_len = positions.shape[1]
+        seq_len = positions.shape[0]
         self.assertEqual(rebound_mask.seq_lengths[0].node.expr, seq_len.node.expr)
         self.assertEqual(rebound_mask.seq_lengths[1].node.expr, seq_len.node.expr)
 
@@ -4685,7 +5558,6 @@ class TestChunkPasses(TestCase):
         maybe_apply_ep_overlap_eager_chunking(
             model,
             GraphTrainerCompileConfig(
-                enable=True,
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     strategy="eager",
@@ -4913,6 +5785,65 @@ class TestChunkPasses(TestCase):
         self.assertEqual(tuple(fake_inputs[0].shape), (4, 8))
         self.assertFalse(free_symbols(x.meta["val"].shape[1]))
         self.assertNotIn(batch_symbol, free_symbols(x.meta["val"].shape[0]))
+
+    def test_concretize_ep_chunk_symbolic_shapes_preserves_dynamic_gather_length(
+        self,
+    ):
+        from torch.fx.experimental.symbolic_shapes import free_symbols, ShapeEnv
+
+        shape_env = ShapeEnv()
+        fake_mode = torch._subclasses.FakeTensorMode(
+            allow_non_fake_inputs=True, shape_env=shape_env
+        )
+        with fake_mode:
+            seq = shape_env.create_unbacked_symint()
+            gathered_tokens = shape_env.create_unbacked_symint()
+            torch._dynamo.override_optimization_hint(seq, 8)
+            torch._dynamo.override_optimization_hint(gathered_tokens, 5)
+            x_meta = torch.empty(seq, 4)
+            indices_meta = torch.empty(gathered_tokens, dtype=torch.int64)
+            gathered_meta = x_meta[indices_meta]
+            expanded_meta = gathered_meta.reshape(1, -1, 4)
+
+        # DSV4 gathers complete compression blocks using independent metadata,
+        # then flattens [1, gathered_tokens, hidden_dim]. Only seq is chunked.
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        indices = graph.placeholder("gather_indices")
+        gathered = graph.call_function(torch.ops.aten.index.Tensor, args=(x, [indices]))
+        expanded = graph.call_function(
+            torch.ops.aten.reshape.default, args=(gathered, [1, -1, 4])
+        )
+        size = graph.call_function(torch.ops.aten.sym_size.int, args=(expanded, 1))
+        flattened = graph.call_function(
+            torch.ops.aten.reshape.default, args=(expanded, [size, 4])
+        )
+        graph.output(flattened)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        x.meta["val"] = x_meta
+        x.meta[CHUNK_SYMBOL_HINTS_META] = {next(iter(free_symbols(seq))): 8}
+        indices.meta["val"] = indices_meta
+        gathered.meta["val"] = gathered_meta
+        expanded.meta["val"] = expanded_meta
+        size.meta["val"] = gathered_tokens
+        flattened.meta["val"] = gathered_meta
+
+        real_x = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+        # Establish that the graph works before the pass, with lengths that
+        # differ from the optimization hint. No CUDA execution is needed.
+        for count in (3, 6):
+            real_indices = torch.arange(count)
+            self.assertEqual(gm(real_x, real_indices), real_x[real_indices])
+
+        concretize_ep_chunk_symbolic_shapes_pass(gm, [x_meta, indices_meta])
+
+        # Execute the same transformed graph with both runtime lengths.
+        # The unfixed pass replaces size with 5, so the first call raises:
+        # RuntimeError: shape '[5, 4]' is invalid for input of size 12.
+        for count in (3, 6):
+            with self.subTest(gathered_tokens=count):
+                real_indices = torch.arange(count)
+                self.assertEqual(gm(real_x, real_indices), real_x[real_indices])
 
     def test_chunk_copied_meta_rewrites_chunk_symbol_inside_product(self):
         from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -6167,6 +7098,82 @@ class TestCanonicalizeGraphPass(TestCase):
         self.assertEqual(gm(x), x.reshape(2, 8))
 
 
+class TestStandaloneInductorCompilationPass(TestCase):
+    def test_prunes_unused_placeholders_and_restores_outer_signature(self):
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            standalone_inductor_compilation_pass,
+        )
+
+        graph = torch.fx.Graph()
+        x_node = graph.placeholder("x")
+        y_node = graph.placeholder("y")
+        unused_node = graph.placeholder("unused")
+        x_node.meta["marker"] = "x"
+        unused_node.meta["marker"] = "unused"
+        result = graph.call_function(torch.ops.aten.add.Tensor, args=(x_node, y_node))
+        graph.output(result)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        x = torch.ones(4)
+        y = torch.full((4,), 2.0)
+        unused = torch.full((4,), 3.0)
+        seen = {}
+
+        def fake_standalone_compile(compile_gm, compile_inputs, **kwargs):
+            import torch._inductor.config as ic
+
+            seen["placeholder_targets"] = [
+                node.target for node in compile_gm.graph.find_nodes(op="placeholder")
+            ]
+            seen["placeholder_meta"] = [
+                node.meta for node in compile_gm.graph.find_nodes(op="placeholder")
+            ]
+            seen["compile_inputs"] = compile_inputs
+            seen["kwargs"] = kwargs
+            seen["reorder_for_peak_memory"] = ic.reorder_for_peak_memory
+
+            def compiled_fn(a, b):
+                return a - b
+
+            seen["compiled_fn"] = compiled_fn
+            return compiled_fn
+
+        with patch(
+            "torch._inductor.standalone_compile", side_effect=fake_standalone_compile
+        ):
+            wrapped = standalone_inductor_compilation_pass(
+                gm,
+                (x, y, unused),
+                inductor_configs={"reorder_for_peak_memory": False},
+            )
+
+        self.assertEqual(seen["placeholder_targets"], ["x", "y"])
+        self.assertEqual(seen["placeholder_meta"][0]["marker"], "x")
+        self.assertEqual(len(seen["compile_inputs"]), 2)
+        self.assertIs(seen["compile_inputs"][0], x)
+        self.assertIs(seen["compile_inputs"][1], y)
+        self.assertEqual(
+            seen["kwargs"],
+            {
+                "dynamic_shapes": "from_tracing_context",
+                "aot": True,
+                "donate_graph_module": False,
+            },
+        )
+        self.assertFalse(seen["reorder_for_peak_memory"])
+
+        wrapped_placeholders = [
+            node.target for node in wrapped.graph.find_nodes(op="placeholder")
+        ]
+        self.assertEqual(wrapped_placeholders, ["x", "y", "unused"])
+        wrapped_call = next(
+            node for node in wrapped.graph.nodes if node.op == "call_function"
+        )
+        self.assertIs(wrapped_call.target.__wrapped__, seen["compiled_fn"])
+
+        torch.testing.assert_close(wrapped(x, y, unused), x - y)
+
+
 class TestAsyncTensorParallelPass(FSDPTest):
     """Verify async_tensor_parallel_pass produces fused ops."""
 
@@ -6718,18 +7725,18 @@ class TestEliminateDeadCodePass(TestCase):
         self.assertIn(torch.ops.aten.copy_.default, targets)
 
 
-class TestIsFullCudagraphable(TestCase):
-    """Pure-CPU tests for the per-node cudagraph-safety predicate and the
+class TestIsFullCudaGraphCompatible(TestCase):
+    """Pure-CPU tests for the per-node CUDA-graph-safety predicate and the
     whole-graph gate built on it."""
 
-    def test_clean_graph_is_full_cudagraphable(self):
+    def test_clean_graph_is_cuda_graph_fully_compatible(self):
         g = torch.fx.Graph()
         x = g.placeholder("x")
         relu = g.call_function(torch.ops.aten.relu.default, (x,))
         g.output(relu)
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
-        self.assertTrue(is_cudagraphable(relu))
-        self.assertTrue(is_full_cudagraphable(gm))
+        self.assertTrue(is_cuda_graph_node_compatible(relu))
+        self.assertTrue(is_cuda_graph_fully_compatible(gm))
 
     def test_local_scalar_dense_is_unsafe(self):
         # _local_scalar_dense (.item()/.tolist()) extracts a host scalar a CUDA
@@ -6739,8 +7746,8 @@ class TestIsFullCudagraphable(TestCase):
         s = g.call_function(torch.ops.aten._local_scalar_dense.default, (x,))
         g.output(s)
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
-        self.assertFalse(is_cudagraphable(s))
-        self.assertFalse(is_full_cudagraphable(gm))
+        self.assertFalse(is_cuda_graph_node_compatible(s))
+        self.assertFalse(is_cuda_graph_fully_compatible(gm))
 
 
 class TestEagerChunking(TestCase):
@@ -6751,7 +7758,6 @@ class TestEagerChunking(TestCase):
         module_fqn: str = "layers.*",
     ) -> GraphTrainerCompileConfig:
         return GraphTrainerCompileConfig(
-            enable=True,
             ep_overlap=EpOverlapConfig(
                 enabled=True,
                 strategy="eager",
@@ -6797,7 +7803,7 @@ class TestEagerChunking(TestCase):
         model = Model()
         forward = model.layers[0].forward
         config = self._config()
-        config.enable = False
+        config.ep_overlap.enabled = False
 
         maybe_apply_ep_overlap_eager_chunking(model, config)
 
@@ -6822,12 +7828,21 @@ class TestEagerChunking(TestCase):
         with self.assertRaisesRegex(TypeError, "layers.0.*dict"):
             model(torch.randn(4, 3))
 
-    def test_transformer_batch_chunking_splits_positions_by_batch(self):
+    def test_transformer_batch_chunking_splits_token_metadata_by_batch(self):
         seen_positions = []
+        seen_padding_masks = []
 
         class Block(torch.nn.Module):
-            def forward(self, x, attention_masks=None, positions=None):
+            def forward(
+                self,
+                x,
+                attention_masks=None,
+                positions=None,
+                *,
+                padding_mask=None,
+            ):
                 seen_positions.append(positions)
+                seen_padding_masks.append(padding_mask)
                 return x
 
         class Model(torch.nn.Module):
@@ -6835,18 +7850,28 @@ class TestEagerChunking(TestCase):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([Block()])
 
-            def forward(self, x, positions):
-                return self.layers[0](x, None, positions)
+            def forward(self, x, positions, padding_mask):
+                return self.layers[0](x, None, positions, padding_mask=padding_mask)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(model, self._config())
         x = torch.randn(4, 4, 2)
         positions = torch.arange(16).view(4, 4)
+        padding_mask = torch.tensor(
+            [
+                [False, False, False, True],
+                [False, False, True, True],
+                [False, False, False, False],
+                [False, True, True, True],
+            ]
+        )
 
-        self.assertEqual(model(x, positions), x)
+        self.assertEqual(model(x, positions, padding_mask), x)
         self.assertEqual([tuple(pos.shape) for pos in seen_positions], [(2, 4), (2, 4)])
         self.assertEqual(seen_positions[0], positions[:2])
         self.assertEqual(seen_positions[1], positions[2:])
+        self.assertEqual(seen_padding_masks[0], padding_mask[:2])
+        self.assertEqual(seen_padding_masks[1], padding_mask[2:])
 
     def test_transformer_batch_chunking_rejects_same_extent_tensor_mask(self):
         class Block(torch.nn.Module):
@@ -6892,10 +7917,48 @@ class TestEagerChunking(TestCase):
             model,
             self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
         )
-        x = torch.randn(2, 4, 3)
+        x = torch.randn(8, 3)
 
         self.assertEqual(model(x), x)
-        self.assertEqual(seen_shapes, [(2, 2, 3), (2, 2, 3)])
+        self.assertEqual(seen_shapes, [(4, 3), (4, 3)])
+
+    def test_moe_chunking_splits_padding_mask_with_activation(self):
+        seen_inputs = []
+
+        class Moe(torch.nn.Module):
+            def forward(self, x, *, padding_mask_T=None):
+                seen_inputs.append((x, padding_mask_T))
+                return x.masked_fill(padding_mask_T.unsqueeze(-1), 0)
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.layers[0].moe = Moe()
+
+            def forward(self, x, padding_mask_T):
+                return self.layers[0].moe(x, padding_mask_T=padding_mask_T)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(
+            model,
+            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+        )
+        x = torch.randn(8, 3)
+        padding_mask_T = torch.tensor(
+            [False, True, False, True, True, False, True, False]
+        )
+
+        self.assertEqual(
+            model(x, padding_mask_T),
+            x.masked_fill(padding_mask_T.unsqueeze(-1), 0),
+        )
+        self.assertEqual(
+            [tuple(chunk_x.shape) for chunk_x, _ in seen_inputs],
+            [(4, 3), (4, 3)],
+        )
+        self.assertEqual(seen_inputs[0][1], padding_mask_T[:4])
+        self.assertEqual(seen_inputs[1][1], padding_mask_T[4:])
 
     def test_moe_chunking_rejects_extra_tensor_input(self):
         class Moe(torch.nn.Module):

@@ -1,0 +1,515 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import os
+import unittest
+
+from copy import deepcopy
+
+import grain.python as grain
+import numpy as np
+import torch
+from datasets import Dataset
+from renderers import Qwen3RendererConfig
+from torch.nn.attention.flex_attention import and_masks
+from torchtitan.components.data.collators import TextCollator
+
+from torchtitan.components.data.dataset import SingleDatasetConfig
+from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.packing import FirstFitPackingConfig
+from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
+from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.renderer import from_renderers
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.hf_datasets.text_datasets import ChatProcessor
+from torchtitan.models.common.attention import (
+    BaseAttention,
+    FlexInnerAttention,
+    get_causal_mask_mod,
+    get_document_mask_mod,
+    get_efficient_causal_mask_mod_for_packed_document,
+)
+from torchtitan.models.common.decoder import Decoder
+
+
+# Path to the test tokenizer and fixture data
+_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "assets")
+_TOKENIZER_PATH = os.path.join(_ASSETS_DIR, "tokenizer")
+_DATA_PATH = os.path.join(_ASSETS_DIR, "sft_test", "data.json")
+
+
+def _process_sample(sample):
+    """Convert a test data sample into [user, assistant] messages."""
+    return [
+        {"role": "user", "content": sample["question"]},
+        {"role": "assistant", "content": sample["answer"]},
+    ]
+
+
+def _load_tokenizer():
+    return HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
+
+
+def _load_dataset():
+    return Dataset.from_json(_DATA_PATH)
+
+
+def _runtime(max_context_length):
+    return DatasetBuildContext(
+        tokenizer=_load_tokenizer(),
+        max_context_length=max_context_length,
+        num_tokens_per_microbatch=max_context_length,
+        read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
+    )
+
+
+def _build_processor(max_context_length=2048, messages_fn=_process_sample):
+    return ChatProcessor.Config(messages_fn=messages_fn).build(
+        context=_runtime(max_context_length)
+    )
+
+
+def _build_rows(max_context_length, *, processor=None):
+    dataset = FirstFitPackingConfig(
+        dataset=SingleDatasetConfig(
+            source=HuggingFaceRandomAccessSource.Config(
+                path="json",
+                split="train",
+                load_dataset_kwargs={
+                    "data_files": _DATA_PATH,
+                },
+            ),
+            processor=processor or ChatProcessor.Config(messages_fn=_process_sample),
+            post_filters=(lambda sample: sample is not None,),
+        )
+    )
+    return dataset.build(
+        context=_runtime(max_context_length),
+        dataset_iteration_policy=DatasetIterationPolicy(
+            seed=42,
+            shuffle=False,
+            repeat=False,
+            dp_rank=0,
+            dp_world_size=1,
+            streaming_shuffle_buffer_size=1_000,
+        ),
+    )
+
+
+def _legacy_single_turn_labels(tokenizer, messages):
+    """Reproduce the original single-turn mask: labels[:max(prompt_len-1, 0)]."""
+    full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+    full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+    if full_tokens[-1] != tokenizer.eos_id:
+        full_tokens.append(tokenizer.eos_id)
+    prompt_text = tokenizer.apply_chat_template(
+        messages[:1], add_generation_prompt=True
+    )
+    prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+    labels = np.asarray(full_tokens[1:], dtype=np.int64)
+    labels[: max(len(prompt_tokens) - 1, 0)] = IGNORE_INDEX
+    return np.asarray(full_tokens[:-1], dtype=np.int64), labels
+
+
+def _build_dataloader(max_context_length=128, world_size=1, rank=0):
+    config = GrainDataLoader.Config(
+        dataset=FirstFitPackingConfig(
+            dataset=SingleDatasetConfig(
+                source=HuggingFaceRandomAccessSource.Config(
+                    path="json",
+                    split="train",
+                    load_dataset_kwargs={
+                        "data_files": _DATA_PATH,
+                    },
+                ),
+                processor=ChatProcessor.Config(messages_fn=_process_sample),
+                post_filters=(lambda sample: sample is not None,),
+            )
+        ),
+        collator=TextCollator.Config(),
+        seed=42,
+        shuffle=True,
+        repeat=True,
+        num_prefetch_microbatches=1,
+    )
+    return config.build(
+        dp_world_size=world_size,
+        dp_rank=rank,
+        tokenizer=_load_tokenizer(),
+        max_context_length=max_context_length,
+        num_tokens_per_microbatch=max_context_length,
+    )
+
+
+class TestChatDatasetLabelMasking(unittest.TestCase):
+    """Prompt tokens should be masked (IGNORE_INDEX), assistant tokens should not."""
+
+    def test_prompt_masked_response_unmasked(self):
+        sequence = _build_processor()(
+            _load_dataset()[0],
+            np.random.default_rng(0),
+        )
+        label_ids = (
+            TextCollator.Config().build(context=_runtime(2048))([sequence]).labels
+        )
+
+        masked = (label_ids == IGNORE_INDEX).nonzero(as_tuple=True)[0]
+        unmasked = (label_ids != IGNORE_INDEX).nonzero(as_tuple=True)[0]
+        self.assertGreater(len(masked), 0, "Expected some masked prompt labels")
+        self.assertGreater(len(unmasked), 0, "Expected some unmasked response labels")
+        self.assertGreater(unmasked[0].item(), 0, "First token label should be masked")
+
+
+class TestChatDatasetShiftedTokens(unittest.TestCase):
+    """The processor creates next-token pairs before collation."""
+
+    def test_shifted_by_one(self):
+        tokenizer = _load_tokenizer()
+        sample = _load_dataset()[0]
+        messages = _process_sample(sample)
+        token_sequence = _build_processor()(sample, np.random.default_rng(0))
+        inputs = TextCollator.Config().build(context=_runtime(2048))([token_sequence])
+        labels = inputs.labels
+
+        full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+        full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+        if full_tokens[-1] != tokenizer.eos_id:
+            full_tokens.append(tokenizer.eos_id)
+
+        self.assertEqual(
+            inputs.input.tolist()[: len(full_tokens) - 1],
+            full_tokens[:-1],
+        )
+
+        prompt_text = tokenizer.apply_chat_template(
+            messages[:1], add_generation_prompt=True
+        )
+        prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+        response_start = len(prompt_tokens) - 1
+        self.assertNotEqual(labels[response_start], IGNORE_INDEX)
+        self.assertEqual(
+            labels[response_start : len(full_tokens) - 1].tolist(),
+            full_tokens[1:][response_start:],
+        )
+        self.assertEqual(labels[len(full_tokens) - 1], IGNORE_INDEX)
+
+
+class TestChatDatasetGreedyPacking(unittest.TestCase):
+    """Multiple short samples packed with a small maximum context length."""
+
+    def test_packing_multiple_samples(self):
+        max_context_length = 256
+        sequences = list(_build_rows(max_context_length))
+
+        # With 10 samples of lengths 79-123, they should pack into fewer than 10 batches
+        self.assertGreater(len(sequences), 0)
+        self.assertLess(len(sequences), 10)
+
+        collator = TextCollator.Config().build(context=_runtime(max_context_length))
+        for sequence in sequences:
+            batch = collator([sequence])
+            labels = batch.labels
+            self.assertEqual(batch.input.shape, (max_context_length,))
+            self.assertEqual(labels.shape, (max_context_length,))
+            self.assertEqual(batch.positions.shape, (max_context_length,))
+
+
+class TestChatDatasetPerDocumentPositions(unittest.TestCase):
+    """Positions reset to 0 at each document boundary in packed mode."""
+
+    def test_positions_reset_at_boundaries(self):
+        sequence = next(iter(_build_rows(max_context_length=256)))
+        batch = TextCollator.Config().build(context=_runtime(256))([sequence])
+        positions = batch.positions
+
+        self.assertEqual(positions[0].item(), 0)
+        resets = (positions[1:] == 0).nonzero(as_tuple=True)[0]
+        self.assertGreater(
+            len(resets), 0, "Expected at least one position reset (document boundary)"
+        )
+
+        pos_list = positions.tolist()
+        for index in range(1, len(pos_list)):
+            if pos_list[index] == 0:
+                continue
+            self.assertEqual(
+                pos_list[index],
+                pos_list[index - 1] + 1,
+                f"Positions should be consecutive at index {index}, "
+                f"got {pos_list[index - 1]} -> {pos_list[index]}",
+            )
+
+
+class TestChatDatasetDropOnOverflow(unittest.TestCase):
+    """Samples exceeding the maximum context length are silently dropped."""
+
+    def test_all_dropped_with_tiny_max_context_length(self):
+        self.assertEqual(
+            len(list(_build_rows(max_context_length=32))),
+            0,
+            "All samples should be dropped at max_context_length=32",
+        )
+
+
+class TestChatDatasetMessageValidation(unittest.TestCase):
+    """Non-[user, assistant] messages raise ValueError."""
+
+    def test_invalid_messages(self):
+        invalid_messages = (
+            [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "assistant", "content": "OK"},
+            ],
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "user", "content": "hello again"},
+            ],
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "user", "content": "bye"},
+            ],
+        )
+        for messages in invalid_messages:
+            with self.subTest(messages=messages), self.assertRaises(ValueError):
+                processor = _build_processor(
+                    messages_fn=lambda _sample, value=messages: value
+                )
+                processor({}, np.random.default_rng(0))
+
+
+class TestChatDatasetPrefixValidation(unittest.TestCase):
+    """Prompt tokens must be an exact prefix of the full conversation tokens."""
+
+    def test_single_turn_labels_match_legacy_formula(self):
+        sample = _load_dataset()[0]
+        messages = _process_sample(sample)
+        sequence = _build_processor()(sample, np.random.default_rng(0))
+        expected_input_ids, expected_labels = _legacy_single_turn_labels(
+            _load_tokenizer(), messages
+        )
+
+        np.testing.assert_array_equal(sequence.input_ids, expected_input_ids)
+        np.testing.assert_array_equal(sequence.labels, expected_labels)
+
+    def test_prefix_mismatch_raises(self):
+        processor = _build_processor()
+        original_encode = processor._tokenizer.encode
+        call_count = 0
+
+        # The template path encodes twice: call 1 is the full conversation,
+        # call 2 is the prompt. Perturbing call 2 breaks the prefix.
+        def mismatched_encode(*args, **kwargs):
+            nonlocal call_count
+            tokens = original_encode(*args, **kwargs)
+            call_count += 1
+            if call_count == 2:
+                return tokens + [0]
+            return tokens
+
+        processor._tokenizer.encode = mismatched_encode
+        with self.assertRaisesRegex(ValueError, "exact prefix"):
+            processor(_load_dataset()[0], np.random.default_rng(0))
+
+
+class TestMultiTurnChatProcessor(unittest.TestCase):
+    def setUp(self):
+        self.messages = [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "reasoning_content": "Add two.", "content": "4"},
+            {"role": "user", "content": "And 3+3?"},
+            {"role": "assistant", "reasoning_content": "Add three.", "content": "6"},
+        ]
+        self.config = ChatProcessor.Config(
+            messages_fn=lambda _: self.messages,
+            renderer=from_renderers(Qwen3RendererConfig()),
+        )
+
+    def test_eos_is_only_required_without_renderer(self):
+        context = _runtime(256)
+        expected = self.config.build(context=context)({}, np.random.default_rng(0))
+        context.tokenizer.eos_id = None
+        actual = self.config.build(context=context)({}, np.random.default_rng(0))
+        np.testing.assert_array_equal(actual.input_ids, expected.input_ids)
+        np.testing.assert_array_equal(actual.labels, expected.labels)
+
+        with self.assertRaisesRegex(ValueError, "valid EOS token"):
+            ChatProcessor.Config(messages_fn=_process_sample).build(context=context)
+
+    def test_assistant_masks_follow_rendered_history(self):
+        context = _runtime(256)
+        sequence = self.config.build(context=context)({}, np.random.default_rng(0))
+        # Qwen3 drops earlier reasoning but still trains both assistant answers.
+        # The final think opener and both assistant terminators are model output.
+        segments = [
+            ("<|im_start|>system\nBe brief.<|im_end|>\n", False),
+            ("<|im_start|>user\nWhat is 2+2?<|im_end|>\n", False),
+            ("<|im_start|>assistant\n", False),
+            ("4<|im_end|>", True),
+            ("\n<|im_start|>user\nAnd 3+3?<|im_end|>\n", False),
+            ("<|im_start|>assistant\n", False),
+            ("<think>\nAdd three.\n</think>\n\n6<|im_end|>", True),
+            ("\n", False),
+        ]
+        expected_tokens = []
+        expected_labels = []
+        for text, supervised in segments:
+            tokens = context.tokenizer.encode(text, add_bos=False, add_eos=False)
+            expected_tokens.extend(tokens)
+            expected_labels.extend(
+                tokens if supervised else [IGNORE_INDEX] * len(tokens)
+            )
+
+        np.testing.assert_array_equal(sequence.input_ids, expected_tokens[:-1])
+        np.testing.assert_array_equal(sequence.labels, expected_labels[1:])
+
+    def test_context_length_counts_next_token_pairs(self):
+        sequence = self.config.build(context=_runtime(256))(
+            {}, np.random.default_rng(0)
+        )
+        length = len(sequence.input_ids)
+        exact = self.config.build(context=_runtime(length))(
+            {}, np.random.default_rng(0)
+        )
+        np.testing.assert_array_equal(exact.input_ids, sequence.input_ids)
+        np.testing.assert_array_equal(exact.labels, sequence.labels)
+        self.assertIsNone(
+            self.config.build(context=_runtime(length - 1))(
+                {}, np.random.default_rng(0)
+            )
+        )
+
+    def test_packing_preserves_whole_conversations(self):
+        sequence = self.config.build(context=_runtime(256))(
+            {}, np.random.default_rng(0)
+        )
+        length = len(sequence.input_ids)
+        packed = next(iter(_build_rows(2 * length, processor=self.config)))
+        np.testing.assert_array_equal(packed.positions, np.tile(np.arange(length), 2))
+        np.testing.assert_array_equal(packed.labels, np.tile(sequence.labels, 2))
+
+
+class TestChatDatasetCheckpointing(unittest.TestCase):
+    """state_dict / load_state_dict round-trips correctly."""
+
+    def test_yield_same_data_after_resume_on_each_rank(self):
+        for rank in range(2):
+            with self.subTest(rank=rank):
+                dataloader = _build_dataloader(world_size=2, rank=rank)
+                iterator = iter(dataloader)
+                # The source has 10 rows, so 12 batches necessarily cross a repeat.
+                for _ in range(12):
+                    next(iterator)
+
+                state = deepcopy(dataloader.state_dict())
+                resumed = _build_dataloader(world_size=2, rank=rank)
+                resumed.load_state_dict(state)
+                resumed_iterator = iter(resumed)
+
+                for _ in range(4):
+                    expected_inputs = next(iterator)
+                    actual_inputs = next(resumed_iterator)
+                    self.assertTrue(
+                        torch.equal(actual_inputs.input, expected_inputs.input)
+                    )
+                    self.assertTrue(
+                        torch.equal(actual_inputs.positions, expected_inputs.positions)
+                    )
+                    self.assertTrue(
+                        torch.equal(actual_inputs.labels, expected_inputs.labels)
+                    )
+
+
+class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
+    """Verify that position-based document masks block cross-document attention."""
+
+    def test_packed_samples_block_cross_document_attention(self):
+        processor = _build_processor()
+        dataset = _load_dataset()
+        input_ids_0 = processor(dataset[0], np.random.default_rng(0)).input_ids[:-1]
+        input_ids_1 = processor(dataset[1], np.random.default_rng(0)).input_ids[:-1]
+
+        packed = np.concatenate((input_ids_0, input_ids_1))
+        boundary = len(input_ids_0)
+        positions = torch.tensor(
+            list(range(len(input_ids_0))) + list(range(len(input_ids_1)))
+        )
+
+        mask_mod = get_document_mask_mod(positions)
+        batch, head = torch.tensor(0), torch.tensor(0)
+
+        self.assertFalse(
+            mask_mod(
+                batch, head, torch.tensor(boundary), torch.tensor(boundary - 1)
+            ).item(),
+        )
+        self.assertFalse(
+            mask_mod(
+                batch, head, torch.tensor(len(packed) - 1), torch.tensor(0)
+            ).item(),
+        )
+        self.assertTrue(
+            mask_mod(batch, head, torch.tensor(boundary - 1), torch.tensor(0)).item(),
+        )
+        self.assertTrue(
+            mask_mod(
+                batch,
+                head,
+                torch.tensor(len(packed) - 1),
+                torch.tensor(boundary),
+            ).item(),
+        )
+
+    def test_packed_document_mask_composes_with_causal_mask(self):
+        for positions in (
+            torch.tensor([0, 1, 2, 0, 1, 0, 1, 2]),
+            torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 1]),
+        ):
+            causal_mask = get_causal_mask_mod()
+            document_mask = get_document_mask_mod(positions)
+            packed_mask = and_masks(
+                causal_mask,
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+            )
+            head = torch.tensor(0)
+
+            batch_tensor = torch.tensor(0)
+            for query_index in range(positions.shape[0]):
+                query_tensor = torch.tensor(query_index)
+                for key_value_index in range(positions.shape[0]):
+                    key_value_tensor = torch.tensor(key_value_index)
+                    expected = causal_mask(
+                        batch_tensor, head, query_tensor, key_value_tensor
+                    ) & document_mask(
+                        batch_tensor, head, query_tensor, key_value_tensor
+                    )
+                    self.assertEqual(
+                        packed_mask(
+                            batch_tensor, head, query_tensor, key_value_tensor
+                        ).item(),
+                        expected.item(),
+                    )
+
+    def test_decoder_block_causal_flex_mask_supports_multiple_samples(self):
+        positions = torch.tensor(
+            [0, 1, 2, 0, 1, 0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 1],
+            dtype=torch.int32,
+        )
+        attn_config = BaseAttention.Config(
+            n_heads=1,
+            inner_attention=FlexInnerAttention.Config(block_size=4),
+        )
+
+        decoder = Decoder.__new__(Decoder)
+        mask = decoder._create_flex_attention_mask_for_document(positions, attn_config)
+
+        self.assertEqual(mask.shape, (1, 1, positions.shape[0], positions.shape[0]))
+
+
+if __name__ == "__main__":
+    unittest.main()

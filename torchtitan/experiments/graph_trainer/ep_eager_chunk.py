@@ -13,6 +13,8 @@ fails loudly if those upstream forward signatures drift.
 
 from __future__ import annotations
 
+import logging
+
 from collections.abc import Callable
 from typing import Any
 
@@ -29,12 +31,14 @@ from torchtitan.experiments.graph_trainer.configs import (
     validate_ep_overlap_config,
 )
 from torchtitan.models.common.decoder import TransformerBlock
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def _chunk_dim_index(mode: EpOverlapChunkDim) -> int:
     """Map logical EP chunk mode to the tensor dimension used by eager wrappers."""
-    return 0 if mode == "batch" else 1
+    return 0
 
 
 def _cat_chunked_outputs(outputs: list[Any], dim: int, root_fqn: str) -> Any:
@@ -98,11 +102,15 @@ def _describe_inputs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
 
 def _expected_contract(root_kind: str) -> str:
     if root_kind == "moe":
-        return "MoE.forward(x_BLD: Tensor[B, L, D])"
+        return (
+            "MoE.forward(x: Tensor[num_tokens, D], *, "
+            "padding_mask_T: Tensor[num_tokens]|None)"
+        )
     return (
-        "TransformerBlock.forward(x: Tensor[B, L, D], "
+        "TransformerBlock.forward(x: Tensor[num_tokens, D], "
         "attention_masks: BlockMask|dict[BlockMask]|None, "
-        "positions: Tensor[B, L]|None)"
+        "positions: Tensor[num_tokens]|None, *, "
+        "padding_mask: Tensor[num_tokens]|None)"
     )
 
 
@@ -193,15 +201,28 @@ class _EagerChunkedForward:
                     "chunked_region_role": "split_boundary",
                 }
             )(torch.split)
-            # MoE blocks flatten activations with view(); seq chunks are
-            # non-contiguous views, so materialize the chunk boundary.
+            # Materialize the chunk boundary for consumers that flatten with view().
             return [
                 chunk.contiguous()
                 for chunk in split(value, [chunk_extent, chunk_extent], dim=self.dim)
             ]
 
+        def split_optional_tensor(value: Any, *, logical_name: str) -> list[Any]:
+            if value is None:
+                return [None, None]
+            if isinstance(value, torch.Tensor):
+                return split_tensor(value, logical_name=logical_name)
+            raise _contract_error(
+                root_fqn=self.root_fqn,
+                root_kind=self.root_kind,
+                chunk_dim=self.chunk_dim,
+                args=args,
+                kwargs=kwargs,
+                reason=f"{logical_name} must be None or a tensor",
+            )
+
         def split_moe_inputs() -> tuple[list[list[Any]], dict[str, list[Any]]]:
-            if len(args) != 1 or kwargs or not isinstance(args[0], torch.Tensor):
+            if len(args) != 1 or not isinstance(args[0], torch.Tensor):
                 raise _contract_error(
                     root_fqn=self.root_fqn,
                     root_kind=self.root_kind,
@@ -210,11 +231,26 @@ class _EagerChunkedForward:
                     kwargs=kwargs,
                     reason="expected exactly one positional activation tensor",
                 )
-            return [split_tensor(args[0], logical_name="x_BLD")], {}
+            if any(key != "padding_mask_T" for key in kwargs):
+                raise _contract_error(
+                    root_fqn=self.root_fqn,
+                    root_kind=self.root_kind,
+                    chunk_dim=self.chunk_dim,
+                    args=args,
+                    kwargs=kwargs,
+                    reason="unexpected keyword argument",
+                )
 
-        def split_transformer_block_inputs() -> tuple[
-            list[list[Any]], dict[str, list[Any]]
-        ]:
+            split_kwargs: dict[str, list[Any]] = {}
+            if "padding_mask_T" in kwargs:
+                split_kwargs["padding_mask_T"] = split_optional_tensor(
+                    kwargs["padding_mask_T"], logical_name="padding_mask_T"
+                )
+            return [split_tensor(args[0], logical_name="x")], split_kwargs
+
+        def split_transformer_block_inputs() -> (
+            tuple[list[list[Any]], dict[str, list[Any]]]
+        ):
             if self.chunk_dim != "batch":
                 raise _contract_error(
                     root_fqn=self.root_fqn,
@@ -236,7 +272,10 @@ class _EagerChunkedForward:
                         "attention_masks and positions"
                     ),
                 )
-            if any(key not in ("attention_masks", "positions") for key in kwargs):
+            if any(
+                key not in ("attention_masks", "positions", "padding_mask")
+                for key in kwargs
+            ):
                 raise _contract_error(
                     root_fqn=self.root_fqn,
                     root_kind=self.root_kind,
@@ -283,32 +322,19 @@ class _EagerChunkedForward:
                 )
 
             def split_positions(value: Any) -> list[Any]:
-                if value is None:
-                    return [None, None]
-                if isinstance(value, torch.Tensor):
-                    return split_tensor(value, logical_name="positions")
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason="positions must be None or a tensor",
-                )
+                return split_optional_tensor(value, logical_name="positions")
 
             split_args = [split_tensor(args[0], logical_name="x")]
             if len(args) > 1:
                 split_args.append(split_attention_masks(args[1]))
             if len(args) > 2:
                 split_args.append(split_positions(args[2]))
-            split_kwargs = {
-                key: (
-                    split_attention_masks(value)
-                    if key == "attention_masks"
-                    else split_positions(value)
-                )
-                for key, value in kwargs.items()
-            }
+            split_kwargs = {}
+            for key, value in kwargs.items():
+                if key == "attention_masks":
+                    split_kwargs[key] = split_attention_masks(value)
+                else:
+                    split_kwargs[key] = split_optional_tensor(value, logical_name=key)
             return split_args, split_kwargs
 
         if self.root_kind == "moe":
@@ -366,7 +392,7 @@ def maybe_apply_ep_overlap_eager_chunking(
     compile_config: GraphTrainerCompileConfig,
 ) -> None:
     """Wrap selected module forwards so tracing observes eager chunking."""
-    if not compile_config.enable or not compile_config.ep_overlap.enabled:
+    if compile_config is None or not compile_config.ep_overlap.enabled:
         return
     chunk_dim, chunk_strategy, module_fqn = validate_ep_overlap_config(
         compile_config.ep_overlap

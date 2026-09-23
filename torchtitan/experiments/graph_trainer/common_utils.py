@@ -5,31 +5,75 @@
 # LICENSE file in the root directory of this source tree.
 
 import fnmatch
+import logging
 import time
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, TypeAlias
 
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate
-from torch.fx.traceback import annotate_fn
+from torch.fx.traceback import annotate, annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.context_parallel import apply_cp_to_forward
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
 )
+from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 BOXED_CODEGEN_META = "graph_trainer_boxed_codegen"
 LossResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, dict[str, Any]]
 AnnotatedLossFn: TypeAlias = Callable[..., LossResult]
+
+
+def _get_graph_modules(
+    gm: torch.fx.GraphModule,
+    *,
+    recurse: bool,
+    apply_to_root: bool,
+) -> list[torch.fx.GraphModule]:
+    modules = [gm] if apply_to_root else []
+    if recurse:
+        modules.extend(
+            module
+            for name, module in gm.named_modules()
+            if name and isinstance(module, torch.fx.GraphModule)
+        )
+    return modules
+
+
+class GraphTrainerScaledDotProductInnerAttention(ScaledDotProductInnerAttention):
+    """Adapt flat graph-trainer attention inputs to the batched SDPA interface."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ScaledDotProductInnerAttention.Config):
+        pass
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        out_1THV = super().forward(
+            q_THK.unsqueeze(0),
+            k_THK.unsqueeze(0),
+            v_THV.unsqueeze(0),
+            **kwargs,
+        )
+        return out_1THV.squeeze(0)
 
 
 @contextmanager
@@ -50,24 +94,26 @@ def build_decoder_config_for_backend(
     cannot consume them (it only has a boolean ``is_causal``). The graph_trainer
     tests, however, use SDPA to exercise *backend-agnostic* graph machinery
     (precompile-artifact serialization, custom codegen, context parallel, bitwise
-    determinism) without FlexAttention's ``BlockMask``, which is unpicklable (its
+    determinism) without FlexInnerAttention's ``BlockMask``, which is unpicklable (its
     ``mask_mod`` closures are Python code objects), is not a tensor (so it breaks
     pipeline-parallel split-backward, which calls ``.requires_grad`` on every stage
     input), and overflows the fp32 Triton shared-memory limit on large head dims.
 
     For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``ScaledDotProductAttention.Config()``. Production code
-    never reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no
-    model registry can construct an SDPA language model outside these tests.
+    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``.
+    The adapter adds a singleton batch around the flat graph-trainer inputs and
+    delegates to the common batched SDPA implementation. Production code never
+    reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
+    registry can construct an SDPA language model outside these tests.
     """
     if attn_backend != "sdpa":
         return config_builder(attn_backend=attn_backend, **builder_kwargs)
 
-    from torchtitan.models.common.attention import ScaledDotProductAttention
-
     config = config_builder(attn_backend="flex", **builder_kwargs)
     for layer in config.layers:
-        layer.attention.inner_attention = ScaledDotProductAttention.Config()
+        layer.attention.inner_attention = (
+            GraphTrainerScaledDotProductInnerAttention.Config()
+        )
     return config
 
 
@@ -135,11 +181,39 @@ def ensure_boxed_graph_module(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
 
 
 _MODULE_FQN = "module_fqn"
+# Tuple of unique parameter FQNs naming one gradient value. Consumers must
+# treat it as a set: tied parameters can associate multiple FQNs with one node.
+PARAMETER_GRADIENT_FQNS_META = "parameter_gradient_fqns"
 _EP_TOKEN_COUNT_EXCHANGE = "EP_token_count_exchange"
 _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
 _EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
+
+
+def compute_parameter_gradients(
+    loss: torch.Tensor,
+    named_parameters: Iterable[tuple[str, torch.Tensor]],
+) -> tuple[torch.Tensor, ...]:
+    """Compute and identify parameter gradients in the traced graph.
+
+    Each gradient is passed through an annotated ``aten.alias`` immediately
+    after ``torch.autograd.grad`` establishes its parameter correspondence.
+    The alias is a view of the same storage, not a copy or device computation,
+    and keeps the identity available even when an optimizer consumes the
+    gradient inside the graph instead of returning it as a graph output.
+    GraphTrainer moves the FQN set onto the underlying gradient node and
+    erases the markers before later graph passes and backend compilation.
+    """
+    named_parameters = tuple(named_parameters)
+    gradients = torch.autograd.grad(
+        loss, tuple(parameter for _, parameter in named_parameters)
+    )
+    tagged_gradients = []
+    for (parameter_fqn, _), gradient in zip(named_parameters, gradients, strict=True):
+        with annotate({PARAMETER_GRADIENT_FQNS_META: (parameter_fqn,)}):
+            tagged_gradients.append(torch.ops.aten.alias.default(gradient))
+    return tuple(tagged_gradients)
 
 
 def compute_annotated_loss(
@@ -165,14 +239,23 @@ def compute_annotated_loss(
 def accumulate_param_grads_(
     params: Iterable[torch.Tensor],
     grads: Iterable[torch.Tensor | None],
+    *,
+    clone_grads_to_initialize_param_grad: bool = False,
 ) -> None:
-    """Accumulate explicit graph-produced gradients into live parameters."""
+    """Accumulate explicit graph-produced gradients into live parameters.
+
+    Args:
+        params: Parameters that receive the explicit gradients.
+        grads: Gradients returned by the traced forward-backward graph.
+        clone_grads_to_initialize_param_grad: Whether to initialize empty
+            ``param.grad`` fields with clones instead of input aliases.
+    """
     for param, grad in zip(params, grads, strict=True):
         if grad is None:
             continue
         grad = _maybe_materialize_grad_for_param_layout(param, grad)
         if param.grad is None:
-            param.grad = grad
+            param.grad = grad.clone() if clone_grads_to_initialize_param_grad else grad
         else:
             param.grad += grad
 
@@ -213,6 +296,13 @@ def annotate_module_fqns(model: nn.Module) -> None:
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
+
+
+def annotate_graph_trainer_model(model: Decoder) -> None:
+    """Attach the annotations consumed by GraphTrainer passes."""
+    if any(getattr(layer, "moe", None) is not None for layer in model.config.layers):
+        annotate_moe_ep_regions()
+    annotate_module_fqns(model)
 
 
 def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:
@@ -394,17 +484,13 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
-def apply_cp_to_attention(
-    model: nn.Module,
-    parallel_dims: ParallelDims,
-) -> None:
-    """Wrap each layer's inner attention with CP logic."""
-    attention_modules = [
-        # pyrefly: ignore [missing-attribute]
-        block.attention.inner_attention
-        for block in model.layers.values()
-    ]
-    apply_cp_to_forward(attention_modules, parallel_dims.get_mesh("cp"))
+def get_simple_fsdp_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
+    """Return the flattened DP-shard/CP mesh used by SimpleFSDP."""
+    fsdp_mesh = parallel_dims.get_optional_mesh(
+        ["dp_shard", "cp"], include_singleton_axes=True
+    )
+    assert fsdp_mesh is not None
+    return fsdp_mesh._flatten("fsdp")
 
 
 def apply_simple_fsdp(
@@ -419,18 +505,23 @@ def apply_simple_fsdp(
     (the routed-expert weights) are separately wrapped on the EDP mesh when expert
     parallelism is enabled.
     """
+    fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
+
     if parallel_dims.dp_replicate_enabled:
         if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-            dp_mesh_dim_names = ["dp_replicate", "fsdp"]
+            dp_replicate_mesh = parallel_dims.get_optional_mesh(
+                "dp_replicate", include_singleton_axes=True
+            )
+            assert dp_replicate_mesh is not None
+            dp_mesh = DeviceMesh._concatenate([dp_replicate_mesh, fsdp_mesh])
             dp_mode = "hybrid_shard"
         else:
-            dp_mesh_dim_names = ["dp_replicate"]
+            dp_mesh = parallel_dims.get_mesh("dp_replicate")
             dp_mode = "replicate"
     else:
-        dp_mesh_dim_names = ["fsdp"]
+        dp_mesh = fsdp_mesh
         dp_mode = "fully_shard"
 
-    dp_mesh = parallel_dims.get_mesh(dp_mesh_dim_names)
     mp_policy = MixedPrecisionPolicy(
         param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
@@ -462,6 +553,7 @@ def apply_simple_fsdp(
                 dp_mode,
                 mp_policy=mp_policy,
                 shard_dim=experts_shard_dim,
+                non_dp_mesh=parallel_dims.get_optional_mesh("ep"),
             )
 
     model = data_parallel(
@@ -469,6 +561,7 @@ def apply_simple_fsdp(
         dp_mesh,
         dp_mode,
         mp_policy=mp_policy,
+        non_dp_mesh=parallel_dims.get_optional_mesh("tp"),
     )
     logger.info(
         "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode

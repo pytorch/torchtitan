@@ -1,6 +1,3 @@
-**The Qwen3 model is still under development.**
-
-
 ## Available features
 #### Dense Model
 - Qwen3 dense model:
@@ -9,10 +6,15 @@
 - Qwen3 MoE model:
     - Supports FSDP/HSDP, TP, CP, DDP, EP.
     - Supports AC, torch.compile.
-    - MoE models use Token Choice routing, which is using auxiluary-loss-free load balancing algorithm.
+    - MoE models use Token Choice routing. Load-balancing follows the original
+      Qwen3 training recipe (auxiliary loss).
 
+Dense and MoE debug models are covered by `tests/integration_tests/models.py`
+(FSDP+TP+CP, and FSDP+TP+CP+EP for MoE).
 
-Other model sizes are added to the configs, but config_registry entries need to be added and tested.
+Model architectures exist for 4B, 8B, and 235B-A22B, but those sizes do not
+yet have pretrain `config_registry` recipes. 8B is available as SFT via
+`sft_qwen3_8b_math`.
 
 ## Download Qwen3 tokenizer
 ```python scripts/download_hf_assets.py --repo_id <hf_repo_name> --assets tokenizer```
@@ -20,7 +22,8 @@ Other model sizes are added to the configs, but config_registry entries need to 
 eg, for Qwen3 0.6B model, the HF repo name is `Qwen/Qwen3-0.6B`. For 1.7B model, the HF repo name is `Qwen/Qwen3-1.7B`.
 
 
-## To be added
-- Testing
-    - Learning rate verifying: verify learning rate and schedule with real training jobs (eg, 3k stps), or find official references.
-    - The model should be tested against established performance benchmarks
+## Remaining work
+- Add `config_registry` recipes for 4B, 8B pretrain, and 235B-A22B.
+- Verify learning rate and schedule on longer training jobs, or cite official
+  references.
+- Compare against established performance benchmarks.

@@ -15,7 +15,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
     set_gqa_attention_sharding,
-    set_gqa_inner_attention_local_map,
+    set_gqa_inner_attention_local_spmd,
 )
 
 if TYPE_CHECKING:
@@ -48,8 +48,8 @@ def _set_llama3_layer_sharding(
 ) -> None:
     """Set sharding on one Llama3 transformer layer.
 
-    ``enable_sp=True``  -> SP norms and Shard(1) activations around attention/FFN;
-    ``attention.wo`` and ``feed_forward.w2`` reduce-scatter to Shard(1).
+    ``enable_sp=True``  -> SP norms and Shard(0) activations around attention/FFN;
+    ``attention.wo`` and ``feed_forward.w2`` reduce-scatter to Shard(0).
     ``enable_sp=False`` -> norms stay Replicate (no parallelism), activations
     stay Replicate; ``attention.wo`` and ``feed_forward.w2`` all-reduce to
     Replicate.
@@ -60,11 +60,11 @@ def _set_llama3_layer_sharding(
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
 
     set_gqa_attention_sharding(layer_cfg.attention, enable_sp=enable_sp)
-    set_gqa_inner_attention_local_map(layer_cfg.attention.inner_attention)
+    set_gqa_inner_attention_local_spmd(layer_cfg.attention.inner_attention)
 
     assert layer_cfg.feed_forward is not None
     set_dense_ffn_sharding(

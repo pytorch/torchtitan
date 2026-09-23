@@ -4,46 +4,35 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
+"""Qwen3.5 vision encoder.
+
+Shape suffixes:
+- T = packed patch tokens
+- D = vision hidden dimension
+- M = packed merged tokens
+- K = merged feature dimension
+"""
+
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.experimental import local_map
-from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.models.common import Linear
-from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import _maybe_wrap_positions, CosSinRoPE
+from torchtitan.models.common.rope import CosSinRoPE
+from torchtitan.models.common.vision_encoder import (
+    create_block_diagonal_mask,
+    VisionTransformerBlock,
+)
 from torchtitan.protocols.module import Module, ModuleDict
-
-_compiled_create_block_mask = torch.compile(create_block_mask)
-
-
-def get_vision_block_mask_mod(num_patch: torch.Tensor) -> Callable:
-    """Create a mask modifier for block-diagonal attention.
-
-    Each image only attends to its own patches.
-
-    Args:
-        num_patch: (num_vision,) actual number of patches per visual item
-    """
-
-    def mask_mod(b, h, q_idx, kv_idx):
-        valid_q = q_idx < num_patch[b]
-        valid_kv = kv_idx < num_patch[b]
-        return valid_q & valid_kv
-
-    return mask_mod
 
 
 def _compute_learned_pos_embeds(
     learned_pos_embed: torch.Tensor,
-    grid_thw: torch.Tensor,
-    max_num_patch: int,
+    grids: list[list[int]],
     num_grid_per_side: int,
     spatial_merge_size: int,
     dim: int,
@@ -56,25 +45,22 @@ def _compute_learned_pos_embeds(
 
     Args:
         learned_pos_embed: (num_position_embeddings, dim) learnable position embeddings
-        grid_thw: (num_vision, 3) with patch counts [t, h, w] per visual item
-        max_num_patch: Maximum number of patches (for padding)
+        grids: per-item ``[t, h, w]`` patch counts as host ints.
         num_grid_per_side: Side length of the square position embedding grid
         spatial_merge_size: Number of patches to merge per spatial dimension
         dim: Hidden dimension
 
     Returns:
-        pos_embeds: (num_vision, max_num_patch, dim) interpolated position embeddings
+        pos_embeds: (total_num_patches, dim) packed position embeddings.
     """
-    num_vision = grid_thw.shape[0]
     dtype = learned_pos_embed.dtype
     merge_size = spatial_merge_size
 
-    pos_embeds = learned_pos_embed.new_zeros(num_vision, max_num_patch, dim)
+    pos_embeds: dict[int, torch.Tensor] = {}
 
     # Group images by (h, w) to batch compute position embeddings
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
-    for i in range(num_vision):
-        h, w = int(grid_thw[i, 1].item()), int(grid_thw[i, 2].item())
+    for i, (_, h, w) in enumerate(grids):
         key = (h, w)
         if key not in hw_to_indices:
             hw_to_indices[key] = []
@@ -90,20 +76,12 @@ def _compute_learned_pos_embeds(
     )
 
     for (h, w), indices in hw_to_indices.items():
-        if isinstance(pos_grid, DTensor):
-            pos_hw = local_map(F.interpolate, out_placements=(pos_grid.placements,),)(
-                pos_grid,
-                size=[h, w],  # pyrefly: ignore [unexpected-keyword]
-                mode="bilinear",  # pyrefly: ignore [unexpected-keyword]
-                align_corners=True,  # pyrefly: ignore [unexpected-keyword]
-            )
-        else:
-            pos_hw = F.interpolate(
-                pos_grid,
-                size=[h, w],
-                mode="bilinear",
-                align_corners=True,
-            )
+        pos_hw = F.interpolate(
+            pos_grid,
+            size=[h, w],
+            mode="bilinear",
+            align_corners=True,
+        )
 
         # (1, dim, h, w) → (h*w, dim)
         pos_hw = pos_hw.squeeze(0).permute(1, 2, 0).reshape(-1, dim).to(dtype)
@@ -116,24 +94,27 @@ def _compute_learned_pos_embeds(
             .flatten(0, 3)
         )  # (h*w, dim)
 
-        # Apply to all images with this (h, w)
+        # Apply to all visual items with this (h, w).
         # For videos (t > 1), repeat spatial embeddings per frame;
         # temporal position encoding is handled by MRoPE in the LLM
         for i in indices:
-            t = int(grid_thw[i, 0].item())
-            seq_len = t * h * w
+            t = grids[i][0]
             if t > 1:
-                pos_embeds[i, :seq_len] = pos_hw_block.repeat(t, 1)
+                pos_embeds[i] = pos_hw_block.repeat(t, 1)
             else:
-                pos_embeds[i, :seq_len] = pos_hw_block
+                pos_embeds[i] = pos_hw_block
 
-    return pos_embeds
+    packed_pos_embeds = torch.cat([pos_embeds[i] for i in range(len(grids))], dim=0)
+    if spmd.is_type_checking():
+        packed_pos_embeds = spmd.mutate_type(
+            packed_pos_embeds, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+        )
+    return packed_pos_embeds
 
 
 def _compute_2d_rope_cache(
     freq_table: torch.Tensor,
-    grid_thw: torch.Tensor,
-    max_num_patch: int,
+    grids: list[list[int]],
     spatial_merge_size: int,
     head_dim: int,
 ) -> torch.Tensor:
@@ -145,27 +126,22 @@ def _compute_2d_rope_cache(
 
     Args:
         freq_table: (max_hw, head_dim//4) precomputed RoPE frequencies
-        grid_thw: (num_vision, 3) with patch counts [t, h, w] per visual item
-        max_num_patch: Maximum number of patches (for padding)
+        grids: per-item ``[t, h, w]`` patch counts as host ints.
         spatial_merge_size: Number of patches to merge per spatial dimension
         head_dim: Attention head dimension
 
     Returns:
-        rope_cache: (num_vision, max_num_patch, 1, head_dim*2) float32 for
-            VisionAttention
+        rope_cache: (total_num_patches, 1, head_dim*2) float32 for
+            VisionAttention.
     """
-    num_vision = grid_thw.shape[0]
-    device = grid_thw.device
+    device = freq_table.device
     merge_size = spatial_merge_size
 
-    rope_embeds = torch.zeros(
-        num_vision, max_num_patch, head_dim // 2, device=device, dtype=torch.float32
-    )
+    rope_embeds: dict[int, torch.Tensor] = {}
 
     # Group images by (h, w) to batch compute RoPE embeddings
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
-    for i in range(num_vision):
-        h, w = int(grid_thw[i, 1].item()), int(grid_thw[i, 2].item())
+    for i, (_, h, w) in enumerate(grids):
         key = (h, w)
         if key not in hw_to_indices:
             hw_to_indices[key] = []
@@ -201,6 +177,9 @@ def _compute_2d_rope_cache(
             .expand(merged_h, merged_w, merge_size, merge_size)
             .reshape(-1)
         )
+        if spmd.is_type_checking():
+            row_idx = spmd.mutate_type(row_idx, "tp", src=spmd.R, dst=spmd.I)
+            col_idx = spmd.mutate_type(col_idx, "tp", src=spmd.R, dst=spmd.I)
 
         # 2D RoPE: row and col each get separate frequency sets, concatenated
         # (not interleaved). freq_table shape: (max_hw, head_dim//4)
@@ -208,22 +187,26 @@ def _compute_2d_rope_cache(
         rope_col = freq_table[col_idx]  # (h*w, head_dim//4)
         rope_2d = torch.cat([rope_row, rope_col], dim=-1)  # (h*w, head_dim//2)
 
-        # Apply to all images with this (h, w)
+        # Apply to all visual items with this (h, w).
         # For videos (t > 1), repeat spatial embeddings per frame;
         # temporal position encoding is handled by MRoPE in the LLM
         for i in indices:
-            t = int(grid_thw[i, 0].item())
-            seq_len = t * h * w
+            t = grids[i][0]
             if t > 1:
-                rope_embeds[i, :seq_len] = rope_2d.repeat(t, 1)
+                rope_embeds[i] = rope_2d.repeat(t, 1).to(torch.float32)
             else:
-                rope_embeds[i, :seq_len] = rope_2d
+                rope_embeds[i] = rope_2d.to(torch.float32)
 
     # Compute cos/sin in float32 for numerical precision
-    rope_embeds = torch.cat((rope_embeds, rope_embeds), dim=-1)  # (N, L, head_dim)
-    rope_cache = torch.cat([rope_embeds.cos(), rope_embeds.sin()], dim=-1).unsqueeze(
-        2
-    )  # (N, L, 1, head_dim*2)
+    packed_rope_embeds = torch.cat([rope_embeds[i] for i in range(len(grids))], dim=0)
+    if spmd.is_type_checking():
+        packed_rope_embeds = spmd.mutate_type(
+            packed_rope_embeds, src=spmd.R, dst={"dp": spmd.V, "tp": spmd.I}
+        )
+    packed_rope_embeds = torch.cat((packed_rope_embeds, packed_rope_embeds), dim=-1)
+    rope_cache = torch.cat(
+        [packed_rope_embeds.cos(), packed_rope_embeds.sin()], dim=-1
+    ).unsqueeze(1)
 
     return rope_cache
 
@@ -262,8 +245,9 @@ class VisionRotaryEmbedding(Module):
         seq = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
-        seq = _maybe_wrap_positions(seq, self.inv_freq)
-        return torch.outer(seq, self.inv_freq)  # pyrefly: ignore
+        if spmd.is_type_checking():
+            seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
+        return torch.outer(seq, self.inv_freq)
 
 
 class PatchMerger(Module):
@@ -294,127 +278,25 @@ class PatchMerger(Module):
         self.act_fn = config.act_fn.build()
         self.linear_fc2 = config.fc2.build()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         """Merge spatial patches and project to output dimension.
 
         Args:
-            x: (batch, seq_len, hidden_size) where seq_len is divisible by spatial_merge_size^2
+            x_TD: Packed patch features. Each visual item's segment length is
+                divisible by ``spatial_merge_size**2``.
 
         Returns:
-            (batch, seq_len // spatial_merge_size^2, out_hidden_size)
+            Packed merged patch features.
         """
-        batch_size, seq_len, _ = x.shape
-        x = self.norm(x)
-        x = x.view(
-            batch_size,
-            seq_len // (self.spatial_merge_size**2),
-            self.merged_hidden_size,
-        )
-        x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
-        return x
-
-
-class VisionAttention(Module):
-    """Multi-head attention with FlexAttention for efficient batched processing."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        num_heads: int
-        wq: Linear.Config
-        wk: Linear.Config
-        wv: Linear.Config
-        proj: Linear.Config
-        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.dim = config.dim
-        self.num_heads = config.num_heads
-        self.head_dim = self.dim // self.num_heads
-
-        self.wq = config.wq.build()
-        self.wk = config.wk.build()
-        self.wv = config.wv.build()
-        self.proj = config.proj.build()
-        self.flex_attention = config.inner_attention.build()
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        rope_cache: torch.Tensor,
-        attention_mask: BlockMask,
-    ) -> torch.Tensor:
-        bs, seqlen, _ = x.shape
-
-        xq = self.wq(x).view(bs, seqlen, -1, self.head_dim)
-        xk = self.wk(x).view(bs, seqlen, -1, self.head_dim)
-        xv = self.wv(x).view(bs, seqlen, -1, self.head_dim)
-
-        xq, xk = CosSinRoPE.apply_rotary_emb(xq, xk, rope_cache)
-
-        output = self.flex_attention(xq, xk, xv, attention_masks=attention_mask)
-        output = output.reshape(bs, seqlen, -1)
-        return self.proj(output)
-
-
-class VisionMLP(Module):
-    """Feed-forward network with GELU activation."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        fc1: Linear.Config
-        fc2: Linear.Config
-        act_fn: GELU.Config = field(
-            default_factory=lambda: GELU.Config(approximate="tanh")
-        )
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.linear_fc1 = config.fc1.build()
-        self.linear_fc2 = config.fc2.build()
-        self.act_fn = config.act_fn.build()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
-
-
-class VisionTransformerBlock(Module):
-    """Single transformer block for vision encoder."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        norm1: LayerNorm.Config
-        norm2: LayerNorm.Config
-        attn: VisionAttention.Config
-        mlp: VisionMLP.Config
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.norm1 = config.norm1.build()
-        self.norm2 = config.norm2.build()
-        self.attn = config.attn.build()
-        self.mlp = config.mlp.build()
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        *,
-        rope_cache: torch.Tensor,
-        attention_mask: BlockMask,
-    ) -> torch.Tensor:
-        x = x + self.attn(
-            self.norm1(x), rope_cache=rope_cache, attention_mask=attention_mask
-        )
-        x = x + self.mlp(self.norm2(x))
-        return x
+        x_TD = self.norm(x_TD)
+        x_MK = x_TD.view(-1, self.merged_hidden_size)
+        return self.linear_fc2(self.act_fn(self.linear_fc1(x_MK)))
 
 
 class Qwen35VisionEncoder(Module):
-    """Qwen3.5 Vision Encoder with FlexAttention.
+    """Qwen3.5 Vision Encoder with FlexInnerAttention.
 
-    Uses padded batches (N, L, D) format for efficient processing.
+    Processes visual items as one packed patch sequence.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -464,58 +346,42 @@ class Qwen35VisionEncoder(Module):
         self.merger = config.merger.build()
 
     def compute_position_embeddings(
-        self, grid_thw: torch.Tensor, max_num_patch: int
+        self, grids: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute position embeddings for padded batch.
+        """Compute packed learned position embeddings and RoPE caches.
 
         Delegates to two standalone helpers:
         - ``_compute_learned_pos_embeds``: bilinear-interpolated learned embeddings
         - ``_compute_2d_rope_cache``: 2D RoPE cache
 
         Args:
-            grid_thw: (num_vision, 3) with patch counts [t, h, w] per visual item
-            max_num_patch: Maximum number of patches (for padding)
+            grids: per-item ``[t, h, w]`` patch counts as host ints.
 
         Returns:
-            learned_pos: (num_vision, max_num_patch, dim) learnable position embeddings
-            rope_cache: (num_vision, max_num_patch, 1, head_dim*2) RoPE cache for
-                VisionAttention
+            learned_pos: ``(total_num_patches, dim)`` learned positions.
+            rope_cache: ``(total_num_patches, 1, head_dim*2)`` RoPE cache.
         """
         head_dim = self.config.dim // self.config.num_heads
 
         # Get RoPE freq table, reusing cache when possible
-        max_hw = int(grid_thw[:, 1:].max().item())
+        max_hw = max(max(h, w) for _, h, w in grids)
         if self._cached_freq_table is None or self._cached_freq_table.shape[0] < max_hw:
             self._cached_freq_table = self.rotary_pos_emb(max_hw)
 
         learned_pos = _compute_learned_pos_embeds(
             self.pos_embed,
-            grid_thw,
-            max_num_patch,
+            grids,
             self.num_grid_per_side,
             self.spatial_merge_size,
             self.config.dim,
         )
 
-        if isinstance(self._cached_freq_table, DTensor):
-            rope_cache = local_map(
-                _compute_2d_rope_cache,
-                out_placements=(self._cached_freq_table.placements,),
-            )(
-                self._cached_freq_table,
-                grid_thw,  # pyrefly: ignore [bad-argument-count]
-                max_num_patch,
-                self.spatial_merge_size,
-                head_dim,
-            )
-        else:
-            rope_cache = _compute_2d_rope_cache(
-                self._cached_freq_table,
-                grid_thw,
-                max_num_patch,
-                self.spatial_merge_size,
-                head_dim,
-            )
+        rope_cache = _compute_2d_rope_cache(
+            self._cached_freq_table,
+            grids,
+            self.spatial_merge_size,
+            head_dim,
+        )
 
         return learned_pos, rope_cache
 
@@ -527,37 +393,51 @@ class Qwen35VisionEncoder(Module):
     ) -> torch.Tensor:
         """Forward pass of the vision encoder.
 
-        Processes both images and videos — each visual item is a batch of
-        padded patches with a (t, h, w) grid.
+        Processes both images and videos. Each visual item has a ``(t, h, w)``
+        patch grid, and all valid patches are packed into one sequence.
 
         Args:
-            pixel_values: Padded patches (num_vision, max_num_patch, patch_dim)
-            grid_thw: Grid dimensions (num_vision, 3) for [temporal, height, width] measured in patches
+            pixel_values: Packed patches ``(total_num_patches, patch_dim)``.
+            grid_thw: Grid dimensions ``(num_vision, 3)`` for
+                ``[temporal, height, width]``, measured in patches.
 
         Returns:
-            merged_hidden_states: (num_vision, max_merged_num_patch, out_hidden_size)
+            merged_hidden_states: Packed merged patch features with shape
+                ``(total_merged_num_patches, out_hidden_size)``.
         """
-        num_vision, max_num_patch, _ = pixel_values.shape
-
-        num_patch = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).to(torch.long)
-
-        x = self.patch_embed(pixel_values)  # (num_vision, max_num_patch, dim)
-        learned_pos, rope_cache = self.compute_position_embeddings(
-            grid_thw, max_num_patch
+        # One host sync for the whole forward: read the (N, 3) grid to CPU ints
+        # so every per-item loop below builds shapes without a device sync.
+        grids = grid_thw.tolist()  # [[t, h, w], ...]
+        segment_lengths = torch.repeat_interleave(
+            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
         )
+        total_tokens = pixel_values.shape[0]
+        expected_tokens = sum(t * h * w for t, h, w in grids)
+        if total_tokens != expected_tokens:
+            raise ValueError(
+                f"pixel_values contains {total_tokens} patches but grid_thw "
+                f"describes {expected_tokens}."
+            )
+
+        x = self.patch_embed(pixel_values)
+        learned_pos, rope_cache = self.compute_position_embeddings(grids)
         x = x + learned_pos
 
-        mask_mod = get_vision_block_mask_mod(num_patch)
-        attention_mask = _compiled_create_block_mask(
-            mask_mod,
-            num_vision,
-            None,
-            max_num_patch,
-            max_num_patch,
-            device=x.device,
-        )
+        # BlockMask creation and use in FlexInnerAttention are blackboxed from
+        # typechecking.
+        with spmd.no_typecheck():
+            attention_mask = create_block_diagonal_mask(
+                segment_lengths,
+                total_tokens,
+                x.device,
+            )
 
         for layer in self.layers.values():
-            x = layer(x, rope_cache=rope_cache, attention_mask=attention_mask)
+            x = layer(
+                x,
+                rope_cache=rope_cache,
+                rope_apply=CosSinRoPE.apply_rotary_emb,
+                attention_mask=attention_mask,
+            )
 
         return self.merger(x)

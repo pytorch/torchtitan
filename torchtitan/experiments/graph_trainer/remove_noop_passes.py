@@ -10,28 +10,86 @@ These passes simplify traced graphs by eliminating nodes that are identity
 operations in the context of a fully traced graph (no autograd, no symbolic
 shape changes) and by canonicalizing equivalent view ops to a single target.
 Removing/normalizing them reduces graph noise and improves downstream pass
-effectiveness (bucketing, scheduling, cudagraph compatibility).
+effectiveness (bucketing, scheduling, CUDA graph compatibility).
 
-``canonicalize_graph_pass`` bundles every individual sub-pass here into a
-single pass-list entry; the sub-passes remain public so they can be tested
+Parameter-gradient aliases are also removed here after transferring their
+trace-time identity metadata to the underlying gradient values.
+
+``canonicalize_graph_pass`` bundles the optional structural cleanup passes
+into a single pass-list entry. Parameter-gradient marker removal remains a
+separate mandatory pass, and all sub-passes remain public so they can be tested
 (and reasoned about) in isolation.
 """
 
+import logging
 import sys
 
 import torch
 from torch.fx.experimental.symbolic_shapes import guard_or_false
 
-from torchtitan.tools.logging import logger
+from torchtitan.experiments.graph_trainer.common_utils import (
+    PARAMETER_GRADIENT_FQNS_META,
+)
 
 # Op overloads that are registered side-effectful but that we want DCE to treat
 # as pure (so unused instances, and their now-orphaned input chains, are dropped).
 # Currently just the ``aten._assert_async`` runtime asserts; add other removable
 # side-effect ops here as they come up.
+logger = logging.getLogger(__name__)
+
+
 _FORCE_PURE_TARGETS = (
     torch.ops.aten._assert_async.msg,
     torch.ops.aten._assert_async.default,
 )
+
+
+def remove_parameter_gradient_markers_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple,
+) -> torch.fx.GraphModule:
+    """Move gradient identities onto their values and erase marker aliases.
+
+    Ordinary dead-code elimination cannot remove a marker that feeds a graph
+    output or optimizer. For each marker, this pass merges its parameter FQNs
+    onto the original gradient node, rewires all users to that node, and erases
+    the view-only ``aten.alias``. A tuple is used because tied parameters may
+    produce distinct markers for the same gradient value. This remains
+    separate from optional canonicalization because markers must be removed
+    even when the rest of the compile-time pass pipeline is disabled.
+    """
+    del example_inputs
+    markers = [
+        node
+        for node in gm.graph.nodes
+        if node.op == "call_function"
+        and node.target is torch.ops.aten.alias.default
+        and PARAMETER_GRADIENT_FQNS_META in node.meta.get("custom", {})
+    ]
+    for marker in markers:
+        gradient = marker.args[0]
+        if not isinstance(gradient, torch.fx.Node):
+            raise RuntimeError(
+                f"Parameter-gradient marker {marker.name} has no FX value input"
+            )
+        gradient_custom = gradient.meta.setdefault("custom", {})
+        existing_fqns = gradient_custom.get(PARAMETER_GRADIENT_FQNS_META, ())
+        marker_fqns = marker.meta["custom"][PARAMETER_GRADIENT_FQNS_META]
+        if not isinstance(existing_fqns, tuple) or not isinstance(marker_fqns, tuple):
+            raise RuntimeError("Parameter-gradient metadata must be a tuple of FQNs")
+        gradient_custom.update(
+            {
+                PARAMETER_GRADIENT_FQNS_META: tuple(
+                    dict.fromkeys((*existing_fqns, *marker_fqns))
+                )
+            }
+        )
+        marker.replace_all_uses_with(gradient)
+        gm.graph.erase_node(marker)
+    if markers:
+        gm.graph.lint()
+        gm.recompile()
+    return gm
 
 
 def _is_impure_for_dce(node: torch.fx.Node) -> bool:
@@ -56,7 +114,7 @@ def eliminate_dead_code_pass(
     nodes (in-place mutations, ``copy_``, collectives -- anything for which
     ``node.is_impure()`` is True), so only genuinely unused pure computation is
     dropped. Running it first shrinks the graph for every downstream pass (memory
-    policy, bucketing, cudagraph partitioning), and removes orphaned subtrees left
+    policy, bucketing, CUDA graph partitioning), and removes orphaned subtrees left
     by tracing so they don't get scheduled or counted.
 
     Dead ``aten._assert_async`` runtime asserts are dropped too, via the custom
@@ -152,7 +210,7 @@ def remove_identity_view_pass(
 
     In a traced graph these ops are no-ops when the output shape equals
     the input shape.  Removing them simplifies the graph for downstream
-    passes (bucketing, scheduling, cudagraph).
+    passes (bucketing, scheduling, CUDA graph).
 
     Args:
         gm: The traced graph module.

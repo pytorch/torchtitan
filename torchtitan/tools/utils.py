@@ -6,6 +6,8 @@
 
 import contextlib
 import gc
+import logging
+import os
 import subprocess
 import time
 from collections.abc import Generator
@@ -16,7 +18,9 @@ import torch
 from torch._utils import _get_available_device_type, _get_device_module
 
 from torchtitan.observability import structured_logger as sl
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 def round_up(value: int, multiple: int) -> int:
@@ -30,6 +34,27 @@ def has_cuda_capability(major: int, minor: int) -> bool:
         and torch.version.hip is None
         and torch.cuda.get_device_capability() >= (major, minor)
     )
+
+
+def get_cuda_flash_attention_impl() -> str | None:
+    """Return the FlashAttention implementation for the current CUDA architecture."""
+
+    # ROCm has neither FA3 nor FA4: torch's flash_attn_interface is CUDA-only.
+    # This has to be checked explicitly, because has_cuda_capability() below is
+    # just torch.cuda.get_device_capability() >= (major, minor) and AMD devices
+    # report a capability too -- gfx950 (MI350X) reports (9, 5), which satisfies
+    # the (9, 0) test and would select FA3 on hardware that cannot run it.
+    if torch.version.hip is not None:
+        return None
+
+    # FA4 advertises Hopper support, but as of writing it hangs under
+    # torch.compile there, so Hopper (sm90) stays on FA3.
+    # https://github.com/pytorch/torchtitan/pull/4413
+    if has_cuda_capability(10, 0):
+        return "FA4"
+    if has_cuda_capability(9, 0):
+        return "FA3"
+    return None
 
 
 def has_rocm_capability(major: int, minor: int) -> bool:
@@ -47,6 +72,43 @@ def get_device_info() -> tuple[str, ModuleType]:
 
 
 device_type, device_module = get_device_info()
+
+
+def get_local_device() -> torch.device:
+    """Return this process's device under LOCAL_RANK or visible-device launch.
+
+    Launchers normally expose multiple accelerators per process and set
+    LOCAL_RANK to identify which local device the process should use. Some
+    launchers instead mask each process down to a single accelerator with
+    CUDA_VISIBLE_DEVICES or another backend-specific visible-device mask. When
+    exactly one device is visible, target device index 0; otherwise preserve
+    the existing LOCAL_RANK mapping.
+    """
+    local_rank_str = os.environ.get("LOCAL_RANK")
+    if local_rank_str is None:
+        raise ValueError("LOCAL_RANK must be set before selecting a local device.")
+    try:
+        local_rank = int(local_rank_str)
+    except ValueError as e:
+        raise ValueError(
+            "LOCAL_RANK environment variable must be a valid integer, "
+            f"got: {local_rank_str}"
+        ) from e
+    if local_rank < 0:
+        raise ValueError(f"LOCAL_RANK must be non-negative, got: {local_rank}")
+
+    num_devices = None
+    if hasattr(device_module, "device_count"):
+        num_devices = device_module.device_count()
+    device_index = 0 if num_devices == 1 else local_rank
+    if num_devices is not None and num_devices > 1 and device_index >= num_devices:
+        raise ValueError(
+            f"LOCAL_RANK={local_rank} is outside the visible {device_type} "
+            f"device count ({num_devices}). If each process is launched with a "
+            f"single visible {device_type} device, set the visible-device mask "
+            "per process so device_count() returns 1."
+        )
+    return torch.device(device_type, device_index)
 
 
 # used to avoid stragglers in garbage collection
@@ -72,7 +134,6 @@ class GarbageCollection:
                 "Force GC to perform collection to obtain debug information",
                 generation=2,
             )
-            gc.collect()
             sl.add_step_tag("gc")
             return True
         if step_count > 1 and step_count % self.gc_freq == 0:
@@ -89,7 +150,7 @@ class GarbageCollection:
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU,
-# AMD MI250, MI300X, MI325X, MI355X, Intel PVC, and AWS Trainium/Inferentia
+# AMD MI250, MI300X, MI325X, MI350X, MI355X, Intel PVC, and AWS Trainium/Inferentia
 def get_peak_flops(device_name: str) -> float:
     try:
         # Run the lspci command and capture the output
@@ -140,9 +201,12 @@ def get_peak_flops(device_name: str) -> float:
         # GB300 data from https://www.nvidia.com/en-us/data-center/dgx-gb300
         return 2.5e15
     elif "B300" in device_name or "B200" in device_name:
-        # data from https://nvdam.widen.net/s/wwnsxrhm2w/blackwell-datasheet-3384703
+        # data from https://resources.nvidia.com/en-us-blackwell-architecture
         # Checked after GB300 to avoid false match on "GB300"
         return 2.25e15
+    elif "MI350X" in device_name:
+        # MI350X data from https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html
+        return 2300e12
     elif "MI355X" in device_name:
         # MI355X data from https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
         return 2500e12
@@ -163,7 +227,7 @@ def get_peak_flops(device_name: str) -> float:
         # Standard EU mode (i.e. 448 max compute units): 298.2 TFLOPS (BF16)
         max_comp_units = torch.xpu.get_device_properties("xpu").max_compute_units
         return 512 * max_comp_units * 1300 * 10**6
-    elif "l40s" in device_name:
+    elif "l40s" in device_name.casefold():
         # data from: "https://resources.nvidia.com/en-us-l40s/l40s-datasheet-28413"
         return 362e12
     elif "neuron" in device_name:

@@ -6,14 +6,12 @@
 
 from dataclasses import dataclass
 
-import torch
-
 from torchtitan.models.llama3 import Llama3Model
 
-from ..simple_fsdp import disable_active_parametrization
+from ..model import GraphTrainerModel
 
 
-class GraphTrainerLlama3Model(Llama3Model):
+class GraphTrainerLlama3Model(GraphTrainerModel, Llama3Model):
     @dataclass(kw_only=True, slots=True)
     class Config(Llama3Model.Config):
         pass
@@ -21,10 +19,19 @@ class GraphTrainerLlama3Model(Llama3Model):
     def __init__(self, config: Config):
         super().__init__(config)
 
-    def init_states(
-        self,
-        *,
-        buffer_device: torch.device | None = None,
-    ) -> None:
-        with disable_active_parametrization():
-            super().init_states(buffer_device=buffer_device)
+    def parallelize(self, *, compile_config, skip_dp: bool = False, **kwargs):
+        if compile_config.enable_autoparallel:
+            if skip_dp:
+                raise ValueError("GraphTrainer models do not support skip_dp=True.")
+            from .parallelize_autoparallel import parallelize_autoparallel_llama
+
+            return parallelize_autoparallel_llama(
+                self,
+                compile_config=compile_config,
+                **kwargs,
+            )
+        return super().parallelize(
+            compile_config=compile_config,
+            skip_dp=skip_dp,
+            **kwargs,
+        )

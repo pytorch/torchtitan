@@ -33,11 +33,14 @@ from __future__ import annotations
 
 import importlib
 import json
+
+import logging
 from dataclasses import dataclass, field, fields, is_dataclass
 from fnmatch import fnmatch
 from typing import Any, cast, TYPE_CHECKING, TypeVar
 
-from torchtitan.tools.logging import logger
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -220,7 +223,7 @@ def override(
     if not (isinstance(target, type) and issubclass(target, Configurable.Config)):
         raise TypeError(
             f"override(target=...) must be a Configurable.Config subclass, got "
-            f"{target!r}. Targets like ModelSpec or a plain class are not "
+            f"{target!r}. Plain classes are not "
             f"overridable; pick the component's `.Config`."
         )
 
@@ -454,8 +457,7 @@ def apply_overrides(
     Args:
         override_config: The override settings (which modules to import).
         config_root: The config tree to traverse and mutate in place. The
-            trainer passes the top-level ``Trainer.Config``; the model config
-            nested under ``ModelSpec`` is reached via ``ModelSpec.traverse``.
+            trainer passes the top-level ``Trainer.Config``.
 
     Returns a list of human-readable log lines describing each replacement.
     """

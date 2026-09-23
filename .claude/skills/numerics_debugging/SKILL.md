@@ -10,17 +10,21 @@ designated step via `torch.utils._debug_mode.DebugMode`, then diffs two
 captures into an HTML report to surface numerics divergence between runs
 that should agree (bitwise, or within float32 reduction-order noise).
 
-Two pieces live in `agent_tooling/numerics_debugging/`:
+Two pieces live in `scripts/`:
 
 - `activation_tracer.py` — runtime capture, driven from `Profiler` by
   `ActivationCaptureProfiler`. Output:
   `{dump_folder}/numerics/rank_{N}_activations.log`.
 - `compare_numerics.py` — diffs two logs, produces an HTML report.
+  Standard library only, no torch import.
 
-`agent_tooling/` sits **outside** the torchtitan package on purpose. Nothing
-in core torchtitan or `graph_trainer` references it; an agent must edit
-torchtitan to wire it in before a capture run, and revert the edits when
-done (they don't belong on `main`).
+They sit **outside** the torchtitan package on purpose. Nothing in core
+torchtitan or `graph_trainer` references them; an agent must edit torchtitan
+to wire the tracer in before a capture run, and revert the edits when done
+(they don't belong on `main`). Because `.claude` is not a valid Python
+package name, `activation_tracer` is imported by putting `scripts/` on
+`sys.path` rather than by dotted module path — see
+[references/patching.md](references/patching.md).
 
 > The two runs being compared **must use the same dtype and seed**. The
 > matcher keys on shape + float64 L1 norm; a precision change (bf16 vs
@@ -49,7 +53,7 @@ done (they don't belong on `main`).
    in float64; tensors aren't held).
 3. **Diff** the two logs:
    ```bash
-   python -m agent_tooling.numerics_debugging.compare_numerics \
+   python .claude/skills/numerics_debugging/scripts/compare_numerics.py \
        outputs/run_A/numerics/rank_0_activations.log \
        outputs/run_B/numerics/rank_0_activations.log \
        --name1 run_A --name2 run_B \

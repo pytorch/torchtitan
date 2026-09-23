@@ -15,26 +15,40 @@ entry point selects a tagging strategy via ``--compile.memory_policy``.
 
 from __future__ import annotations
 
+import logging
+
 import operator
 from collections import defaultdict
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
+from torch._functorch.partitioners import (
+    choose_saved_values_set,
+    force_save_bw_mutation_src,
+    force_save_collectives,
+    force_save_effectful_ops,
+    get_default_op_list,
+    NodeInfo,
+)
+from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
+    _get_module_fqn,
     _is_backward_node,
     _MODULE_FQN,
     _NOT_IN_LAYERS,
+    matches_module_fqn_pattern,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
     tag_all_offloadable_activations,
 )
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
-    find_fsdp_unshard_save_nodes,
+    find_fsdp_unshard_outputs_by_param,
 )
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
@@ -43,7 +57,15 @@ from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
     register_memory_policy,
 )
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
+
+if TYPE_CHECKING:
+    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+
+
+_INF_DISTANCE = int(1e9)
 
 
 def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
@@ -59,14 +81,79 @@ def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
     return policy_fn
 
 
+def _make_no_ac_memory_policy() -> Callable:
+    """Create a policy that saves every forward activation."""
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        return CheckpointPolicy.MUST_SAVE
+
+    return policy_fn
+
+
 def _find_fsdp_unshard_save_nodes(gm: torch.fx.GraphModule) -> set[torch.fx.Node]:
-    save_nodes: set[torch.fx.Node] = set()
-    for node in gm.graph.find_nodes(op="placeholder"):
-        save_nodes.update(find_fsdp_unshard_save_nodes(node))
-    return save_nodes
+    outputs_by_param = find_fsdp_unshard_outputs_by_param(
+        gm.graph.find_nodes(op="placeholder")
+    )
+    return {output for outputs in outputs_by_param.values() for output in outputs}
 
 
-def _make_full_memory_policy() -> Callable:
+def _resolve_op_target(op_name: str) -> object:
+    """Resolve ``aten.mm.default``-style names through ``torch.ops``."""
+    if op_name.startswith("torch.ops."):
+        op_name = op_name.removeprefix("torch.ops.")
+
+    target = torch.ops
+    try:
+        for component in op_name.split("."):
+            target = getattr(target, component)
+    except AttributeError as exc:
+        raise ValueError(
+            f"Unknown op in --compile.full_recompute_save_ops: {op_name!r}"
+        ) from exc
+
+    if not isinstance(target, (torch._ops.OpOverload, torch._ops.HigherOrderOperator)):
+        raise ValueError(
+            "Ops in --compile.full_recompute_save_ops must name a specific "
+            f"overload or higher-order op, got {op_name!r}"
+        )
+    return target
+
+
+def _parse_full_recompute_save_ops(
+    value: str,
+) -> tuple[tuple[str, object], ...]:
+    """Parse ``FQN::OP | FQN::OP`` save selectors."""
+    if not value.strip():
+        return ()
+
+    selectors: list[tuple[str, object]] = []
+    for raw_selector in value.split("|"):
+        parts = raw_selector.split("::")
+        if len(parts) != 2 or not all(part.strip() for part in parts):
+            raise ValueError(
+                "Invalid --compile.full_recompute_save_ops selector "
+                f"{raw_selector.strip()!r}; expected 'MODULE_FQN_PATTERN::OP'"
+            )
+        module_fqn_pattern, op_name = (part.strip() for part in parts)
+        selectors.append((module_fqn_pattern, _resolve_op_target(op_name)))
+    return tuple(selectors)
+
+
+def validate_memory_policy_config(
+    compile_config: "GraphTrainerCompileConfig",
+) -> None:
+    """Validate memory-policy options before tracing the training graph."""
+    if (
+        compile_config.full_recompute_save_ops
+        and compile_config.memory_policy != "full"
+    ):
+        raise ValueError(
+            "--compile.full_recompute_save_ops requires --compile.memory_policy full"
+        )
+    _parse_full_recompute_save_ops(compile_config.full_recompute_save_ops)
+
+
+def _make_full_memory_policy(save_ops: str = "") -> Callable:
     """Full recompute policy: mark everything as MUST_RECOMPUTE.
 
     The layer boundary pass in tag_sac_policy will force MUST_SAVE on nodes
@@ -83,10 +170,21 @@ def _make_full_memory_policy() -> Callable:
     Higher-order ops (e.g. flex_attention) ARE recomputed: ``node_copy``
     duplicates them together with their ``get_attr`` subgraph references, and
     the subsequent regional_inductor pass compiles the duplicate as well.
+
+    ``save_ops`` can make exact module-FQN-pattern and op pairs exceptions to
+    full recompute. Matching nodes are marked MUST_SAVE.
     """
+
+    save_selectors = _parse_full_recompute_save_ops(save_ops)
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if torch.Tag.nondeterministic_seeded in getattr(node.target, "tags", set()):
+            return CheckpointPolicy.MUST_SAVE
+        fqn = _get_module_fqn(node)
+        if any(
+            node.target == target and matches_module_fqn_pattern(fqn_pattern, fqn)
+            for fqn_pattern, target in save_selectors
+        ):
             return CheckpointPolicy.MUST_SAVE
         return CheckpointPolicy.MUST_RECOMPUTE
 
@@ -103,7 +201,11 @@ def _make_eager_memory_policy(save_ops: set | None = None) -> Callable:
     """
     if save_ops is None:
         save_ops = _get_default_save_ops()
-    mm_ops = {torch.ops.aten.mm.default, torch.ops.aten.linear.default}
+    mm_ops = {
+        torch.ops.aten.mm.default,
+        torch.ops.aten.mm.dtype,
+        torch.ops.aten.linear.default,
+    }
     mm_count = 0
     current_layer = None
 
@@ -136,9 +238,9 @@ def tag_sac_policy(
 
     Annotates forward ``call_function`` nodes with a ``CheckpointPolicy``
     determined by ``policy_fn``. After tagging, a boundary pass forces
-    ``MUST_SAVE`` on recomputable nodes whose output crosses a layer
-    boundary (layer N → layer N+1), since recomputing them would require
-    rerunning the entire preceding layer.
+    ``MUST_SAVE`` on recomputable nodes whose output leaves its producing
+    layer, since recomputing them would require rerunning that layer. This
+    includes the final layer output consumed by the model epilogue.
 
     ``getitem`` / ``wait_tensor`` nodes inherit the parent's tag.
 
@@ -208,9 +310,10 @@ def tag_sac_policy(
         # because the alternating heuristic is arbitrary.
         node.meta["recompute"] = policy_fn(node)
 
-    # Pass 2: Force MUST_SAVE at layer boundaries. If a recomputable node
-    # feeds into a node in a higher layer, saving it is cheaper than
-    # recomputing the entire preceding layer.
+    # Pass 2: Save recomputable outputs consumed outside their producing
+    # layer. Recreating one would require rerunning that producer layer. A
+    # consumer without a layer FQN is also outside the producer layer; this
+    # covers the final layer output consumed by the model epilogue.
     def _is_recomputable(n: torch.fx.Node) -> bool:
         return n.meta.get("recompute") in (
             CheckpointPolicy.PREFER_RECOMPUTE,
@@ -226,7 +329,7 @@ def tag_sac_policy(
             if (
                 not _is_backward_node(user)
                 and _is_recomputable(user)
-                and _get_layer_id(user) > node_layer_id
+                and _get_layer_id(user) != node_layer_id
             ):
                 node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
                 boundary_saves += 1
@@ -268,6 +371,17 @@ def tag_sac_policy(
     return gm
 
 
+@register_memory_policy("none")
+def _no_ac_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Save every forward activation without rematerialization."""
+    tag_sac_policy(gm, policy_fn=_make_no_ac_memory_policy())
+    return gm
+
+
 @register_memory_policy("default")
 def _default_memory_policy_pass(
     gm: torch.fx.GraphModule,
@@ -296,8 +410,11 @@ def _full_memory_policy_pass(
     *,
     config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
-    """Full recompute: only layer outputs are saved."""
-    tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+    """Full recompute except for user-selected module operations."""
+    tag_sac_policy(
+        gm,
+        policy_fn=_make_full_memory_policy(config.compile.full_recompute_save_ops),
+    )
     return gm
 
 
@@ -309,6 +426,144 @@ def _eager_memory_policy_pass(
 ) -> torch.fx.GraphModule:
     """SAC policy that alternates mm ops between save/recompute."""
     tag_sac_policy(gm, policy_fn=_make_eager_memory_policy())
+    return gm
+
+
+def _is_backward_side(node: torch.fx.Node, backward_side: set[torch.fx.Node]) -> bool:
+    return _is_backward_node(node) or any(
+        inp in backward_side for inp in node.all_input_nodes
+    )
+
+
+def _backward_side_nodes(
+    gm: torch.fx.GraphModule,
+) -> OrderedSet[torch.fx.Node]:
+    backward_side = OrderedSet()
+    for node in gm.graph.nodes:
+        if node.op != "output" and _is_backward_side(node, backward_side):
+            backward_side.add(node)
+    return backward_side
+
+
+def _node_info_for_graph_trainer(
+    gm: torch.fx.GraphModule,
+    backward_side: OrderedSet[torch.fx.Node],
+) -> NodeInfo | None:
+    nodes = list(gm.graph.nodes)
+    required_bw_nodes = OrderedSet(
+        node for node in nodes if node in backward_side and node.op != "output"
+    )
+    if not required_bw_nodes:
+        return None
+
+    required_fw_nodes = OrderedSet(
+        node for node in nodes if node not in required_bw_nodes and node.op != "output"
+    )
+    fw_order = {node: idx for idx, node in enumerate(required_fw_nodes)}
+    static_lifetime_input_nodes = OrderedSet(
+        node for node in required_fw_nodes if node.op in ("placeholder", "get_attr")
+    )
+
+    for node in reversed(nodes):
+        if node.op == "output":
+            node.dist_from_bw = _INF_DISTANCE
+        elif node in required_bw_nodes:
+            node.dist_from_bw = 0
+        elif node in required_fw_nodes:
+            user_distances = [
+                getattr(user, "dist_from_bw", _INF_DISTANCE) + 1 for user in node.users
+            ]
+            node.dist_from_bw = min(user_distances, default=_INF_DISTANCE)
+        else:
+            node.dist_from_bw = _INF_DISTANCE
+
+    return NodeInfo(
+        list(static_lifetime_input_nodes),
+        required_fw_nodes,
+        required_bw_nodes.copy(),
+        required_bw_nodes.copy(),
+        OrderedSet(),
+        fw_order,
+        static_lifetime_input_nodes,
+    )
+
+
+def tag_min_cut_saved_values(
+    gm: torch.fx.GraphModule,
+    backward_side: OrderedSet[torch.fx.Node],
+    saved_values: set[torch.fx.Node],
+) -> None:
+    required_fw_nodes = {
+        node
+        for node in gm.graph.nodes
+        if node not in backward_side and node.op != "output"
+    }
+    saved_boundaries = set(saved_values)
+    op_types = get_default_op_list()
+    pending = list(saved_boundaries)
+    while pending:
+        node = pending.pop()
+        if node not in saved_boundaries:
+            continue
+        if node not in required_fw_nodes or node.op != "call_function":
+            continue
+        if (
+            node.target == torch.ops.aten.detach.default or op_types.is_view(node)
+        ) and any(inp in required_fw_nodes for inp in node.all_input_nodes):
+            saved_boundaries.remove(node)
+            for inp in node.all_input_nodes:
+                if inp in required_fw_nodes and inp not in saved_boundaries:
+                    saved_boundaries.add(inp)
+                    pending.append(inp)
+
+    saved_boundaries.update(
+        node
+        for node in required_fw_nodes
+        if node.meta.get("recompute") == CheckpointPolicy.MUST_SAVE
+    )
+    for node in saved_boundaries:
+        if node in required_fw_nodes:
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+
+    seen = set()
+
+    def visit(node: torch.fx.Node) -> None:
+        if node in seen or node in saved_boundaries:
+            return
+        seen.add(node)
+        if node in backward_side:
+            for inp in node.all_input_nodes:
+                visit(inp)
+            return
+        if node not in required_fw_nodes or node.op in ("placeholder", "get_attr"):
+            return
+        if node.op == "call_function":
+            node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+            for inp in node.all_input_nodes:
+                visit(inp)
+
+    for node in backward_side:
+        for inp in node.all_input_nodes:
+            visit(inp)
+
+
+@register_memory_policy("min_cut")
+def _min_cut_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Choose saved activations with the min-cut partitioner."""
+    backward_side = _backward_side_nodes(gm)
+    node_info = _node_info_for_graph_trainer(gm, backward_side)
+    if node_info is None:
+        return gm
+
+    force_save_collectives(gm)
+    force_save_effectful_ops(gm)
+    force_save_bw_mutation_src(gm)
+    saved_values = choose_saved_values_set(gm.graph, node_info)
+    tag_min_cut_saved_values(gm, backward_side, set(saved_values))
     return gm
 
 
@@ -336,13 +591,16 @@ def tag_with_memory_policy_pass(
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
     The ``config.compile.memory_policy`` selects the tagging strategy:
+        none: save every forward activation without rematerialization.
         default: SAC with all compute-intensive ops saved.
-        full: full recompute — only layer outputs are saved.
+        full: full recompute except user-selected module operations.
         eager: SAC alternating mm ops between save/recompute.
+        min_cut: choose saved activations with the min-cut partitioner.
         sac_and_offload: SAC + CPU offload within budget.
 
     Other memory policies combining SAC and CPU offload can be added
     via ``register_memory_policy`` without modifying this function.
+
     """
     memory_policy = config.compile.memory_policy
     if memory_policy not in MEMORY_POLICY_REGISTRY:
@@ -350,6 +608,7 @@ def tag_with_memory_policy_pass(
             f"Unknown memory_policy: {memory_policy!r}. "
             f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
         )
+
     gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)
     log_activation_memory_policy(gm)
     return gm

@@ -12,13 +12,22 @@ This note clarifies the recommended practices to follow when testing the loss co
 
 ## Guidelines
 
-To validate the correctness of a distributed training technique, one should try to **keep the determinism in the input data to minimize the differences it could cause**. To make sure the global batch size and in general #tokens per iteration stay the same, one can fix the local batch size (`training.local_batch_size`) in the config_registry function, and at the same time fix the data parallel degree.
+To validate the correctness of a distributed training technique, one should try to **keep the determinism in the input data to minimize the differences it could cause**. To keep the number of tokens per train step fixed, preserve:
+
+```
+training.num_tokens_per_microbatch_per_dp_rank
+* parallelism.num_pp_microbatches
+* data-parallel degree
+* derived gradient accumulation steps
+```
+
+When PP is disabled, its effective number of microbatches is one.
 
 If the technique is a parallelism (TP/PP/CP/etc)
 - The control set is a 1D FSDP job on `dp` GPUs (or any other verified setups), with a trusted training config (e.g. those in config_registry.py).
 - The minimal test set is a 2D job on `dp*p` GPUs, where `p >= 2` is the degree of the experimented parallelism.
   - For some parallelisms, larger `p` may cause larger discrepancies in numeric due to various reasons. For example, current implementation of CP uses `torch.bfloat16` (under default mixed precision training configs) when accumulating intermediate results. A higher `p` is desired to ensure the parallelism works properly, at the cost of more hardware resources.
-  - Certain parallelisms may impose additional requirements on the batch size. For instance, PP requires local batch size to be at least the number of microbatches (or equivalently, the number of pipeline stages) to reduce bubbles. A valid comparison example would be 1D FSDP on N GPUs with local batch size 8, and 2D FSDP + PP on 4N GPUs (DP N, PP 4) with Interleaved 1F1B schedule (also with local batch size 8), where each PP rank gets two pipeline stages.
+  - Certain parallelisms may impose additional requirements on microbatching. For instance, PP needs enough microbatches relative to its stages to reduce bubbles. A valid comparison would keep the derived per-DP-rank token count fixed: a 1D FSDP run can use 32768 tokens per microbatch, while an FSDP + PP run with four PP microbatches can use 8192 tokens per microbatch.
 - N-D parallelisms should be tested on more (e.g. `dp*tp*pp*cp*p`) GPUs.
   - For mutually compatible parallelisms, one can assume the converging of a higher dimensional combination implies that of a lower dimensional subset. For example, in order to verify the converging of FSDP, TP, PP, and CP, in principle one can just run two jobs, the control set being 1D FSDP and the test set being 4D including all.
   - A lower dimensional combination can be helpful for enlarging the degrees of some parallelisms and for debugging purposes in general.
@@ -40,8 +49,10 @@ Results are obtained on 2025/01/21, with the latest `torch`, `torchao`, and `tor
 
 ### Setup
 - Base config: `llama3_8b` (from [config_registry.py](../torchtitan/models/llama3/config_registry.py))
-- `training.local_batch_size = 4`, which is a minimum for Pipeline Parallel with `pipeline_parallel_degree = 2` and `pipeline_parallel_schedule = "Interleaved1F1B"`
-- `training.data_parallel_shard_degree = 8`, resulting in global batch size 32
+- Target token count: 262144 tokens per train step with DP degree 8 and one gradient accumulation step
+- Non-PP runs use `training.num_tokens_per_microbatch_per_dp_rank = 32768`
+- PP runs use `training.num_tokens_per_microbatch_per_dp_rank = 8192` and `parallelism.num_pp_microbatches = 4`
+- `training.data_parallel_shard_degree = 8`, resulting in 262144 tokens per step
 - `training.steps = 3000`, `lr_scheduler.warmup_steps = 600`
 
 | Parallelism              | Techniques                                        | Remarks                           |

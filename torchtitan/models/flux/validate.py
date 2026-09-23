@@ -4,29 +4,32 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import os
 from dataclasses import dataclass, field, replace
 
 import torch
-import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
-from torchtitan.components.dataloader import BaseDataLoader
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.loss import LossFunction
-from torchtitan.components.metrics import MetricsProcessor
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.components.validate import ValidationContext, Validator
+from torchtitan.components.validate import iterate_and_close_dataloader, Validator
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.tools.logging import logger
+from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.protocols.model import BaseModel
 
 from .configs import SamplingConfig
-from .flux_datasets import FluxDataLoader
+from .flux_datasets import FluxValidationDatasetConfig
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
 from .tokenizer import FluxTokenizerContainer
 from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
+
+
+logger = logging.getLogger(__name__)
 
 
 class FluxValidator(Validator):
@@ -41,18 +44,12 @@ class FluxValidator(Validator):
         tokenizer: Tokenizer
         parallel_dims: Parallel dimensions
         loss_fn: Loss function to use for validation
-        validation_context: Context manager for validation
         metrics_processor: Metrics processor
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Validator.Config):
-        dataloader: BaseDataLoader.Config = field(
-            default_factory=lambda: FluxDataLoader.Config(
-                dataset="coco-validation",
-                generate_timesteps=True,
-            )
-        )
+        dataloader: GrainDataLoader.Config  # pyrefly: ignore [bad-override]
         """DataLoader configuration for Flux validation"""
 
         all_timesteps: bool = False
@@ -77,8 +74,8 @@ class FluxValidator(Validator):
         tokenizer: BaseTokenizer,
         parallel_dims: ParallelDims,
         loss_fn: LossFunction,
-        validation_context: ValidationContext,
-        local_batch_size: int,
+        seq_len: int,
+        num_tokens_per_microbatch: int,
         metrics_processor: MetricsProcessor | None = None,
         pp_schedule: _PipelineSchedule | None = None,
         pp_has_first_stage: bool | None = None,
@@ -92,18 +89,25 @@ class FluxValidator(Validator):
         self.loss_fn = loss_fn
         self.all_timesteps = config.all_timesteps
 
-        assert isinstance(config.dataloader, FluxDataLoader.Config)
         assert isinstance(tokenizer, FluxTokenizerContainer)
 
+        dataset = config.dataloader.dataset
+        if isinstance(dataset, FluxValidationDatasetConfig):
+            dataset = dataset.dataset
+        # A bounded validation run repeats data; steps=-1 consumes one finite pass.
         self.dl_config = replace(
             config.dataloader,
-            infinite=config.steps != -1,
-            generate_timesteps=not config.all_timesteps,
+            dataset=(
+                dataset
+                if config.all_timesteps
+                else FluxValidationDatasetConfig(dataset=dataset)
+            ),
+            repeat=config.steps != -1,
         )
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
-        self.local_batch_size = local_batch_size
-        self.validation_context = validation_context
+        self.seq_len = seq_len
+        self.num_tokens_per_microbatch = num_tokens_per_microbatch
         # pyrefly: ignore [bad-assignment]
         self.metrics_processor = metrics_processor
 
@@ -133,7 +137,7 @@ class FluxValidator(Validator):
     @torch.no_grad()
     def validate(
         self,
-        model_parts: list[nn.Module],
+        model_parts: list[BaseModel],
         step: int,
     ) -> None:
         # Set model to eval mode
@@ -142,55 +146,62 @@ class FluxValidator(Validator):
         model.eval()
 
         assert isinstance(self.config, FluxValidator.Config)
-        save_img_count = self.config.save_img_count
+        max_saved_images = self.config.save_img_count
+        image_idx = 0
 
         parallel_dims = self.parallel_dims
 
-        accumulated_losses = []
+        accumulated_loss: torch.Tensor | None = None
         device_type = dist_utils.device_type
+        total_local_elements = torch.zeros((), dtype=torch.int64, device=device_type)
         num_steps = 0
 
         validation_dataloader = self.dl_config.build(
             dp_world_size=self.dp_world_size,
             dp_rank=self.dp_rank,
-            local_batch_size=self.local_batch_size,
             tokenizer=self.tokenizer,
+            max_context_length=self.seq_len,
+            num_tokens_per_microbatch=self.num_tokens_per_microbatch,
         )
 
-        for input_dict, labels in validation_dataloader:
+        for microbatch in iterate_and_close_dataloader(validation_dataloader):
             if self.config.steps != -1 and num_steps >= self.config.steps:
                 break
 
+            input_dict = microbatch.to_input_dict(self.device)
+            labels = input_dict.pop("labels")
             prompt = input_dict.pop("prompt")
             if not isinstance(prompt, list):
                 prompt = [prompt]
+            img_height, img_width = labels.shape[-2:]
             for p in prompt:
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
-                if save_img_count != -1 and save_img_count <= 0:
+                if max_saved_images != -1 and image_idx >= max_saved_images:
                     break
-                img_size = (
-                    self.config.dataloader.img_size  # pyrefly: ignore [missing-attribute]
-                )
-                image = generate_image(
-                    device=self.device,
-                    dtype=self._dtype,
-                    img_height=16 * (img_size // 16),
-                    img_width=16 * (img_size // 16),
-                    enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
-                    denoising_steps=self.config.sampling.denoising_steps,
-                    classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,
-                    # pyrefly: ignore [bad-argument-type]
-                    model=model,
-                    prompt=p,
-                    autoencoder=self.autoencoder,
-                    # pyrefly: ignore [bad-argument-type]
-                    tokenizer=self.tokenizer,
-                    t5_encoder=self.t5_encoder,
-                    clip_encoder=self.clip_encoder,
-                )
+                with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
+                    image = generate_image(
+                        device=self.device,
+                        dtype=self._dtype,
+                        img_height=img_height,
+                        img_width=img_width,
+                        enable_classifier_free_guidance=self.config.sampling.enable_classifier_free_guidance,
+                        denoising_steps=self.config.sampling.denoising_steps,
+                        classifier_free_guidance_scale=self.config.sampling.classifier_free_guidance_scale,
+                        # pyrefly: ignore [bad-argument-type]
+                        model=model,
+                        prompt=p,
+                        autoencoder=self.autoencoder,
+                        # pyrefly: ignore [bad-argument-type]
+                        tokenizer=self.tokenizer,
+                        t5_encoder=self.t5_encoder,
+                        clip_encoder=self.clip_encoder,
+                    )
 
                 save_image(
-                    name=f"image_rank{str(torch.distributed.get_rank())}_{step}.png",
+                    name=(
+                        f"image_rank{torch.distributed.get_rank()}_step{step}_"
+                        f"{image_idx:06d}.png"
+                    ),
                     output_dir=os.path.join(
                         self.dump_folder,
                         self.config.save_img_folder,
@@ -199,7 +210,7 @@ class FluxValidator(Validator):
                     add_sampling_metadata=True,
                     prompt=p,
                 )
-                save_img_count -= 1
+                image_idx += 1
 
             # generate t5 and clip embeddings
             input_dict["image"] = labels
@@ -229,6 +240,9 @@ class FluxValidator(Validator):
                 labels = labels.repeat_interleave(8, dim=0)
             else:
                 stratified_timesteps = input_dict.pop("timestep")
+
+            # Count full latent elements before CP shards the sequence.
+            total_local_elements += labels.numel()
 
             # Note the tps may be inaccurate due to the generating image step not being counted
             self.metrics_processor.ntokens_since_last_log += labels.numel()
@@ -269,9 +283,10 @@ class FluxValidator(Validator):
                     (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
                     None,  # No attention masks for Flux
                     load_balancer_type=None,
+                    input_seq_dims=1,
                 )
 
-            with self.validation_context():
+            with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
                 latent_noise_pred = model(
                     img=latents,
                     img_ids=latent_pos_enc,
@@ -285,19 +300,33 @@ class FluxValidator(Validator):
 
             del noise, target, latent_noise_pred, latents
 
-            accumulated_losses.append(loss.detach())
+            loss = loss.detach()
+            if accumulated_loss is None:
+                accumulated_loss = loss.clone()
+            else:
+                accumulated_loss.add_(loss)
 
             num_steps += 1
 
-        # Compute average loss
-        loss = torch.sum(torch.stack(accumulated_losses))
-        loss /= num_steps
-        if parallel_dims.dp_cp_enabled:
-            global_avg_loss = dist_utils.dist_mean(
-                loss, parallel_dims.get_optional_mesh("loss")
+        assert accumulated_loss is not None
+
+        # CP ranks shard the same full latent tensor, so only DP contributes
+        # additional elements to the denominator.
+        if parallel_dims.dp_enabled:
+            total_global_elements = dist_utils.dist_sum_tensor(
+                total_local_elements, parallel_dims.get_mesh("dp")
             )
         else:
-            global_avg_loss = float(loss.item())
+            total_global_elements = total_local_elements
+
+        if parallel_dims.dp_cp_enabled:
+            global_loss_sum = dist_utils.dist_sum(
+                accumulated_loss, parallel_dims.get_optional_mesh("loss")
+            )
+        else:
+            global_loss_sum = float(accumulated_loss.item())
+
+        global_avg_loss = global_loss_sum / int(total_global_elements.item())
 
         self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
 

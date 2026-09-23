@@ -1,0 +1,472 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""Configurations for the ``models`` integration test suite."""
+
+from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data import GrainDataLoader
+from torchtitan.components.optimizer import default_adamw
+from torchtitan.config import CompileConfig
+from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
+
+from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.deepseek_v3.config_registry import (
+    deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_mtp,
+)
+from torchtitan.models.gpt_oss.config_registry import (
+    gpt_oss_debugmodel,
+    gpt_oss_debugmodel_flex,
+)
+from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan.models.qwen3.config_registry import (
+    qwen3_debugmodel,
+    qwen3_debugmodel_moe_param_groups,
+)
+from torchtitan.trainer import Trainer
+
+from . import _set_spmd_typechecking
+
+
+def _configure_fsdp_numerics(
+    config: Trainer.Config, *, expert_parallel_degree: int = 1
+) -> Trainer.Config:
+    """Use a logical-world-eight FSDP topology for numerical comparison."""
+    config.parallelism.data_parallel_replicate_degree = 1
+    config.parallelism.data_parallel_shard_degree = 8
+    config.parallelism.context_parallel_degree = 1
+    config.parallelism.tensor_parallel_degree = 1
+    config.parallelism.pipeline_parallel_degree = 1
+    config.parallelism.expert_parallel_degree = expert_parallel_degree
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=2048)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def llama3_debugmodel_region_ac_fsdp2_tp2_cp2() -> Trainer.Config:
+    config = llama3_debugmodel_fsdp2_tp2_cp2()
+    config.activation_checkpoint = RegionAC.Config(
+        save_regions=[
+            "attention.qkv",
+            "attention.inner_attention",
+            "attention.wo",
+        ]
+    )
+    return config
+
+
+def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=2048)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 2
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v3_debugmodel_mtp_fsdp4_ep2_compile() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_mtp(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 2
+    config.compile = CompileConfig()
+    config.override.imports = [
+        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
+        "torchtitan.overrides.helion_rope.helion_complex_rope",
+    ]
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v3_debugmodel_mtp_cp2() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_mtp(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.context_parallel_degree = 2
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def deepseek_v3_debugmodel_mtp_tp2_cp2() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_mtp_cp2()
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.enable_sequence_parallel = True
+    return config
+
+
+def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
+    return _configure_fsdp_numerics(
+        deepseek_v3_debugmodel(seq_len=2048), expert_parallel_degree=8
+    )
+
+
+def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
+    config = deepseek_v3_debugmodel()
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 8
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 4
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_replicate_degree = 2
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
+    from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_debugmodel
+
+    config = deepseek_v4_debugmodel(seq_len=512)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 1
+    config.parallelism.pipeline_parallel_degree = 1
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v3_debugmodel_fused_mla_swiglu_fsdp4_ep2() -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=True)
+    config.override.imports = [
+        "torchtitan.overrides.fused_mla.fused_mla",
+        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+    ]
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 2
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_ep4() -> Trainer.Config:
+    config = qwen3_debugmodel_moe_param_groups(seq_len=4096)
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 4
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def qwen3_debugmodel_moe_param_groups_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
+    config = qwen3_debugmodel_moe_param_groups(seq_len=4096)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 8
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def qwen3_debugmodel_moe_param_groups_seed() -> Trainer.Config:
+    config = qwen3_debugmodel_moe_param_groups()
+    config.checkpointer = CheckpointManager.Config(export_dtype="float16")
+    return config
+
+
+def qwen3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
+    config = qwen3_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def qwen3_debugmodel_fsdp2_tp2_cp2_no_sp() -> Trainer.Config:
+    config = qwen3_debugmodel_fsdp2_tp2_cp2()
+    config.parallelism.enable_sequence_parallel = False
+    return config
+
+
+def qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope() -> Trainer.Config:
+    config = qwen3_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.compile = CompileConfig()
+    config.override.imports = ["torchtitan.overrides.helion_rope.helion_cos_sin_rope"]
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
+    from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_moe
+
+    config = qwen35_debugmodel_moe(seq_len=512)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 4
+    _set_spmd_typechecking(config, typechecking=False)
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
+    from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_moe
+
+    config = qwen35_debugmodel_moe(seq_len=512)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 4
+    config.parallelism.pipeline_parallel_degree = 1
+    config.training.num_tokens_per_microbatch_per_dp_rank = (
+        config.training.max_context_length
+    )
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
+    from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel_varlen_attn
+
+    config = qwen35_debugmodel_varlen_attn(seq_len=512)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.activation_checkpoint = SelectiveAC.Config()
+    _set_spmd_typechecking(config, typechecking=False)
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def gpt_oss_debugmodel_fsdp4_tp2_ep4_compile() -> Trainer.Config:
+    config = gpt_oss_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 4
+    config.compile = CompileConfig()
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
+    config = gpt_oss_debugmodel(seq_len=2048)
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = None
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 4
+    config.training.max_context_length = 512
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
+    config = gpt_oss_debugmodel_flex(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = "ptrr"
+    config.parallelism.context_parallel_ptrr_mask_key = "basic_mask"
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 1024
+    config.parallelism.expert_parallel_degree = 4
+    config.activation_checkpoint = SelectiveAC.Config()
+    config.training.disable_cuda_graphs = True
+    config.training.max_context_length = 512
+    config.training.steps = 10
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
+    config = gpt_oss_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 1024
+    config.training.num_tokens_per_train_step = 131072
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.expert_parallel_degree = 4
+    config.activation_checkpoint = SelectiveAC.Config()
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
+    """One four-GPU smoke path covering PP=2, FSDP=2, and EP=2.
+
+    Each PP stage consumes its local subset of the global DistMuon
+    compute-sharding map. DistMuon rejects tensor parallel: it produces
+    _StridedShard storage.
+    """
+    from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
+
+    config = kimi_k2_5_debugmodel(seq_len=512)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    # Four microbatches match the four virtual pipeline stages.
+    config.parallelism.num_pp_microbatches = 4
+    config.training.steps = 1
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def kimi_k2_5_debugmodel_muon_fsdp8_ep8() -> Trainer.Config:
+    from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
+
+    config = kimi_k2_5_debugmodel(seq_len=512)
+    config.parallelism.data_parallel_shard_degree = 8
+    config.parallelism.expert_parallel_degree = 8
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def kimi_k2_5_debugmodel_seed_checkpoint() -> Trainer.Config:
+    """Use the same Kimi model with an optimizer safe for unsharded setup."""
+    config = kimi_k2_5_debugmodel_muon_fsdp8_ep8()
+    config.optimizer = default_adamw()
+    config.optimizer.implementation = "for-loop"
+    return config
+
+
+def muse_glimmer_debugmodel_fsdp8() -> Trainer.Config:
+    from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
+
+    return _configure_fsdp_numerics(muse_glimmer_debugmodel(seq_len=2048))
+
+
+def muse_glimmer_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
+    from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
+
+    config = muse_glimmer_debugmodel()
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = (
+        config.training.max_context_length
+    )
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def muse_glimmer_debugmodel_mm_fsdp2_tp2() -> Trainer.Config:
+    from torchtitan.models.muse_glimmer.config_registry import (
+        muse_glimmer_debugmodel_mm,
+    )
+
+    config = muse_glimmer_debugmodel_mm(seq_len=512)
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def muse_glimmer_debugmodel_mm_tp2_cp2_pp2() -> Trainer.Config:
+    from torchtitan.models.muse_glimmer.config_registry import (
+        muse_glimmer_debugmodel_mm,
+    )
+
+    config = muse_glimmer_debugmodel_mm()
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.enable_sequence_parallel = True
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 2
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )

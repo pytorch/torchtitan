@@ -98,9 +98,10 @@ For each commit found, answer:
 - Does this change a signature or field that graph_trainer depends on?
   Key fragile surfaces:
   - `Trainer.Config` fields (dict-spread copy in `configs.py:to_graph_trainer_config`)
-  - `Trainer.post_dataloading_process()` return tuple
+  - `BaseModel.preprocess_inputs()` return tuple (inlined into
+    `Trainer.forward_backward_step`/`pp_forward_backward_step`)
   - `CompileConfig` fields (extended by `GraphTrainerCompileConfig`)
-  - `FlexAttention.forward`, `MoE.forward` signatures (monkey-patched)
+  - `FlexInnerAttention.forward`, `MoE.forward` signatures (monkey-patched)
   - `ParallelDims` properties and `build_mesh()`
 - Does this add a new model variant that graph_trainer should consider supporting?
 - Does this unify code across models in a way that makes graph_trainer's
@@ -265,7 +266,7 @@ in prior reports, only re-check if the relevant upstream files have changed
 since the last report date. For debt items already reported, verify whether
 they've been addressed; if not, carry forward.
 
-- **Stale monkey-patches**: Graph_trainer patches `FlexAttention.forward`,
+- **Stale monkey-patches**: Graph_trainer patches `FlexInnerAttention.forward`,
   `MoE.forward`, `ExpertParallel._token_dispatch/_token_combine`. Check if
   the upstream signatures have changed, making our patches do unnecessary
   work or miss new parameters.

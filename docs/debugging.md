@@ -5,9 +5,11 @@ Launch training job with the following command (or alternatively set configs in 
 MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --profiler.enable_memory_snapshot --profiler.save_memory_snapshot_folder memory_snapshot
 ```
 * `--profiler.enable_memory_snapshot`: to enable memory profiling
-* `--profiler.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`./outputs/memory_snapshot/` by default)
-	+ In case of OOMs, the snapshots will be in `./outputs/memory_snapshot/iteration_x_exit`.
-	+ Regular snapshots (taken every `profiler.profile_freq` iterations) will be in `memory_snapshot/iteration_x`.
+* `--profiler.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`profiling/memory_snapshot` under the dump folder by default)
+* `--profiler.memory_snapshot_freq`: controls how often regular memory snapshots are taken. When unset, it defaults to `--profiler.profile_freq` for backward compatibility.
+	+ In case of OOMs, the snapshots will be in `step_{step:012d}_exit` under that folder.
+	+ Regular snapshots will be in `step_{step:012d}`.
+	+ For example, set `--profiler.memory_snapshot_freq 3` to take a snapshot every three iterations independently of trace profiling.
 
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
@@ -56,15 +58,9 @@ python -m torchtitan.config.manager --module llama3 --config llama3_debugmodel -
 
 This will print a structured configuration to `stdout`, allowing you to verify that overrides are being applied correctly.
 
-## Communication Mode (COMM_MODE) for Debugging
+## Fake Backend Debugging
 
-The `COMM_MODE` environment variable provides specialized debugging modes that allow you to test and validate your training setup without requiring full multi-GPU distributed execution. This is particularly useful for rapid iteration during development and debugging.
-
-### Available Modes
-
-#### 1. `fake_backend` - Configuration Validation Mode
-
-This mode enables dry-run validation of your configuration, model setup, and rank-0 program logic without actual distributed communication:
+Set `COMM_MODE="fake_backend"` to validate your configuration, model setup, and rank-0 program logic without requiring full multi-GPU distributed execution. To inspect a nonzero rank under `torchrun`, see [Distributed Breakpoints and LOG_RANK](#distributed-breakpoints-and-log_rank).
 
 ```bash
 NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
@@ -86,38 +82,21 @@ NGPU=32 COMM_MODE="fake_backend" ./run_train.sh
 NGPU=128 COMM_MODE="fake_backend" MODULE=llama3 CONFIG=llama3_70b ./run_train.sh
 ```
 
-#### 2. `local_tensor` - Single-GPU Distributed Simulation
-
-This mode simulates the full distributed training workflow on a single GPU by executing all communication and computation locally:
-
-```bash
-NGPU=32 COMM_MODE="local_tensor" ./run_train.sh
-```
-
-**What it does:**
-- Simulates multi-GPU behavior on a single shared GPU
-- Executes all collectives (all-reduce, all-gather, etc.) locally without network communication
-- Maintains the same code paths as distributed training for accurate debugging
-- Runs only one training step by default
-
-**When to use it:**
-- Debugging distributed training logic (FSDP, TP, PP, CP, EP) with data dependencies without multi-GPU setup. Note that local tensor doesn't support FSDP2 but should support SimpleFSDP.
-- Verifying correctness of parallelism strategies locally
-- Testing gradient synchronization and communication patterns
-- Reproducing distributed training bugs in a simplified environment
-
-**Example use case:**
-```bash
-# Debug 8-way TP + 2-way FSDP on a single GPU
-NGPU=16 COMM_MODE="local_tensor" ./run_train.sh \
-  --parallelism.tensor_parallel_degree 8 \
-  --parallelism.data_parallel_shard_degree 2
-```
-
 ### Limitations
 
-- **Performance testing**: Neither mode provides accurate performance metrics; use actual distributed runs for benchmarking
-- **Memory requirement**: Local tensor runs require more memory on a single GPU than the actual distributed runs
+- **Performance testing**: Fake backend mode does not provide accurate performance metrics; use actual distributed runs for benchmarking
+
+## Distributed Breakpoints and LOG_RANK
+
+`run_train.sh` defaults `LOG_RANK` to `0` and passes it to `torchrun` as `--local-ranks-filter`, so only rank 0's stdin/stdout are teed to the console. `torch.distributed.breakpoint(rank=N)` on a filtered rank therefore hangs and never prints a prompt.
+
+To debug rank N, set `LOG_RANK` to N (or a comma-separated list that includes N) before launching. Do not change the default `LOG_RANK` in `run_train.sh`.
+
+```bash
+LOG_RANK=1 ./run_train.sh
+# or, to keep rank 0 visible as well:
+LOG_RANK=0,1 ./run_train.sh
+```
 
 ## Troubleshooting jobs that timeout
 
@@ -178,19 +157,17 @@ For multiple experimental runs with different parallelism configs, we need to us
 
 #### Creating a Seed Checkpoint
 
-```bash
-NGPU=1 MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --checkpoint.enable --checkpoint.create_seed_checkpoint --parallelism.data_parallel_replicate_degree 1 --parallelism.data_parallel_shard_degree 1 --parallelism.tensor_parallel_degree 1 --parallelism.pipeline_parallel_degree 1 --parallelism.context_parallel_degree 1 --parallelism.expert_parallel_degree 1
-```
+Create a registry configuration with `create_seed_checkpoint=True`, a
+non-`None` `checkpointer`, and every parallelism degree set to 1, then run it
+on one device.
 
 #### Loading Seed Checkpoints for Debugging
 
 When using seed checkpoints for debugging or validation purposes, you can enable the `load_only` configuration to load checkpoints without saving any new ones during training. This is particularly useful when you only want to verify model correctness or compare different configurations without cluttering your disk:
 
-```bash
-MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --checkpoint.enable --checkpoint.load_only
-```
-
-The `--checkpoint.load_only` flag prevents the training process from saving any checkpoints, allowing you to:
+Set `checkpointer=CheckpointManager.Config(load_only=True)` in the config
+registry. The `load_only` setting prevents the training process from saving
+any checkpoints, allowing you to:
 - Run debugging sessions without generating unwanted checkpoint files
 - Compare model behaviors using the same initial weights without checkpoint overhead
 

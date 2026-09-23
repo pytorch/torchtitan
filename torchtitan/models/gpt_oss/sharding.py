@@ -9,49 +9,43 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 
 from torchtitan.models.common.decoder_sharding import (
+    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
     set_decoder_sharding_config,
-    set_gqa_inner_attention_local_map,
-    set_qkv_linear_sharding,
+    set_gqa_inner_attention_local_spmd,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    expert_param_placement_sparse,
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.models.gpt_oss.model import Attention
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
 
 
-# Routed-expert layout for ``GptOssGroupedExperts`` (mlp1/mlp2 fused
-# weights + biases): mlp1 colwise, mlp2 rowwise, mlp2_bias replicated.
-_GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "mlp1_weight_EGD": spmd.S(1),
-    "mlp1_bias_EG": spmd.S(1),
-    "mlp2_weight_EDF": spmd.S(2),
-    "mlp2_bias_ED": spmd.R,
-}
-
-
-def scaled_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
-    input_layout = dense_activation_placement(tp=spmd.S(2))
+def partial_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
+    input_layout = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     out_dst = (
         dense_sequence_parallel_placement()
         if output_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.R),
+            "bias": dense_param_placement(tp=spmd.I),
         },
         in_src_shardings={"input": input_layout},
         in_dst_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.P),
+        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
         out_dst_shardings=out_dst,
-        local_map=LocalMapConfig(in_grad_placements=(input_layout,)),
+        local_spmd=True,
     )
 
 
@@ -95,7 +89,7 @@ def _set_gpt_oss_layer_sharding(
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
 
     # Attention: input x gathered to Replicate.
@@ -106,22 +100,34 @@ def _set_gpt_oss_layer_sharding(
             "x": attn_x_layout,
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R),
+            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
         },
     )
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
-    set_qkv_linear_sharding(attention.qkv_linear)
-    attention.wo.sharding_config = scaled_bias_rowwise_config(output_sp=enable_sp)
+    attention.qkv_linear.wqkv.sharding_config = colwise_config()
+    attention.wo.sharding_config = partial_bias_rowwise_config(output_sp=enable_sp)
 
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # MoE FFN (all GPT-OSS blocks are MoE).
     if layer_cfg.moe is not None:
+        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
         )
+        if enable_ep:
+            layer_cfg.moe.routed_experts.inner_experts.sharding_config = ShardingConfig(
+                state_shardings={
+                    name: expert_param_placement_sparse()
+                    for name in (
+                        "mlp1_weight_EGD",
+                        "mlp1_bias_EG",
+                        "mlp2_weight_EDF",
+                        "mlp2_bias_ED",
+                    )
+                }
+            )

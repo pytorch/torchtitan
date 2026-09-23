@@ -2047,7 +2047,11 @@
       "</tool_call>": 2012,
       "<tool_response>": 2013,
       "</tool_response>": 2014,
-      "</think>": 2015
+      "</think>": 2015,
+      "<|media_pad|>": 2016,
+      "<|media_begin|>": 2017,
+      "<|media_end|>": 2018,
+      "[PAD]": 2019
     },
     "merges": []
   }

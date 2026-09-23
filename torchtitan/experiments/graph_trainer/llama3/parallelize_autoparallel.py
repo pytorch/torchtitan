@@ -12,6 +12,7 @@ graph_trainer trace and compile the placed model through its normal
 `aot_fx_trace` train-step pipeline.
 """
 
+import logging
 import time
 
 import torch
@@ -31,8 +32,10 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     validate_autoparallel_config,
 )
-from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_type
+
+
+logger = logging.getLogger(__name__)
 
 
 def parallelize_autoparallel_llama(
@@ -59,7 +62,9 @@ def parallelize_autoparallel_llama(
     if parallel_dims.pp_enabled:
         raise ValueError("AutoParallel Llama3 does not support PP yet")
 
-    dense_names = ["dp_replicate", "fsdp", "tp"]
+    # CP is rejected above, so the former flattened ``fsdp = dp_shard * cp``
+    # axis maps exactly to ``dp_shard`` here.
+    dense_names = ["dp_replicate", "dp_shard", "tp"]
     dense_names = [
         name
         for name in dense_names
@@ -68,21 +73,26 @@ def parallelize_autoparallel_llama(
     dense_mesh = parallel_dims.get_mesh(dense_names)
 
     def input_fn():
-        global_batch_size = training.global_batch_size
-        if global_batch_size < 0:
-            dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
-            global_batch_size = training.local_batch_size * dp_degree
+        dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
+        num_tokens_per_train_step = training.num_tokens_per_train_step
+        if num_tokens_per_train_step < 0:
+            num_tokens_per_train_step = (
+                training.num_tokens_per_microbatch_per_dp_rank * dp_degree
+            )
         tokens = torch.randint(
             0,
             model.config.vocab_size,
-            (global_batch_size, training.seq_len),
+            (num_tokens_per_train_step,),
             device=torch.device(device_type),
         )
-        positions = torch.arange(
-            training.seq_len,
-            dtype=torch.int32,
-            device=torch.device(device_type),
-        ).repeat(global_batch_size, 1)
+        positions = (
+            torch.arange(
+                num_tokens_per_train_step,
+                dtype=torch.int32,
+                device=torch.device(device_type),
+            )
+            % training.max_context_length
+        )
         return tokens, positions
 
     param_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
@@ -99,7 +109,7 @@ def parallelize_autoparallel_llama(
 
     possible_input_shardings = {
         "dp_replicate": Shard(0),
-        "fsdp": Shard(0),
+        "dp_shard": Shard(0),
         "tp": Replicate(),
     }
     unsupported_axes = [
@@ -118,7 +128,7 @@ def parallelize_autoparallel_llama(
     )
 
     output_sharding = tuple(
-        Shard(2) if name == "tp" else Shard(0) for name in dense_mesh.mesh_dim_names
+        Shard(1) if name == "tp" else Shard(0) for name in dense_mesh.mesh_dim_names
     )
 
     with AutoParallelGraph(
@@ -140,8 +150,8 @@ def parallelize_autoparallel_llama(
         model_output = (
             AutoParallelModelOutput(
                 output_mesh=parallel_dims.get_mesh("tp"),
-                output_placements=(Shard(2),),
-                sharded_output_axis=2,
+                output_placements=(Shard(1),),
+                sharded_output_axis=1,
             )
             if parallel_dims.tp_enabled
             else None

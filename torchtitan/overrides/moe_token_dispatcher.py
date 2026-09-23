@@ -4,18 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Overrides: cudagraph-capturable EP MoE token dispatch for the RL generator.
+"""Overrides: CUDA-graph-capturable EP MoE token dispatch for the RL generator.
 
-The RL trainer and generator share one ``model_spec``, but the generator captures a CUDA
+The RL trainer and generator share one ``model_config``, but the generator captures a CUDA
 graph and needs a static, host-sync-free MoE expert-parallel dispatch path that the eager,
 backward-able trainer does not. Each EP comm backend has its own override here; the
 generator activates the one matching its backend (passing its kwarg), while the trainer
 keeps the shared spec's default. Activate per-actor via the ``module.function`` target::
 
-    # generator.override -- DeepEP cudagraph-able EXPAND dispatch:
+    # generator.override -- DeepEP CUDA-graph-compatible EXPAND dispatch:
     OverrideConfig(imports=[(
         "torchtitan.overrides.moe_token_dispatcher.deepep_override",
-        {"cudagraphable": True},
+        {"cuda_graph_compatible": True},
     )])
     # ...or HybridEP static non-blocking dispatch:
     OverrideConfig(imports=[(
@@ -23,15 +23,12 @@ keeps the shared spec's default. Activate per-actor via the ``module.function`` 
         {"capacity_factor": 0.0325},
     )])
 
-``deepep_override`` (``DeepEPTokenDispatcher.Config``): ``cudagraphable=True`` flips DeepEP
+``deepep_override`` (``DeepEPTokenDispatcher.Config``): ``cuda_graph_compatible=True`` flips DeepEP
 to the static, host-sync-free EXPAND layout a CUDA graph can capture (the compact,
 host-synced, backward-able path is the default). ``deepep.dispatch_tokens`` also gates the
 expand path to ``not torch.is_grad_enabled()``, so it only takes effect for the no-grad
-inference forward. The per-rank EXPAND capacity ``num_max_tokens_per_rank`` is
-inference-only and REQUIRED for this path (the recipe sets it on the ``model_spec``
-dispatchers; ``DeepEPTokenDispatcher.wire_meshes`` raises if it is still None when the
-expand buffer is built). Set it to the largest per-rank token count for droplessness
-(= max_num_batched_tokens / sp), or lower to save memory. ``cudagraphable`` is required.
+inference forward. The runtime configuration derives the required per-rank buffer capacity
+from the scheduler and CUDA graph limits before applying this override.
 
 ``hybridep_override`` (``HybridEPTokenDispatcher.Config``): ``capacity_factor`` sets
 ``non_blocking_capacity_factor`` (``None`` = blocking, dropless; a float in (0, 1] = the
@@ -53,19 +50,16 @@ from torchtitan.models.common.token_dispatcher import (
 
 @override(
     target=DeepEPTokenDispatcher.Config,
-    description="DeepEP cudagraph-able expand dispatch for inference.",
+    description="DeepEP CUDA-graph-compatible expand dispatch for inference.",
 )
 def deepep_override(
     cfg: DeepEPTokenDispatcher.Config,
     *,
-    cudagraphable: bool,
+    cuda_graph_compatible: bool,
 ) -> DeepEPTokenDispatcher.Config:
-    # cudagraphable=True flips the DeepEP dispatchers to the static, cudagraph-able EXPAND
-    # layout (False keeps the compact host-synced default). The expand path also needs
-    # num_max_tokens_per_rank set on the dispatcher (the per-rank capacity); that is
-    # validated where the buffer is built (DeepEPTokenDispatcher.wire_meshes), not here,
-    # since the value is set on the dispatcher by the inference recipe rather than to us.
-    return dataclasses.replace(cfg, cudagraphable=cudagraphable)
+    # cuda_graph_compatible=True flips the DeepEP dispatchers to the static, CUDA-graph-compatible EXPAND
+    # layout (False keeps the compact host-synced default).
+    return dataclasses.replace(cfg, cuda_graph_compatible=cuda_graph_compatible)
 
 
 @override(

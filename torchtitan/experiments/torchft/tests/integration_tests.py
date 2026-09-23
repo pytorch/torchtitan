@@ -12,7 +12,9 @@ import subprocess
 
 from tests.integration_tests import OverrideDefinitions
 
-logging.basicConfig(level=logging.INFO)
+from torchtitan.observability.logging import init_logger
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,8 +29,10 @@ def build_ft_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module torchft.llama3 --config llama3_torchft_debugmodel",
+                    "--training.max_context_length 2048",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 16384",
                     "--training.steps 10",
-                    "--checkpoint.enable",
+                    "",
                 ],
             ],
             "Default TorchFT integration test",
@@ -113,6 +117,7 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
 
 
 def main():
+    init_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(

@@ -21,34 +21,27 @@ The folder should be organized as follows
   - Inherit [`BaseStateDictAdapter`](/torchtitan/protocols/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).
   - There are multiple ways such adapters could be used
     - Checkpoint conversion scripts in `scripts/checkpoint_conversion/` will use them to adapt state dicts containing non-sharded `torch.Tensor` on CPU.
-    - During training, [`CheckpointManager`](/torchtitan/components/checkpoint.py) will use them to adapt state dicts containing (potentially sharded) `DTensor` on GPUs to save / load checkpoints in HF format.
+    - During training, [`CheckpointManager`](/torchtitan/components/checkpointer/dcp.py) will use them to adapt state dicts containing (potentially sharded) `DTensor` on GPUs to save / load checkpoints in HF format.
     - In post-training, `to_hf()` helps convert a torchtitan model to HF model, which can be used for inference by other frameworks.
   - This is optional for offline exploration.
 - `sharding.py`
-  - Define `set_<model>_sharding_config(config, *, enable_sp, ...)` that populates `sharding_config` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention `LocalMapConfig` placements are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
+  - Define `set_<model>_sharding_config(config, *, enable_sp, ...)` that populates `sharding_config` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention local SPMD regions are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
   - Call the helper from `Model.Config.update_from_config()` so placements depend on the trainer's `parallelism` settings.
   - Reuse shared helpers from `torchtitan/models/common/decoder_sharding.py` (`set_decoder_sharding_config`, `set_dense_ffn_sharding`, `set_gqa_attention_sharding`, `norm_config`, `dense_param_placement`, `dense_activation_placement`) where possible.
-  - Under `--parallelism.spmd_backend full_dtensor`, declare the mesh axes in canonical outer-to-inner SPMD order: `(dp_replicate, dp_shard, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, efsdp, ep)` for sparse (MoE expert weights). `Module.parallelize` resolves the mesh by the declared order and validates it matches one of the SPMD meshes; declaring axes out of order raises `ValueError`.
-- `parallelize.py`
-  - apply training techniques in the following order
-    - `model.parallelize(parallel_dims)` — auto-recursive declarative sharding driven by `sharding_config` (TP, SP, attention `local_map`). Replaces per-model `parallelize_module` plan dicts.
-    - (MoE models) `apply_moe_ep_tp` for expert-parallel + TP on MoE experts (not yet config-based).
-    - activation checkpointing
-    - `torch.compile`
-    - FSDP /  HSDP
-    - NOTE: currently CP support for language models is enabled via a context manager in `torchtitan/train.py`. Ideally no extra work is needed to enable CP.
+  - Declare the mesh axes in canonical outer-to-inner SPMD order: `(dp, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, efsdp, ep)` for sparse (MoE expert weights). `Module._parallelize` resolves the mesh from the declared axes.
+- `model.py`
+  - `BaseModel.parallelize()` applies declarative model parallelism, activation checkpointing, `torch.compile`, and FSDP/HSDP in order.
+  - Override `parallelize()` only when the model needs a different lifecycle order, and override `_apply_fsdp()` when it has a model-family-specific FSDP structure.
+  - Language-model CP goes through `Decoder.preprocess_inputs` -> `prepare_context_parallel_input`.
 - `pipeline.py` (optional if model size is small)
   - apply PP
 - `__init__.py`
   - A dictionary of the actual model configurations, of the type `[str: Model.Config]`.
-  - Define `model_registry(flavor)` to return a [`ModelSpec`](/torchtitan/protocols/model_spec.py), consisting of
-    - model name and flavor
-    - model config (a `Model.Config` dataclass)
-    - parallelizing function, pipelining function
-    - loss function builder
-    - state dict adapter
+  - Define `model_registry(flavor)` to return a concrete `Model.Config`.
+  - Bind the state dict adapter to the model class with `state_dict_adapter_cls`.
+  - Override the model's pipeline or optimizer hook methods only when it needs model-specific behavior.
   - Model name should be the same as the folder name, which should be added to `torchtitan/models/__init__.py` or ``torchtitan/experiments/__init__.py``.
-  - Read [more](/docs/extension.md#modelspec) on `ModelSpec`.
+  - Read [more](/docs/extension.md#models) about the model extension point.
 - `config_registry.py`
   - Define one function for each training configuration (e.g. `llama3_debugmodel`, `llama3_8b`, `llama3_70b`).
   - Each function returns a `Trainer.Config` (or subclass) instance with all training settings.

@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import importlib
+
+import logging
 import os
 import sys
 import warnings
@@ -13,7 +15,10 @@ from typing import Any
 
 import tyro
 
-from torchtitan.tools.logging import logger
+from torchtitan.observability.logging import init_logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigManager:
@@ -108,7 +113,7 @@ class ConfigManager:
             for prefix in (
                 "torchtitan.models",
                 "torchtitan.experiments",
-                "torchtitan.experiments.rl.examples",
+                "torchtitan.rl.examples",
             ):
                 module_path = f"{prefix}.{module_name}.config_registry"
                 try:
@@ -120,7 +125,7 @@ class ConfigManager:
                 raise ImportError(
                     f"Cannot import config_registry for module '{module_name}' "
                     f"from torchtitan.models, torchtitan.experiments, or "
-                    f"torchtitan.experiments.rl.examples"
+                    f"torchtitan.rl.examples"
                 )
         else:
             # Fully qualified module path: try appending .config_registry first,
@@ -297,6 +302,8 @@ if __name__ == "__main__":
     #     > python -m torchtitan.config.manager --module llama3 --config llama3_debugmodel --help
     #
     # -----------------------------------------------------------------------------
+
+    init_logger()
 
     try:
 

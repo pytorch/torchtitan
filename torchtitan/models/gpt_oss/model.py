@@ -4,31 +4,42 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import dataclasses
 import math
 from dataclasses import dataclass
 
 import torch
+import torch._dynamo
 from torch import nn
-from torch.distributed.tensor import DTensor
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    BaseQKVLinear,
     create_varlen_metadata_for_document,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
-    VarlenAttention,
+    QKVLinear,
+    VarlenInnerAttention,
 )
+from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.utils import get_moe_model_nparams_and_flops
+from torchtitan.models.utils import (
+    get_nparams_and_active_nparams,
+    quadratic_attention_flops_per_token,
+)
 from torchtitan.protocols.module import Module
+
+from .state_dict_adapter import GptOssStateDictAdapter
 
 
 def apply_attention_sink_rescale(
@@ -51,10 +62,10 @@ class Attention(BaseAttention):
         n_kv_heads: int = 8
         head_dim: int = 64
         dim: int
-        qkv_linear: BaseQKVLinear.Config
+        qkv_linear: QKVLinear.Config
         wo: Linear.Config  # output projection
         inner_attention: Module.Config = dataclasses.field(
-            default_factory=VarlenAttention.Config
+            default_factory=VarlenInnerAttention.Config
         )
         sliding_window_size: int | None = None
         """Per-layer causal sliding-window size"""
@@ -93,14 +104,14 @@ class Attention(BaseAttention):
         Forward pass for the Multi-Head Latent Attention (MLA) Layer.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
+            x: Input tensor with shape ``[T, D]``.
             attention_masks: a ``BlockMask`` (flex) or ``VarlenMetadata`` (varlen).
             positions: Optional position indices (unused, for API compatibility).
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        bsz, seqlen, _ = x.size()
+        num_tokens = x.shape[0]
 
         q, k, v = self.qkv_linear(x)
 
@@ -117,18 +128,12 @@ class Attention(BaseAttention):
         )
 
         # Reshape and project output
-        output = output.reshape(
-            bsz, seqlen, -1
-        ).contiguous()  # (bsz, seqlen, n_heads * v_head_dim)
-        output = self.wo(output)  # (bsz, seqlen, dim)
-        return output
+        output = output.reshape(num_tokens, -1).contiguous()
+        return self.wo(output)
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""
-        sinks = self.sinks
-        if isinstance(sinks, DTensor):
-            sinks = sinks.to_local(grad_placements=sinks.placements)
-        return apply_attention_sink_rescale(out, lse, sinks)
+        return apply_attention_sink_rescale(out, lse, self.sinks)
 
 
 class GptOssTransformerBlock(TransformerBlock):
@@ -161,17 +166,19 @@ class GptOssTransformerBlock(TransformerBlock):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Transformer block.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, dim).
+            x (torch.Tensor): Input tensor of shape (num_tokens, dim).
             attention_masks (AttentionMasksType): with flex, a dict of per-window
                 ``BlockMask``s from which this layer picks its mask; with varlen,
                 a single ``VarlenMetadata`` shared by all layers (the per-layer
                 causal window is baked into each layer's
-                ``VarlenAttention.window_size``).
+                ``VarlenInnerAttention.window_size``).
             positions: Optional position indices.
 
         Returns:
@@ -182,11 +189,19 @@ class GptOssTransformerBlock(TransformerBlock):
             attention_masks = attention_masks[self.attn_mask_key]
 
         x = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        x = x + self.moe(self.ffn_norm(x))
+        x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         return x
 
 
 class GptOssModel(Decoder):
+    state_dict_adapter_cls = GptOssStateDictAdapter
+
+    @classmethod
+    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
     """
@@ -213,33 +228,93 @@ class GptOssModel(Decoder):
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        # pyrefly: ignore [bad-override]
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
-        ) -> tuple[int, float]:
-            assert isinstance(self.layers[0].attention, Attention.Config)
-            return get_moe_model_nparams_and_flops(
-                self,
-                model,
-                self.layers[0].attention.n_heads,
-                2 * self.layers[0].attention.head_dim,
-                seq_len,
-            )
+        ) -> tuple[int, int]:
+            nparams, active_nparams = get_nparams_and_active_nparams(model)
+            attention_op_flops = 0
+            for layer in self.layers:
+                attention = layer.attention
+                attention_op_flops += quadratic_attention_flops_per_token(
+                    num_heads=attention.n_heads,
+                    qk_head_dim=attention.head_dim,
+                    v_head_dim=attention.head_dim,
+                    seq_len=seq_len,
+                    sliding_window_size=attention.sliding_window_size,
+                )
+            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         super().__init__(config)
 
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> GptOssModel:
+        if parallel_dims.cp_enabled and isinstance(
+            self.config.first_full_attention_backend,
+            UlyssesCPInnerAttention.Config,
+        ):
+            raise NotImplementedError(
+                "GPT-OSS does not support Ulysses CP because its per-head "
+                "sinks are not sharded over CP."
+            )
+
+        if compile_config is not None and "model" in compile_config.components:
+            if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+                has_sliding_window_attention = any(
+                    isinstance(
+                        window_size := getattr(module, "window_size", None),
+                        (tuple, list),
+                    )
+                    and len(window_size) > 0
+                    and window_size[0] != -1
+                    for module in self.modules()
+                )
+                min_recompile_limit = 12 if has_sliding_window_attention else 10
+                # PyTorch types this config as Literal[8], but runtime accepts ints.
+                # pyrefly: ignore [bad-assignment]
+                torch._dynamo.config.recompile_limit = max(
+                    torch._dynamo.config.recompile_limit,
+                    min_recompile_limit,
+                )
+        return super().parallelize(
+            parallel_dims=parallel_dims,
+            training=training,
+            parallelism=parallelism,
+            compile_config=compile_config,
+            ac_config=ac_config,
+            dump_folder=dump_folder,
+            skip_dp=skip_dp,
+        )
+
     def get_attention_masks(
         self,
         positions: torch.Tensor,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
     ) -> AttentionMasksType:
         attn_cfg = self.config.layers[0].attention
         assert isinstance(attn_cfg, Attention.Config)
         inner_attn = attn_cfg.inner_attention
 
-        if isinstance(inner_attn, VarlenAttention.Config):
-            return create_varlen_metadata_for_document(positions)
-        elif isinstance(inner_attn, FlexAttention.Config):
+        if isinstance(inner_attn, VarlenInnerAttention.Config):
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+        elif isinstance(inner_attn, FlexInnerAttention.Config):
             base_mask_mods = [
                 get_causal_mask_mod(),
                 get_efficient_causal_mask_mod_for_packed_document(positions),
@@ -271,6 +346,6 @@ class GptOssModel(Decoder):
             return masks
         else:
             raise TypeError(
-                f"GPT-OSS supports FlexAttention and VarlenAttention inner attention, "
+                f"GPT-OSS supports FlexInnerAttention and VarlenInnerAttention inner attention, "
                 f"got {type(inner_attn).__name__}"
             )

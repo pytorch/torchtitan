@@ -1,0 +1,93 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""Configurations for the ``h100`` integration test suite."""
+
+from torchtitan.config import CompileConfig
+from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+
+from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.deepseek_v3.config_registry import (
+    deepseek_v3_debugmodel_float8_grouped,
+    deepseek_v3_debugmodel_hybridep,
+)
+from torchtitan.models.llama3.config_registry import (
+    llama3_debugmodel,
+    llama3_debugmodel_dist_gemm,
+    llama3_debugmodel_float8,
+)
+from torchtitan.trainer import Trainer
+
+
+def llama3_debugmodel_tp2_asynctp_compile() -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=2048)
+    config.compile = CompileConfig()
+    config.parallelism.tensor_parallel_degree = 2
+    config.compile.enable_async_tensor_parallel = True
+    return config
+
+
+def llama3_debugmodel_dist_gemm_tp2() -> Trainer.Config:
+    config = llama3_debugmodel_dist_gemm(seq_len=2048)
+    config.parallelism.tensor_parallel_degree = 2
+    return config
+
+
+def llama3_debugmodel_fsdp_symm_mem() -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=2048)
+    config.parallelism.fsdp_symm_mem_scope = "all"
+    return config
+
+
+def llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile() -> Trainer.Config:
+    config = llama3_debugmodel_float8(seq_len=2048)
+    config.compile = CompileConfig()
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.compile.enable_async_tensor_parallel = True
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
+    config = llama3_debugmodel_float8(seq_len=2048)
+    config.compile = CompileConfig()
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.data_parallel_replicate_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    )
+
+
+def deepseek_v3_debugmodel_float8_grouped_fsdp2_ep2_compile() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_float8_grouped(seq_len=2048)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 2
+    config.compile = CompileConfig(components=["model", "loss"])
+    return config
+
+
+def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
+    from torchtitan.models.qwen3.config_registry import qwen3_moe_deepep
+
+    config = qwen3_moe_deepep(seq_len=512)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 4
+    return config

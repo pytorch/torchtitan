@@ -2,6 +2,8 @@
 
 This enables HF transformers models to be trained with `4D parallelism + torch.compile`
 
+This backend uses the TorchTitan SPMD type system.
+
 ## Quick start
 
 - Requirements `transformers==5.9.0`
@@ -14,7 +16,7 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 --config transformers_modeling_backend_debugmodel
 ...
 ```
-- Train: `LOG_RANK=7 MODEL=transformers_modeling_backend CONFIG=transformers_modeling_backend_debugmodel ./run_train.sh --compile.enable`
+- Train: `LOG_RANK=7 MODEL=transformers_modeling_backend CONFIG=transformers_modeling_backend_debugmodel_compile ./run_train.sh`
     - Make sure you have created the tokenizers beforehand
 <img width="1334" height="453" alt="image" src="https://github.com/user-attachments/assets/da459448-027b-4af9-8176-6a3e433a272c" />
 
@@ -46,7 +48,7 @@ This enables HF transformers models to be trained with `4D parallelism + torch.c
 
 ### Attention
 
-Attention runs on **FlexAttention**. `attn_mask_type` selects the flex mask:
+Attention runs on **FlexInnerAttention**. `attn_mask_type` selects the flex mask:
 `causal` (plain causal) or `block_causal` (causal + same-document, for packed /
 SFT sequences).
 
@@ -78,5 +80,4 @@ PP is not yet wired for the MoE path (see Further work).
 - Missing PP support for MoE
 - Load HF weights
 - Add LORA support
-- `spmd_types` backend support (move off the DTensor sharding path)
 - Support for Titan RL

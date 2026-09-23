@@ -3,14 +3,11 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import copy
 from dataclasses import dataclass
 from typing import Literal
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.protocols.model_spec import ModelSpec
 from .model import HFTransformerModel
-from .parallelize import parallelize_hf_transformers
-from .pipeline import pipeline_hf_transformers
 from .state_dict_adapter import HFTransformerStateDictAdapter
 
 __all__ = [
@@ -43,7 +40,7 @@ class TitanModelConfig:
     # TorchTitan-only fields with no HF equivalent: they don't override anything
     # from the HF config, so they keep concrete defaults. (multiple_of and
     # ffn_dim_multiplier are only used when deriving FFN size from an explicitly
-    # overridden dim; max_seq_len is set from training.seq_len.)
+    # overridden dim; max_seq_len is set from training.max_context_length.)
     multiple_of: int = 256
     ffn_dim_multiplier: float | None = None
     max_seq_len: int = 2048
@@ -160,13 +157,10 @@ flavors = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
-    return ModelSpec(
-        name="transformers_modeling_backend",
-        flavor=flavor,
-        model=flavors[flavor],
-        parallelize_fn=parallelize_hf_transformers,
-        pipelining_fn=pipeline_hf_transformers,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
-        state_dict_adapter=HFTransformerStateDictAdapter,
-    )
+def model_registry(flavor: str, *, seq_len: int) -> HFTransformerModel.Config:
+    config = copy.deepcopy(flavors[flavor])
+    config.max_seq_len = seq_len
+    return config
+
+
+HFTransformerModel.state_dict_adapter_cls = HFTransformerStateDictAdapter

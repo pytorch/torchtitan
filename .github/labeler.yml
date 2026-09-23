@@ -1,11 +1,21 @@
-"ciflow/8gpu":
-  - .ci/docker/**
-  - .github/workflows/**
-  - scripts/**
-  - tests/**
-  - torchtitan/**
+"ciflow/fake-pg":
+  globs:
+    - .ci/docker/**
+    - .github/workflows/**
+    - scripts/**
+    - tests/**
+    - torchtitan/**
+  draft: false
 
 "ciflow/rl":
-  - torchtitan/experiments/rl/**
-  - .github/workflows/integration_test_4gpu_rl.yaml
-  - .github/workflows/integration_test_8gpu_rl_h100.yaml
+  - torchtitan/rl/**
+  - tests/rl/**
+  - scripts/rl/**
+  - torchtitan/trainer.py
+  - torchtitan/components/checkpointer/**
+  - torchtitan/components/data/**
+  - torchtitan/distributed/cuda_graph.py
+  - torchtitan/models/common/**
+  - torchtitan/models/qwen3_5/**
+  - torchtitan/models/qwen3_8/**
+  - .github/workflows/integration_test_8gpu_rl.yaml

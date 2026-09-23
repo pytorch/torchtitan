@@ -30,6 +30,16 @@ MODULE=deepseek_v3 CONFIG=deepseek_v3_16b ./run_train.sh
 MODULE=deepseek_v3 CONFIG=deepseek_v3_671b ./run_train.sh
 ```
 
+### Performance-optimized option
+
+For better performance, DeepSeek-V3 models can opt into fused Triton kernels
+for MLA Q/KV assembly, ComplexRoPE, and SwiGLU. The overrides preserve the
+existing model parameters and checkpoint layout.
+
+```bash
+MODULE=deepseek_v3 CONFIG=deepseek_v3_671b ./run_train.sh \
+  --override.imports torchtitan.overrides.fused_mla.fused_mla,torchtitan.overrides.fused_swiglu.fused_swiglu
+```
 
 ## HuggingFace -> DCP Checkpoint Conversion
 

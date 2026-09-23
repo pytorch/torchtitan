@@ -9,14 +9,14 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
+
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.utils import validate_converter_order
 
-from torchtitan.protocols.model import ModelConfigConverter
-from torchtitan.protocols.model_spec import ModelSpec
-
-from .flux_datasets import FluxDataLoader
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
 from .model.layers import (
@@ -30,14 +30,10 @@ from .model.layers import (
     SingleStreamBlock,
 )
 from .model.model import FluxModel
-from .model.state_dict_adapter import FluxStateDictAdapter
-from .parallelize import parallelize_flux
 
 __all__ = [
     "FluxModel",
-    "FluxDataLoader",
     "flux_configs",
-    "parallelize_flux",
 ]
 
 _ZERO_LINEAR = {"weight": nn.init.zeros_, "bias": nn.init.zeros_}
@@ -548,6 +544,8 @@ def _flux_debug() -> FluxModel.Config:
     )
 
 
+# The default lengths are ``_flux_seq_len(img_size, max_t5_encoding_len)`` for
+# the img_size / T5 length each shipped trainer config uses.
 flux_configs = {
     "flux-dev": _flux_dev,
     "flux-schnell": _flux_schnell,
@@ -558,18 +556,10 @@ flux_configs = {
 def model_registry(
     flavor: str,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> FluxModel.Config:
     config = flux_configs[flavor]()
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
-    return ModelSpec(
-        name="flux",
-        flavor=flavor,
-        model=config,
-        parallelize_fn=parallelize_flux,
-        pipelining_fn=None,
-        post_optimizer_build_fn=None,
-        state_dict_adapter=FluxStateDictAdapter,
-    )
+    return config

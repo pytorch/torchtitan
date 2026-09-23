@@ -1,0 +1,21 @@
+name: Integration Tests (ROCm)
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - ciflow/rocm/*
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  rocm:
+    uses: ./.github/workflows/integration_test.yaml
+    with:
+      gpu-arch: rocm
+      execution_mode: real_pg
+    secrets: inherit

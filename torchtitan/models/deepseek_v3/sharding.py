@@ -14,12 +14,17 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
+    pre_lm_head_norm_config,
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_map,
+    set_gqa_inner_attention_local_spmd,
+    token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.models.deepseek_v3.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -28,14 +33,6 @@ if TYPE_CHECKING:
         DeepSeekV3Model,
         DeepSeekV3TransformerBlock,
     )
-
-
-# Routed-expert layout for the shared ``GroupedExperts`` (w1/w2/w3).
-_GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "w1_EFD": spmd.S(1),
-    "w2_EDF": spmd.S(2),
-    "w3_EFD": spmd.S(1),
-}
 
 
 def set_deepseek_v3_sharding_config(
@@ -60,6 +57,12 @@ def set_deepseek_v3_sharding_config(
         _set_deepseek_v3_layer_sharding(
             layer_cfg, enable_sp=enable_sp, enable_ep=enable_ep
         )
+    if len(config.mtp_layers) > 0:
+        _set_deepseek_v3_mtp_sharding(
+            config,
+            enable_sp=enable_sp,
+            enable_ep=enable_ep,
+        )
 
 
 def _set_deepseek_v3_layer_sharding(
@@ -83,7 +86,7 @@ def _set_deepseek_v3_layer_sharding(
     attn_x_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
-        else dense_activation_placement(tp=spmd.I)
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
 
     # MLA attention input: x is gathered to Replicate. RoPE is read from the
@@ -93,15 +96,14 @@ def _set_deepseek_v3_layer_sharding(
             "x": attn_x_layout,
         },
         in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R),
+            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
         },
     )
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
-    # Low-rank projections and norms keep Replicate weights on TP. We still
-    # distribute them (Replicate DTensor) so DTensor activations flow through
-    # without mixing plain Tensor + DTensor in the matmul.
+    # Low-rank projections and norms keep replicated weights on TP so their
+    # SPMD types compose with the surrounding activations.
     replicate_weight = ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
     )
@@ -111,14 +113,14 @@ def _set_deepseek_v3_layer_sharding(
     attention.wkv_b.sharding_config = colwise_config()
     attention.wo.sharding_config = rowwise_config(output_sp=enable_sp)
 
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # Query projection: depends on q_lora_rank
     if attention.q_lora_rank == 0:
         assert attention.wq is not None
         attention.wq.sharding_config = colwise_config()
     else:
-        # Low-rank: wq_a + q_norm stay Replicate DTensors; wq_b is Colwise.
+        # Low-rank: wq_a + q_norm stay replicated; wq_b is colwise.
         assert attention.wq_a is not None
         assert attention.wq_b is not None
         attention.wq_a.sharding_config = replicate_weight
@@ -135,9 +137,51 @@ def _set_deepseek_v3_layer_sharding(
 
     # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
+        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GROUPED_EXPERTS_PARAM_LAYOUT,
+        )
+
+
+def _set_deepseek_v3_mtp_sharding(
+    config,
+    *,
+    enable_sp: bool,
+    enable_ep: bool,
+) -> None:
+    activation = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+    )
+    norm = norm_config(enable_sp=enable_sp)
+
+    for mtp_layer_cfg in config.mtp_layers:
+        if enable_sp:
+            mtp_layer_cfg.sharding_config = ShardingConfig(
+                in_src_shardings={
+                    "mtp_input_valid_mask": token_id_placement(),
+                },
+                in_dst_shardings={
+                    "mtp_input_valid_mask": token_id_placement(enable_sp=enable_sp),
+                },
+            )
+        _set_deepseek_v3_layer_sharding(
+            mtp_layer_cfg,
+            enable_sp=enable_sp,
+            enable_ep=enable_ep,
+        )
+        mtp_layer_cfg.enorm.sharding_config = norm
+        mtp_layer_cfg.hnorm.sharding_config = norm
+        mtp_layer_cfg.mtp_norm.sharding_config = pre_lm_head_norm_config(
+            enable_sp=enable_sp
+        )
+        mtp_layer_cfg.eh_proj.sharding_config = ShardingConfig(
+            state_shardings={
+                "weight": dense_param_placement(tp=spmd.R),
+            },
+            in_src_shardings={"input": activation},
+            out_src_shardings=activation,
         )

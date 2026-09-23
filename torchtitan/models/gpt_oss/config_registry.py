@@ -4,34 +4,41 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.lr_scheduler import LRSchedulersContainer
-from torchtitan.components.metrics import MetricsProcessor
-from torchtitan.components.optimizer import default_adamw
-from torchtitan.components.validate import Validator
+from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.hf_datasets.text_datasets import HuggingFaceTextDataLoader
-from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
+from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 
 
-def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
-    model_spec = model_registry("debugmodel", attn_backend=attn_backend)
+def _gpt_oss_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    attn_backend: str = "varlen",
+) -> Trainer.Config:
+    model_config = model_registry(
+        "debugmodel", seq_len=seq_len, attn_backend=attn_backend
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(
-            dataset="c4_test",
+        model=model_config,
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=128 if attn_backend == "varlen" else None,
         ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -41,46 +48,45 @@ def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            local_batch_size=8,
-            seq_len=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=None,
-        validator=Validator.Config(
-            freq=5,
-            steps=10,
-        ),
+        validator=None,
     )
 
 
-def gpt_oss_debugmodel() -> Trainer.Config:
-    return _gpt_oss_debugmodel()
+def gpt_oss_debugmodel(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    return _gpt_oss_debugmodel(seq_len=seq_len)
 
 
-def gpt_oss_debugmodel_flex() -> Trainer.Config:
-    # FlexAttention variant. Pipeline Parallel is incompatible with
-    # VarlenAttention, so PP integration tests use this flex config.
-    return _gpt_oss_debugmodel(attn_backend="flex")
+def gpt_oss_debugmodel_flex(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    return _gpt_oss_debugmodel(seq_len=seq_len, attn_backend="flex")
 
 
-def gpt_oss_20b() -> Trainer.Config:
-    model_spec = model_registry("20b")
+def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
+    model_config = model_registry("20b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/gpt-oss-20b",
-        model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        model=model_config,
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            max_num_documents=64,
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -89,29 +95,32 @@ def gpt_oss_20b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10000,
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
 
-def gpt_oss_120b() -> Trainer.Config:
-    model_spec = model_registry("120b")
+def gpt_oss_120b(seq_len: int | None = None) -> Trainer.Config:
+    model_config = model_registry("120b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/gpt-oss-120b",
-        model_spec=model_spec,
-        dataloader=HuggingFaceTextDataLoader.Config(dataset="c4"),
+        model=model_config,
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            max_num_documents=64,
+        ),
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
@@ -120,13 +129,13 @@ def gpt_oss_120b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            local_batch_size=1,
-            seq_len=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10000,
         ),
         parallelism=ParallelismConfig(
             expert_parallel_degree=1,
         ),
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )

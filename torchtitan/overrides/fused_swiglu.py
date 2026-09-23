@@ -6,65 +6,23 @@
 
 # pyrefly: ignore-errors
 
-"""
-Example override: a SwiGLU feed-forward with a single fused gate+up weight.
+"""Fused SwiGLU overrides.
 
-This is the worked example referenced in ``torchtitan/overrides/README.md``. It
-demonstrates the pieces a non-trivial fused module needs to plug in via the
-override mechanism, *without touching core*:
-
-1. Custom ``__init__`` parametrization — ``w1`` and ``w3`` of the stock
-   :class:`FeedForward` are fused into one parameter ``w13`` of shape
-   ``(hidden_dim, 2, dim)`` (``w13[:, 0]`` is the gate / stock ``w1``,
-   ``w13[:, 1]`` the up / stock ``w3``). The gate+up projection is a single GEMM.
-2. Weight initialization via the ``Module`` protocol (``param_init``).
-3. A ``sharding_config`` that supports both FSDP and tensor parallelism.
-4. Registration via ``@override`` targeting ``FeedForward.Config``.
-
-This module also defines the ``torchtitan::silu_and_mul`` custom CUDA op (a fused
-SiLU-and-mul Triton kernel) and :class:`FusedGroupedExperts`, which applies the
-same gate+up fusion to MoE experts. Both the ``fused_swiglu`` (``FeedForward``)
-and ``fused_grouped_experts`` (``GroupedExperts``) overrides are registered here;
-activate each by naming its factory, e.g. ``--override.imports
-torchtitan.overrides.fused_swiglu.fused_swiglu,torchtitan.overrides.fused_swiglu.fused_grouped_experts``.
-For the DeepEP inference path, pair it with the sibling ``deepep_override`` dispatcher
-override (``torchtitan.overrides.moe_token_dispatcher``).
-
-Tensor parallelism — the ``(hidden_dim, 2, dim)`` layout is what makes TP work.
-``w13`` is sharded ``Shard(0)`` on the ``hidden_dim`` axis, so each TP rank holds
-``(hidden_dim/tp, 2, dim)`` — a matching slice of *both* the gate and up
-projections (the Megatron column-parallel layout for gated MLPs). A flat
-``(2*hidden, dim)`` weight has no correct TP sharding (``Shard(0)`` there would
-give one rank all of ``w1`` and another all of ``w3``); the explicit ``2`` dim
-fixes that. ``hidden_dim`` is also dim 0, so FSDP shards the large axis cleanly
-at any degree. The layout is contiguous and transpose-free, so it costs nothing
-at compute time: the single GEMM is expressed with ``einsum`` (which contracts
-``dim`` and keeps ``hidden`` sharded), and never reshapes across the sharded axis.
-
-NOTE (checkpoint compatibility) -- although the parameter is the fused ``w13``,
-this module checkpoints in the stock ``FeedForward`` layout
-(``w1.weight`` / ``w3.weight``), so its checkpoints **are** interchangeable with
-the non-fused module (and with the HF adapter, which targets the stock layout). A
-``register_state_dict_post_hook`` splits ``w13`` into ``w1.weight``/``w3.weight``
-on save, and a ``register_load_state_dict_pre_hook`` merges them back into ``w13``
-on load (a native ``w13`` key is still accepted for back-compat). See
-``torchtitan/overrides/README.md`` "Checkpoint Compatibility".
+``fused_swiglu`` replaces every ``SwiGLU`` activation selected by the override
+framework. ``fused_grouped_experts`` retains the grouped gate/up projection
+override until that projection becomes the core ``GroupedExperts`` default.
 """
 
-from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import Any
 
 import spmd_types as spmd
 import torch
 import triton
 import triton.language as tl
 
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.experimental import local_map
-
 from torchtitan.config import derive, override
-from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -72,6 +30,7 @@ __all__ = [
     "FusedGroupedExperts",
     "FusedSwiGLU",
     "fused_grouped_experts",
+    "fused_swiglu",
     "silu_and_mul_backward_kernel",
     "silu_and_mul_forward_kernel",
     "silu_and_mul_op",
@@ -102,7 +61,7 @@ def _silu_and_mul_forward_kernel(
     BLOCK_N: tl.constexpr,
 ) -> None:
     """Compute ``silu(gate) * up`` for optionally offset-limited rows."""
-    row_start = tl.program_id(0) * BLOCK_M
+    row_start = tl.program_id(0).to(tl.int64) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_OFFSETS:
         row_limit = tl.load(offsets + NUM_OFFSETS - 1)
@@ -157,7 +116,7 @@ def _silu_and_mul_backward_kernel(
     BLOCK_N: tl.constexpr,
 ) -> None:
     """Backward for ``_silu_and_mul_forward_kernel`` over defined rows."""
-    row_start = tl.program_id(0) * BLOCK_M
+    row_start = tl.program_id(0).to(tl.int64) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_OFFSETS:
         row_limit = tl.load(offsets + NUM_OFFSETS - 1)
@@ -364,58 +323,36 @@ silu_and_mul_op.register_autograd(
 )
 
 
-def _make_fused_gate_up_init(
-    gate_init: Callable,
-    up_init: Callable,
-    *,
-    gate_up_axis: int,
-) -> Callable:
-    """Build an initializer for a fused gate/up weight from per-half initializers.
+class FusedSwiGLU(BinaryActivationFn):
+    """SwiGLU activation implemented by the fused Triton operation."""
 
-    The fused weight has a size-2 ``gate_up_axis`` (index 0 = gate / stock w1,
-    index 1 = up / stock w3). Each half is initialized with its own initializer
-    because the gate and up projections differ (e.g. up shares w2's depth-scaled
-    init), so initializing the whole tensor at once would mis-init the up half.
-    Shared by the dense FusedSwiGLU ``(hidden, 2, dim)`` (axis 1) and the grouped
-    FusedGroupedExperts ``(E, F, 2, D)`` (axis 2) overrides.
-    """
+    @dataclass(kw_only=True, slots=True)
+    class Config(BinaryActivationFn.Config):
+        pass
 
-    def _init(t: torch.Tensor) -> None:
-        gate_idx: list[int | slice] = [slice(None)] * t.ndim
-        up_idx: list[int | slice] = [slice(None)] * t.ndim
-        gate_idx[gate_up_axis] = 0
-        up_idx[gate_up_axis] = 1
-        gate_init(t[tuple(gate_idx)])  # gate (stock w1)
-        up_init(t[tuple(up_idx)])  # up (stock w3)
+    def __init__(self, config: Config) -> None:
+        pass
 
-    return _init
-
-
-def _fused_silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """``silu(gate) * up`` via the fused ``torchtitan::silu_and_mul`` op."""
-    if isinstance(gate, DTensor):
-        assert isinstance(up, DTensor)
-        placements = gate.placements
-        mapped = local_map(
-            _silu_and_mul_2d,
-            out_placements=(placements,),
-            in_placements=(placements, placements),
-            in_grad_placements=(placements, placements),
-            device_mesh=gate.device_mesh,
-        )
-        return mapped(gate, up)
-    return _silu_and_mul_2d(gate, up)
+    def __call__(
+        self,
+        gate: torch.Tensor,
+        up: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs
+        return _silu_and_mul_2d(gate, up)
 
 
 def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     # TODO(pianpwk): Migrate this local_map workaround to a custom op SPMD
     # propagation rule registration system.
+    activation_type = (
+        {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+        spmd.PartitionSpec(("dp", "cp"), "tp"),
+    )
     return spmd.local_map(
-        in_types=(
-            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # gate_BLF
-            {"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},  # up_BLF
-        ),
-        out_types={"dp": spmd.S(0), "cp": spmd.S(1), "tp": spmd.S(2)},
+        in_types=(activation_type, activation_type),
+        out_types=activation_type,
     )(
         lambda gate, up: silu_and_mul_op(
             gate.reshape(-1, gate.shape[-1]),
@@ -426,100 +363,17 @@ def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     )
 
 
-class FusedSwiGLU(FeedForward):
-    """SwiGLU FFN with the gate and up projections fused into one parameter.
-
-    ``w13`` has shape ``(hidden_dim, 2, dim)``: ``w13[:, 0]`` is the gate
-    projection (the stock ``w1``) and ``w13[:, 1]`` the up projection (the stock
-    ``w3``). A single GEMM computes both; the result is split into gate/up. The
-    down projection ``w2`` is reused as-is. ``hidden_dim`` is dim 0, so TP shards
-    it (``Shard(0)``, matching gate/up slices per rank) and FSDP shards it cleanly
-    at any degree. Inherits :class:`FeedForward` (building then deleting ``w1`` /
-    ``w3``) so ``isinstance(x, FeedForward)`` checks still hold.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        del self.w1
-        del self.w3
-        self.w13 = torch.nn.Parameter(
-            torch.empty(config.w1.out_features, 2, config.w1.in_features)
-        )
-        self.register_state_dict_post_hook(self._split_w13_on_save)
-        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate, up = torch.einsum("...d,hgd->...hg", x, self.w13).unbind(-1)
-        return self.w2(_fused_silu_and_mul(gate, up))
-
-    @staticmethod
-    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Emit the fused ``w13`` as the stock ``w1.weight`` / ``w3.weight``.
-
-        Runs after the default ``state_dict`` (which produced ``{prefix}w13``),
-        so the saved checkpoint is in the stock FeedForward layout. ``w13[:, 0]``
-        is the gate (stock ``w1``) and ``w13[:, 1]`` the up (stock ``w3``).
-        """
-        w13 = state_dict.pop(f"{prefix}w13")
-        state_dict[f"{prefix}w1.weight"] = w13[:, 0].contiguous()
-        state_dict[f"{prefix}w3.weight"] = w13[:, 1].contiguous()
-
-    @staticmethod
-    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
-        """Merge stock ``w1.weight`` / ``w3.weight`` back into the fused ``w13``.
-
-        Runs before the default ``_load_from_state_dict``, so it loads ``w13``
-        (the real parameter) normally afterwards. A native ``w13`` key is left
-        untouched, keeping back-compat with checkpoints saved as ``w13``.
-        """
-        w1_key, w3_key = f"{prefix}w1.weight", f"{prefix}w3.weight"
-        if w1_key in state_dict and w3_key in state_dict:
-            state_dict[f"{prefix}w13"] = torch.stack(
-                [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=1
-            )
-
-
 @override(
-    target=FeedForward.Config,
-    description="Fuse SwiGLU gate+up into one weight (FSDP + TP).",
+    target=SwiGLU.Config,
+    exact=True,
+    description="Fuse the SwiGLU SiLU and multiply operations with Triton.",
 )
-def fused_swiglu(cfg: FeedForward.Config) -> FusedSwiGLU.Config:
-    w1_init = (cfg.w1.param_init or {}).get("weight")
-    w3_init = (cfg.w3.param_init or {}).get("weight")
-    param_init = None
-    if w1_init is not None and w3_init is not None:
-        param_init = {"w13": _make_fused_gate_up_init(w1_init, w3_init, gate_up_axis=1)}
-
-    fused = derive(cfg, FusedSwiGLU.Config, param_init=param_init)
-
-    base = cfg.sharding_config
-    fused.sharding_config = ShardingConfig(
-        state_shardings={"w13": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings=base.in_src_shardings if base is not None else None,
-        in_dst_shardings=base.in_dst_shardings if base is not None else None,
-    )
-    return fused
+def fused_swiglu(cfg: SwiGLU.Config) -> FusedSwiGLU.Config:
+    return derive(cfg, FusedSwiGLU.Config)
 
 
 class FusedGroupedExperts(GroupedExperts):
-    """Routed experts (grouped GEMM) with the gate and up projections fused.
-
-    ``w13`` has shape ``(num_experts, hidden_dim, 2, dim)``: ``w13[:, :, 0]`` is
-    the gate (original ``w1_EFD``) and ``w13[:, :, 1]`` the up (original ``w3_EFD``). A
-    single grouped GEMM computes both projections; the fused
-    ``torchtitan::silu_and_mul`` op forms the activation (skipping inactive
-    capacity-padding rows via grouped_mm offsets). The down projection
-    ``w2_EDF`` is reused as-is.
-
-    The explicit ``2`` axis stays unsharded so that it matches the dense FusedSwiGLU
-    ``(hidden_dim, 2, dim)`` layout: TP shards ``hidden_dim`` (dim 1) and EP
-    shards the expert axis (dim 0), so each rank keeps matching gate/up slices.
-    Checkpoints save original ``w1_EFD`` / ``w3_EFD`` separately.
-    """
+    """Grouped experts with one physical interleaved gate/up parameter."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GroupedExperts.Config):
@@ -527,14 +381,11 @@ class FusedGroupedExperts(GroupedExperts):
 
     def __init__(self, config: Config):
         super().__init__(config)
-
-        # delete separate w1/w3 and fuse
         del self.w1_EFD
         del self.w3_EFD
         self.w13 = torch.nn.Parameter(
             torch.empty(config.num_experts, config.hidden_dim, 2, config.dim)
         )
-
         self.register_state_dict_post_hook(self._split_w13_on_save)
         self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
 
@@ -543,87 +394,81 @@ class FusedGroupedExperts(GroupedExperts):
         x_RD: torch.Tensor,
         num_tokens_per_expert_E: torch.Tensor,
     ) -> torch.Tensor:
-        if isinstance(self.w13, DTensor):
-            w13 = self.w13.to_local()
-            assert isinstance(self.w2_EDF, DTensor)
-            w2_EDF = self.w2_EDF.to_local()
-        else:
-            w13 = self.w13
-            w2_EDF = self.w2_EDF
-
-        E, F, _, D = w13.shape
+        E, F, _, D = self.w13.shape
         offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-
-        w13_E_D_2F = w13.bfloat16().reshape(E, F * 2, D).transpose(-2, -1)
-        gate_up_R2F = torch._grouped_mm(x_RD.bfloat16(), w13_E_D_2F, offs=offsets_E)
+        gate_up_R2F = self._grouped_mm(
+            A=x_RD.bfloat16(),
+            weight_EOI=self.w13.reshape(E, F * 2, D),
+            offs=offsets_E,
+        )
         gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
         h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
-        return torch._grouped_mm(
-            h_RF, w2_EDF.bfloat16().transpose(-2, -1), offs=offsets_E
-        ).type_as(x_RD)
+        return self._grouped_mm(A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E).type_as(
+            x_RD
+        )
 
     @staticmethod
     def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Save fused as ``w1_EFD`` / ``w3_EFD`` on save."""
+        """Expose fused experts under the logical w1/w3 checkpoint keys."""
         w13 = state_dict.pop(f"{prefix}w13")
         state_dict[f"{prefix}w1_EFD"] = w13[:, :, 0, :].contiguous()
         state_dict[f"{prefix}w3_EFD"] = w13[:, :, 1, :].contiguous()
 
     @staticmethod
     def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
-        """Combine separate ``w1_EFD`` / ``w3_EFD`` back into the fused ``w13`` on load."""
-        w1_key, w3_key = f"{prefix}w1_EFD", f"{prefix}w3_EFD"
-        if w1_key in state_dict and w3_key in state_dict:
-            state_dict[f"{prefix}w13"] = torch.stack(
-                [state_dict.pop(w1_key), state_dict.pop(w3_key)], dim=2
-            )
+        """Pack logical w1/w3 checkpoint entries into the fused parameter."""
+        gate_key = f"{prefix}w1_EFD"
+        up_key = f"{prefix}w3_EFD"
+        if gate_key not in state_dict or up_key not in state_dict:
+            return
+        state_dict[f"{prefix}w13"] = torch.stack(
+            [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=2
+        )
 
 
-def _fuse_w13_grouped_experts_param_init(param_init: dict | None) -> dict | None:
-    """Remap ``w1_EFD`` / ``w3_EFD`` initializers onto the fused ``w13``.
-
-    Other entries (e.g. ``w2_EDF``) are kept as-is.
-    """
+def _fuse_grouped_experts_param_init(param_init: dict | None) -> dict | None:
+    """Remap logical gate/up initializers onto the fused parameter."""
     if param_init is None:
         return None
-    w1_init = param_init.get("w1_EFD")
-    w3_init = param_init.get("w3_EFD")
-    fused = {k: v for k, v in param_init.items() if k not in ("w1_EFD", "w3_EFD")}
-    if w1_init is not None and w3_init is not None:
-        fused["w13"] = _make_fused_gate_up_init(w1_init, w3_init, gate_up_axis=2)
+    gate_init = param_init.get("w1_EFD")
+    up_init = param_init.get("w3_EFD")
+    fused = {
+        key: value
+        for key, value in param_init.items()
+        if key not in ("w1_EFD", "w3_EFD")
+    }
+    if gate_init is not None and up_init is not None:
+
+        def init_w13(w13: torch.Tensor) -> None:
+            gate_init(w13[:, :, 0, :])
+            up_init(w13[:, :, 1, :])
+
+        fused["w13"] = init_w13
     return fused or None
 
 
-def _fuse_w13_grouped_experts_sharding(base: ShardingConfig) -> ShardingConfig:
-    """Replace the ``w1_EFD`` / ``w3_EFD`` state shardings with one for ``w13``.
-
-    ``w13`` (E, F, 2, D) shards on the same axes as ``w1_EFD`` (E, F, D): EP on
-    dim 0 (expert) and TP on dim 1 (hidden); the ``2`` axis (dim 2) stays
-    unsharded. Everything else (``w2_EDF``, local_map, in/out shardings) is kept.
-    """
+def _fuse_grouped_experts_sharding(base: ShardingConfig) -> ShardingConfig:
+    """Replace logical gate/up shardings with the fused parameter sharding."""
     state = dict(base.state_shardings)
-    w1_layout = state.pop("w1_EFD")
+    gate_layout = state.pop("w1_EFD")
     state.pop("w3_EFD")
-    state["w13"] = w1_layout
+    state["w13"] = gate_layout
     return replace(base, state_shardings=state)
 
 
 @override(
     target=GroupedExperts.Config,
-    description="Fuse routed-experts gate+up into one weight; fused SiLU-and-mul.",
+    description="Fuse routed-experts gate/up projection and SwiGLU activation.",
 )
-def fused_grouped_experts(
-    cfg: GroupedExperts.Config,
-) -> GroupedExperts.Config:
-    # Remap w1_EFD/w3_EFD param-init and state shardings onto the fused w13.
-    # Idempotent: return cfg unchanged if it is not a stock GroupedExperts.Config
-    # (already fused, or a subclass like GptOssGroupedExperts).
+def fused_grouped_experts(cfg: GroupedExperts.Config) -> GroupedExperts.Config:
     if type(cfg) is not GroupedExperts.Config:
         return cfg
 
-    param_init = _fuse_w13_grouped_experts_param_init(cfg.param_init)
-    fused = derive(cfg, FusedGroupedExperts.Config, param_init=param_init)
-    base = cfg.sharding_config
-    if base is not None:
-        fused.sharding_config = _fuse_w13_grouped_experts_sharding(base)
+    fused = derive(
+        cfg,
+        FusedGroupedExperts.Config,
+        param_init=_fuse_grouped_experts_param_init(cfg.param_init),
+    )
+    if cfg.sharding_config is not None:
+        fused.sharding_config = _fuse_grouped_experts_sharding(cfg.sharding_config)
     return fused

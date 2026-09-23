@@ -7,12 +7,12 @@
 
 # Install DeepEP (HybridEP) for MoE expert parallelism integration tests.
 # Pinned to a known-good commit on the hybrid-ep branch to avoid
-# breakage from upstream changes. Update the commit hash when
-# upgrading to a newer DeepEP version.
+# breakage from upstream changes. This revision includes upstream's
+# C++20 build fix for hybrid_ep_cpp.
 
 set -eux
 
-DEEPEP_COMMIT=${DEEPEP_COMMIT:-1b8f467}
+DEEPEP_COMMIT=${DEEPEP_COMMIT:-f725d29699f5bda9ba789456bb9579af69844685}
 
 # Dependencies for DeepEP compilation (NVSHMEM needs libcudacxx, IB headers).
 sudo apt-get update -qq && sudo apt-get install -y -qq rdma-core libibverbs1 libmlx5-1 libibverbs-dev
