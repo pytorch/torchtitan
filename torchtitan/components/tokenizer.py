@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -80,7 +81,9 @@ class BaseTokenizer(ABC, Configurable):
         env.filters["tojson"] = tojson
         self._chat_template = env.from_string(template)
 
-    def apply_chat_template(self, messages: list[dict[str, str]], **kwargs) -> str:
+    def apply_chat_template(
+        self, messages: Sequence[Mapping[str, Any]], **kwargs
+    ) -> str:
         """Render messages through the Jinja chat template. Returns formatted text.
 
         Messages should be a list of dicts with "role" and "content" keys, e.g.

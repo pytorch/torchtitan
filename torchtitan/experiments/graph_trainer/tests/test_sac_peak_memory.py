@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_registry,
@@ -35,9 +36,9 @@ def _set_deterministic() -> None:
 
 
 def _build_model(model_flavor: str, attn_backend: str = "flex") -> nn.Module:
-    model_spec = llama3_registry(model_flavor, attn_backend=attn_backend)
+    model_config = llama3_registry(model_flavor, attn_backend=attn_backend)
     with torch.device("meta"):
-        model = model_spec.model.build()
+        model = model_config.build()
     model.to_empty(device="cuda")
     with torch.no_grad():
         model.init_states(buffer_device=None)
@@ -57,7 +58,7 @@ class StepResult:
 def _measure_step(
     trainer: Trainer, tokens: torch.Tensor, labels: torch.Tensor
 ) -> StepResult:
-    model = trainer.model_parts[0]
+    model = trainer.engine.model_parts[0]
     model.zero_grad(set_to_none=True)
     global_valid_tokens = torch.tensor(labels.numel(), dtype=torch.float, device="cuda")
     # The dataloader always supplies per-document positions, which the trainer
@@ -67,8 +68,16 @@ def _measure_step(
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
-    loss = trainer.forward_backward_step(
-        input_dict={"input": tokens, "positions": positions, "labels": labels},
+    loss = trainer.engine.forward_backward_microbatch(
+        microbatch_group=[
+            TokenizedTrainingMicrobatch(
+                input=tokens,
+                positions=positions,
+                labels=labels,
+                padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                num_valid_tokens=labels.numel(),
+            )
+        ],
         global_valid_tokens=global_valid_tokens,
     )
     torch.cuda.synchronize()
@@ -108,7 +117,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         SelectiveAC.Config().build().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
-            llama3_registry(DEBUGMODEL).model,
+            llama3_registry(DEBUGMODEL),
             Trainer,
             parallel_dims=self.parallel_dims,
         )
@@ -117,7 +126,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         traced_model.load_state_dict(copy.deepcopy(self.state_dict))
         traced_trainer = build_minimal_trainer(
             traced_model,
-            llama3_registry(DEBUGMODEL).model,
+            llama3_registry(DEBUGMODEL),
             GraphTrainer,
             activation_checkpoint_mode="selective",
             parallel_dims=self.parallel_dims,
@@ -172,7 +181,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         FullAC.Config().build().apply(eager_model)
         eager_trainer = build_minimal_trainer(
             eager_model,
-            llama3_registry(DEBUGMODEL).model,
+            llama3_registry(DEBUGMODEL),
             Trainer,
             parallel_dims=self.parallel_dims,
         )
@@ -181,7 +190,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         traced_model.load_state_dict(copy.deepcopy(self.state_dict))
         traced_trainer = build_minimal_trainer(
             traced_model,
-            llama3_registry(DEBUGMODEL).model,
+            llama3_registry(DEBUGMODEL),
             GraphTrainer,
             activation_checkpoint_mode="selective",
             parallel_dims=self.parallel_dims,

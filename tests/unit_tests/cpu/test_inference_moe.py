@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""fused_swiglu + deepep_override compose as disjoint sibling nodes
-under moe.routed_experts (no ancestor/descendant conflict)."""
+"""The fused activation and DeepEP overrides compose independently."""
 
 import unittest
 from functools import partial
@@ -13,12 +12,13 @@ from functools import partial
 from torch.nn import init
 
 from torchtitan.config.override import _REGISTRY, apply_overrides, OverrideConfig
-from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 from torchtitan.overrides.moe_token_dispatcher import deepep_override
@@ -27,10 +27,10 @@ _DIM = 16
 _HIDDEN = 32
 _E = 4
 
-_FUSED_SWIGLU = ("torchtitan.overrides.fused_swiglu.fused_swiglu",)
+_FUSED_SWIGLU = "torchtitan.overrides.fused_swiglu.fused_swiglu"
 _DEEPEP_OVERRIDE = (
     "torchtitan.overrides.moe_token_dispatcher.deepep_override",
-    {"cudagraphable": True},
+    {"cuda_graph_compatible": True},
 )
 
 # The @override decorators register once, at the imports above. Capture the
@@ -64,6 +64,7 @@ def _moe_config(comm_backend: str):
         dim=_DIM,
         num_experts=_E,
         gate_param_init={"weight": partial(init.trunc_normal_, std=0.02)},
+        score_func=Sigmoid.Config(),
         top_k=1,
     )
     return make_moe_config(num_experts=_E, router=router, routed_experts=routed_experts)
@@ -75,9 +76,11 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         for name, ov in _OVERRIDES.items():
             _REGISTRY.setdefault(name, ov)
 
-    def test_activation_and_dispatcher_are_siblings(self):
+    def test_grouped_linears_and_dispatcher_are_siblings(self):
+        """Expert projections and the dispatcher are first-class siblings."""
         cfg = _moe_config("deepep")
-        self.assertIsInstance(cfg.routed_experts.activation_fn, SwiGLU.Config)
+        self.assertIsInstance(cfg.routed_experts.w13, GroupedLinear.Config)
+        self.assertIsInstance(cfg.routed_experts.w2, GroupedLinear.Config)
         self.assertIsInstance(
             cfg.routed_experts.token_dispatcher, DeepEPTokenDispatcher.Config
         )
@@ -86,27 +89,29 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         cfg = _moe_config("deepep")
 
         replacements = apply_overrides(
-            OverrideConfig(imports=[*_FUSED_SWIGLU, _DEEPEP_OVERRIDE]),
+            OverrideConfig(imports=[_FUSED_SWIGLU, _DEEPEP_OVERRIDE]),
             cfg,
         )
 
         self.assertEqual(len(replacements), 2)
+        self.assertIsInstance(cfg.routed_experts.w13, GroupedLinear.Config)
         self.assertIsInstance(cfg.routed_experts.activation_fn, FusedSwiGLU.Config)
         self.assertIsInstance(
             cfg.routed_experts.token_dispatcher, DeepEPTokenDispatcher.Config
         )
-        self.assertTrue(cfg.routed_experts.token_dispatcher.cudagraphable)
+        self.assertTrue(cfg.routed_experts.token_dispatcher.cuda_graph_compatible)
 
     def test_non_deepep_dispatcher_flip_is_noop(self):
         cfg = _moe_config("standard")
 
         # deepep_override targets DeepEP only; on a standard dispatcher just fusion applies.
         replacements = apply_overrides(
-            OverrideConfig(imports=[*_FUSED_SWIGLU, _DEEPEP_OVERRIDE]),
+            OverrideConfig(imports=[_FUSED_SWIGLU, _DEEPEP_OVERRIDE]),
             cfg,
         )
 
         self.assertEqual(len(replacements), 1)
+        self.assertIsInstance(cfg.routed_experts.w13, GroupedLinear.Config)
         self.assertIsInstance(cfg.routed_experts.activation_fn, FusedSwiGLU.Config)
 
     def test_composition_is_order_independent(self):
@@ -115,29 +120,34 @@ class TestInferenceMoEOverrides(unittest.TestCase):
             return (
                 type(ge.activation_fn).__qualname__,
                 type(ge.token_dispatcher).__qualname__,
-                ge.token_dispatcher.cudagraphable,
+                ge.token_dispatcher.cuda_graph_compatible,
             )
 
         a = _moe_config("deepep").routed_experts
         a.activation_fn = fused_swiglu(a.activation_fn)
-        a.token_dispatcher = deepep_override(a.token_dispatcher, cudagraphable=True)
+        a.token_dispatcher = deepep_override(
+            a.token_dispatcher, cuda_graph_compatible=True
+        )
 
         b = _moe_config("deepep").routed_experts
-        b.token_dispatcher = deepep_override(b.token_dispatcher, cudagraphable=True)
+        b.token_dispatcher = deepep_override(
+            b.token_dispatcher, cuda_graph_compatible=True
+        )
         b.activation_fn = fused_swiglu(b.activation_fn)
 
         self.assertEqual(summarize(a), summarize(b))
         self.assertIsInstance(a.activation_fn, FusedSwiGLU.Config)
-        self.assertTrue(a.token_dispatcher.cudagraphable)
+        self.assertTrue(a.token_dispatcher.cuda_graph_compatible)
 
     def test_trainer_uses_only_experts_fusion(self):
         cfg = _moe_config("deepep")
 
-        # Trainer imports only fused_swiglu: experts fused, dispatcher left compact.
-        apply_overrides(OverrideConfig(imports=[*_FUSED_SWIGLU]), cfg)
+        # Trainer imports only fused_swiglu: activation fused, dispatcher unchanged.
+        apply_overrides(OverrideConfig(imports=[_FUSED_SWIGLU]), cfg)
 
+        self.assertIsInstance(cfg.routed_experts.w13, GroupedLinear.Config)
         self.assertIsInstance(cfg.routed_experts.activation_fn, FusedSwiGLU.Config)
-        self.assertFalse(cfg.routed_experts.token_dispatcher.cudagraphable)
+        self.assertFalse(cfg.routed_experts.token_dispatcher.cuda_graph_compatible)
 
 
 if __name__ == "__main__":
