@@ -30,7 +30,6 @@ from torchtitan.distributed.pipeline_parallel import (
 )
 from torchtitan.models.common.nn_modules import Identity
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
@@ -149,13 +148,13 @@ def generate_llm_fqn_per_model_part(
 
 
 def pipeline_module_split(
-    whole_model: nn.Module,
+    whole_model: BaseModel,
     pp_mesh: DeviceMesh,
     pp_schedule: str,
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
-) -> tuple[list[PipelineStage], list[nn.Module]]:
+) -> tuple[list[PipelineStage], list[BaseModel]]:
     """
     This API creates pipeline stages based on specified module names for each stage.
 
@@ -291,19 +290,18 @@ def pipeline_module_split(
 
 
 def pipeline_hf_transformers(
-    model: nn.Module,
+    model: BaseModel,
     parallel_dims: ParallelDims,
     *,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
-    parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
-) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
+) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
     pp_mesh = parallel_dims.get_mesh("pp")
 
     # Determine the number of virtual stages based on schedule type
@@ -389,8 +387,7 @@ def pipeline_hf_transformers(
     # optimizer, and checkpointing
     for i, m in enumerate(model_parts):
         # apply SPMD-style PT-D techniques
-        m = parallelize_fn(
-            m,
+        m = m.parallelize(
             parallel_dims=parallel_dims,
             training=training,
             parallelism=parallelism,
