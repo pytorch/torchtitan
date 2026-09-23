@@ -23,7 +23,7 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
@@ -34,6 +34,9 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
+
+from .parallelize import parallelize_hf_transformers
+from .pipeline import pipeline_hf_transformers
 
 
 logger = logging.getLogger(__name__)
@@ -191,6 +194,46 @@ def _uses_dsa(config) -> bool:
 
 
 class HFTransformerModel(BaseModel):
+    parallelize = parallelize_hf_transformers
+    pipeline = pipeline_hf_transformers
+
+    @classmethod
+    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            resolve_fsdp_mesh,
+            resolve_sparse_fsdp_mesh,
+        )
+
+        from .parallelize import apply_fsdp
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+        apply_fsdp(
+            self,
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallel_dims.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            ep_degree=parallel_dims.ep,
+            dp_mod_ep_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+        )
+
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor inputs.
     _skip_lm_head: bool = False
 
@@ -1331,15 +1374,6 @@ class HFTransformerModel(BaseModel):
             recs = self._logit_dump_recs = []
         recs.append((cp_coord, logits.detach().float().cpu()))
         torch.save(recs, os.path.join(dump_dir, f"logits_rank{rank}.pt"))
-
-    def verify_module_protocol(self) -> None:
-        """Skip recursive verification for HuggingFace model internals.
-
-        HF PreTrainedModel submodules are plain nn.Module and cannot
-        conform to the Module protocol. Initialization is handled
-        entirely by HF's own _init_weights mechanism.
-        """
-        pass
 
     def init_states(
         self,

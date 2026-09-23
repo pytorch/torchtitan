@@ -35,7 +35,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.model_spec import ParallelizeFunction
 
 
 logger = logging.getLogger(__name__)
@@ -78,9 +77,8 @@ def graph_pipeline_llm(
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
-    parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
-) -> tuple[GraphPipelineRuntime, list[nn.Module], bool, bool]:
+) -> tuple[GraphPipelineRuntime, list[BaseModel], bool, bool]:
     """Build a GraphPP pipeline schedule for GraphTrainer.
 
     Args:
@@ -89,11 +87,10 @@ def graph_pipeline_llm(
         training: Training config used for local batch size.
         parallelism: Parallelism config used for PP schedule and module split.
         compile_config: GraphTrainer compile config.
-        ac_config: Activation checkpointing config forwarded to ``parallelize_fn``.
+        ac_config: Activation checkpointing config forwarded to the model.
         dump_folder: Artifact/debug output directory.
         device: Local device for the stage.
         model_config: Model config consumed by stage graph passes.
-        parallelize_fn: Model-specific SPMD parallelization function.
         loss_fn: Loss function used by upstream PP metadata and GraphPP tracing.
 
     Returns:
@@ -130,12 +127,11 @@ def graph_pipeline_llm(
         parallelism.pipeline_parallel_schedule,
         len(module_names_per_stage),
     )
-    model_parts: list[nn.Module] = []
+    model_parts: list[BaseModel] = []
     stages: list[GraphPipelineStage] = []
     for stage_index in pp_rank_to_stage_indices:
         model_part = _split_module(model, module_names_per_stage[stage_index])
-        model_part = parallelize_fn(
-            model_part,
+        model_part = model_part.parallelize(
             parallel_dims=parallel_dims,
             training=training,
             parallelism=parallelism,

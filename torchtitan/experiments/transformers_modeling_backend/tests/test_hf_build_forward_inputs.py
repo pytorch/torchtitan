@@ -37,6 +37,7 @@ def _run(
         pp=1,
         ep=1,
         world_size=1,
+        enable_sequence_parallel=False,
     )
     with patch(
         "torchtitan.distributed.spmd_types.annotate_input_spmd_types",

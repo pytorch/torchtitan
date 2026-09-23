@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallel_dims import ParallelDims
-    from torchtitan.trainer import Trainer
+    from torchtitan.training_engine import TrainingEngine
 
 
 __all__ = [
@@ -574,11 +574,12 @@ def _plan_pipeline_activation_slots(
 
 def prepare_dist_moe_runtime(
     *,
-    config: Trainer.Config,
+    config: TrainingEngine.Config,
     model_parts: list[torch.nn.Module],
     parallel_dims: ParallelDims,
     device: torch.device,
     pp_schedule: object | None,
+    create_seed_checkpoint: bool = False,
 ) -> DistMoeRuntime | None:
     """Prepare and attach one shared DistMoE runtime for the local rank.
 
@@ -613,7 +614,7 @@ def prepare_dist_moe_runtime(
             if isinstance(module, DistMoeRoutedExperts)
         )
     )
-    if not modules or config.checkpoint.create_seed_checkpoint:
+    if not modules or create_seed_checkpoint:
         return None
     if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 10:
         raise ValueError("DistMoE requires an SM100-or-newer CUDA device")

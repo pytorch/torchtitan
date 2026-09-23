@@ -139,9 +139,9 @@ def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():
         compile=GraphTrainerCompileConfig(
             enable_autoparallel=True,
             enable_async_tensor_parallel=False,
-            disable_passes=["cudagraph_pass"],
+            disable_passes=["cuda_graph_pass"],
         ),
-        model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
+        model=SimpleNamespace(layers=[object()]),
         parallelism=SimpleNamespace(
             fsdp_reshard_after_forward="always",
             pipeline_parallel_degree=1,

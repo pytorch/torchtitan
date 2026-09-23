@@ -5,10 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
+from typing import Any, cast, Self
 
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
+from torchtitan.config import (
+    CompileConfig,
+    ParallelismConfig,
+    TORCH_DTYPE_MAP,
+    TrainingConfig,
+)
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
@@ -22,12 +32,23 @@ from torchtitan.models.flux.model.layers import (
     SingleStreamBlock,
     timestep_embedding,
 )
+from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
+from torchtitan.models.flux.utils import (
+    create_position_encoding_for_latents,
+    pack_latents,
+    preprocess_data,
+)
 from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.module import ModuleList
 
+from .state_dict_adapter import FluxStateDictAdapter
+
 
 class FluxModel(BaseModel):
+    state_dict_adapter_cls = FluxStateDictAdapter
+    supports_pipeline_parallel = False
+
     """
     Transformer model for flow matching on sequences.
     """
@@ -165,6 +186,166 @@ class FluxModel(BaseModel):
 
         self.final_layer = config.final_layer_config.build()
 
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> Self:
+        """Apply Flux's AC-before-SPMD parallelization lifecycle."""
+        from torchtitan.distributed.utils import get_spmd_context
+
+        with get_spmd_context(parallel_dims=parallel_dims):
+            if ac_config is not None:
+                from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                    checkpoint_wrapper,
+                )
+
+                for blocks in (self.double_blocks, self.single_blocks):
+                    for layer_id, block in blocks.named_children():
+                        blocks.register_module(
+                            layer_id,
+                            checkpoint_wrapper(block, preserve_rng_state=True),
+                        )
+
+            self._parallelize(parallel_dims)
+            annotate_replicated_parameters(self, parallel_dims)
+
+            if compile_config is not None and "model" in compile_config.components:
+                for block in (*self.double_blocks, *self.single_blocks):
+                    block.compile(backend=compile_config.backend, fullgraph=True)
+
+            if not skip_dp:
+                self._apply_fsdp(
+                    parallel_dims=parallel_dims,
+                    training=training,
+                    parallelism=parallelism,
+                )
+        return self
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torch.distributed.fsdp import (
+            CPUOffloadPolicy,
+            fully_shard,
+            MixedPrecisionPolicy,
+        )
+
+        from torchtitan.distributed.fsdp import (
+            disable_fsdp_gradient_division,
+            enable_fsdp_symm_mem,
+            resolve_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        fsdp_config: dict[str, Any] = {
+            "mesh": dp_mesh,
+            "mp_policy": MixedPrecisionPolicy(
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            ),
+        }
+        if dp_mesh_dims is not None:
+            fsdp_config["dp_mesh_dims"] = dp_mesh_dims
+        if training.enable_cpu_offload:
+            fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+        for module in (self.img_in, self.time_in, self.vector_in, self.txt_in):
+            fully_shard(module, **fsdp_config)
+        for block in (*self.double_blocks, *self.single_blocks):
+            fully_shard(block, **fsdp_config)
+        fully_shard(self.final_layer, **fsdp_config, reshard_after_forward=False)
+        fully_shard(self, **fsdp_config)
+        enable_fsdp_symm_mem(self, parallelism.fsdp_symm_mem_scope)
+        disable_fsdp_gradient_division(self)
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        *,
+        parallel_dims: ParallelDims,
+        parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Encode a raw image-text batch and prepare flow-matching inputs."""
+        del parallelism, max_num_documents, max_context_length
+        autoencoder = cast(AutoEncoder | None, kwargs["autoencoder"])
+        clip_encoder = cast(FluxEmbedder, kwargs["clip_encoder"])
+        t5_encoder = cast(FluxEmbedder, kwargs["t5_encoder"])
+        dtype = cast(torch.dtype, kwargs["dtype"])
+        batch = dict(input_dict)
+        batch["image"] = batch.pop("labels")
+        batch = preprocess_data(
+            device=batch["image"].device,
+            dtype=dtype,
+            autoencoder=autoencoder,
+            clip_encoder=clip_encoder,
+            t5_encoder=t5_encoder,
+            batch=batch,
+        )
+
+        image_encodings = batch["img_encodings"]
+        clip_encodings = batch["clip_encodings"]
+        t5_encodings = batch["t5_encodings"]
+        batch_size = image_encodings.shape[0]
+
+        with torch.no_grad(), torch.device(image_encodings.device):
+            noise = torch.randn_like(image_encodings)
+            timesteps = torch.rand((batch_size,))
+            sigmas = timesteps.view(-1, 1, 1, 1)
+            latents = (1 - sigmas) * image_encodings + sigmas * noise
+
+            _, _, latent_height, latent_width = latents.shape
+            position_dim = 3
+            latent_pos_enc = create_position_encoding_for_latents(
+                batch_size, latent_height, latent_width, position_dim
+            )
+            text_pos_enc = torch.zeros(batch_size, t5_encodings.shape[1], position_dim)
+            latents = pack_latents(latents)
+            target = pack_latents(noise - image_encodings)
+
+        if parallel_dims.cp_enabled:
+            from torchtitan.distributed.context_parallel import cp_shard
+
+            (
+                latents,
+                latent_pos_enc,
+                t5_encodings,
+                text_pos_enc,
+                target,
+            ), _ = cp_shard(
+                parallel_dims.get_mesh("cp"),
+                (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
+                None,
+                load_balancer_type=None,
+                input_seq_dims=1,
+            )
+
+        return (
+            latents,
+            target,
+            {
+                "img_ids": latent_pos_enc,
+                "txt": t5_encodings,
+                "txt_ids": text_pos_enc,
+                "y": clip_encodings,
+                "timesteps": timesteps,
+                "loss_target": target,
+            },
+        )
+
     def forward(
         self,
         img: Tensor,
@@ -173,7 +354,18 @@ class FluxModel(BaseModel):
         txt_ids: Tensor,
         timesteps: Tensor,
         y: Tensor,
+        loss_target: Tensor | None = None,
     ) -> Tensor:
+        annotate_flux_forward_inputs(
+            latents=img,
+            latent_pos_enc=img_ids,
+            t5_encodings=txt,
+            text_pos_enc=txt_ids,
+            target=loss_target,
+            clip_encodings=y,
+            timesteps=timesteps,
+        )
+
         @spmd.local_map(
             in_types=(
                 spmd.PartitionSpec("dp", "cp", None),

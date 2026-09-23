@@ -8,9 +8,12 @@
 
 from .apply import apply_transforms, transform_model_config_
 from .base import convert_config_type, ModelConfigTransform
+from .batch_invariance import BatchInvariantFlexConverter
+from .cast_linear import LMHeadCastConverter
 from .context_parallel import ContextParallelTransform
+from .converter import ModelConfigConverter, validate_converter_compatibility
 from .dist_moe import DistMoeTransform, MXFP8DistMoeTransform
-from .lora import LoRAConverter
+from .lora import LinearLoRAHandler, LoRATransform
 from .quantization import (
     Float8GroupedLinearConverter,
     Float8LinearConverter,
@@ -22,12 +25,16 @@ from .quantization import (
 
 __all__ = [
     "ModelConfigTransform",
+    "ModelConfigConverter",
     "apply_transforms",
     "transform_model_config_",
     "convert_config_type",
     "ContextParallelTransform",
+    "BatchInvariantFlexConverter",
     "DistMoeTransform",
-    "LoRAConverter",
+    "LMHeadCastConverter",
+    "LinearLoRAHandler",
+    "LoRATransform",
     "Float8GroupedLinearConverter",
     "Float8LinearConverter",
     "MXFP8GroupedLinearConverter",
@@ -35,4 +42,5 @@ __all__ = [
     "MXFP8DistMoeTransform",
     "NVFP4LinearConverter",
     "QuantizationConverter",
+    "validate_converter_compatibility",
 ]
