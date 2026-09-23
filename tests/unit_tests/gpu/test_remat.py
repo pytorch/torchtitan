@@ -16,8 +16,12 @@ import torch
 import torch_remat as remat
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
+from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import GQAttention
-from torchtitan.models.common.dist_gemm import DistGEMMFeedForward
+from torchtitan.models.common.dist_gemm import (
+    AsyncColumnParallelLinear,
+    AsyncRowParallelLinear,
+)
 from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
@@ -197,7 +201,7 @@ def _linear_config(in_features: int, out_features: int) -> Linear.Config:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w13=_linear_config(4, 16),
+        w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
         w2=_linear_config(8, 4),
     )
 
@@ -227,7 +231,7 @@ class TestRematRegions(unittest.TestCase):
         from torchtitan.models.llama3 import model_registry
 
         with torch.device("meta"):
-            model = model_registry("debugmodel").model.build()
+            model = model_registry("debugmodel").build()
         state_keys = list(model.state_dict())
 
         RegionAC.Config(save_regions=["attention.*"]).build().apply(model)
@@ -324,9 +328,13 @@ class TestRematRegions(unittest.TestCase):
             "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
             side_effect=silu_and_mul,
         ):
-            dist_gemm_config = DistGEMMFeedForward.Config(
-                w13=feed_forward_config.w13,
-                w2=feed_forward_config.w2,
+            dist_gemm_config = FeedForward.Config(
+                w13=AsyncColumnParallelLinear.Config(
+                    in_features=4,
+                    out_features=8,
+                    num_linears=2,
+                ),
+                w2=AsyncRowParallelLinear.Config(in_features=8, out_features=4),
             )
             fused_config = deepcopy(feed_forward_config)
             fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)
@@ -395,6 +403,7 @@ class TestRematRegions(unittest.TestCase):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            score_func=Sigmoid.Config(),
             top_k=1,
         ).build()
 

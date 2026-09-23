@@ -8,12 +8,13 @@ import copy
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import Literal
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -21,9 +22,11 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    Sigmoid,
+    Softmax,
     TransformerBlock,
+    UnaryActivationFn,
 )
-from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -33,19 +36,13 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.utils import validate_converter_order
-from torchtitan.protocols.model import ModelConfigConverter
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.protocols.module import Module
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
-from .parallelize import parallelize_deepseekv3
-from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 __all__ = [
-    "parallelize_deepseekv3",
     "DeepSeekV3Model",
     "DeepSeekV3Router",
     "MTPLoss",
@@ -92,7 +89,7 @@ def make_deepseek_v3_router_config(
     num_experts: int,
     gate_param_init: dict[str, Callable],
     top_k: int = 1,
-    score_func: Literal["sigmoid", "softmax", "sqrtsoftplus"] = "sigmoid",
+    score_func: UnaryActivationFn.Config | None = None,
     route_norm: bool = False,
     route_scale: float = 1.0,
     num_expert_groups: int | None = None,
@@ -108,7 +105,7 @@ def make_deepseek_v3_router_config(
             param_init=gate_param_init,
         ),
         top_k=top_k,
-        score_func=score_func,
+        score_func=Sigmoid.Config() if score_func is None else score_func,
         route_norm=route_norm,
         route_scale=route_scale,
         num_expert_groups=num_expert_groups,
@@ -223,7 +220,7 @@ def build_mla_moe_layers(
     num_experts: int,
     num_shared_experts: int,
     router_top_k: int,
-    router_score_func: Literal["sigmoid", "softmax"],
+    router_score_func: UnaryActivationFn.Config,
     router_route_scale: float = 1.0,
     router_route_norm: bool = False,
     aux_loss_coeff: float | None = None,
@@ -287,7 +284,7 @@ def build_mla_moe_layers(
                     num_experts=num_experts,
                     gate_param_init=depth_init(layer_id),
                     top_k=router_top_k,
-                    score_func=router_score_func,
+                    score_func=copy.deepcopy(router_score_func),
                     route_scale=router_route_scale,
                     route_norm=router_route_norm,
                 ),
@@ -409,7 +406,7 @@ def _debugmodel(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=3,
-        router_score_func="sigmoid",
+        router_score_func=Sigmoid.Config(),
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
@@ -427,6 +424,7 @@ def _debugmodel(
         ),
     )
     return DeepSeekV3Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -483,7 +481,7 @@ def _16b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=6,
-        router_score_func="sigmoid",
+        router_score_func=Sigmoid.Config(),
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
@@ -501,6 +499,7 @@ def _16b(
         ),
     )
     return DeepSeekV3Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -558,7 +557,7 @@ def _236b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=6,
-        router_score_func="softmax",
+        router_score_func=Softmax.Config(),
         router_num_expert_groups=8,
         router_num_limited_groups=3,
         router_route_scale=16.0,
@@ -578,6 +577,7 @@ def _236b(
         ),
     )
     return DeepSeekV3Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -635,7 +635,7 @@ def _671b(
         num_experts=num_experts,
         num_shared_experts=num_shared_experts,
         router_top_k=8,
-        router_score_func="sigmoid",
+        router_score_func=Sigmoid.Config(),
         router_num_expert_groups=8,
         router_num_limited_groups=4,
         router_route_scale=2.5,
@@ -656,6 +656,7 @@ def _671b(
         ),
     )
     return DeepSeekV3Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -685,12 +686,6 @@ deepseekv3_configs = {
 }
 
 
-def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
-    """Register step pre-hooks for load balancing and aux-loss accumulators."""
-    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
-    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
-
-
 def model_registry(
     flavor: str,
     *,
@@ -700,7 +695,7 @@ def model_registry(
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
-) -> ModelSpec:
+) -> DeepSeekV3Model.Config:
     get_config, max_context_len = deepseekv3_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -716,16 +711,7 @@ def model_registry(
         seq_len=context_len,
     )
     if converters is not None:
-        validate_converter_order(converters)
+        validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
-    return ModelSpec(
-        name="deepseek_v3",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_deepseekv3,
-        pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=_post_optimizer_build_fn,
-        state_dict_adapter=DeepSeekV3StateDictAdapter,
-    )
+    return config

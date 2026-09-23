@@ -9,7 +9,6 @@ from typing import cast
 
 from torch.distributed.tensor import Shard
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
     GrainDataLoader,
@@ -44,7 +43,6 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.protocols.model_spec import ModelSpec
 from torchtitan.trainer import Trainer
 
 from . import KIMI_K2_5_SPECIAL_TOKENS, KimiK25Model, model_registry
@@ -78,7 +76,7 @@ def _kimi_multimodal_dataloader(
     return GrainDataLoader.Config(
         dataset=replace(dataset, processor=processor),
         collator=MultiModalCollator.Config(
-            max_images_per_batch=128,
+            max_images_per_microbatch=128,
             patch_size=processor.patch_size,
             temporal_patch_size=processor.temporal_patch_size,
             spatial_merge_size=processor.spatial_merge_size,
@@ -91,22 +89,23 @@ def _kimi_multimodal_dataloader(
 def kimi_k2_5_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_spec = model_registry("debugmodel", seq_len=seq_len)
+    model_config = model_registry("debugmodel", seq_len=seq_len)
     parallelism = ParallelismConfig()
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**KIMI_K2_5_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
-        model_spec=model_spec,
+        model=model_config,
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
         optimizer=_dist_muon_optimizer(
-            model_spec,
-            lr=8e-4,
+            model_config,
+            muon_lr=8e-4,
+            adamw_lr=8e-4,
             parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -116,23 +115,20 @@ def kimi_k2_5_debugmodel(
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10,
             disable_cuda_graphs=True,
         ),
         parallelism=parallelism,
-        checkpoint=CheckpointManager.Config(
-            interval=10,
-            last_save_model_only=False,
-        ),
+        checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
 
 
 def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
     """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
-    model_spec = model_registry(
+    model_config = model_registry(
         "moonlight-16B-A3B", seq_len=seq_len, attn_backend="flex"
     )
     parallelism = ParallelismConfig(
@@ -141,17 +137,18 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Moonlight-16B-A3B",
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=_dist_muon_optimizer(
-            model_spec,
-            lr=3e-4,
+            model_config,
+            muon_lr=3e-4,
+            adamw_lr=3e-4,
             parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -161,27 +158,27 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,
         ),
         parallelism=parallelism,
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
 
 def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
     """Kimi-VL A3B: Moonlight text tower + 2D MoonViT vision (image-text)."""
-    model_spec = model_registry("Kimi-VL-A3B", seq_len=seq_len, attn_backend="flex")
+    model_config = model_registry("Kimi-VL-A3B", seq_len=seq_len, attn_backend="flex")
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
     )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Kimi-VL-A3B",
@@ -190,13 +187,14 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(
             **{**KIMI_K2_5_SPECIAL_TOKENS, "vision_start_token": "<|media_start|>"}
         ),
-        model_spec=model_spec,
+        model=model_config,
         # Kimi-VL is a compatibility flavor; resizing intentionally follows
         # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m"]),
         optimizer=_dist_muon_optimizer(
-            model_spec,
-            lr=3e-4,
+            model_config,
+            muon_lr=3e-4,
+            adamw_lr=3e-4,
             parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -206,22 +204,22 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,
         ),
         parallelism=parallelism,
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )
 
 
 def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     """Full Kimi K2.5 (~1T-total / ~32B-active)."""
-    compile_config = CompileConfig(enable=True, components=["loss"])
+    compile_config = CompileConfig(components=["loss"])
     # The report uses BF16 compute; its FP8 path only compresses saved activations.
-    model_spec = model_registry("Kimi-K2.5", seq_len=seq_len, attn_backend="flex")
+    model_config = model_registry("Kimi-K2.5", seq_len=seq_len, attn_backend="flex")
     parallelism = ParallelismConfig(
         pipeline_parallel_schedule="Interleaved1F1B",
         expert_parallel_degree=8,
@@ -229,17 +227,18 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_spec),
+                global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
         hf_assets_path="./assets/hf/Kimi-K2.5",
-        model_spec=model_spec,
+        model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimizer=_dist_muon_optimizer(
-            model_spec,
-            lr=2.2e-4,
+            model_config,
+            muon_lr=2.2e-4,
+            adamw_lr=2.2e-4,
             parallelism=parallelism,
         ),
         lr_scheduler=LRSchedulersContainer.Config(
@@ -249,13 +248,13 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
-            max_context_length=model_spec.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,
         ),
         parallelism=parallelism,
-        checkpoint=CheckpointManager.Config(interval=500),
+        checkpointer=None,
         activation_checkpoint=FullAC.Config(),
         compile=compile_config,
     )
@@ -289,23 +288,34 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
 
 
 def _dist_muon_optimizer(
-    model_spec: ModelSpec,
+    model_config: KimiK25Model.Config,
     *,
-    lr: float,
+    muon_lr: float,
+    adamw_lr: float,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    model_config = cast(KimiK25Model.Config, model_spec.model)
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
     owned = ComputeLayout(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: Owned(),
         },
     )
+    # Kimi runs Newton-Schulz per logical projection within each MLA head.
     per_query_head = ComputeLayout(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: BlockShard(
                 dim=0,
-                block_size=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
+                # per head: [q_nope_h; q_rope_h]
+                block_sizes=(attention.qk_nope_head_dim, attention.qk_rope_head_dim),
+            )
+        },
+    )
+    kv_latent_and_rope = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                # Shared projections: [kv_latent; k_rope]
+                block_sizes=(attention.kv_lora_rank, attention.qk_rope_head_dim),
             )
         },
     )
@@ -313,7 +323,8 @@ def _dist_muon_optimizer(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: BlockShard(
                 dim=0,
-                block_size=attention.qk_nope_head_dim + attention.v_head_dim,
+                # per head: [k_nope_h; v_h]
+                block_sizes=(attention.qk_nope_head_dim, attention.v_head_dim),
             )
         },
     )
@@ -328,13 +339,19 @@ def _dist_muon_optimizer(
     )
     attention_shardings = {
         **query_shardings,
-        "wkv_a": owned,
+        "wkv_a": kv_latent_and_rope,
         "wkv_b": per_key_value_head,
         "wo": owned,
     }
+    feed_forward_shardings = {
+        "w13": ComputeLayout(
+            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
+        ),
+        "w2": owned,
+    }
     num_layers = len(model_config.layers)
     muon_kwargs = {
-        "lr": lr,
+        "lr": muon_lr,
         "weight_decay": 0.1,
         "foreach": False,
         # Kimi K2 uses 0.2 * sqrt(max(rows, columns))
@@ -343,7 +360,7 @@ def _dist_muon_optimizer(
         "adjust_lr_fn": "match_rms_adamw",
     }
     adamw_kwargs = {
-        "lr": lr,
+        "lr": adamw_lr,
         "betas": (0.9, 0.95),
         "eps": 1e-8,
         "weight_decay": 0.1,
@@ -361,8 +378,8 @@ def _dist_muon_optimizer(
         if not layer_id:
             shardings.update(
                 {
-                    f"{prefix}.feed_forward.{projection}.weight": owned
-                    for projection in ("w13", "w2")
+                    f"{prefix}.feed_forward.{projection}.weight": compute_sharding
+                    for projection, compute_sharding in feed_forward_shardings.items()
                 }
             )
         else:
@@ -375,57 +392,39 @@ def _dist_muon_optimizer(
             shardings[f"{prefix}.moe.router.gate.weight"] = owned
             shardings.update(
                 {
-                    f"{prefix}.moe.shared_experts.{projection}.weight": owned
-                    for projection in ("w13", "w2")
+                    f"{prefix}.moe.shared_experts.{projection}.weight": compute_sharding
+                    for projection, compute_sharding in feed_forward_shardings.items()
                 }
             )
         return shardings
 
-    compute_sharding_by_fqn_per_layer = tuple(
-        compute_shardings_for_layer(layer_id) for layer_id in range(num_layers)
-    )
-    compute_sharding_by_fqn = {
-        fqn: compute_sharding
-        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
-        for fqn, compute_sharding in layer_compute_sharding_by_fqn.items()
-    }
-    layer_bucket_fqns = tuple(
-        tuple(layer_compute_sharding_by_fqn)
-        for layer_compute_sharding_by_fqn in compute_sharding_by_fqn_per_layer
-    )
+    compute_sharding_by_fqn: dict[str, ComputeLayout] = {}
+    layer_fqns = []
+    for layer_id in range(num_layers):
+        layer_shardings = compute_shardings_for_layer(layer_id)
+        compute_sharding_by_fqn.update(layer_shardings)
+        layer_fqns.append(tuple(layer_shardings))
     # Layer 0 has a much larger dense MLP, so keep it separate while amortizing
     # collective launch overhead across pairs of MoE layers.
-    bucket_layer_ids = ((0,),) + tuple(
+    bucket_layer_ids = [(0,)] + [
         tuple(range(first_layer_id, min(first_layer_id + 2, num_layers)))
         for first_layer_id in range(1, num_layers, 2)
-    )
-    bucket_fqns = tuple(
-        tuple(fqn for layer_id in layer_ids for fqn in layer_bucket_fqns[layer_id])
-        for layer_ids in bucket_layer_ids
-    )
-    bucket_configs_list = []
-    for layer_ids, fqns in zip(bucket_layer_ids, bucket_fqns, strict=True):
+    ]
+    bucket_configs = []
+    for layer_ids in bucket_layer_ids:
         name = "layers." + "-".join(map(str, layer_ids))
+        fqns = [fqn for layer_id in layer_ids for fqn in layer_fqns[layer_id]]
         routed_fqns = tuple(
             fqn for fqn in fqns if compute_sharding_by_fqn[fqn] is per_expert
         )
         non_routed_fqns = tuple(
             fqn for fqn in fqns if compute_sharding_by_fqn[fqn] is not per_expert
         )
-        bucket_configs_list.append(
-            BucketConfig(
-                name=name,
-                patterns=non_routed_fqns,
-            )
-        )
+        bucket_configs.append(BucketConfig(name=name, patterns=non_routed_fqns))
         if routed_fqns:
-            bucket_configs_list.append(
-                BucketConfig(
-                    name=f"{name}.routed-experts",
-                    patterns=routed_fqns,
-                )
+            bucket_configs.append(
+                BucketConfig(name=f"{name}.routed-experts", patterns=routed_fqns)
             )
-    bucket_configs = tuple(bucket_configs_list)
     # Muon is designed for matrix parameters; Moonlight uses AdamW for
     # non-matrix parameters such as RMSNorm, LM head, and embeddings. Expert
     # tensors below are batch-first stacks of matrices. See Sec. 2.2:
@@ -459,7 +458,7 @@ def _dist_muon_optimizer(
         ],
         optimizer_factory_kwargs_by_name={
             "DistMuon": {
-                "bucket_configs": bucket_configs,
+                "bucket_configs": tuple(bucket_configs),
                 "compute_sharding_by_fqn": compute_sharding_by_fqn,
             }
         },
