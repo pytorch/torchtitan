@@ -15,7 +15,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
-    apply_fsdp_to_vision_encoder,
+    apply_fsdp_to_multimodal_encoder,
 )
 
 
@@ -93,7 +93,7 @@ class TestVisionEncoderCPUOffload(DTensorTestBase):
         with torch.device("meta"):
             model = _TinyVLM()
 
-        apply_fsdp_to_vision_encoder(
+        apply_fsdp_to_multimodal_encoder(
             model.vision_encoder,
             mesh,
             param_dtype=torch.bfloat16,

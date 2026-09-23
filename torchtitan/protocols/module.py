@@ -11,7 +11,7 @@ import inspect
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any
+from typing import Any, ClassVar
 
 import spmd_types as spmd
 import torch
@@ -52,6 +52,7 @@ class Module(nn.Module, Configurable):
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
+    _module_protocol_exempt_children: ClassVar[frozenset[str]] = frozenset()
 
     def remat_region_name(self, local_name: str) -> str:
         """Return a region's configured qualified name or its local name."""
@@ -223,7 +224,7 @@ class Module(nn.Module, Configurable):
     def _cache_pos_arg_names(self) -> list[str]:
         """Return positional arg names of ``forward`` (excluding ``self``), cached.
 
-        Must be called once **before** ``forward`` is wrapped in ``parallelize``
+        Must be called once **before** ``forward`` is wrapped in ``_parallelize``
         so ``inspect.signature`` sees the unwrapped signature. Subsequent
         calls return the cached list.
         """
@@ -246,7 +247,7 @@ class Module(nn.Module, Configurable):
         ]
         return self._pos_arg_list
 
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
+    def _parallelize(self, parallel_dims: ParallelDims) -> None:
         """Parallelize this module and all Module children recursively.
 
         For each module with a ``sharding_config``:
@@ -263,18 +264,32 @@ class Module(nn.Module, Configurable):
         if self._parallelized:
             raise ValueError(
                 f"{type(self).__name__} has already been parallelized. "
-                "Module.parallelize() must be called at most once per instance."
+                "Module._parallelize() must be called at most once per instance."
             )
         self._parallelized = True
 
-        queue = list(self.children())
+        queue = list(self.named_children())
         while queue:
-            child = queue.pop()
+            child_name, child = queue.pop()
             if isinstance(child, Module):
-                child.parallelize(parallel_dims)
+                child._parallelize(parallel_dims)
             else:
-                # Look through non-Module wrappers, e.g., CheckpointWrapper.
-                queue.extend(child.children())
+                if child_name in self._module_protocol_exempt_children:
+                    continue
+                if (
+                    next(child.parameters(recurse=False), None) is not None
+                    or next(child.buffers(recurse=False), None) is not None
+                ):
+                    raise RuntimeError(
+                        f"{type(self).__name__}.{child_name} owns state but does "
+                        "not implement the Module protocol."
+                    )
+                # Look through stateless containers and wrappers, e.g.
+                # CheckpointWrapper.
+                queue.extend(
+                    (f"{child_name}.{name}", nested)
+                    for name, nested in child.named_children()
+                )
 
         # TODO(fegin): Change to assert once ALL Models are migrated to use _sharding_config.
         if self._sharding_config is None:
