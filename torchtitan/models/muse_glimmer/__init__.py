@@ -381,6 +381,11 @@ def _muse_glimmer_config(
         )
         perception_emb_norm = _scaleless_norm(dim, _NORM_EPS)
 
+    # When the model owns the vision stack, fill the encoder/adapter sharding
+    # configs so ``model.parallelize`` applies their TP.
+    if vision_encoder is not None:
+        set_muse_glimmer_vision_sharding_config(vision_encoder, vision_adapter)
+
     return MuseGlimmerModel.Config(
         max_context_length=max_context_length,
         dim=dim,
