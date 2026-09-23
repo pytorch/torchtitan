@@ -372,13 +372,14 @@ class TestModuleRedistribution(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=2,
+            enable_sequence_parallel=False,
         )
 
         with self.assertRaisesRegex(
             ValueError,
             r"WeightModule\.weight.*tensor dimension 1.*mesh axis tp with size 2",
         ):
-            module.parallelize(parallel_dims)
+            module._parallelize(parallel_dims)
 
     def test_rejects_uneven_ep_parameter_sharding(self):
         module = self.WeightModule(
@@ -393,17 +394,18 @@ class TestModuleRedistribution(unittest.TestCase):
             pp=1,
             ep=2,
             world_size=2,
+            enable_sequence_parallel=False,
         )
 
         with self.assertRaisesRegex(
             ValueError,
             r"WeightModule\.weight.*tensor dimension 0.*mesh axis ep with size 2",
         ):
-            module.parallelize(parallel_dims)
+            module._parallelize(parallel_dims)
 
 
-class TestVerifyModuleProtocol(unittest.TestCase):
-    """Tests for BaseModel.verify_module_protocol."""
+class TestParallelizeModuleProtocol(unittest.TestCase):
+    """Tests for protocol validation during Module._parallelize."""
 
     def test_passes_for_all_module(self):
         """No error when all submodules are Module instances."""
@@ -423,11 +425,14 @@ class TestVerifyModuleProtocol(unittest.TestCase):
                 linear_config = Linear.Config(in_features=4, out_features=4)
                 self.linear = linear_config.build()
 
+            def _apply_fsdp(self, **kwargs):
+                pass
+
         model = GoodModel()
-        model.verify_module_protocol()  # should not raise
+        model._parallelize(None)
 
     def test_default_raises_for_plain_nn_module(self):
-        """Default verify_module_protocol raises when plain nn.Module child exists."""
+        """A plain stateful nn.Module is rejected during parallelization."""
         from torchtitan.protocols.model import BaseModel
 
         class BadModel(BaseModel):
@@ -443,12 +448,15 @@ class TestVerifyModuleProtocol(unittest.TestCase):
                 super().__init__()
                 self.plain = nn.Linear(4, 4)
 
+            def _apply_fsdp(self, **kwargs):
+                pass
+
         model = BadModel()
         with self.assertRaises(RuntimeError):
-            model.verify_module_protocol()
+            model._parallelize(None)
 
-    def test_override_skips_verification(self):
-        """Subclass can override verify_module_protocol to skip verification."""
+    def test_stateless_plain_module_is_allowed(self):
+        """Stateless PyTorch modules do not need the TorchTitan protocol."""
         from torchtitan.protocols.model import BaseModel
 
         class ThirdPartyModel(BaseModel):
@@ -462,13 +470,38 @@ class TestVerifyModuleProtocol(unittest.TestCase):
 
             def __init__(self):
                 super().__init__()
-                self.plain = nn.Linear(4, 4)  # third-party module
+                self.plain = nn.ReLU()
 
-            def verify_module_protocol(self) -> None:
-                pass  # skip for third-party internals
+            def _apply_fsdp(self, **kwargs):
+                pass
 
         model = ThirdPartyModel()
-        model.verify_module_protocol()  # should not raise
+        model._parallelize(None)
+
+    def test_explicitly_exempt_stateful_child_is_allowed(self):
+        """A protocol module may own an opaque third-party implementation."""
+        from torchtitan.protocols.model import BaseModel
+
+        class ThirdPartyModel(BaseModel):
+            _module_protocol_exempt_children = frozenset({"plain"})
+
+            @dataclass(kw_only=True, slots=True)
+            class Config(BaseModel.Config):
+                def update_from_config(self, *, config, **kwargs):
+                    pass
+
+                def get_nparams_and_flops(self, model, seq_len):
+                    return (0, 0)
+
+            def __init__(self):
+                super().__init__()
+                self.plain = nn.Linear(4, 4)
+
+            def _apply_fsdp(self, **kwargs):
+                pass
+
+        model = ThirdPartyModel()
+        model._parallelize(None)
 
 
 if __name__ == "__main__":

@@ -52,11 +52,17 @@ class SimpleModel(nn.Module):
         return self.output(x)
 
 
+class FakeRouter(nn.Module):
+    def __init__(self, tokens):
+        super().__init__()
+        self.register_buffer("tokens_per_expert_E", torch.tensor(tokens))
+
+
 class FakeMoE(nn.Module):
     def __init__(self, load_balance_coeff, tokens):
         super().__init__()
         self.load_balance_coeff = load_balance_coeff
-        self.register_buffer("tokens_per_expert_E", torch.tensor(tokens))
+        self.router = FakeRouter(tokens)
         if load_balance_coeff is not None:
             self.register_buffer("expert_bias_E", torch.zeros(len(tokens)))
         else:
@@ -145,7 +151,7 @@ def _run_torchft_moe_load_balancing_step(rank, store_path):
         expected_global_counts = torch.tensor([[10, 20], [20, 10]])
         local_counts = torch.tensor(local_counts_by_rank[rank])
         for layer, counts in zip(model.layers.values(), local_counts):
-            layer.moe.tokens_per_expert_E.copy_(counts)
+            layer.moe.router.tokens_per_expert_E.copy_(counts)
 
         config = TorchFTOptimizersContainer.Config(
             implementation="for-loop",
@@ -196,11 +202,11 @@ def _run_torchft_moe_load_balancing_step(rank, store_path):
 
         # The next training step must start with empty load counters.
         torch.testing.assert_close(
-            model.layers["0"].moe.tokens_per_expert_E,
+            model.layers["0"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.tokens_per_expert_E,
+            model.layers["1"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
 
@@ -291,11 +297,11 @@ class TestParamGroupConfig(unittest.TestCase):
             torch.tensor([0.2, -0.2]),
         )
         torch.testing.assert_close(
-            model.layers["0"].moe.tokens_per_expert_E,
+            model.layers["0"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.tokens_per_expert_E,
+            model.layers["1"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
 
@@ -343,7 +349,7 @@ class TestParamGroupConfig(unittest.TestCase):
             torch.tensor([-0.3, 0.3]),
         )
         torch.testing.assert_close(
-            model.mtp_layers[0].moe.tokens_per_expert_E,
+            model.mtp_layers[0].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
 

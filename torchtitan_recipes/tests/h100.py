@@ -6,10 +6,12 @@
 
 """Configurations for the ``h100`` integration test suite."""
 
+from torchtitan.config import CompileConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
+    deepseek_v3_debugmodel_float8_grouped,
     deepseek_v3_debugmodel_hybridep,
 )
 from torchtitan.models.llama3.config_registry import (
@@ -22,7 +24,7 @@ from torchtitan.trainer import Trainer
 
 def llama3_debugmodel_tp2_asynctp_compile() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
-    config.compile.enable = True
+    config.compile = CompileConfig()
     config.parallelism.tensor_parallel_degree = 2
     config.compile.enable_async_tensor_parallel = True
     return config
@@ -36,13 +38,13 @@ def llama3_debugmodel_dist_gemm_tp2() -> Trainer.Config:
 
 def llama3_debugmodel_fsdp_symm_mem() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
-    config.parallelism.enable_fsdp_symm_mem = True
+    config.parallelism.fsdp_symm_mem_scope = "all"
     return config
 
 
 def llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile() -> Trainer.Config:
     config = llama3_debugmodel_float8(seq_len=2048)
-    config.compile.enable = True
+    config.compile = CompileConfig()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
@@ -55,7 +57,7 @@ def llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile() -> Trainer.Config:
 
 def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
     config = llama3_debugmodel_float8(seq_len=2048)
-    config.compile.enable = True
+    config.compile = CompileConfig()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.data_parallel_replicate_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -65,12 +67,20 @@ def llama3_debugmodel_float8_hsdp2x2_cp2_compile() -> Trainer.Config:
     )
 
 
+def deepseek_v3_debugmodel_float8_grouped_fsdp2_ep2_compile() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_float8_grouped(seq_len=2048)
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile() -> Trainer.Config:
     config = deepseek_v3_debugmodel_hybridep(seq_len=2048)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 2
-    config.compile.enable = True
-    config.compile.components = ["model", "loss"]
+    config.compile = CompileConfig(components=["model", "loss"])
     return config
 
 

@@ -46,7 +46,7 @@ class _RowsSource:
 CONTEXT = DatasetBuildContext(
     tokenizer=_Tokenizer(),
     max_context_length=9,
-    num_tokens_per_batch=9,
+    num_tokens_per_microbatch=9,
     read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
 )
 
@@ -323,11 +323,11 @@ def test_multimodal_collator_preserves_aligned_labels():
         "pixel_values_videos": [],
     }
 
-    inputs = collator([packed])
-    labels = inputs["labels"]
+    microbatch = collator([packed])
+    labels = microbatch.labels
 
     assert labels[:4].tolist() == [2, 9, 4, 10]
-    assert inputs["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 4
+    assert microbatch.num_valid_tokens == int((labels != IGNORE_INDEX).sum()) == 4
 
 
 def test_mm_finite_underfilled_tail_flushes():
