@@ -185,7 +185,7 @@ class ParallelismConfig:
     of stages. Stages per rank are inferred from split points degree, and schedule.
     """
 
-    module_fqns_per_model_part: list[list[str]] | None = None
+    pipeline_parallel_module_fqns_per_model_part: list[list[str]] | None = None
     """
     Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model chunk.
     Each inner list represents one model chunk and contains the module names that belong to that chunk.
@@ -209,7 +209,7 @@ class ParallelismConfig:
 
     pipeline_parallel_layers_per_stage: int | None = None
     """
-    The number of layers per (virtual) pipeline stage. If specified, the module_fqns_per_model_part will be
+    The number of layers per (virtual) pipeline stage. If specified, the pipeline_parallel_module_fqns_per_model_part will be
     calculated from the number of layers and pipeline_parallel_degree. If not specified, the
     layers per stage will be inferred from the model, schedule, and pipeline_parallel_degree.
     """

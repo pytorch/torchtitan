@@ -18,7 +18,7 @@ from torchtitan.distributed.pipeline_parallel import (
 )
 
 
-def test_pipeline_with_first_stage_modules_prepends_present_modules(monkeypatch):
+def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):
     model = nn.Module()
     model.vision_encoder = nn.Linear(2, 2)
     model.vision_adapter = nn.Linear(2, 2)
@@ -32,7 +32,8 @@ def test_pipeline_with_first_stage_modules_prepends_present_modules(monkeypatch)
 
     monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
 
-    result = pipeline_parallel.pipeline_with_first_stage_modules(
+    parallelism = ParallelismConfig(pipeline_parallel_degree=2)
+    result = pipeline_parallel.pipeline_with_first_last_stage_modules(
         model,
         first_stage_module_fqns=(
             "vision_encoder",
@@ -41,23 +42,24 @@ def test_pipeline_with_first_stage_modules_prepends_present_modules(monkeypatch)
             "missing_module",
         ),
         parallel_dims=SimpleNamespace(pp=2),
-        parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+        parallelism=parallelism,
         model_config=SimpleNamespace(layers=[None] * 4),
     )
 
     assert result is expected_result
-    assert captured["parallelism"].module_fqns_per_model_part == [
+    assert parallelism.pipeline_parallel_module_fqns_per_model_part is None
+    assert captured["parallelism"].pipeline_parallel_module_fqns_per_model_part == [
         ["vision_encoder", "vision_adapter", "tok_embeddings", "layers.0", "layers.1"],
         ["layers.2", "layers.3", "norm", "lm_head"],
     ]
 
 
-def test_pipeline_with_first_stage_modules_preserves_explicit_split(monkeypatch):
+def test_pipeline_with_first_last_stage_modules_preserves_explicit_split(monkeypatch):
     model = nn.Module()
     configured_fqns = [["input"], ["output"]]
     parallelism = ParallelismConfig(
         pipeline_parallel_degree=2,
-        module_fqns_per_model_part=configured_fqns,
+        pipeline_parallel_module_fqns_per_model_part=configured_fqns,
     )
     captured = {}
 
@@ -67,7 +69,7 @@ def test_pipeline_with_first_stage_modules_preserves_explicit_split(monkeypatch)
 
     monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
 
-    pipeline_parallel.pipeline_with_first_stage_modules(
+    pipeline_parallel.pipeline_with_first_last_stage_modules(
         model,
         first_stage_module_fqns=("missing_module",),
         parallel_dims=SimpleNamespace(pp=2),
@@ -76,6 +78,36 @@ def test_pipeline_with_first_stage_modules_preserves_explicit_split(monkeypatch)
     )
 
     assert captured["parallelism"] is parallelism
+
+
+def test_pipeline_with_first_last_stage_modules_appends_present_last_stage_modules(
+    monkeypatch,
+):
+    model = nn.Module()
+    model.vision_encoder = nn.Linear(2, 2)
+    model.output_res_proj = nn.Linear(2, 2)
+    model.output_res_norm = None
+    captured = {}
+
+    def capture_pipeline_llm(model, **kwargs):
+        captured["parallelism"] = kwargs["parallelism"]
+        return object()
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
+
+    pipeline_parallel.pipeline_with_first_last_stage_modules(
+        model,
+        first_stage_module_fqns=("vision_encoder",),
+        last_stage_module_fqns=("output_res_proj", "output_res_norm", "missing"),
+        parallel_dims=SimpleNamespace(pp=2),
+        parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+        model_config=SimpleNamespace(layers=[None] * 4),
+    )
+
+    assert captured["parallelism"].pipeline_parallel_module_fqns_per_model_part == [
+        ["vision_encoder", "tok_embeddings", "layers.0", "layers.1"],
+        ["layers.2", "layers.3", "norm", "lm_head", "output_res_proj"],
+    ]
 
 
 def _assert_layer_assignment(module_names_per_stage: list[list[str]], num_layers: int):
@@ -220,3 +252,53 @@ def test_pp_rank_to_stage_mapping_requires_even_division():
 def test_get_pipeline_metadata_requires_layers_attribute():
     with pytest.raises(ValueError, match="Model does not have layers attribute."):
         _get_pipeline_metadata(object(), ParallelismConfig(), object())
+
+
+def test_pipeline_with_first_last_stage_modules_hands_back_the_split(monkeypatch):
+    model = nn.Module()
+    model.vision_encoder = nn.Linear(2, 2)
+    model.output_res_norm = nn.Linear(2, 2)
+    fake_result = (object(), [], True, False)
+    captured = {}
+
+    def capture_pipeline_llm(model, **kwargs):
+        captured["parallelism"] = kwargs["parallelism"]
+        return fake_result
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
+    common = dict(
+        first_stage_module_fqns=("vision_encoder",),
+        last_stage_module_fqns=("output_res_norm",),
+        parallel_dims=SimpleNamespace(pp=2),
+        model_config=SimpleNamespace(layers=[None] * 4),
+    )
+
+    plain = pipeline_parallel.pipeline_with_first_last_stage_modules(
+        model, parallelism=ParallelismConfig(pipeline_parallel_degree=2), **common
+    )
+    assert plain is fake_result
+
+    *head, split = pipeline_parallel.pipeline_with_first_last_stage_modules(
+        model,
+        parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+        return_split=True,
+        **common,
+    )
+    assert tuple(head) == fake_result
+    assert split == [
+        ["vision_encoder", "tok_embeddings", "layers.0", "layers.1"],
+        ["layers.2", "layers.3", "norm", "lm_head", "output_res_norm"],
+    ]
+    assert split == captured["parallelism"].pipeline_parallel_module_fqns_per_model_part
+
+    explicit = [["tok_embeddings", "layers.0"], ["layers.1", "norm", "lm_head"]]
+    *_, split = pipeline_parallel.pipeline_with_first_last_stage_modules(
+        model,
+        parallelism=ParallelismConfig(
+            pipeline_parallel_degree=2,
+            pipeline_parallel_module_fqns_per_model_part=explicit,
+        ),
+        return_split=True,
+        **common,
+    )
+    assert split == explicit

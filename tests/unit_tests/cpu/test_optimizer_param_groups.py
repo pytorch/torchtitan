@@ -581,6 +581,32 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
         opt = container.optimizers[0]
         self.assertEqual(len(opt.param_groups), 2)
 
+    def test_pattern_may_match_nothing_on_one_stage(self):
+        """A pipeline stage without a pattern's parameters gets no group for it."""
+        head_only = nn.Sequential(nn.Linear(16, 32))
+        config = OptimizersContainer.Config(
+            implementation="for-loop",
+            param_groups=[
+                ParamGroupConfig(
+                    pattern=r"attention",
+                    optimizer_name="Adam",
+                    optimizer_kwargs={"lr": 1e-3},
+                ),
+                _DEFAULT_ADAMW,
+            ],
+        )
+        container = config.build(model_parts=[SimpleModel(), head_only])
+        # Two optimizers for the full part, one for the head-only part.
+        self.assertEqual(
+            [type(opt).__name__ for opt in container.optimizers],
+            ["Adam", "AdamW", "AdamW"],
+        )
+        self.assertEqual(len(container.optimizers[2].param_groups), 1)
+
+        config.param_groups[0].pattern = r"nonexistent"
+        with self.assertRaisesRegex(ValueError, "matched no parameters"):
+            config.build(model_parts=[SimpleModel(), head_only])
+
     def test_build_optimizer_default_groups(self):
         """default_adamw produces standard single-group behavior."""
         model = SimpleModel()
