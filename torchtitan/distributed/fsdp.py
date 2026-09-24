@@ -301,7 +301,7 @@ def apply_fsdp_to_decoder(
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
         # - When EP = 1: all params use the same FSDP mesh, but experts may
-        #   use Shard(1) when FSDP degree > num_experts to avoid padding
+        #   shard their output features when FSDP degree > num_experts
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
         if getattr(transformer_block, "moe_enabled", False):
@@ -309,7 +309,6 @@ def apply_fsdp_to_decoder(
             # Expert weights live on the grouped-GEMM child (inner_experts).
             # pyrefly: ignore [missing-attribute]
             experts = transformer_block.moe.routed_experts.inner_experts
-            expert_params = set(experts.parameters())
             num_experts = experts.num_experts
 
             if ep_degree > 1:
@@ -326,14 +325,18 @@ def apply_fsdp_to_decoder(
                     efsdp_ep_size *= dp_storage_mesh["cp"].size()
 
             if efsdp_ep_size > num_experts:
-                expert_shard_placement = Shard(1)
+                expert_param_placements = {
+                    param: Shard(2 if name == "w13_E2FD" else 1)
+                    for name, param in experts.named_parameters()
+                }
             else:
-                expert_shard_placement = Shard(0)
+                expert_param_placements = {
+                    param: Shard(0) for param in experts.parameters()
+                }
 
             if ep_degree == 1:
                 param_placements = stacked_param_placements.copy()
-                for param in expert_params:
-                    param_placements[param] = expert_shard_placement
+                param_placements.update(expert_param_placements)
                 fully_shard(
                     transformer_block,
                     **fsdp_config,
@@ -366,15 +369,16 @@ def apply_fsdp_to_decoder(
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
-                    _expert_params: set = expert_params,
-                    _expert_placement: Shard = expert_shard_placement,
+                    _expert_param_placements: dict[
+                        nn.Parameter, Shard
+                    ] = expert_param_placements,
                     _stacked: dict[nn.Parameter, Shard] = stacked_param_placements,
                     _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
                     _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
                 ) -> ShardPlacementResult:
-                    if param in _expert_params:
+                    if (placement := _expert_param_placements.get(param)) is not None:
                         return ShardPlacementResult(
-                            placement=_expert_placement, mesh_info=_edp_mesh_info
+                            placement=placement, mesh_info=_edp_mesh_info
                         )
                     else:
                         return ShardPlacementResult(
