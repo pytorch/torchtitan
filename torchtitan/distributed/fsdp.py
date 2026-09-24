@@ -21,6 +21,7 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.config import FSDPSymmMemScope
 from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.models.common.linear import GroupedLinear
 
 logger = logging.getLogger(__name__)
 
@@ -33,23 +34,35 @@ _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
 
 
-def _linear_param_shard_placements(module: nn.Module) -> dict[nn.Parameter, Shard]:
-    """Shard stacked Linear parameters along their matrix-row dimension.
+def _linear_param_shard_placements(
+    module: nn.Module,
+    *,
+    include_unstacked_grouped: bool = False,
+) -> dict[nn.Parameter, Shard]:
+    """Shard linear parameters along their matrix-row dimension.
 
     A stacked Linear stores weight as ``[N, F, D]`` and bias as ``[N, F]``.
-    FSDP's default ``Shard(0)`` would split the small logical-projection
-    dimension, so shard ``F`` instead. Ordinary Linear parameters remain 2D
-    and use FSDP's default placement.
+    A GroupedLinear prepends its group dimension, producing ``[E, N, F, D]``
+    for stacked weights. FSDP's default ``Shard(0)`` would split a logical
+    projection or group dimension, so shard the matrix rows instead.
+
+    Args:
+        module: Module tree whose linear parameters should be inspected.
+        include_unstacked_grouped: Also return ordinary ``[E, F, D]`` grouped
+            weights. This is used when the expert dimension is too small for
+            the E/FSDP mesh and expert weights must shard their matrix rows.
     """
     placements: dict[nn.Parameter, Shard] = {}
     for child in module.modules():
-        if not isinstance(child, nn.Linear) or getattr(child, "num_linears", 1) == 1:
+        if isinstance(child, GroupedLinear):
+            if child.num_linears == 1 and not include_unstacked_grouped:
+                continue
+        elif not isinstance(child, nn.Linear) or getattr(child, "num_linears", 1) == 1:
             continue
         weight = cast(nn.Parameter, child.weight)
-        placements[weight] = Shard(1)
-        if child.bias is not None:
-            bias = child.bias
-            placements[bias] = Shard(1)
+        placements[weight] = Shard(weight.ndim - 2)
+        if (bias := getattr(child, "bias", None)) is not None:
+            placements[bias] = Shard(bias.ndim - 1)
     return placements
 
 
@@ -324,10 +337,10 @@ def apply_fsdp_to_decoder(
                     efsdp_ep_size *= dp_storage_mesh["cp"].size()
 
             if efsdp_ep_size > num_experts:
-                expert_param_placements = {
-                    **{param: Shard(2) for param in routed_experts.w13.parameters()},
-                    **{param: Shard(1) for param in routed_experts.w2.parameters()},
-                }
+                expert_param_placements = _linear_param_shard_placements(
+                    routed_experts,
+                    include_unstacked_grouped=True,
+                )
             else:
                 expert_param_placements = {
                     param: Shard(0) for param in routed_experts.parameters()
