@@ -773,13 +773,19 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return out_TD
-        return spmd.redistribute(
+        out_TD = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("tp_communication.output_reduce"),
+            recompute=self.remat_should_recompute("tp_communication"),
+        )(
             out_TD,
             tp_group,
             src=spmd.P,
             dst=spmd.I,
             backward_options={"op_dtype": out_TD.dtype},
         )
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:

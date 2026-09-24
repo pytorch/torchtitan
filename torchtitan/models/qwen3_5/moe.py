@@ -39,13 +39,26 @@ class SigmoidGatedFeedForward(FeedForward):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if ep_enabled and tp_group is not None:
             src = spmd.S(0) if sp_enabled else spmd.I
-            x = spmd.redistribute(
-                x,
-                tp_group,
-                src=src,
-                dst=spmd.R,
-                backward_options={"op_dtype": x.dtype},
-            )
+            if sp_enabled:
+                x = remat.region(
+                    spmd.redistribute,
+                    self.remat_region_name("tp_communication.input_gather"),
+                    recompute=self.remat_should_recompute("tp_communication"),
+                )(
+                    x,
+                    tp_group,
+                    src=src,
+                    dst=spmd.R,
+                    backward_options={"op_dtype": x.dtype},
+                )
+            else:
+                x = spmd.redistribute(
+                    x,
+                    tp_group,
+                    src=src,
+                    dst=spmd.R,
+                    backward_options={"op_dtype": x.dtype},
+                )
 
         out_TD = super().forward(x)
         gate_out_TD = remat.region(

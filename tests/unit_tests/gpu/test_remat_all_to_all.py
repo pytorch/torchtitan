@@ -19,7 +19,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
-from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.moe import MoE, RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -74,6 +74,16 @@ class _AllToAllBlock(Module):
             expert_ids_TK,
             num_tokens_per_expert_E,
         ).sum()
+
+
+class _TPOutputReduceBlock(Module):
+    def __init__(self):
+        super().__init__()
+        self.moe = MoE.__new__(MoE)
+        Module.__init__(self.moe)
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.moe._reduce_output_across_tp(x_TD).sum()
 
 
 class _Model(Module):
@@ -162,6 +172,65 @@ class TestAllToAllRematRegions(DTensorTestBase):
 
                 self._assert_results_equal(expected, actual)
                 self.assertEqual(baseline_collectives, 3)
+                self.assertEqual(
+                    num_collectives,
+                    baseline_collectives + expected_replay_collectives,
+                )
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class TestMoETPRematRegions(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @with_comms
+    def test_output_reduce_replay_follows_region_policy(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("tp",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+
+        for save_regions, expected_replay_collectives in (
+            ([], 1),
+            (["moe.tp_communication"], 0),
+        ):
+            with (
+                self.subTest(save_regions=save_regions),
+                torch.autograd.set_multithreading_enabled(False),
+                set_current_spmd_mesh(mesh),
+            ):
+                baseline = _Model(_TPOutputReduceBlock()).to(self.device_type)
+                remat_model = _Model(_TPOutputReduceBlock()).to(self.device_type)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+
+                num_collectives = 0
+                original_redistribute = spmd.redistribute
+
+                def counted_redistribute(*args, **kwargs):
+                    nonlocal num_collectives
+                    num_collectives += 1
+                    return original_redistribute(*args, **kwargs)
+
+                x_TD = torch.randn(4, 4, device=self.device_type)
+                with patch.object(
+                    spmd,
+                    "redistribute",
+                    side_effect=counted_redistribute,
+                ):
+                    expected = _run_forward_backward(baseline, x_TD)
+                    baseline_collectives = num_collectives
+                    num_collectives = 0
+                    actual = _run_forward_backward(remat_model, x_TD)
+
+                TestAllToAllRematRegions._assert_results_equal(expected, actual)
+                self.assertEqual(baseline_collectives, 1)
                 self.assertEqual(
                     num_collectives,
                     baseline_collectives + expected_replay_collectives,

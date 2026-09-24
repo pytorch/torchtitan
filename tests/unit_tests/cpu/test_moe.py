@@ -338,6 +338,32 @@ class TestMoE(unittest.TestCase):
         self.assertIs(type(config.w2), Linear.Config)
         self.assertEqual(config.w13.num_linears, 2)
 
+    def test_common_shared_expert_input_gather_is_owned_by_w13(self):
+        moe_config = _moe_sharding_config(enable_ep=True, enable_sp=True)
+        shared_config, w13_config, _ = _shared_experts_sharding_configs(
+            enable_ep=True,
+            enable_sp=True,
+        )
+
+        assert moe_config.in_src_shardings is not None
+        assert shared_config.in_src_shardings is not None
+        assert w13_config.in_src_shardings is not None
+        self.assertIsNone(moe_config.in_dst_shardings)
+        self.assertIsNone(shared_config.in_dst_shardings)
+        self.assertIsNone(w13_config.in_dst_shardings)
+        self.assertEqual(
+            _per_axis_types(moe_config.in_src_shardings["x_TD"])[MeshAxisName.TP],
+            spmd.S(0),
+        )
+        self.assertEqual(
+            _per_axis_types(shared_config.in_src_shardings["x"])[MeshAxisName.TP],
+            spmd.S(0),
+        )
+        self.assertEqual(
+            _per_axis_types(w13_config.in_src_shardings["input"])[MeshAxisName.TP],
+            spmd.S(0),
+        )
+
     def test_explicit_moe_tp_transitions_with_ep_without_sp(self):
         moe = MoE.__new__(MoE)
         x_TD = torch.randn(4, 8)
@@ -361,6 +387,10 @@ class TestMoE(unittest.TestCase):
                 "torchtitan.models.common.moe.spmd.redistribute",
                 side_effect=lambda tensor, *_args, **_kwargs: tensor,
             ) as redistribute,
+            patch(
+                "torchtitan.models.common.moe.remat.region",
+                side_effect=lambda function, *_args, **_kwargs: function,
+            ) as region,
         ):
             moe._shard_expert_parallel_inputs(x_TD, padding_mask_T)
             moe._reduce_output_across_tp(x_TD)
@@ -389,6 +419,11 @@ class TestMoE(unittest.TestCase):
                         backward_options={"op_dtype": x_TD.dtype},
                     ),
                 ],
+            )
+            region.assert_called_once_with(
+                redistribute,
+                "tp_communication.output_reduce",
+                recompute=True,
             )
 
     def test_expert_branch_layouts_before_moe_boundary(self):
