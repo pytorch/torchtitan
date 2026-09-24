@@ -4,6 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
+from dataclasses import dataclass
+from typing import cast, TypeVar
+
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.common.token_dispatcher import (
@@ -11,6 +15,37 @@ from torchtitan.models.common.token_dispatcher import (
     HybridEPTokenDispatcher,
     TorchAOTokenDispatcher,
 )
+
+_LinearT = TypeVar("_LinearT", bound=Linear)
+
+
+@functools.cache
+def get_quantized_linear(
+    quantized_cls: type[_LinearT],
+    parent_cls: type[Linear],
+) -> type[_LinearT]:
+    """Get a cached quantized version of a linear module class."""
+    if parent_cls is Linear:
+        return quantized_cls
+
+    quantized_config_cls = quantized_cls.Config
+
+    class QuantizedLinear(
+        quantized_cls,  # pyrefly: ignore [invalid-inheritance]
+        parent_cls,
+    ):
+        @dataclass(kw_only=True, slots=True)
+        class Config(quantized_config_cls):  # type: ignore[misc]
+            pass
+
+    quantized_name = quantized_cls.__name__.removesuffix("Linear")
+    linear_name = f"{quantized_name}{parent_cls.__name__}"
+    QuantizedLinear.__name__ = linear_name
+    QuantizedLinear.__qualname__ = linear_name
+    QuantizedLinear.__module__ = quantized_cls.__module__
+    QuantizedLinear.Config.__qualname__ = f"{linear_name}.Config"
+    QuantizedLinear.Config.__module__ = quantized_cls.__module__
+    return cast(type[_LinearT], QuantizedLinear)
 
 
 def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) -> bool:

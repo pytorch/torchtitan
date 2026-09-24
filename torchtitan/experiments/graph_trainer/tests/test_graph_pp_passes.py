@@ -8,7 +8,7 @@ import contextlib
 import operator
 import unittest
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -274,6 +274,97 @@ def _assert_tensor_sequence_equal(
 
 
 class GraphPPPartitionTest(unittest.TestCase):
+    def test_partition_keeps_only_same_phase_effects(self) -> None:
+        x = torch.randn(2, 4)
+        fwd_state = torch.zeros_like(x)
+        bwd_state = torch.zeros_like(x)
+        base_traced = minimal_fx_tracer(lambda a, b, c: [a, b])(
+            x,
+            fwd_state,
+            bwd_state,
+        )
+
+        graph = fx.Graph()
+        graph_x = graph.placeholder("x")
+        graph_fwd_state = graph.placeholder("fwd_state")
+        graph_bwd_state = graph.placeholder("bwd_state")
+        fwd_value = graph.call_function(
+            torch.ops.aten.add.Tensor,
+            args=(graph_x, 1.0),
+        )
+        fwd_copy = graph.call_function(
+            torch.ops.aten.copy_.default,
+            args=(graph_fwd_state, fwd_value),
+        )
+        graph.call_function(
+            torch.ops.aten.rand.default,
+            args=([2, 4],),
+            kwargs={"device": "cpu"},
+        )
+        fwd_output = graph.call_function(torch.ops.aten.sin.default, args=(fwd_copy,))
+        bwd_value = graph.call_function(
+            torch.ops.aten.sub.Tensor,
+            args=(graph_x, 1.0),
+        )
+        bwd_copy = graph.call_function(
+            torch.ops.aten.copy_.default,
+            args=(graph_bwd_state, bwd_value),
+        )
+        bwd_random = graph.call_function(
+            torch.ops.aten.rand.default,
+            args=([2, 4],),
+            kwargs={"device": "cpu"},
+        )
+        bwd_output = graph.call_function(torch.ops.aten.cos.default, args=(bwd_copy,))
+        for node in (bwd_value, bwd_copy, bwd_random, bwd_output):
+            node.meta["autograd_backward"] = True
+        graph.output((fwd_output, bwd_output))
+        joint = _make_graph_module(graph)
+        traced = replace(base_traced, gm=joint)
+
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced,
+            num_fwd_outputs=1,
+        )
+
+        for module, expected_backward in (
+            (fw_module, False),
+            (bw_module, True),
+        ):
+            effect_nodes = [
+                node
+                for node in module.graph.nodes
+                if node.op == "call_function"
+                and node.target
+                in (torch.ops.aten.copy_.default, torch.ops.aten.rand.default)
+            ]
+            self.assertEqual(len(effect_nodes), 2)
+            self.assertTrue(
+                all(
+                    bool(node.meta.get("autograd_backward", False)) == expected_backward
+                    for node in effect_nodes
+                )
+            )
+
+        joint_inputs = [x.clone(), fwd_state.clone(), bwd_state.clone()]
+        torch.manual_seed(42)
+        joint_outputs = _boxed_run(joint, list(joint_inputs))
+        joint_rng_state = torch.get_rng_state()
+
+        split_inputs = [x.clone(), fwd_state.clone(), bwd_state.clone()]
+        torch.manual_seed(42)
+        fw_args = [split_inputs[index] for index in meta.fwd_flat_input_indices]
+        fw_outputs = _boxed_run(fw_module, list(fw_args))
+        bw_args = _backward_args_from_partition(meta, fw_outputs, ())
+        bw_outputs = _boxed_run(bw_module, bw_args)
+        split_rng_state = torch.get_rng_state()
+
+        _assert_tensor_sequence_equal(self, fw_outputs[:1], joint_outputs[:1])
+        _assert_tensor_sequence_equal(self, bw_outputs, joint_outputs[1:])
+        self.assertTrue(torch.equal(split_inputs[1], joint_inputs[1]))
+        self.assertTrue(torch.equal(split_inputs[2], joint_inputs[2]))
+        self.assertTrue(torch.equal(split_rng_state, joint_rng_state))
+
     def test_real_dsv3_moe_block_partition_matches_joint_graph(self) -> None:
         traced_block = _trace_dsv3_moe_block_stage()
 
@@ -1005,7 +1096,8 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         traced.gm = gm
         _, bw_module, meta = partition_joint_graph(traced, num_fwd_outputs=1)
         self.assertIn(sharded_param.name, meta.saved_for_backward_names)
-        self.assertIn(
+        self.assertIn(unshard_output.name, meta.saved_for_backward_names)
+        self.assertNotIn(
             torch.ops._c10d_functional.all_gather_into_tensor.default,
             _call_targets(bw_module),
         )
