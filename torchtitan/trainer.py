@@ -370,6 +370,7 @@ class Trainer(Configurable):
         global_valid_tokens = engine.prepare_step(
             global_valid_tokens,
             num_accumulation_steps=self.gradient_accumulation_steps,
+            microbatch_groups=microbatch_groups,
         )
 
         # Process each gradient accumulation step, then free its inputs.

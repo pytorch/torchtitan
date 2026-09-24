@@ -33,6 +33,7 @@ from torchtitan.components.loss import (
     IGNORE_INDEX,
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder, MTPLoss, roll_mtp_sequence
 
 
@@ -138,6 +139,42 @@ class TestLoss(unittest.TestCase):
             torch.tensor([True, False, False, True, False, False, False, False]),
         )
         torch.testing.assert_close(extra_kwargs["padding_mask"], padding_mask)
+
+    def test_mtp_aux_loss_counts_match_routed_tokens_across_step(self):
+        model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
+        packed = {
+            "input": torch.tensor([10, 11, 12, 20, 21, 22, 23, 24]),
+            "positions": torch.tensor([0, 1, 2, 0, 1, 2, 3, 4]),
+            "padding_mask": torch.tensor(
+                [False, False, False, False, False, False, True, True]
+            ),
+        }
+        # Source position 1 is valid for position 0, but position 0 itself
+        # is padded and must not be counted by the MTP MoE.
+        padded_current = {
+            "input": torch.tensor([10, 11, 12]),
+            "positions": torch.tensor([0, 1, 2]),
+            "padding_mask": torch.tensor([True, False, False]),
+        }
+        microbatches = [
+            [SimpleNamespace(as_input_dict=lambda: packed)],
+            [SimpleNamespace(as_input_dict=lambda: padded_current)],
+        ]
+        torch.testing.assert_close(
+            model.count_mtp_aux_loss_tokens(microbatches),
+            torch.tensor([5, 2]),
+        )
+
+    def test_mtp_aux_loss_denominators_are_per_layer(self):
+        model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
+        with patch.dict(AuxLoss._group_counts, {}, clear=True):
+            losses = [AuxLoss(AuxLoss.Config(coeff=1.0)) for _ in range(2)]
+            for layer, loss in zip(model.mtp_layers, losses):
+                layer.add_module("aux_loss", loss)
+
+            model.set_mtp_aux_loss_denominators(torch.tensor([5, 0]))
+            self.assertEqual(losses[0]._get_step_denominator().item(), 5)
+            self.assertEqual(losses[1]._get_step_denominator().item(), 1)
 
     def test_mtp_loss_rejects_plain_tensor(self):
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))

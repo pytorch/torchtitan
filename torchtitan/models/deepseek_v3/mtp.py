@@ -14,6 +14,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
+from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
 from torchtitan.config import (
     CompileConfig,
@@ -33,6 +34,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     VarlenInnerAttention,
 )
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.linear import Linear
@@ -244,6 +246,54 @@ class MTPDecoder(Decoder):
                     "MTPTransformerBlock.Config instances."
                 )
             self.mtp_layers.append(layer_config.build())
+
+    def count_mtp_aux_loss_tokens(
+        self, microbatch_groups: list[list[TrainingMicrobatch]]
+    ) -> torch.Tensor:
+        """Count the tokens routed by each MTP depth across an optimizer step.
+
+        Use the same shifted-input validity and current-position padding masks
+        as ``MTPTransformerBlock.forward``. Inputs are still on CPU here, before
+        context-parallel sharding and the first forward of the step.
+        """
+        if self.mtp_layers is None:
+            return torch.zeros(0, dtype=torch.int64)
+        counts = torch.zeros(len(self.mtp_layers), dtype=torch.int64)
+        for group in microbatch_groups:
+            for microbatch in group:
+                batch = microbatch.as_input_dict()
+                tokens = batch["input"]
+                positions = batch.get("positions")
+                padding_mask = batch.get("padding_mask")
+                if positions is None:
+                    raise ValueError("MTP auxiliary-loss counting requires positions.")
+                for depth in range(1, len(self.mtp_layers) + 1):
+                    _, valid_mask = roll_mtp_sequence(
+                        tokens,
+                        shift=depth,
+                        positions=positions,
+                        padding_mask=padding_mask,
+                        fill_value=0,
+                        return_valid_mask=True,
+                    )
+                    if padding_mask is not None:
+                        valid_mask &= ~padding_mask
+                    counts[depth - 1] += valid_mask.sum()
+        return counts
+
+    def set_mtp_aux_loss_denominators(self, denominators: torch.Tensor) -> None:
+        """Give each MTP layer's auxiliary losses its DP-global token count."""
+        if self.mtp_layers is None:
+            return
+        if denominators.numel() != len(self.mtp_layers):
+            raise ValueError("Expected one auxiliary-loss denominator per MTP layer.")
+        for depth, layer in enumerate(self.mtp_layers):
+            # An all-masked layer contributes no routed tokens. Keep its
+            # denominator nonzero so a zero raw sum does not become NaN.
+            denominator = denominators[depth].clamp_min(1)
+            for module in layer.modules():
+                if isinstance(module, AuxLoss):
+                    module.set_instance_step_denominator(denominator)
 
     def _apply_fsdp(
         self,

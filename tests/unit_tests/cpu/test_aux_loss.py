@@ -156,6 +156,29 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         out_TK.sum().backward()
         self.assertLess((scores_TE.grad - ref_scores.grad).abs().max().item(), 1e-10)
 
+    def test_instance_denominator_overrides_base_and_updates_in_place(self):
+        base = _make_loss(coeff=1.0, per_step_denominator=8)
+        mtp = MicrobatchWiseLoadBalanceLoss(
+            MicrobatchWiseLoadBalanceLoss.Config(coeff=1.0)
+        )
+        mtp.set_instance_step_denominator(torch.tensor(4))
+        buffer = mtp._instance_step_denominator
+
+        base_raw = torch.tensor(8.0, requires_grad=True)
+        mtp_raw = torch.tensor(8.0, requires_grad=True)
+        (
+            base.inject(base_raw, carrier=torch.ones((), requires_grad=True))
+            + mtp.inject(mtp_raw, carrier=torch.ones((), requires_grad=True))
+        ).backward()
+        self.assertAlmostEqual(base_raw.grad.item(), 1 / 8)
+        self.assertAlmostEqual(mtp_raw.grad.item(), 1 / 4)
+        self.assertAlmostEqual(base.instance_acc.item(), 1.0)
+        self.assertAlmostEqual(mtp.instance_acc.item(), 2.0)
+
+        mtp.set_instance_step_denominator(torch.tensor(2))
+        self.assertIs(mtp._instance_step_denominator, buffer)
+        self.assertEqual(buffer.item(), 2)
+
     def test_accumulates_forwards_then_clears(self):
         """Every forward adds its scaled value to the register, and the roll-up
         into group_acc zeroes the instance accumulator."""
