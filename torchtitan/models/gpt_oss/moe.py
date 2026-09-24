@@ -14,7 +14,6 @@ from torch import nn
 
 from torchtitan.models.common.activation import BinaryActivationFn
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.moe import MoE
 
 
 class GptOssSwiGLU(BinaryActivationFn):
@@ -80,11 +79,3 @@ class GptOssGroupedLinear(GroupedLinear):
         bias_RO: torch.Tensor,
     ) -> torch.Tensor:
         return output_RO + bias_RO.to(output_RO.dtype)
-
-
-class GptOssMoE(MoE):
-    """GptOss MoE implementation that inherits from the base MoE class."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(MoE.Config):
-        pass
