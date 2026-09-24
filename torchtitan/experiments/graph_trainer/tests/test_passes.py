@@ -7,6 +7,7 @@
 import inspect
 import operator
 import sys
+from collections import Counter, defaultdict
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -23,8 +24,10 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.traceback import preserve_node_meta
+from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
+from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
@@ -88,7 +91,10 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     deduplicate_fsdp_unshard_chains_pass,
     get_transformer_block_bucket_counts,
     get_transformer_block_layer_ids,
+    joint_transformer_block_bucketing_reordering_pass,
+    JointManualOverlapScheduler,
     reassign_collective_pgs_pass,
+    reorder_hsdp_grad_collectives_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
 from torchtitan.experiments.graph_trainer.graph_utils import export_joint
@@ -178,6 +184,43 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             [False, True],
         )
 
+    def test_hsdp_collective_reordering_precedes_bucketing(self) -> None:
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(
+                disable_passes=["cuda_graph_pass"],
+                inductor_compilation="full",
+            ),
+            loss=None,
+            model=SimpleNamespace(layers=[object()]),
+            parallelism=SimpleNamespace(
+                data_parallel_replicate_degree=2,
+                data_parallel_shard_degree=2,
+                fsdp_reshard_after_forward="always",
+                pipeline_parallel_degree=1,
+            ),
+        )
+        traced_result = SimpleNamespace(state_fqns=[])
+
+        def get_mesh(axis):
+            return SimpleNamespace(get_group=lambda: SimpleNamespace(group_name=axis))
+
+        parallel_dims = SimpleNamespace(
+            dp_replicate=2,
+            dp_shard=2,
+            get_mesh=get_mesh,
+        )
+        graph_passes = compile_time_passes(
+            traced_result,
+            config,
+            parallel_dims=parallel_dims,
+        )
+        pass_fns = [getattr(pass_fn, "func", pass_fn) for pass_fn in graph_passes]
+
+        self.assertLess(
+            pass_fns.index(reorder_hsdp_grad_collectives_pass),
+            pass_fns.index(joint_transformer_block_bucketing_reordering_pass),
+        )
+
 
 class TestFSDPUnshardDedupPass(TestCase):
     def _duplicate_unshard_graph(self) -> torch.fx.GraphModule:
@@ -250,6 +293,228 @@ class TestFSDPUnshardDedupPass(TestCase):
         gm.graph.lint()
 
 
+class TestReorderHSDPGradCollectivesPass(TestCase):
+    def _make_graph(
+        self,
+        *,
+        all_reduce_op: str = "sum",
+        reduce_scatter_op: str = "sum",
+        reduce_scatter_group_size: int = 2,
+        all_reduce_group_name: str = "dp_replicate",
+        reduce_scatter_group_name: str = "dp_shard",
+        group_args_as_nodes: bool = False,
+        branch_all_reduce_wait: bool = False,
+    ) -> tuple[torch.fx.GraphModule, dict[str, torch.fx.Node]]:
+        c10d = torch.ops._c10d_functional
+        graph = torch.fx.Graph()
+        grad = graph.placeholder("grad")
+        if group_args_as_nodes:
+            all_reduce_group = graph.placeholder("all_reduce_group")
+            all_reduce_group.meta["val"] = SimpleNamespace(
+                group_name=all_reduce_group_name
+            )
+            reduce_scatter_group = graph.placeholder("reduce_scatter_group")
+            reduce_scatter_group.meta["val"] = SimpleNamespace(
+                group_name=reduce_scatter_group_name
+            )
+        else:
+            all_reduce_group = all_reduce_group_name
+            reduce_scatter_group = reduce_scatter_group_name
+        all_reduce = graph.call_function(
+            c10d.all_reduce.default,
+            args=(grad, all_reduce_op, all_reduce_group),
+        )
+        all_reduce_wait = graph.call_function(
+            c10d.wait_tensor.default,
+            args=(all_reduce,),
+        )
+        reduce_scatter = graph.call_function(
+            c10d.reduce_scatter_tensor.default,
+            args=(
+                all_reduce_wait,
+                reduce_scatter_op,
+                reduce_scatter_group_size,
+                reduce_scatter_group,
+            ),
+        )
+        reduce_scatter_wait = graph.call_function(
+            c10d.wait_tensor.default,
+            args=(reduce_scatter,),
+        )
+        if branch_all_reduce_wait:
+            side_output = graph.call_function(
+                torch.ops.aten.clone.default,
+                args=(all_reduce_wait,),
+            )
+            graph.output((reduce_scatter_wait, side_output))
+        else:
+            graph.output(reduce_scatter_wait)
+
+        with torch._subclasses.FakeTensorMode():
+            grad.meta["val"] = torch.empty(8, 4)
+            all_reduce.meta["val"] = torch.empty(8, 4)
+            all_reduce_wait.meta["val"] = torch.empty(8, 4)
+            reduce_scatter.meta["val"] = torch.empty(4, 4)
+            reduce_scatter_wait.meta["val"] = torch.empty(4, 4)
+        for node in (
+            all_reduce,
+            all_reduce_wait,
+            reduce_scatter,
+            reduce_scatter_wait,
+        ):
+            node.meta["autograd_backward"] = True
+        all_reduce.meta["custom"] = {"origin": "all_reduce"}
+        all_reduce_wait.meta["custom"] = {"origin": "all_reduce_wait"}
+
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        return gm, {
+            "grad": grad,
+            "all_reduce": all_reduce,
+            "all_reduce_wait": all_reduce_wait,
+            "reduce_scatter": reduce_scatter,
+            "reduce_scatter_wait": reduce_scatter_wait,
+        }
+
+    def _apply(self, gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
+        return reorder_hsdp_grad_collectives_pass(
+            gm,
+            (),
+            dp_replicate_degree=2,
+            dp_shard_degree=2,
+            dp_replicate_group_name="dp_replicate",
+            dp_shard_group_name="dp_shard",
+        )
+
+    def test_reorders_direct_hsdp_gradient_chain(self) -> None:
+        gm, nodes = self._make_graph()
+
+        self._apply(gm)
+
+        call_nodes = [node for node in gm.graph.nodes if node.op == "call_function"]
+        self.assertEqual(
+            [node.target for node in call_nodes],
+            [
+                torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                torch.ops._c10d_functional.wait_tensor.default,
+                torch.ops._c10d_functional.all_reduce.default,
+                torch.ops._c10d_functional.wait_tensor.default,
+            ],
+        )
+        self.assertIs(nodes["reduce_scatter"].args[0], nodes["grad"])
+        self.assertIs(nodes["all_reduce"].args[0], nodes["reduce_scatter_wait"])
+        output = gm.graph.find_nodes(op="output")[0]
+        self.assertIs(output.args[0], nodes["all_reduce_wait"])
+        self.assertEqual(tuple(nodes["all_reduce"].meta["val"].shape), (4, 4))
+        self.assertEqual(tuple(nodes["all_reduce_wait"].meta["val"].shape), (4, 4))
+        self.assertIsNot(
+            nodes["all_reduce"].meta["val"], nodes["reduce_scatter"].meta["val"]
+        )
+        self.assertIsNot(
+            nodes["all_reduce_wait"].meta["val"],
+            nodes["reduce_scatter_wait"].meta["val"],
+        )
+        self.assertNotEqual(
+            nodes["all_reduce"].meta["val"].untyped_storage()._cdata,
+            nodes["reduce_scatter"].meta["val"].untyped_storage()._cdata,
+        )
+        self.assertEqual(nodes["all_reduce"].meta["custom"], {"origin": "all_reduce"})
+        self.assertEqual(
+            nodes["all_reduce_wait"].meta["custom"],
+            {"origin": "all_reduce_wait"},
+        )
+        gm.graph.lint()
+
+    def test_is_idempotent(self) -> None:
+        gm, _ = self._make_graph()
+        self._apply(gm)
+        first_graph = str(gm.graph)
+
+        self._apply(gm)
+
+        self.assertEqual(str(gm.graph), first_graph)
+
+    def test_reorders_compile_on_one_rank_group_nodes(self) -> None:
+        gm, nodes = self._make_graph(group_args_as_nodes=True)
+
+        self._apply(gm)
+
+        self.assertIs(nodes["reduce_scatter"].args[0], nodes["grad"])
+        self.assertIs(nodes["all_reduce"].args[0], nodes["reduce_scatter_wait"])
+
+    def test_skips_when_hsdp_is_not_enabled(self) -> None:
+        gm, nodes = self._make_graph()
+
+        reorder_hsdp_grad_collectives_pass(
+            gm,
+            (),
+            dp_replicate_degree=1,
+            dp_shard_degree=2,
+            dp_replicate_group_name="dp_replicate",
+            dp_shard_group_name="dp_shard",
+        )
+
+        self.assertIs(nodes["reduce_scatter"].args[0], nodes["all_reduce_wait"])
+
+    def test_skips_non_sum_or_branched_chains(self) -> None:
+        cases = (
+            {"all_reduce_op": "avg"},
+            {"reduce_scatter_op": "avg"},
+            {"reduce_scatter_group_size": 4},
+            {"all_reduce_group_name": "other"},
+            {"reduce_scatter_group_name": "other"},
+            {"reduce_scatter_group_name": "dp_replicate"},
+            {"branch_all_reduce_wait": True},
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                gm, nodes = self._make_graph(**case)
+
+                self._apply(gm)
+
+                self.assertIs(nodes["reduce_scatter"].args[0], nodes["all_reduce_wait"])
+                gm.graph.lint()
+
+    def test_prefetch_scheduling_ignores_non_fsdp_all_reduces(self) -> None:
+        graph = torch.fx.Graph()
+        value = graph.placeholder("value")
+        tp_all_reduce = graph.call_function(torch.ops.aten.relu.default, (value,))
+        tp_wait = graph.call_function(torch.ops.aten.neg.default, (tp_all_reduce,))
+        hsdp_all_reduce = graph.call_function(torch.ops.aten.sin.default, (value,))
+        hsdp_wait = graph.call_function(torch.ops.aten.cos.default, (hsdp_all_reduce,))
+        reduce_scatter = graph.call_function(torch.ops.aten.tanh.default, (value,))
+        reduce_scatter_wait = graph.call_function(
+            torch.ops.aten.abs.default, (reduce_scatter,)
+        )
+        graph.output((tp_wait, hsdp_wait, reduce_scatter_wait))
+
+        for node in (hsdp_all_reduce, hsdp_wait):
+            node.meta["custom"] = {FSDP_PARAM_FQNS_META: ("linear.weight",)}
+
+        scheduler = JointManualOverlapScheduler.__new__(JointManualOverlapScheduler)
+        scheduler.graph = graph
+        scheduler.nodes = list(graph.nodes)
+        scheduler.node_ancestors = scheduler._collect_node_ancestors()
+        scheduler.in_degree = Counter(
+            user for node in scheduler.nodes for user in node.users
+        )
+        scheduler.bucketer = SimpleNamespace(
+            bucketed_node_types={
+                tp_all_reduce: "bucketed_all_reduce",
+                tp_wait: "bucketed_all_reduce_wait",
+                hsdp_all_reduce: "bucketed_all_reduce",
+                hsdp_wait: "bucketed_all_reduce_wait",
+                reduce_scatter: "bucketed_reduce_scatter",
+                reduce_scatter_wait: "bucketed_reduce_scatter_wait",
+            }
+        )
+        overlap_deps = defaultdict(OrderedSet)
+
+        scheduler._schedule_rs_prefetch(overlap_deps)
+
+        self.assertEqual(overlap_deps, {hsdp_wait: OrderedSet([reduce_scatter])})
+        self.assertNotIn(tp_wait, overlap_deps)
+
+
 class ToyModel(Module):
     """A small toy model with multiple linear layers and activation
     checkpointing so that the backward graph recomputes the forward
@@ -273,6 +538,137 @@ class ToyModel(Module):
                 use_reentrant=False,
             )
         return x
+
+
+class TestHSDPGradCollectiveReorderingPass(FSDPTest):
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    @skip_if_lt_x_gpu(4)
+    def test_reorders_real_simple_fsdp_joint_trace(self) -> None:
+        parallel_dims = ParallelDims(
+            dp_shard=2,
+            dp_replicate=2,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+        model = ToyModel(dim=16, n_layers=2).cuda()
+        model = data_parallel(
+            model,
+            device_mesh=parallel_dims.get_mesh(["dp_replicate", "dp_shard"]),
+            mode="hybrid_shard",
+        )
+        torch.manual_seed(42 + self.rank)
+        inputs = torch.randn(4, 16, device="cuda")
+
+        def fwd_bwd(inp):
+            loss = model(inp).sum()
+            return list(torch.autograd.grad(loss, tuple(model.parameters())))
+
+        traced = minimal_fx_tracer(fwd_bwd, module=model)(inputs)
+        c10d = torch.ops._c10d_functional
+        all_reduces = [
+            node
+            for node in traced.gm.graph.nodes
+            if node.op == "call_function" and node.target is c10d.all_reduce.default
+        ]
+        reduce_scatters = [
+            node
+            for node in traced.gm.graph.nodes
+            if node.op == "call_function"
+            and node.target is c10d.reduce_scatter_tensor.default
+        ]
+        self.assertGreater(len(all_reduces), 0)
+        self.assertEqual(len(all_reduces), len(reduce_scatters))
+        self.assertTrue(
+            all(
+                node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+                for node in all_reduces
+            )
+        )
+        self.assertTrue(
+            all(
+                next(iter(all_reduce.users)).args[0] is all_reduce
+                for all_reduce in all_reduces
+            )
+        )
+
+        expected = fwd_bwd(inputs)
+        reorder_hsdp_grad_collectives_pass(
+            traced.gm,
+            traced.example_inputs,
+            dp_replicate_degree=2,
+            dp_shard_degree=2,
+            dp_replicate_group_name=(
+                parallel_dims.get_mesh("dp_replicate").get_group().group_name
+            ),
+            dp_shard_group_name=(
+                parallel_dims.get_mesh("dp_shard").get_group().group_name
+            ),
+        )
+        actual = run_traced(traced, module=model)(inputs)
+
+        for all_reduce in all_reduces:
+            reduce_scatter_wait = all_reduce.args[0]
+            self.assertIsInstance(reduce_scatter_wait, torch.fx.Node)
+            self.assertEqual(reduce_scatter_wait.target, c10d.wait_tensor.default)
+            reduce_scatter = reduce_scatter_wait.args[0]
+            self.assertIsInstance(reduce_scatter, torch.fx.Node)
+            self.assertEqual(
+                reduce_scatter.target,
+                c10d.reduce_scatter_tensor.default,
+            )
+            self.assertEqual(
+                all_reduce.meta["val"].shape,
+                reduce_scatter.meta["val"].shape,
+            )
+        for expected_grad, actual_grad in zip(expected, actual, strict=True):
+            torch.testing.assert_close(
+                expected_grad.to_local(),
+                actual_grad.to_local(),
+            )
+
+        for node in traced.gm.graph.nodes:
+            if node.target in (
+                c10d.all_reduce.default,
+                c10d.reduce_scatter_tensor.default,
+            ):
+                node.meta.setdefault("custom", {})[_MODULE_FQN] = "layers.0"
+        joint_transformer_block_bucketing_reordering_pass(
+            traced.gm,
+            module_bucket_plans=["layers.0"],
+        )
+        bucketed_all_reduces = traced.gm.graph.find_nodes(
+            op="call_function", target=c10d.all_reduce.default
+        )
+        bucketed_reduce_scatters = traced.gm.graph.find_nodes(
+            op="call_function", target=c10d.reduce_scatter_tensor.default
+        )
+        self.assertEqual(len(bucketed_all_reduces), 1)
+        self.assertEqual(len(bucketed_reduce_scatters), 1)
+        self.assertTrue(
+            bucketed_all_reduces[0].meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+        )
+        (bucketed_all_reduce_wait,) = tuple(
+            node
+            for node in bucketed_all_reduces[0].users
+            if node.target is c10d.wait_tensor.default
+        )
+        self.assertTrue(
+            bucketed_all_reduce_wait.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+        )
+        bucketed_actual = run_traced(traced, module=model)(inputs)
+        for expected_grad, actual_grad in zip(expected, bucketed_actual, strict=True):
+            torch.testing.assert_close(
+                expected_grad.to_local(),
+                actual_grad.to_local(),
+            )
+        traced.gm.graph.lint()
 
 
 class TestReassignCollectivePgsPass(FSDPTest):

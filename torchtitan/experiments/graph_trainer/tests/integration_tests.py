@@ -218,6 +218,20 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 HSDP",
+            "aot_fx_trace_llama3_hsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
                     "--compile.memory_policy sac_and_offload",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",

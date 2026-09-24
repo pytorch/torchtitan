@@ -105,10 +105,10 @@ def run_loss_compare_close(
 ) -> bool:
     """Run loss_compare.py and assert losses are numerically close.
 
-    AutoParallel can choose a different SPMD graph and collective ordering than
-    eager, so this checks tight numerical agreement rather than bitwise identity.
+    Graph transforms can change collective ordering, so this checks tight
+    numerical agreement rather than bitwise identity.
     """
-    from scripts.loss_compare import extract_losses_from_tensorboard
+    from scripts.loss_compare import extract_metrics_from_tensorboard
 
     with tempfile.TemporaryDirectory() as job_dump_folder:
         cmd = [
@@ -136,10 +136,12 @@ def run_loss_compare_close(
             print("loss_compare.py failed")
             return False
 
-        baseline_losses = extract_losses_from_tensorboard(
-            job_dump_folder, "tb_baseline"
-        )
-        test_losses = extract_losses_from_tensorboard(job_dump_folder, "tb_test")
+        baseline_losses = extract_metrics_from_tensorboard(
+            job_dump_folder, "tb_baseline", ("loss",)
+        )["loss"]
+        test_losses = extract_metrics_from_tensorboard(
+            job_dump_folder, "tb_test", ("loss",)
+        )["loss"]
         if baseline_losses.keys() != test_losses.keys():
             return False
         max_step = max(
@@ -255,6 +257,27 @@ def _run_llama3_loss_compare(test_options_extra: str = "") -> bool:
         test_config="graph_trainer_llama3_debugmodel",
         baseline_options=options,
         test_options=test_options,
+    )
+
+
+HSDP_LLAMA3_PARALLELISM = (
+    "--parallelism.data_parallel_replicate_degree=2"
+    " --parallelism.data_parallel_shard_degree=2"
+)
+
+
+def _run_hsdp_llama3_loss_compare() -> bool:
+    """Compare eager and GraphTrainer after changing HSDP reduction order."""
+    options = f"{HSDP_LLAMA3_PARALLELISM} {DEBUGMODEL_TRAINING_OPTIONS}"
+    return run_loss_compare_close(
+        baseline_module="llama3",
+        baseline_config="llama3_debugmodel",
+        test_module="graph_trainer.llama3",
+        test_config="graph_trainer_llama3_debugmodel",
+        baseline_options=options,
+        test_options=f"{options} --compile.mode aot_fx_trace",
+        baseline_ngpus=4,
+        test_ngpus=4,
     )
 
 
@@ -572,6 +595,9 @@ class TestGraphTrainerNumerics(unittest.TestCase):
         self.assertTrue(
             _run_llama3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
         )
+
+    def test_dense_llama3_hsdp_aot_fx_trace_vs_eager(self):
+        self.assertTrue(_run_hsdp_llama3_loss_compare())
 
     @unittest.skip("Disabled: upstream partitioner regression (#2149)")
     def test_dense_llama3_jit_vs_eager(self):
