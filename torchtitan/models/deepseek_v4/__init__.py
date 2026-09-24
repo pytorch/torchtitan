@@ -29,6 +29,7 @@ from torchtitan.models.common import (
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
+    fused_grouped_experts_param_init,
     make_ffn_config,
     make_routed_experts_config,
     make_shared_expert_ffn_config,
@@ -551,8 +552,8 @@ def _build_mtp_layers(
             assert isinstance(router_cfg, DeepSeekV4Router.Config)
             router_cfg.gate.param_init = _depth_init(layer_id)
             router_cfg.layer_id = layer_id
-            block_cfg.moe.routed_experts.inner_experts.param_init = _depth_experts_init(
-                layer_id
+            block_cfg.moe.routed_experts.inner_experts.param_init = (
+                fused_grouped_experts_param_init(_depth_experts_init(layer_id))
             )
             if block_cfg.moe.shared_experts is not None:
                 depth_init = _depth_init(layer_id)
