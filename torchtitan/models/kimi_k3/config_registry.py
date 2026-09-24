@@ -105,18 +105,23 @@ def kimi_k3_debugmodel_mx_qat(
     weight_fake_quant_config: MXFakeQuantizeConfig | None = None,
     activation_fake_quant_config: MXFakeQuantizeConfig | None = None,
 ) -> Trainer.Config:
-    """Kimi QAT using the released policy and optional packed HF initialization.
+    """Kimi QAT using checkpoint storage policy when initializing from HF.
 
     Pass an absolute checkpoint_path to load the packed debug fixture. Without
-    it, the recipe uses random initialization and remains valid before overrides.
+    it, random initialization applies QAT to all config-eligible weights.
+    With a checkpoint, only actual manifest packed pairs select QAT weights.
     Optional TorchAO configs control fake quantization and kernel_preference;
     model-specific parameter selection stays inside the recipe.
     """
     config = kimi_k3_debugmodel(seq_len=seq_len)
     adapter = KimiK3StateDictAdapter(config.model, hf_assets_path=None)
     mapping = adapter.hf_linear_weight_mapping()
-    policy = MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
-    weights = {mapping[key] for key in policy.weight_fqns if mapping[key] is not None}
+    policy = (
+        adapter.mxfp4_policy(checkpoint_path)
+        if checkpoint_path is not None
+        else MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
+    )
+    weights = adapter.qat_weight_fqns(policy)
     transform = MXQATTransform.from_weight_fqns(config.model, weights)
     if weight_fake_quant_config is not None:
         transform.weight_fake_quant_config = weight_fake_quant_config

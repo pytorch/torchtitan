@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from torchtitan.components.checkpointer.hf_storage import (
     LogicalPrefixSpec,
     PackedPairSpec,
 )
+from torchtitan.models.kimi_k3.quantization import MXFP4_QUANTIZATION_CONFIG
 from torchtitan.quantization.mx_qat.checkpoint import (
     decode_mxfp4,
     MXFP4CheckpointPolicy,
@@ -62,6 +64,15 @@ class KimiK3MXFP4CheckpointIntegrationTest(unittest.TestCase):
                 max_shard_bytes=64,
             )
             self.assertGreater(manifest["shard_count"], 1)
+            # Both linears are eligible, but only the actual indexed pair is
+            # packed. This is the release's mixed MXFP4/BF16 storage contract.
+            index = json.loads((output / "model.safetensors.index.json").read_text())
+            policy = MXFP4CheckpointPolicy.from_manifest(
+                MXFP4_QUANTIZATION_CONFIG,
+                [_HF_WEIGHT, "dense.weight"],
+                index["weight_map"],
+            )
+            self.assertEqual(policy.weight_fqns, frozenset({_HF_WEIGHT}))
             destination = {
                 _HF_WEIGHT: torch.empty_like(weight),
                 "dense.weight": torch.empty_like(dense),
@@ -77,7 +88,7 @@ class KimiK3MXFP4CheckpointIntegrationTest(unittest.TestCase):
                     block_size=32,
                     packed_values_per_byte=2,
                     target_dtype=torch.bfloat16,
-                    target_fqns=frozenset({_HF_WEIGHT}),
+                    target_fqns=policy.weight_fqns,
                     decode=decode_mxfp4,
                 ),
                 logical_prefixes={"A_log": LogicalPrefixSpec(96, 128)},

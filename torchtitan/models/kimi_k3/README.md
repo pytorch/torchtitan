@@ -71,8 +71,8 @@ NGPU=1 MODULE=kimi_k3 CONFIG=kimi_k3_debugmodel_mx_qat ./run_train.sh
 ```
 
 The debug recipe starts from random initialization and uses `EMULATED` by
-default. It selects the expert and dense projections required by the released
-MXFP4 policy, keeps BF16 master parameters, and applies MXFP8 activation fake
+default. Without a checkpoint it selects all config-eligible expert and dense
+projections, keeps BF16 master parameters, and applies MXFP8 activation fake
 quantization to grouped experts. No manual expert replacement or parameter-name
 list is needed. Prepare the normal Kimi tokenizer and dataset dependencies as
 for `kimi_k3_debugmodel`; QAT does not replace that data setup.
@@ -100,8 +100,18 @@ def qat():
 NGPU=1 MODULE=my_kimi_runs CONFIG=qat ./run_train.sh
 ```
 
-`checkpoint_path` sets the existing HF and quantized-load options together. The
-loader validates the checkpoint policy against the selected QAT modules.
+`checkpoint_path` sets the existing HF and quantized-load options together and
+reads `config.json` plus `model.safetensors.index.json` before selecting QAT
+modules. The config defines eligible weights; only actual packed/scale pairs in
+the index select QAT. Eligible weights stored in BF16 remain ordinary weights.
+The released checkpoint packs routed expert matrices while residual and fused
+projection weights remain BF16. The synthetic debug fixture deliberately packs
+all eligible weights, so its selected set can differ from the release.
+
+The loader validates the same manifest-derived policy against the selected QAT
+modules and actual tensor headers. Missing pairs, orphan scales, and pairs
+outside the config policy remain errors. A grouped parameter mixing packed and
+BF16 experts can be imported, but cannot be selected for grouped QAT.
 
 For native grouped execution, pass the existing TorchAO configurations to the
 same recipe function; both `kernel_preference` values must agree:
