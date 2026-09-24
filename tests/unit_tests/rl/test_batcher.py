@@ -50,6 +50,49 @@ def test_padding_workload_matches_existing_full_length_segments() -> None:
         assert num_padding_segments <= 6
 
 
+def test_lpt_uses_padding_workload_for_full_length_documents() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=48,
+        max_context_length=8,
+        num_prompts_per_train_step=1,
+        dp_degree=2,
+        pad_id=0,
+    )
+    samples = _make_samples([8] * 3 + [2] * 16)
+
+    assignments = batcher._assign_training_samples_to_microbatches(samples)
+
+    assert [
+        batcher._attention_workload(rank_samples)
+        for row in assignments
+        for rank_samples in row
+    ] == [288, 264]
+    assert sorted(
+        sum(map(batcher.num_tokens_to_pack, rank_samples))
+        for row in assignments
+        for rank_samples in row
+    ) == [26, 30]
+
+
+def test_lpt_does_not_leave_a_full_length_document_in_an_expensive_bin() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=20,
+        max_context_length=10,
+        num_prompts_per_train_step=1,
+        dp_degree=2,
+        pad_id=0,
+    )
+    samples = _make_samples([10, 5, 5, 5, 5])
+
+    assignments = batcher._assign_training_samples_to_microbatches(samples)
+
+    assert [
+        batcher._attention_workload(rank_samples)
+        for row in assignments
+        for rank_samples in row
+    ] == [150, 100]
+
+
 def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
     batcher = Batcher.Config(max_num_documents=3).build(
         num_tokens_per_microbatch_per_dp_rank=8,
@@ -65,7 +108,7 @@ def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
     assert [
         [batcher._attention_workload(rank_samples) for rank_samples in microbatch]
         for microbatch in assignments
-    ] == [[24, 24], [22, 22]]
+    ] == [[26, 26], [22, 22]]
     assert all(
         len(rank_samples) <= 3
         and sum(map(batcher.num_tokens_to_pack, rank_samples)) <= 8

@@ -356,11 +356,12 @@ class Batcher(Configurable):
         """Pack samples into an FFD-derived grid and balance its attention work.
 
         T is the token capacity per DP rank, D the DP degree, and M the number
-        of PP microbatches per outer gradient accumulation step. First-fit
-        decreasing (FFD) determines B bins subject to T and max_num_documents.
-        Round B up to ``ceil(B / (M * D)) * M * D`` slots, then try
-        longest-processing-time (LPT) packing: place longest samples first in
-        the feasible bin with the least ``sum(L**2)`` document work. If any
+        of PP microbatches per scheduling step. First-fit decreasing (FFD)
+        determines B bins subject to T and max_num_documents. Each step has
+        M * D slots, so G = ceil(B / (M * D)) steps form a ``[G][M][D]`` grid.
+        Try longest-processing-time (LPT) packing: place longest samples first in
+        the feasible bin with the highest padding-aware attention work,
+        breaking ties by fewer packed tokens. If any
         sample cannot fit, discard the partial LPT assignment and reuse FFD,
         splitting its bins to fill the extra slots where possible. Both paths
         have the same grid size and therefore the same total padding fraction.
@@ -372,9 +373,9 @@ class Batcher(Configurable):
         optimal or zig-zag-dominating maximum rank cost. With M=1 it preserves
         the original alternating rank order between G steps.
 
-        The logical layout is ``[G][M][D]``; this method returns the first
-        two axes flattened as ``[G * M][D]``. The RL trainer currently uses
-        M=1; M>1 is available for PP scheduling tests.
+        This method returns the first two grid axes flattened as
+        ``[G * M][D]``. The RL trainer currently uses M=1; M>1 is available
+        for PP scheduling tests.
         """
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
 
@@ -423,16 +424,19 @@ class Batcher(Configurable):
             self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
 
         # Step 4: estimate attention work, including tail padding.
-        bins.sort(key=self._attention_workload, reverse=True)
+        workloads = [self._attention_workload(bin_) for bin_ in bins]
+        sorted_bin_indices = sorted(
+            range(len(bins)), key=workloads.__getitem__, reverse=True
+        )
 
         # Steps 5-6: keep adjacent bins together and balance their rank totals.
         bin_indices_by_rank = assign_sorted_bins_to_dp_ranks(
-            [self._attention_workload(bin_) for bin_ in bins],
+            [workloads[index] for index in sorted_bin_indices],
             dp_degree=self._dp_degree,
             num_pp_microbatches=num_pp_microbatches,
         )
         return [
-            [bins[index] for index in rank_indices]
+            [bins[sorted_bin_indices[index]] for index in rank_indices]
             for rank_indices in bin_indices_by_rank
         ]
 
@@ -446,6 +450,7 @@ class Batcher(Configurable):
         This models the existing padding segments without increasing their
         number or changing fixed-size varlen metadata.
         """
+        # TODO(rl): Account for hybrid sliding-window or linear-attention layers.
         sample_lengths = [
             self.num_tokens_to_pack(sample) for sample in training_samples
         ]
@@ -465,21 +470,22 @@ class Batcher(Configurable):
         *,
         target_num_bins: int,
     ) -> list[list[TrainingSample]] | None:
-        """Put longest samples in the lowest-workload feasible fixed bin.
+        """Put longest samples in the highest-workload feasible fixed bin.
 
-        The workload is document ``sum(L**2)``: padding-aware work can decrease
-        when a bin receives samples, so it is not an LPT placement key.
+        Adding a sample cannot increase padding-aware attention work. Break
+        workload ties by fewer packed tokens to spread full-length documents
+        whose work exactly replaces one padding segment.
         Return None if token or document capacity blocks a sample; the caller
         then discards this partial assignment and uses the FFD fallback.
         """
         num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
         bins: list[list[TrainingSample]] = [[] for _ in range(target_num_bins)]
         bin_num_tokens = [0] * target_num_bins
-        bin_workloads = [0] * target_num_bins
+        bin_workloads = [self._attention_workload([])] * target_num_bins
 
         for sample in ordered_samples:
             num_tokens = self.num_tokens_to_pack(sample)
-            destination = min(
+            destination = max(
                 (
                     index
                     for index, bin_ in enumerate(bins)
@@ -489,7 +495,7 @@ class Batcher(Configurable):
                         or len(bin_) < self._max_num_documents
                     )
                 ),
-                key=bin_workloads.__getitem__,
+                key=lambda index: (bin_workloads[index], -bin_num_tokens[index]),
                 default=None,
             )
             if destination is None:
@@ -497,7 +503,7 @@ class Batcher(Configurable):
 
             bins[destination].append(sample)
             bin_num_tokens[destination] += num_tokens
-            bin_workloads[destination] += num_tokens**2
+            bin_workloads[destination] = self._attention_workload(bins[destination])
 
         return bins
 
