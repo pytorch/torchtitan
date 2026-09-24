@@ -9,7 +9,9 @@ import unittest
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.config import ParallelismConfig
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
+from torchtitan.models.kimi_k3.config_registry import _dist_muon_optimizer
 from torchtitan.models.kimi_k3.kda import KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
@@ -107,6 +109,39 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_dist_muon_config_uses_native_grouped_expert_fqns(self):
+        """DistMuon owns the physical routed W13 and W2 parameters."""
+        optimizer = _dist_muon_optimizer(
+            _small_model_config(),
+            muon_lr=1e-3,
+            adamw_lr=1e-3,
+            parallelism=ParallelismConfig(),
+        )
+        compute_layouts = optimizer.optimizer_factory_kwargs_by_name["DistMuon"][
+            "compute_sharding_by_fqn"
+        ]
+
+        self.assertTrue(
+            any(fqn.endswith("inner_experts.w13_E2FD") for fqn in compute_layouts)
+        )
+        self.assertTrue(
+            any(fqn.endswith("inner_experts.w2_EDF") for fqn in compute_layouts)
+        )
+        muon_group = next(
+            group
+            for group in optimizer.param_groups
+            if group.optimizer_name == "DistMuon"
+        )
+        self.assertRegex(
+            "layers.1.moe.routed_experts.inner_experts.w13_E2FD",
+            muon_group.pattern,
+        )
+        self.assertRegex(
+            "layers.1.moe.routed_experts.inner_experts.w2_EDF",
+            muon_group.pattern,
+        )
+        self.assertNotRegex(muon_group.pattern, r"w[13]_EFD")
+
     def test_flex_attention_mask(self):
         config = _small_model_config()
         model = config.build()
@@ -218,7 +253,7 @@ class TestKimiK3(unittest.TestCase):
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         hf_state_dict = adapter.to_hf(state_dict)
         self.assertIn(
-            "layers.1.moe.routed_experts.inner_experts.w1_EFD",
+            "layers.1.moe.routed_experts.inner_experts.w13_E2FD",
             state_dict,
         )
         self.assertIn(

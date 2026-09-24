@@ -173,7 +173,7 @@ def _dist_muon_optimizer(
         ),
         "w2": owned,
     }
-    expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
+    expert_projections = ("w13_E2FD", "w2_EDF")
 
     def compute_shardings_for_layer(layer_id: int) -> dict[str, ComputeLayout]:
         layer = model_config.layers[layer_id]

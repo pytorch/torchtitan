@@ -193,6 +193,23 @@ def fused_gate_up_param_init(
     return {"weight": _make_fused_linear_init(gate_init, up_init)}
 
 
+def fused_grouped_experts_param_init(
+    param_init: dict[str, Callable],
+) -> dict[str, Callable]:
+    """Initialize the logical gate/up slices of the physical W13 weight."""
+    if not param_init:
+        return param_init
+
+    def init_w13(w13_E2FD: torch.Tensor) -> None:
+        param_init["w1_EFD"](w13_E2FD[:, 0])
+        param_init["w3_EFD"](w13_E2FD[:, 1])
+
+    return {
+        "w13_E2FD": init_w13,
+        "w2_EDF": param_init["w2_EDF"],
+    }
+
+
 def make_gqa_config(
     *,
     dim: int,
@@ -431,7 +448,7 @@ def make_routed_experts_config(
             dim=dim,
             hidden_dim=hidden_dim,
             num_experts=num_experts,
-            param_init=param_init,
+            param_init=fused_grouped_experts_param_init(param_init),
         ),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,

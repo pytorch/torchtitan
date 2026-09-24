@@ -28,7 +28,7 @@ TP = MeshAxisName.TP
 EP = MeshAxisName.EP
 EFSDP = MeshAxisName.EFSDP
 
-_GROUPED_EXPERT_PARAM_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
+_GROUPED_EXPERT_PARAM_NAMES = ("w13_E2FD", "w2_EDF")
 
 
 def expert_param_placement_sparse() -> SpmdType:
