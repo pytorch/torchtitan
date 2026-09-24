@@ -60,6 +60,7 @@ from torchtitan.protocols.model import BaseModel
 
 
 if TYPE_CHECKING:
+    from torchtitan.distributed import ParallelismContext
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 
@@ -264,6 +265,7 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     traced: TracedResult,
     *,
     config: "GraphTrainer.Config | GraphTrainerConfigView",
+    parallelism_context: ParallelismContext | None,
     split_fsdp_param_unshard: bool,
     split_fsdp_grad_reduction: bool,
 ) -> Callable | None:
@@ -313,6 +315,7 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
         traced,
         config,
         use_cuda_graph=False,
+        parallelism_context=parallelism_context,
         include_inductor=False,
         include_mandatory_normalization=False,
     )

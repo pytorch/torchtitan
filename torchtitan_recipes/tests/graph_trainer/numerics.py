@@ -49,6 +49,49 @@ def llama3_graph_numerics():
     return config
 
 
+def llama3_eager_hsdp_gradient_accumulation_numerics():
+    config = llama3_debugmodel(seq_len=2048)
+    # Match GraphTrainer, which captures model and loss in one eager FX graph.
+    config.model.local_compile_regions = []
+    config.parallelism.data_parallel_replicate_degree = 2
+    config.parallelism.data_parallel_shard_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
+    config.training.num_tokens_per_train_step = 65536
+    return config
+
+
+def llama3_graph_hsdp_gradient_accumulation_numerics():
+    config = graph_trainer_llama3_debugmodel()
+    config.parallelism.data_parallel_replicate_degree = 2
+    config.parallelism.data_parallel_shard_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
+    config.training.num_tokens_per_train_step = 65536
+    return config
+
+
+def _llama3_hsdp_pp_numerics(config):
+    config.training.disable_cuda_graphs = True
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.data_parallel_replicate_degree = 2
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    return config
+
+
+def llama3_eager_hsdp_pp_numerics():
+    config = llama3_debugmodel(seq_len=2048)
+    config.model.local_compile_regions = []
+    return _llama3_hsdp_pp_numerics(config)
+
+
+def llama3_graph_hsdp_pp_numerics():
+    config = _llama3_hsdp_pp_numerics(graph_trainer_llama3_debugmodel())
+    config.compile.inductor_compilation = "regional"
+    return config
+
+
 def deepseek_v3_eager_numerics():
     config = deepseek_v3_debugmodel(seq_len=2048)
     config.parallelism.data_parallel_shard_degree = 4
