@@ -2,6 +2,13 @@ name: docker-builds
 
 on:
   workflow_dispatch:
+  # TEMPORARY: kept so this migration can be exercised on the PR itself. Drop
+  # before merging -- pytorch's docker-builds has no pull_request trigger, and
+  # a PR opts in with the ciflow/docker label instead.
+  pull_request:
+    paths:
+      - .ci/docker/**
+      - .github/workflows/docker-builds.yml
   push:
     branches:
       - main
