@@ -40,6 +40,9 @@ class _DummyMuseGlimmer(nn.Module):
     def _parallelize(self, parallel_dims) -> None:
         del parallel_dims
 
+    def _apply_fsdp(self, **kwargs) -> None:
+        pass
+
 
 def test_compile_skips_vision_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     compiled: list[nn.Module] = []
@@ -65,7 +68,6 @@ def test_compile_skips_vision_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
         compile_config=CompileConfig(components=["model"]),
         ac_config=None,
         dump_folder="",
-        skip_dp=True,
     )
 
     assert compiled == [model, model.vision_encoder]
