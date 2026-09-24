@@ -487,16 +487,9 @@ for the full recipe.
   `OffsetRMSNorm` with fused Triton forward and backward kernels while preserving
   the stock zero-centered weight and checkpoint layout. Activate it with
   `--override.imports torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm`.
-- `torchtitan/overrides/compiled_gated_rmsnorm.py` -- replaces Kimi K3
-  `KimiGatedRMSNorm` or Qwen3.5 `Qwen35GatedRMSNorm` with their stock forward
-  compiled by TorchInductor. Activate the corresponding override with
-  `--override.imports torchtitan.overrides.compiled_gated_rmsnorm.compiled_kimi_gated_rmsnorm`
-  or
-  `--override.imports torchtitan.overrides.compiled_gated_rmsnorm.compiled_qwen35_gated_rmsnorm`.
-- `torchtitan/overrides/kimi_gated_rmsnorm.py` -- replaces Kimi K3
-  `KimiGatedRMSNorm` with fused Triton forward and backward kernels. Activate it
-  with
-  `--override.imports torchtitan.overrides.kimi_gated_rmsnorm.triton_kimi_gated_rmsnorm`.
+- `torchtitan/overrides/compiled_gated_rmsnorm.py` -- replaces `GatedRMSNorm`
+  with its stock forward compiled by TorchInductor. Activate it with
+  `--override.imports torchtitan.overrides.compiled_gated_rmsnorm.compiled_gated_rmsnorm`.
 
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
 shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real

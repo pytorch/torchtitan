@@ -17,8 +17,10 @@ from torchtitan.config.transform import (
 from torchtitan.models.common import (  # noqa: F401
     Conv1d,
     Embedding,
+    GatedRMSNorm,
     Linear,
     RowParallelLinear,
+    SiLU,
     Softmax,
 )
 from torchtitan.models.common.config_utils import (
@@ -38,7 +40,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 
-from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet, Qwen35GatedRMSNorm
+from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
@@ -299,9 +301,13 @@ def _qwen35_deltanet_config(
         inner_gated_delta_net=InnerGatedDeltaNet.Config(
             kernel=GatedDeltaKernel.Config(),
         ),
-        norm=Qwen35GatedRMSNorm.Config(
+        # Keep RMS normalization and gating in FP32 until the final output cast,
+        # following the FLA behavior noted by Hugging Face:
+        # https://github.com/huggingface/transformers/blob/7cd73d9df0c14b151c684b708a9f27d8d0349dfe/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L216-L218
+        norm=GatedRMSNorm.Config(
             dim=value_head_dim,
             eps=1e-6,
+            activation_fn=SiLU.Config(),
             param_init={"weight": nn.init.ones_},
         ),
         out_proj=RowParallelLinear.Config(

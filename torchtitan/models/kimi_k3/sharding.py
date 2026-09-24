@@ -180,8 +180,8 @@ def _set_kda_sharding(
     )
     kda_cfg.forget_a.sharding_config = replicate_weight
     norm_inputs = {
-        "x_THV": head_placement,
-        "gate_THV": head_placement,
+        "x": head_placement,
+        "gate": head_placement,
     }
     kda_cfg.output_norm.sharding_config = ShardingConfig(
         state_shardings={"weight": weight_placement},

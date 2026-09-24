@@ -32,8 +32,8 @@ FakeTensorMode.__init__ = torch.compiler.disable(  # type: ignore[method-assign]
 
 
 # Toggled on by ``_maybe_regional_inductor_backend`` when the model is compiled
-# with a non-inductor backend that needs inductor-only regions (e.g.
-# FlexInnerAttention) scooped into an inductor sub-compile. Read by
+# with a non-inductor backend and contains modules with Inductor-only regions.
+# Read by
 # ``maybe_regional_inductor`` at trace time; left False on the default inductor
 # / eager paths so no annotation metadata is emitted.
 _regional_inductor_enabled: bool = False
@@ -107,31 +107,27 @@ def _maybe_enable_async_tp(
 
 
 def _maybe_regional_inductor_backend(model: nn.Module, backend: str) -> str | Callable:
-    """Wrap the ``aot_eager`` backend so inductor-only flex regions are scooped out.
+    """Wrap ``aot_eager`` so marked Inductor-only regions are scooped out.
 
-    ``regional_inductor`` lowers just the regions annotated with ``compile_with_inductor`` (see
-    ``FlexInnerAttention.forward``) to inductor while the rest stays in aot_eager.
+    ``regional_inductor`` lowers regions annotated with ``compile_with_inductor``
+    to Inductor while the rest stays in aot_eager.
 
-    Only applied for ``aot_eager`` on models that actually use FlexInnerAttention, so
-    dense/non-flex aot_eager paths are left untouched. Other non-inductor backends
-    can't be scooped here and raise rather than silently degrading.
+    Only applied for ``aot_eager`` on models containing modules that set
+    ``_has_inductor_region``. Other models are left untouched. Other
+    non-Inductor backends cannot lower these regions and raise rather than
+    silently degrading.
     """
-    from torchtitan.models.common.attention import FlexInnerAttention
-
-    uses_flex = any(isinstance(m, FlexInnerAttention) for m in model.modules())
-    # Non-flex models never need the scoop; the default inductor backend already
-    # lowers the flex region directly. Both are left on the unmodified backend.
-    if not uses_flex or backend == "inductor":
+    has_inductor_region = any(
+        getattr(module, "_has_inductor_region", False) for module in model.modules()
+    )
+    if not has_inductor_region or backend == "inductor":
         return backend
 
-    # FlexInnerAttention only has an inductor lowering. Under a non-inductor backend
-    # other than aot_eager it would decompose to eager aten ops (no Triton
-    # kernel), which we can't transparently scoop here -- fail loudly.
     if backend != "aot_eager":
         raise ValueError(
-            f"Model uses FlexInnerAttention but compile backend {backend!r} is neither "
-            f"'inductor' nor 'aot_eager'; the flex region would decompose to eager "
-            f"aten ops (no Triton kernel). Use 'inductor' or 'aot_eager'."
+            f"Model contains Inductor-only regions but compile backend {backend!r} "
+            "is neither 'inductor' nor 'aot_eager'. Use 'inductor' or "
+            "'aot_eager'."
         )
 
     from torch._dynamo.backends.common import aot_autograd

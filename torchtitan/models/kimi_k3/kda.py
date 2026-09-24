@@ -23,34 +23,14 @@ from torchtitan.models.common.attention import (
     VarlenMetadata,
 )
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.nn_modules import Conv1d, GatedRMSNorm
+from torchtitan.models.common.nn_modules import Conv1d
+from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # W = convolution kernel width.
-
-
-class KimiGatedRMSNorm(GatedRMSNorm):
-    """Kimi K3 gated RMSNorm: ``rms_norm(x, weight) * sigmoid(gate)``."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        eps: float = 1e-5
-
-    def __init__(self, config: Config):
-        super().__init__(
-            GatedRMSNorm.Config(
-                dim=config.dim,
-                eps=config.eps,
-                activation_fn=torch.sigmoid,
-            )
-        )
-
-    def forward(self, x_THV: torch.Tensor, gate_THV: torch.Tensor) -> torch.Tensor:
-        return super().forward(x_THV, gate_THV)
 
 
 class KDAKernel(Module):
@@ -203,7 +183,7 @@ class KDA(Module):
         beta: Linear.Config
         output_gate: Linear.Config
         inner_kda: Module.Config
-        output_norm: KimiGatedRMSNorm.Config
+        output_norm: GatedRMSNorm.Config
         output_proj: Linear.Config
 
         def __post_init__(self):

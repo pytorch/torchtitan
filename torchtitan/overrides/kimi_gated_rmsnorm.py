@@ -23,8 +23,9 @@ import triton
 import triton.language as tl
 
 from torchtitan.config import derive, override
+from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.decoder_sharding import attention_activation_placement
-from torchtitan.models.kimi_k3.kda import KimiGatedRMSNorm
+from torchtitan.models.common.norm import GatedRMSNorm
 
 
 __all__ = [
@@ -335,11 +336,11 @@ def triton_kimi_gated_rms_norm(
     return output
 
 
-class TritonKimiGatedRMSNorm(KimiGatedRMSNorm):
+class TritonKimiGatedRMSNorm(GatedRMSNorm):
     """Kimi K3 gated RMSNorm implemented by a fused Triton kernel."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(KimiGatedRMSNorm.Config):
+    class Config(GatedRMSNorm.Config):
         pass
 
     def forward(
@@ -363,13 +364,16 @@ class TritonKimiGatedRMSNorm(KimiGatedRMSNorm):
 
 
 @override(
-    target=KimiGatedRMSNorm.Config,
+    target=GatedRMSNorm.Config,
+    fqns=["model.layers.*.delta_attention.output_norm"],
     exact=True,
     description="Fuse Kimi K3 gated RMSNorm with Triton.",
 )
 def triton_kimi_gated_rmsnorm(
-    cfg: KimiGatedRMSNorm.Config,
+    cfg: GatedRMSNorm.Config,
 ) -> TritonKimiGatedRMSNorm.Config:
+    if not isinstance(cfg.activation_fn, Sigmoid.Config):
+        raise ValueError("Triton Kimi gated RMSNorm requires sigmoid gating")
     sharding_config = cfg.sharding_config
     if sharding_config is not None:
         if sharding_config.state_shardings.get("weight") is None:

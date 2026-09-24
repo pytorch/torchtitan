@@ -11,9 +11,9 @@ import unittest
 
 import torch
 
-from torchtitan.models.common import Conv1d, Linear
+from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, Sigmoid
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
-from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel, KimiGatedRMSNorm
+from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel
 
 _HAS_ATTENTION_GYM_KDA = (
     importlib.util.find_spec("attn_gym") is not None
@@ -59,7 +59,11 @@ def _kda_config() -> KDA.Config:
             head_dim=128,
             kernel=KDAKernel.Config(),
         ),
-        output_norm=KimiGatedRMSNorm.Config(dim=128),
+        output_norm=GatedRMSNorm.Config(
+            dim=128,
+            eps=1e-5,
+            activation_fn=Sigmoid.Config(),
+        ),
         output_proj=linear(projection_dim, 32),
     )
 

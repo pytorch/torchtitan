@@ -228,12 +228,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         dtype: torch.dtype = torch.float32,
     ):
         try:
-            from torchtitan.models.common import Conv1d, Linear
+            from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, SiLU
             from torchtitan.models.qwen3_5.gdn import (
                 GatedDeltaKernel,
                 GatedDeltaNet,
                 InnerGatedDeltaNet,
-                Qwen35GatedRMSNorm,
             )
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
@@ -275,7 +274,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             inner_gated_delta_net=InnerGatedDeltaNet.Config(
                 kernel=GatedDeltaKernel.Config(),
             ),
-            norm=Qwen35GatedRMSNorm.Config(dim=value_head_dim),
+            norm=GatedRMSNorm.Config(
+                dim=value_head_dim,
+                eps=1e-6,
+                activation_fn=SiLU.Config(),
+            ),
             out_proj=Linear.Config(
                 in_features=value_dim,
                 out_features=dim,

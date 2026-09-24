@@ -22,8 +22,9 @@ from torch import nn
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear
+from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
 
 
@@ -53,30 +54,6 @@ def _causal_conv1d_varlen(
     )
     assert isinstance(out_BTD, torch.Tensor)
     return out_BTD.squeeze(0)
-
-
-class Qwen35GatedRMSNorm(GatedRMSNorm):
-    """Qwen3.5 gated RMSNorm: ``rms_norm(x, weight) * silu(gate)``."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        eps: float = 1e-6
-
-    def __init__(self, config: Config):
-        super().__init__(
-            GatedRMSNorm.Config(
-                dim=config.dim,
-                eps=config.eps,
-                activation_fn=F.silu,
-            )
-        )
-
-    def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        # Keep RMS normalization and gating in FP32 until the final output cast,
-        # following the FLA behavior noted by Hugging Face:
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L216-L218
-        return super().forward(x, gate)
 
 
 @torch.library.custom_op(
@@ -374,7 +351,7 @@ class GatedDeltaNet(Module):
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
         inner_gated_delta_net: Module.Config
-        norm: Qwen35GatedRMSNorm.Config
+        norm: GatedRMSNorm.Config
         out_proj: Linear.Config
 
     def __init__(self, config: Config):
