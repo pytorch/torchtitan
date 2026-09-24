@@ -38,6 +38,41 @@ def _config():
 
 
 class MXFP4PolicyTest(unittest.TestCase):
+    def test_manifest_selects_only_actual_pairs_from_eligible_linears(self):
+        weights = ["model.expert.weight", "model.residual.weight", "model.fused.weight"]
+        policy = MXFP4CheckpointPolicy.from_manifest(
+            _config(),
+            weights,
+            {
+                "model.expert.weight_packed": "weights.safetensors",
+                "model.expert.weight_scale": "scales.safetensors",
+                "model.residual.weight": "dense.safetensors",
+                "model.fused.weight": "dense.safetensors",
+            },
+        )
+        self.assertEqual(policy.weight_fqns, frozenset({"model.expert.weight"}))
+
+    def test_manifest_rejects_invalid_pairs(self):
+        pair = {"model.expert.weight_packed": "a", "model.expert.weight_scale": "b"}
+        cases = [
+            ({"model.expert.weight_packed": "a"}, "missing scales"),
+            ({"model.expert.weight_scale": "a"}, "orphan scales"),
+            ({**pair, "model.expert.weight": "c"}, "both packed and ordinary"),
+            (
+                {"model.shared.weight_packed": "a", "model.shared.weight_scale": "b"},
+                "outside",
+            ),
+            ({"unknown.weight_packed": "a", "unknown.weight_scale": "b"}, "outside"),
+            ({"model.expert.weight_packed": None}, "weight_map"),
+        ]
+        for manifest, message in cases:
+            with self.subTest(manifest=manifest), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                MXFP4CheckpointPolicy.from_manifest(
+                    _config(), ["model.expert.weight", "model.shared.weight"], manifest
+                )
+
     def test_resolves_actual_linear_hierarchy_and_prefix_regex(self):
         policy = MXFP4CheckpointPolicy.from_config(
             _config(),

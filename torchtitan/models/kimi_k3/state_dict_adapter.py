@@ -222,9 +222,35 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         quantization = config.get("text_config", config).get("quantization_config")
         if not isinstance(quantization, dict):
             raise ValueError("Kimi checkpoint is missing quantization_config metadata.")
-        return MXFP4CheckpointPolicy.from_config(
-            quantization, self.hf_linear_weight_mapping()
+        index_path = Path(path) / "model.safetensors.index.json"
+        if not index_path.is_file():
+            raise ValueError(f"Quantized Kimi checkpoint is missing {index_path}.")
+        index = json.loads(index_path.read_text())
+        return MXFP4CheckpointPolicy.from_manifest(
+            quantization, self.hf_linear_weight_mapping(), index.get("weight_map")
         )
+
+    def qat_weight_fqns(self, policy: MXFP4CheckpointPolicy) -> set[str]:
+        """Translate a manifest policy without silently quantizing BF16 experts.
+
+        Several HF experts share one Titan parameter. QAT can only select that
+        parameter when every corresponding HF weight is packed.
+        """
+        mapping = self.hf_linear_weight_mapping()
+        selected = {
+            mapping[key] for key in policy.weight_fqns if mapping[key] is not None
+        }
+        partial = {
+            target
+            for key, target in mapping.items()
+            if target in selected and key not in policy.weight_fqns
+        }
+        if partial:
+            raise ValueError(
+                "MX QAT cannot mix packed and BF16 experts within a shared parameter: "
+                f"{sorted(partial)}"
+            )
+        return selected
 
     @staticmethod
     def _validate_qat_weight_config(config, policy: MXFP4CheckpointPolicy) -> None:
@@ -259,9 +285,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 )
         if not has_qat:
             return  # Packed import into a BF16 model remains supported.
-        expected = {
-            mapping[key] for key in policy.weight_fqns if mapping[key] is not None
-        }
+        expected = self.qat_weight_fqns(policy)
         if selected != expected:
             raise ValueError(
                 "MX QAT selection disagrees with checkpoint policy: "

@@ -23,10 +23,11 @@ class MXFP4CheckpointPolicy:
     def from_config(
         cls, quantization: Mapping[str, Any], linear_weights: Iterable[str]
     ) -> "MXFP4CheckpointPolicy":
-        """Resolve an exact set; the adapter supplies actual HF Linear weights.
+        """Resolve eligible weights, not the checkpoint's actual packed set.
 
         Only the released static, symmetric 1x32 E2M1/E8M0 format is supported.
         Names alone cannot distinguish Linear weights from embeddings or norms.
+        Use from_manifest for checkpoint import; eligible weights may be BF16.
         """
         if (
             quantization.get("format") != "mxfp4-pack-quantized"
@@ -100,6 +101,53 @@ class MXFP4CheckpointPolicy:
                 )
             )
         )
+
+    @classmethod
+    def from_manifest(
+        cls,
+        quantization: Mapping[str, Any],
+        linear_weights: Iterable[str],
+        weight_map: Mapping[str, str],
+    ) -> "MXFP4CheckpointPolicy":
+        """Validate actual index pairs against eligibility and select only those.
+
+        A config target is permission to quantize, not proof of packed storage.
+        The storage reader subsequently validates the indexed pairs' physical
+        presence, dtype, and shape. Ordinary weights remain ordinary tensors.
+        """
+        eligible = cls.from_config(quantization, linear_weights)
+        if not isinstance(weight_map, Mapping) or any(
+            not isinstance(name, str) or not isinstance(shard, str) or not shard
+            for name, shard in weight_map.items()
+        ):
+            raise ValueError("Checkpoint index requires a tensor-to-shard weight_map")
+        packed = {
+            name.removesuffix(".weight_packed") + ".weight"
+            for name in weight_map
+            if name.endswith(".weight_packed")
+        }
+        scaled = {
+            name.removesuffix(".weight_scale") + ".weight"
+            for name in weight_map
+            if name.endswith(".weight_scale")
+        }
+        if packed != scaled:
+            raise ValueError(
+                "Checkpoint index has unpaired MXFP4 tensors: "
+                f"missing scales={sorted(packed - scaled)[:10]}, "
+                f"orphan scales={sorted(scaled - packed)[:10]}"
+            )
+        outside = packed - eligible.weight_fqns
+        if outside:
+            raise ValueError(
+                f"Checkpoint packed weights are outside the config policy: {sorted(outside)[:10]}"
+            )
+        conflicts = packed & weight_map.keys()
+        if conflicts:
+            raise ValueError(
+                f"Checkpoint index has both packed and ordinary weights: {sorted(conflicts)[:10]}"
+            )
+        return cls(frozenset(packed), block_size=eligible.block_size)
 
 
 def decode_mxfp4(
