@@ -52,7 +52,7 @@ class PPRankLocalCache:
         return any(key[0] == mb for key in self._deposits)
 
 
-def assemble_stack(
+def _assemble_stack(
     hidden_TD: torch.Tensor,
     delta_TND: torch.Tensor,
     delta_blocks: list[int],
@@ -165,7 +165,7 @@ class AttnResPipelineStage(PipelineStage):
                 f"stage {self.stage_index} micro-batch {mb}: the store holds "
                 f"blocks {sorted(held)} but the routing expects {sorted(expected)}"
             )
-        stack_TND, order = assemble_stack(hidden_TD, delta_TND, delta_blocks, held)
+        stack_TND, order = _assemble_stack(hidden_TD, delta_TND, delta_blocks, held)
         if layout.cache:
             # Keep what arrived for the rank's later stages.
             for i, b in enumerate(delta_blocks):
@@ -344,7 +344,7 @@ class AttnResPipelineStage(PipelineStage):
                 b: hidden_TD.new_zeros(hidden_TD.shape)
                 for b in layout.cache_at_entry(self.stage_index)
             }
-            stack_TND, order_in = assemble_stack(
+            stack_TND, order_in = _assemble_stack(
                 hidden_TD, delta_TND, delta_blocks, held
             )
             output = module(hidden_TD, stack_TND, **kwargs)

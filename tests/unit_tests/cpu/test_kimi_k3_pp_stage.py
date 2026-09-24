@@ -20,7 +20,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.models.kimi_k3.pipeline_parallel import _swap_in_attn_res_stages
 from torchtitan.models.kimi_k3.pipeline_parallel.stage import (
-    assemble_stack,
+    _assemble_stack,
     AttnResPipelineStage,
     pack_outgoing_delta,
     PPRankLocalCache,
@@ -34,15 +34,15 @@ class TestCarrier(unittest.TestCase):
         hidden = torch.randn(T, D)
         delta = torch.randn(T, 1, D, requires_grad=True)  # block 2 on the wire
         store = {0: torch.randn(T, D), 1: torch.randn(T, D)}
-        stack, order = assemble_stack(hidden, delta, [2], store)
+        stack, order = _assemble_stack(hidden, delta, [2], store)
         self.assertEqual(order, [0, 1, 2])
         self.assertTrue(stack.is_leaf and stack.requires_grad)
         self.assertTrue(torch.equal(stack[:, 0], store[0]))
         self.assertTrue(torch.equal(stack[:, 2], delta[:, 0]))
-        empty, order = assemble_stack(hidden, hidden.new_zeros(T, 0, D), [], {})
+        empty, order = _assemble_stack(hidden, hidden.new_zeros(T, 0, D), [], {})
         self.assertEqual((tuple(empty.shape), order), ((T, 0, D), []))
         with self.assertRaisesRegex(ValueError, "routing expects"):
-            assemble_stack(hidden, delta, [2, 3], store)
+            _assemble_stack(hidden, delta, [2, 3], store)
 
     def test_payload_is_the_routed_columns_of_the_model_stack(self):
         T, D = 4, 8

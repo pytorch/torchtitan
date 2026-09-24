@@ -28,7 +28,7 @@ and the two transports are the same hop.
 
 ## What the stage does
 
-- `assemble_stack`: the received delta and the held blocks become one leaf
+- `_assemble_stack`: the received delta and the held blocks become one leaf
   `[T, N, D]` in block order, and the stage's model part runs on it.
 - `pack_outgoing_delta`: the columns the next rank lacks, `delta_to_send`,
   as views of the model's stack.
