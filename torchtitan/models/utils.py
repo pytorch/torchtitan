@@ -52,39 +52,6 @@ class MoEStateDictAdapter(StateDictAdapter):
         self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
 
     @staticmethod
-    def _to_logical_expert_state(
-        state_dict: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        """Expose structured W13 as logical gate/up tensors to HF adapters."""
-        logical = dict(state_dict)
-        for key in list(logical):
-            if not key.endswith("routed_experts.w13.weight"):
-                continue
-            weight = logical.pop(key)
-            prefix = key.removesuffix("w13.weight")
-            logical[f"{prefix}w1_EFD"] = weight.select(1, 0)
-            logical[f"{prefix}w3_EFD"] = weight.select(1, 1)
-        return logical
-
-    @staticmethod
-    def _to_native_expert_state(
-        state_dict: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
-        """Combine logical gate/up tensors into the canonical W13 parameter."""
-        native = dict(state_dict)
-        gate_keys = [key for key in native if key.endswith("routed_experts.w1_EFD")]
-        for gate_key in gate_keys:
-            prefix = gate_key.removesuffix("w1_EFD")
-            up_key = f"{prefix}w3_EFD"
-            if up_key not in native:
-                raise ValueError(f"Missing routed-expert up weight for {gate_key}")
-            native[f"{prefix}w13.weight"] = torch.stack(
-                (native.pop(gate_key), native.pop(up_key)),
-                dim=1,
-            )
-        return native
-
-    @staticmethod
     def _is_expert_weight_key(key: str) -> bool:
         """Return whether ``key`` is a canonical or logical expert projection."""
         return key.endswith(
