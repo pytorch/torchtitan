@@ -73,6 +73,19 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                 [
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.data_parallel_shard_degree 2",
+                ],
+            ],
+            "aot_fx_trace llama3 HSDP",
+            "aot_fx_trace_llama3_hsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
                     "--training.num_tokens_per_microbatch_per_dp_rank 2048",
                     "--training.num_tokens_per_train_step 4096",
                 ],
@@ -252,6 +265,21 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
 
     return [
         # === GraphRuntime tests ===
+        OverrideDefinitions(
+            [
+                [
+                    "--training.disable_cuda_graphs",
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel",
+                    "--parallelism.data_parallel_replicate_degree 2",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--parallelism.expert_parallel_degree 2",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 HSDP+edp_shard+EP",
+            "aot_fx_trace_deepseek_v3_hsdp_edp_shard_ep",
+            ngpu=8,
+        ),
         # Note: standard DSv3 MoE load-balancing introduces CUDA-to-CPU
         # transfers incompatible with CUDA graph capture, so this fused test
         # explicitly disables CUDA graphs in both the trainer and graph passes.
