@@ -635,7 +635,7 @@ class MoE(Module):
     def __init__(self, config: Config):
         super().__init__()
 
-        num_experts = config.num_experts
+        self.num_experts = config.num_experts
         self.routed_experts = config.routed_experts.build()
         self.router = config.router.build()
         self.shared_experts = (
@@ -651,7 +651,7 @@ class MoE(Module):
             assert self.load_balance_coeff > 0.0
             self.register_buffer(
                 "expert_bias_E",
-                torch.zeros(num_experts, dtype=torch.float32),
+                torch.zeros(self.num_experts, dtype=torch.float32),
                 persistent=True,
             )
         else:
