@@ -20,6 +20,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
   cancel-in-progress: true
 
+# The build assumes an AWS role by OIDC to push to ECR, which needs a token the
+# workflow has to ask for. contents is named explicitly because naming any
+# permission zeroes the ones left out, and checkout needs it.
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   docker-build:
     # Skip scheduled runs on forks, where they would only fail and email the fork owner
