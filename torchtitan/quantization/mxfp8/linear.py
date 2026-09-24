@@ -36,7 +36,10 @@ from .tensor import (
 )
 
 
-__all__ = ["InputActivationFormatForBackward", "MXFP8Linear"]
+__all__ = [
+    "InputActivationFormatForBackward",
+    "MXFP8Linear",
+]
 
 # Activation and gradient quantization takes a scaling mode; the 32x32 weight
 # cast hardcodes RCEIL. Pin the two to match, so both operands of a GEMM round
@@ -302,6 +305,8 @@ spmd.register_local_autograd_function(_MXFP8LinearFunction)
 class MXFP8Linear(Linear):
     """Linear using 1D activations and cached 32x32 weight quantization."""
 
+    WEIGHT_BLOCK_SIZE = _MXFP8_BLOCK_SIZE
+
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         """Drop-in replacement for ``Linear.Config``."""
@@ -346,18 +351,34 @@ class MXFP8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        physical_weight = self.weight
+        local_out_features = physical_weight.shape[-2]
+        if local_out_features % _MXFP8_BLOCK_SIZE:
+            raise ValueError(
+                "MXFP8 requires local out_features divisible by "
+                f"{_MXFP8_BLOCK_SIZE}; got {local_out_features}. Adjust the "
+                "Linear out_features or TP degree so quantization blocks do "
+                "not span projection boundaries."
+            )
         # Always a plain tensor: spmd_types carries TP and EP as annotations
         # instead of wrapping the weight as a model-parallel DTensor.
-        weight_NK = self.weight
+        weight_NK = weight
         # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
         # not what forward usually sees. Under FSDP the post-all-gather hook has
         # already replaced it for this unshard lifetime with the storage-free
         # _UnshardedFSDPTensor holding the quantized operands, so the weight
         # arrives here already quantized and the type identifies which state we
         # are in.
-        if isinstance(weight_NK, _UnshardedFSDPTensor):
-            operands = weight_NK.operands
+        if isinstance(physical_weight, _UnshardedFSDPTensor):
+            # Read operands from the physical wrapper. Dynamo can source the
+            # module parameter, but not a temporary tensor-subclass view of it.
+            operands = physical_weight.operands
         else:
             # No data parallel implementation owns this weight's lifecycle, so
             # it still holds high-precision storage and the operands are built
@@ -366,26 +387,28 @@ class MXFP8Linear(Linear):
             # hands forward a plain annotated local tensor, so the wrapper
             # SimpleFSDP's parametrization built never reaches here. Quantize
             # the storage rather than the wrapper, which the kernels cannot
-            # consume; ``weight_NK`` itself stays wrapped so autograd returns
+            # consume; the matrix view itself stays wrapped so autograd returns
             # the gradient to the parameter.
             with torch.no_grad():
-                operands = _quantize_mxfp8_weight(
-                    weight_NK._tensor
-                    if isinstance(weight_NK, _LinearShardedTensorWithMXFP8Compute)
-                    else weight_NK
+                high_precision_weight = (
+                    physical_weight._tensor
+                    if isinstance(physical_weight, _LinearShardedTensorWithMXFP8Compute)
+                    else physical_weight
                 )
+                operands = _quantize_mxfp8_weight(high_precision_weight.flatten(0, -2))
             # Nothing caches this across calls, so a frozen weight is
             # requantized on every forward. Training pays that anyway, since
             # the weight changes each optimizer step; inference does not.
             # TODO(anijain2305): key the operands on the parameter's
             # version counter so a frozen weight is quantized once.
-        return _MXFP8LinearFunction.apply(
+        output = _MXFP8LinearFunction.apply(
             input,
             weight_NK,
             operands.weight_qdata_fprop_KN,
             operands.weight_scale_fprop_swizzled,
             operands.weight_qdata_dgrad_NK,
             operands.weight_scale_dgrad_swizzled,
-            self.bias,
+            bias,
             self.input_activation_format_for_backward,
         )
+        return output

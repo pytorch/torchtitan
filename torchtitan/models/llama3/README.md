@@ -30,7 +30,8 @@ Other recipes include `llama3_70b` and `llama3_405b`. See
 
 ## Supported Parallelisms
 
-Coverage below matches `parallelize.py` and the Llama 3 jobs in
+Coverage below matches [`sharding.py`](./sharding.py),
+`BaseModel.parallelize()`, and the Llama 3 jobs in
 `tests/integration_tests/features.py` (plus Float8 jobs in
 `tests/integration_tests/h100.py`).
 

@@ -13,10 +13,11 @@ Two-phase replacement:
   Phase 2 (parallelize time): ``build_and_swap_native_moe`` calls
       ``set_moe_sharding_config`` on each stored config, builds the Titan MoE,
       initializes it, and swaps it into the layer. Actual parallelization
-      happens later via ``model.parallelize(parallel_dims)``.
+      happens later via ``model._parallelize(parallel_dims)``.
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 
@@ -29,23 +30,21 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
     _hf_activation_placement,
     _hf_sequence_parallel_placement,
 )
+from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
-    make_ffn_config,
+    fused_gate_up_param_init,
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    make_shared_expert_ffn_config,
 )
-from torchtitan.models.common.decoder_sharding import (
-    dense_activation_placement,
-    dense_param_placement,
-    dense_sequence_parallel_placement,
-)
-from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    set_moe_sharding_config,
+    set_routed_moe_sharding_config,
+)
 from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
-from torchtitan.protocols.sharding import ShardingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -110,6 +109,12 @@ def build_and_swap_native_moe(
             each MoE-enabled layer (from ``prepare_native_moe_configs``).
         parallel_dims: Parallel dimensions for EP/TP mesh resolution.
     """
+    if parallel_dims.ep < parallel_dims.tp:
+        raise ValueError(
+            f"MoE models require expert_parallel_degree ({parallel_dims.ep}) to be "
+            "greater than or equal to tensor_parallel_degree "
+            f"({parallel_dims.tp})."
+        )
     enable_ep = parallel_dims.ep_enabled
     enable_sp = parallel_dims.tp_enabled
 
@@ -118,13 +123,30 @@ def build_and_swap_native_moe(
         if moe_config is None:
             continue
 
-        _, expert_layout = _get_expert_param_info()
-        set_moe_sharding_config(
-            moe_config,
-            enable_ep=enable_ep,
-            enable_sp=enable_sp,
-            expert_param_layout=expert_layout,
-        )
+        shared_experts = moe_config.shared_experts
+        if shared_experts is not None and hasattr(shared_experts, "gate"):
+            # Avoid loading Qwen3.5's optional model dependencies for other HF
+            # architectures handled by this generic experiment.
+            from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
+            from torchtitan.models.qwen3_5.sharding import (
+                set_sigmoid_gated_feed_forward_sharding_config,
+            )
+
+            assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
+            set_routed_moe_sharding_config(
+                moe_config,
+                enable_ep=enable_ep,
+                enable_sp=enable_sp,
+            )
+            set_sigmoid_gated_feed_forward_sharding_config(
+                shared_experts, enable_ep=enable_ep, enable_sp=enable_sp
+            )
+        else:
+            set_moe_sharding_config(
+                moe_config,
+                enable_ep=enable_ep,
+                enable_sp=enable_sp,
+            )
         root_sharding = moe_config.sharding_config
         assert root_sharding is not None
         # Only the MoE root sees HF's singleton batch. Its children retain the
@@ -149,24 +171,6 @@ def build_and_swap_native_moe(
             out_src_shardings=output_layout,
             out_dst_shardings=hf_sp_layout,
         )
-
-        # set_moe_sharding_config shards the shared FFN (w13/w2) but
-        # leaves the SigmoidGatedFeedForward gate to model-specific code.
-        shared = moe_config.shared_experts
-        if isinstance(shared, SigmoidGatedFeedForward.Config):
-            gate_output_layout = (
-                dense_sequence_parallel_placement()
-                if enable_sp
-                else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-            )
-            shared.gate.sharding_config = ShardingConfig(
-                state_shardings={
-                    "weight": dense_param_placement(tp=spmd.R),
-                    "bias": dense_param_placement(tp=spmd.R),
-                },
-                out_src_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-                out_dst_shardings=gate_output_layout,
-            )
 
         with torch.device("meta"):
             native_moe = moe_config.build()
@@ -496,27 +500,11 @@ _LINEAR_INIT = {
     "bias": nn.init.zeros_,
 }
 
-_expert_param_info_cache: tuple[dict, dict] | None = None
 
-
-def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]:
-    """Return logical expert initialization and TP sharding configuration."""
-    global _expert_param_info_cache
-    if _expert_param_info_cache is not None:
-        return _expert_param_info_cache
-
+def _get_expert_param_init() -> dict[str, Callable]:
+    """Return initializers for the three logical expert projections."""
     init_fn = partial(nn.init.trunc_normal_, std=0.02)
-    param_init = {
-        "w1_EFD": init_fn,
-        "w2_EDF": init_fn,
-        "w3_EFD": init_fn,
-    }
-    param_layout = {
-        "w13_E_2F_D": spmd.S(1),
-        "w2_EDF": spmd.S(2),
-    }
-    _expert_param_info_cache = (param_init, param_layout)
-    return _expert_param_info_cache
+    return {"w1_EFD": init_fn, "w2_EDF": init_fn, "w3_EFD": init_fn}
 
 
 def _build_moe_config(params: dict, config) -> MoE.Config:
@@ -537,35 +525,48 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_experts=params["num_experts"],
         gate_param_init=_LINEAR_INIT,
         top_k=params["top_k"],
-        score_func=params["score_func"],
+        score_func=(
+            Sigmoid.Config() if params["score_func"] == "sigmoid" else Softmax.Config()
+        ),
         route_norm=params["route_norm"],
         route_scale=params["route_scale"],
         **router_kwargs,
     )
 
-    expert_init, _ = _get_expert_param_info()
     routed_experts = make_routed_experts_config(
         dim=params["dim"],
         hidden_dim=params["moe_intermediate_size"],
         num_experts=params["num_experts"],
         top_k=params["top_k"],
-        param_init=expert_init,
+        param_init=_get_expert_param_init(),
         comm_backend=params["comm_backend"],
     )
 
     shared_experts = None
     shared_info = params["shared_expert_info"]
     if shared_info is not None:
-        ffn_config = make_ffn_config(
+        ffn_config = make_shared_expert_ffn_config(
             dim=shared_info["dim"],
             hidden_dim=shared_info["hidden_dim"],
             w1_param_init=_LINEAR_INIT,
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
+            # Import only for the Qwen3.5 topology so unrelated HF models do
+            # not load Qwen3.5's optional model dependencies.
+            from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
+
             shared_experts = SigmoidGatedFeedForward.Config(
-                w13=ffn_config.w13,
+                # The enclosing MoE gathers once because w13 and the sigmoid
+                # gate consume the same input.
+                w13=Linear.Config(
+                    in_features=shared_info["dim"],
+                    out_features=shared_info["hidden_dim"],
+                    num_linears=2,
+                    param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
+                ),
                 w2=ffn_config.w2,
+                activation_fn=ffn_config.activation_fn,
                 gate=Linear.Config(
                     in_features=shared_info["dim"],
                     out_features=1,
