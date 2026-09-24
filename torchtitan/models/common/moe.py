@@ -81,18 +81,6 @@ class GroupedExperts(Module):
             torch.empty(config.num_experts, config.dim, config.hidden_dim)
         )
         self.activation_fn = config.activation_fn.build()
-        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
-
-    @staticmethod
-    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
-        """Pack logical w1/w3 checkpoint entries into the fused parameter."""
-        gate_key = f"{prefix}w1_EFD"
-        up_key = f"{prefix}w3_EFD"
-        if gate_key not in state_dict or up_key not in state_dict:
-            return
-        state_dict[f"{prefix}w13_E2FD"] = torch.stack(
-            [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=1
-        )
 
     def forward(
         self,
