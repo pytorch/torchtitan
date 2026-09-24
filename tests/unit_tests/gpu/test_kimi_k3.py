@@ -132,9 +132,8 @@ class TestKimiK3(unittest.TestCase):
         )
 
     @unittest.skipIf(
-        not torch.cuda.is_available()
-        or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)},
-        "Attention Gym KDA requires CUDA capability 10.0 or 10.3.",
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0),
+        "Attention Gym KDA requires CUDA capability 9.0 or newer.",
     )
     def test_attention_gym_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
