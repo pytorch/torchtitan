@@ -26,12 +26,15 @@ from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter imp
     titan_to_hf_moe_state_dict,
 )
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 
 
-def _expert_weights(experts):
-    """Return logical gate, down, and up expert-weight tensors."""
-    return experts.w13_E2FD[:, 0], experts.w2_EDF, experts.w13_E2FD[:, 1]
+def _expert_weights(routed_experts):
+    """Return the gate, down, and up expert-weight views."""
+    return (
+        routed_experts.w13.weight[:, 0],
+        routed_experts.w2.weight,
+        routed_experts.w13.weight[:, 1],
+    )
 
 
 def _moe_buffer(moe, prefix):
@@ -59,9 +62,9 @@ def test_moe_state_dict_roundtrip_uses_native_w13():
 
     titan_state = hf_to_titan_moe_state_dict(hf_state)
 
-    expert_prefix = "layers.0.moe.routed_experts.inner_experts"
-    assert titan_state[f"{expert_prefix}.w13_E2FD"].shape == (4, 2, 8, 4)
-    assert titan_state[f"{expert_prefix}.w2_EDF"] is down_EDF
+    expert_prefix = "layers.0.moe.routed_experts"
+    assert titan_state[f"{expert_prefix}.w13.weight"].shape == (4, 2, 8, 4)
+    assert titan_state[f"{expert_prefix}.w2.weight"] is down_EDF
     restored = titan_to_hf_moe_state_dict(titan_state)
     assert restored.keys() == hf_state.keys()
     for key in hf_state:
@@ -253,7 +256,6 @@ class TestPrepareNativeMoeConfigs(unittest.TestCase):
         _prepare_layers(model)
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
-            _build_moe_config,
             _probe_hf_moe_block,
         )
 
@@ -266,9 +268,6 @@ class TestPrepareNativeMoeConfigs(unittest.TestCase):
         self.assertEqual(params["num_limited_groups"], 1)
         self.assertIsNotNone(params["shared_expert_info"])
         self.assertFalse(params["shared_expert_info"]["has_sigmoid_gate"])
-
-        moe_config = _build_moe_config(params, config)
-        self.assertIsInstance(moe_config.router, DeepSeekV3Router.Config)
 
     def test_moe_config_build(self):
         """MoE.Config is built correctly from probed params."""
@@ -361,7 +360,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
             native_moe = moe_config.build()
 
         self.assertIsInstance(native_moe, MoE)
-        w1, w2, w3 = _expert_weights(native_moe.routed_experts.inner_experts)
+        w1, w2, w3 = _expert_weights(native_moe.routed_experts)
         self.assertEqual(w1.shape, (4, 32, 64))
         self.assertEqual(w2.shape, (4, 64, 32))
         self.assertEqual(w3.shape, (4, 32, 64))
@@ -388,16 +387,14 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
             native_moe = moe_config.build()
 
         self.assertTrue(
-            _expert_weights(native_moe.routed_experts.inner_experts)[0].device.type
-            == "meta"
+            _expert_weights(native_moe.routed_experts)[0].device.type == "meta"
         )
 
         native_moe.to_empty(device=torch.device("cpu"))
         native_moe.init_states(buffer_device=torch.device("cpu"))
 
         self.assertTrue(
-            _expert_weights(native_moe.routed_experts.inner_experts)[0].device.type
-            == "cpu"
+            _expert_weights(native_moe.routed_experts)[0].device.type == "cpu"
         )
         self.assertTrue(native_moe.router.gate.weight.device.type == "cpu")
         self.assertTrue(
@@ -461,9 +458,8 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         output.sum().backward()
 
         self.assertIsNotNone(x.grad)
-        inner_experts = native_moe.routed_experts.inner_experts
-        self.assertIsNotNone(inner_experts.w13_E2FD.grad)
-        self.assertIsNotNone(inner_experts.w2_EDF.grad)
+        self.assertIsNotNone(native_moe.routed_experts.w13.weight.grad)
+        self.assertIsNotNone(native_moe.routed_experts.w2.weight.grad)
 
 
 # ---------------------------------------------------------------------------

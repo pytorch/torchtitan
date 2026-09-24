@@ -44,9 +44,9 @@ With all three fixes applied, all PASS/WARN models produce max_diff=0.00.
 
 ### Activation function (Gemma4)
 
-Titan's `GroupedExperts._experts_forward` hardcodes `F.silu` (SwiGLU).
-Gemma4 uses `F.gelu(approximate="tanh")` (GeGLU). With matched
-activation and identical routing, expert output is exactly 0.00.
+Titan's default routed-expert `SwiGLU` uses SwiGLU, while Gemma4 uses
+`F.gelu(approximate="tanh")` (GeGLU). Supplying the model-specific activation
+produces an exact expert-output match under identical routing.
 
 ### Router architecture (Gemma4)
 
@@ -129,9 +129,9 @@ diff.
 
 ## Core Changes Needed for Full Support
 
-### Configurable expert activation (for Gemma4)
-`GroupedExperts._experts_forward` hardcodes `F.silu`. Making the
-activation configurable would support Gemma4 (`gelu_pytorch_tanh`).
+### Model-specific expert activation (for Gemma4)
+Configure the routed experts with a GeGLU `ActivationFn` implementation
+(`gelu_pytorch_tanh`) instead of the default SwiGLU implementation.
 
 ### Extended router features (for Gemma4)
 `TokenChoiceTopKRouter` needs support for input normalization, learned

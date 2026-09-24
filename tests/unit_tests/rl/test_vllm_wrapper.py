@@ -18,8 +18,7 @@ from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.qwen3_5 import model_registry
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
@@ -89,31 +88,35 @@ def test_state_dict_layouts_include_native_qkv_weight():
     assert "qkv_linear.wv.weight" not in layouts
 
 
-def test_state_dict_layouts_include_native_expert_weights():
-    """Verify fused grouped-expert layouts use native model-state keys."""
+def test_state_dict_layouts_include_native_grouped_linear_weights():
+    """Verify routed expert layouts use native grouped-linear state keys."""
     physical_colwise = dense_param_placement(tp=spmd.S(2))
-    rowwise = dense_param_placement(tp=spmd.S(2))
-    config = GroupedExperts.Config(
-        dim=16,
-        hidden_dim=32,
-        num_experts=4,
-        sharding_config=ShardingConfig(
-            state_shardings={
-                "w13_E2FD": physical_colwise,
-                "w2_EDF": rowwise,
-            }
-        ),
+    rowwise = dense_param_placement(tp=spmd.S(1))
+    w13_config = GroupedLinear.Config(
+        group_size=4,
+        in_features=16,
+        out_features=32,
+        num_linears=2,
+        sharding_config=ShardingConfig(state_shardings={"weight": physical_colwise}),
+    )
+    w2_config = GroupedLinear.Config(
+        group_size=4,
+        in_features=32,
+        out_features=16,
+        sharding_config=ShardingConfig(state_shardings={"weight": rowwise}),
     )
     model = torch.nn.Module()
-    model.experts = config.build()
+    model.experts = torch.nn.Module()
+    model.experts.w13 = w13_config.build()
+    model.experts.w2 = w2_config.build()
     wrapper = VLLMModelWrapper.__new__(VLLMModelWrapper)
     torch.nn.Module.__init__(wrapper)
     wrapper.model = model
 
     layouts = wrapper.get_state_dict_layouts()
 
-    assert layouts["experts.w13_E2FD"] is physical_colwise
-    assert layouts["experts.w2_EDF"] is rowwise
+    assert layouts["experts.w13.weight"] is physical_colwise
+    assert layouts["experts.w2.weight"] is rowwise
 
 
 def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:

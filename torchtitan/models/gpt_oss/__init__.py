@@ -31,10 +31,10 @@ from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
 )
-from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from .model import Attention, GptOssModel, GptOssTransformerBlock
-from .moe import GptOssGroupedExperts, GptOssMoE
+from .moe import GptOssGroupedLinear, GptOssSwiGLU
 
 __all__ = [
     "GptOssModel",
@@ -136,18 +136,24 @@ def _make_gptoss_experts_config(
     """Build a fully-specified RoutedExperts.Config for a single GPT-OSS layer."""
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
-        "mlp1_weight_EGD": partial(nn.init.trunc_normal_, std=std),
-        "mlp1_bias_EG": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_weight_EDF": partial(nn.init.trunc_normal_, std=std),
-        "mlp2_bias_ED": partial(nn.init.trunc_normal_, std=std),
+        "weight": partial(nn.init.trunc_normal_, std=std),
+        "bias": partial(nn.init.trunc_normal_, std=std),
     }
     return RoutedExperts.Config(
-        inner_experts=GptOssGroupedExperts.Config(
-            dim=dim,
-            hidden_dim=hidden_dim,
-            num_experts=num_experts,
+        w13=GptOssGroupedLinear.Config(
+            group_size=num_experts,
+            in_features=dim,
+            out_features=hidden_dim,
+            num_linears=2,
             param_init=experts_init,
         ),
+        w2=GptOssGroupedLinear.Config(
+            group_size=num_experts,
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init=experts_init,
+        ),
+        activation_fn=GptOssSwiGLU.Config(),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,
             top_k=top_k,
@@ -194,7 +200,7 @@ def _build_gptoss_layers(
             moe_comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
-        moe_cfg = GptOssMoE.Config(
+        moe_cfg = MoE.Config(
             num_experts=num_experts,
             load_balance_coeff=load_balance_coeff,
             routed_experts=routed_experts_cfg,
