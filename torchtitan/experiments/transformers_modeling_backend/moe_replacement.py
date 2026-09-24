@@ -17,6 +17,7 @@ Two-phase replacement:
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 
@@ -499,27 +500,11 @@ _LINEAR_INIT = {
     "bias": nn.init.zeros_,
 }
 
-_expert_param_info_cache: tuple[dict, dict] | None = None
 
-
-def _get_expert_param_info() -> tuple[dict, dict[str, spmd.PerMeshAxisSpmdType]]:
-    """Return logical expert initialization and TP sharding configuration."""
-    global _expert_param_info_cache
-    if _expert_param_info_cache is not None:
-        return _expert_param_info_cache
-
+def _get_expert_param_init() -> dict[str, Callable]:
+    """Return initializers for the three logical expert projections."""
     init_fn = partial(nn.init.trunc_normal_, std=0.02)
-    param_init = {
-        "w1_EFD": init_fn,
-        "w2_EDF": init_fn,
-        "w3_EFD": init_fn,
-    }
-    param_layout = {
-        "w13_E2FD": spmd.S(2),
-        "w2_EDF": spmd.S(2),
-    }
-    _expert_param_info_cache = (param_init, param_layout)
-    return _expert_param_info_cache
+    return {"w1_EFD": init_fn, "w2_EDF": init_fn, "w3_EFD": init_fn}
 
 
 def _build_moe_config(params: dict, config) -> MoE.Config:
@@ -548,13 +533,12 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         **router_kwargs,
     )
 
-    expert_init, _ = _get_expert_param_info()
     routed_experts = make_routed_experts_config(
         dim=params["dim"],
         hidden_dim=params["moe_intermediate_size"],
         num_experts=params["num_experts"],
         top_k=params["top_k"],
-        param_init=expert_init,
+        param_init=_get_expert_param_init(),
         comm_backend=params["comm_backend"],
     )
 
@@ -582,6 +566,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
                     param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
                 ),
                 w2=ffn_config.w2,
+                activation_fn=ffn_config.activation_fn,
                 gate=Linear.Config(
                     in_features=shared_info["dim"],
                     out_features=1,

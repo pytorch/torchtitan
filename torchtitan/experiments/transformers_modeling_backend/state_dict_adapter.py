@@ -37,15 +37,8 @@ if TYPE_CHECKING:
 # ``router.weight`` that must map back exactly rather than to ``gate.weight``).
 _TITAN_TO_ORIGINAL_HF_KEY: dict[str, str] = {}
 
-# Post-#3859 the routed grouped experts live under this submodule path on the
-# titan MoE (the token_dispatcher is a sibling node under ``routed_experts``).
-# HF stores the routed experts directly under ``experts``. Keeping the two
-# spellings distinct here is what makes ``load_state_dict`` actually populate
-# the GroupedExperts params; before this, the adapter emitted the stale
-# ``experts.*`` titan FQN and the weights silently failed to load.
-_TITAN_EXPERTS_PREFIX = "routed_experts.inner_experts"
-_TITAN_W13_WEIGHT = f"{_TITAN_EXPERTS_PREFIX}.w13_E2FD"
-_TITAN_W2_WEIGHT = f"{_TITAN_EXPERTS_PREFIX}.w2_EDF"
+_TITAN_W13_WEIGHT = "routed_experts.w13.weight"
+_TITAN_W2_WEIGHT = "routed_experts.w2.weight"
 
 
 class HFTransformerStateDictAdapter(StateDictAdapter):
@@ -90,15 +83,13 @@ class HFTransformerStateDictAdapter(StateDictAdapter):
 
 
 def _build_hf_to_titan_patterns() -> list[tuple[str, str, bool]]:
-    """Build regex patterns using native expert parameter names."""
     return [
         (r"^(.*\.)gate\.weight$", r"\1router.gate.weight", False),
         (r"^(.*\.)router\.weight$", r"\1router.gate.weight", False),
         (r"^(.*\.)router\.proj\.weight$", r"\1router.gate.weight", False),
         (r"^(.*\.)gate\.e_score_correction_bias$", r"\1expert_bias", False),
         (r"^(.*\.)experts\.down_proj$", rf"\1{_TITAN_W2_WEIGHT}", False),
-        # Shared experts use logical w1/w2/w3 adapter keys, which are packed
-        # into the native FeedForward w13/w2 state after these renames.
+        # Shared experts use FeedForward (w1/w2/w3 attribute names, not params)
         (r"^(.*\.shared_experts)\.gate_proj\.weight$", r"\1.w1.weight", False),
         (r"^(.*\.shared_experts)\.up_proj\.weight$", r"\1.w3.weight", False),
         (r"^(.*\.shared_experts)\.down_proj\.weight$", r"\1.w2.weight", False),
@@ -122,7 +113,6 @@ def _build_hf_to_titan_patterns() -> list[tuple[str, str, bool]]:
 
 
 def _build_titan_to_hf_patterns() -> list[tuple[str, str, bool]]:
-    """Build reverse regex patterns using actual expert parameter names."""
     return [
         (r"^(.*\.)router\.gate\.weight$", r"\1gate.weight", False),
         (r"^(.*\.)expert_bias$", r"\1gate.e_score_correction_bias", False),
@@ -173,7 +163,7 @@ def hf_to_titan_moe_state_dict(
 
     for key, value in hf_state_dict.items():
         # HF stores W13 as [E, 2F, D]; Titan preserves gate/up as a semantic
-        # axis so FSDP can shard F without separating the two projections.
+        # axis so TP can shard F without separating the two projections.
         # Match ``.experts.`` with a leading dot so the routed experts are not
         # confused with a shared expert (e.g. ``shared_experts.down_proj``).
         if key.endswith(".experts.gate_up_proj"):

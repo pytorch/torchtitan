@@ -50,7 +50,7 @@ class KimiLatentMoE(MoE):
         super()._init_self_buffers(buffer_device=buffer_device)
         with torch.device(buffer_device):
             self.expert_bias_E = torch.zeros(
-                self.routed_experts.inner_experts.num_experts,
+                self.router.num_experts,
                 dtype=torch.float32,
             )
 

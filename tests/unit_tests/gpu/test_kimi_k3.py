@@ -109,8 +109,8 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
-    def test_dist_muon_config_uses_native_grouped_expert_fqns(self):
-        """DistMuon owns the physical routed W13 and W2 parameters."""
+    def test_dist_muon_config_uses_native_grouped_linear_fqns(self):
+        """DistMuon buckets reference the native routed W13 and W2 parameters."""
         optimizer = _dist_muon_optimizer(
             _small_model_config(),
             muon_lr=1e-3,
@@ -122,25 +122,21 @@ class TestKimiK3(unittest.TestCase):
         ]
 
         self.assertTrue(
-            any(fqn.endswith("inner_experts.w13_E2FD") for fqn in compute_layouts)
+            any(
+                fqn.endswith("moe.routed_experts.w13.weight") for fqn in compute_layouts
+            )
         )
         self.assertTrue(
-            any(fqn.endswith("inner_experts.w2_EDF") for fqn in compute_layouts)
+            any(fqn.endswith("moe.routed_experts.w2.weight") for fqn in compute_layouts)
         )
+        self.assertFalse(any("inner_experts" in fqn for fqn in compute_layouts))
         muon_group = next(
             group
             for group in optimizer.param_groups
             if group.optimizer_name == "DistMuon"
         )
-        self.assertRegex(
-            "layers.1.moe.routed_experts.inner_experts.w13_E2FD",
-            muon_group.pattern,
-        )
-        self.assertRegex(
-            "layers.1.moe.routed_experts.inner_experts.w2_EDF",
-            muon_group.pattern,
-        )
-        self.assertNotRegex(muon_group.pattern, r"w[13]_EFD")
+        self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_group.pattern)
+        self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_group.pattern)
 
     def test_flex_attention_mask(self):
         config = _small_model_config()
@@ -253,7 +249,7 @@ class TestKimiK3(unittest.TestCase):
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         hf_state_dict = adapter.to_hf(state_dict)
         self.assertIn(
-            "layers.1.moe.routed_experts.inner_experts.w13_E2FD",
+            "layers.1.moe.routed_experts.w13.weight",
             state_dict,
         )
         self.assertIn(

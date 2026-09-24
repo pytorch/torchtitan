@@ -25,6 +25,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    GroupedLinear,
     Linear,
     RowParallelLinear,
 )
@@ -145,6 +146,48 @@ class TestLinear(unittest.TestCase):
         linear = config.build()
         self.assertIsInstance(linear, Linear)
         self.assertEqual(linear.weight.shape, torch.Size([16, 32]))
+
+
+class TestGroupedLinear(unittest.TestCase):
+    def test_num_linears_preserves_projection_axis_without_copy(self):
+        """Multiple projections retain a zero-copy logical output axis."""
+        grouped = GroupedLinear.Config(
+            group_size=3,
+            in_features=4,
+            out_features=8,
+            num_linears=2,
+        ).build()
+
+        self.assertEqual(grouped.weight.shape, torch.Size([3, 2, 8, 4]))
+        weight_EOI = grouped.weight.flatten(1, -2)
+        self.assertEqual(weight_EOI.shape, torch.Size([3, 16, 4]))
+        self.assertEqual(
+            weight_EOI.untyped_storage().data_ptr(),
+            grouped.weight.untyped_storage().data_ptr(),
+        )
+
+    def test_forward_restores_projection_axis(self):
+        """Forward restores the projection axis after the grouped GEMM seam."""
+
+        class StubGroupedLinear(GroupedLinear):
+            def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
+                del offsets_E
+                return input_RI.new_zeros(input_RI.shape[0], weight_EOI.shape[1])
+
+        grouped = StubGroupedLinear(
+            GroupedLinear.Config(
+                group_size=2,
+                in_features=4,
+                out_features=8,
+                num_linears=2,
+            )
+        )
+        output_R2F = grouped(
+            torch.randn(5, 4),
+            torch.tensor([2, 5], dtype=torch.int32),
+        )
+
+        self.assertEqual(output_R2F.shape, torch.Size([5, 2, 8]))
 
 
 class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
