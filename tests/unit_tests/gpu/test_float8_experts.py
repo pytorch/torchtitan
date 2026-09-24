@@ -18,15 +18,15 @@ from torchao.prototype.moe_training.utils import (  # noqa: E402
     _quantize_then_scaled_grouped_mm,
 )
 
-from torchtitan.models.common.moe import GroupedExperts  # noqa: E402
-from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts  # noqa: E402
+from torchtitan.models.common.linear import GroupedLinear  # noqa: E402
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear  # noqa: E402
 from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
-from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls  # noqa: E402
+from torchtitan.quantization.float8 import _get_float8_grouped_linear_cls  # noqa: E402
 from torchtitan.quantization.float8.experts import (  # noqa: E402
     _Float8GroupedMMFunction,
 )
 from torchtitan.quantization.float8.tensor import (  # noqa: E402
-    _GroupedExpertsShardedTensorWithFloat8Compute,
+    _GroupedLinearShardedTensorWithFloat8Compute,
     _quantize_float8_grouped_weight,
 )
 
@@ -40,18 +40,23 @@ pytestmark = [
 ]
 
 
-def _make_float8_grouped_experts():
-    float8_cls = _get_float8_grouped_experts_cls(GroupedExperts)
-    experts = (
-        float8_cls.Config(dim=128, hidden_dim=128, num_experts=4)
+def _make_float8_grouped_linear():
+    float8_cls = _get_float8_grouped_linear_cls(GroupedLinear)
+    grouped_linear = (
+        float8_cls.Config(
+            group_size=4,
+            in_features=128,
+            out_features=128,
+            num_linears=2,
+        )
         .build()
         .cuda()
         .bfloat16()
     )
     with torch.no_grad():
-        for parameter in experts.parameters():
+        for parameter in grouped_linear.parameters():
             parameter._tensor.normal_(std=0.02)
-    return experts
+    return grouped_linear
 
 
 def _install_unsharded_weights(experts):
@@ -125,21 +130,22 @@ def test_float8_grouped_mm_matches_torchao(weight_dtype):
     )
 
 
-@pytest.mark.parametrize("parent_cls", [GroupedExperts, GptOssGroupedExperts])
-def test_float8_grouped_experts_wraps_grouped_weights(parent_cls):
-    float8_cls = _get_float8_grouped_experts_cls(parent_cls)
-    experts = float8_cls.Config(dim=128, hidden_dim=128, num_experts=4).build()
-    grouped_weights = [
-        parameter
-        for parameter in experts.parameters(recurse=False)
-        if parameter.ndim == 3
-    ]
-
-    assert grouped_weights
-    assert all(
-        isinstance(weight, _GroupedExpertsShardedTensorWithFloat8Compute)
-        for weight in grouped_weights
+@pytest.mark.parametrize("parent_cls", [GroupedLinear, GptOssGroupedLinear])
+def test_float8_grouped_linear_wraps_weight(parent_cls):
+    """Float8 wraps only the grouped weight, leaving model-specific bias plain."""
+    float8_cls = _get_float8_grouped_linear_cls(parent_cls)
+    grouped_linear = float8_cls.Config(
+        group_size=4,
+        in_features=128,
+        out_features=128,
+        num_linears=2,
+    ).build()
+    assert isinstance(
+        grouped_linear.weight,
+        _GroupedLinearShardedTensorWithFloat8Compute,
     )
+    if isinstance(grouped_linear, GptOssGroupedLinear):
+        assert type(grouped_linear.bias) is nn.Parameter
 
 
 def test_float8_grouped_weight_operands_refill_in_place():
@@ -150,7 +156,7 @@ def test_float8_grouped_weight_operands_refill_in_place():
         device="cuda",
         dtype=torch.bfloat16,
     )
-    sharded_weight = _GroupedExpertsShardedTensorWithFloat8Compute(weight_EOI)
+    sharded_weight = _GroupedLinearShardedTensorWithFloat8Compute(weight_EOI)
     operands = sharded_weight._build_operands(weight_EOI)
     fields = (
         operands.weight_qdata_fprop_EIO,
@@ -179,7 +185,7 @@ def test_float8_grouped_mm_saves_fsdps_weight_holder():
         device="cuda",
         dtype=torch.bfloat16,
     )
-    sharded_weight = _GroupedExpertsShardedTensorWithFloat8Compute(weight_EOI)
+    sharded_weight = _GroupedLinearShardedTensorWithFloat8Compute(weight_EOI)
     with torch.no_grad():
         unsharded_weight = _UnshardedFSDPTensor(
             weight_EOI,
@@ -234,35 +240,31 @@ def test_float8_grouped_mm_saves_fsdps_weight_holder():
 
 
 @pytest.mark.parametrize("execution_mode", ["compile", "activation_checkpoint"])
-def test_float8_grouped_experts_runs_outside_plain_eager(execution_mode):
-    experts = _install_unsharded_weights(_make_float8_grouped_experts())
-    input_RD = torch.randn(
+def test_float8_grouped_linear_runs_outside_plain_eager(execution_mode):
+    """Structured Float8 grouped linear supports compile and checkpoint replay."""
+    grouped_linear = _install_unsharded_weights(_make_float8_grouped_linear())
+    input_RI = torch.randn(
         64,
         128,
         device="cuda",
         dtype=torch.bfloat16,
         requires_grad=True,
     )
-    num_tokens_per_expert_E = torch.full(
-        (4,),
-        16,
-        device="cuda",
-        dtype=torch.int64,
-    )
+    offsets_E = torch.arange(16, 65, 16, device="cuda", dtype=torch.int32)
     if execution_mode == "compile":
-        output_RD = torch.compile(experts, fullgraph=True)(
-            input_RD,
-            num_tokens_per_expert_E,
+        output_R2O = torch.compile(grouped_linear, fullgraph=True)(
+            input_RI,
+            offsets_E,
         )
     else:
-        output_RD = checkpoint(
-            experts,
-            input_RD,
-            num_tokens_per_expert_E,
+        output_R2O = checkpoint(
+            grouped_linear,
+            input_RI,
+            offsets_E,
             use_reentrant=False,
         )
-    output_RD.sum().backward()
+    output_R2O.sum().backward()
 
-    assert output_RD.shape == input_RD.shape
-    assert input_RD.grad is not None
-    assert all(parameter.grad is not None for parameter in experts.parameters())
+    assert output_R2O.shape == (64, 2, 128)
+    assert input_RI.grad is not None
+    assert all(parameter.grad is not None for parameter in grouped_linear.parameters())

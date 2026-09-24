@@ -229,6 +229,83 @@ class RowParallelLinear(Linear):
         )
 
 
+class GroupedLinear(Module):
+    """A collection of linears selected by cumulative group offsets.
+
+    Like :class:`Linear`, ``num_linears`` retains a projection axis in parameter
+    storage. For example, a fused gate/up projection stores ``[E, 2, F, D]``
+    and returns ``[R, 2, F]`` while grouped GEMM consumes its zero-copy
+    ``[E, 2F, D]`` view.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        """Configure a grouped linear.
+
+        Attributes:
+            group_size: Number of independently selected linear weights.
+            in_features: Input features for each linear.
+            out_features: Output features for each linear.
+            num_linears: Number of stacked linears per element in the group.
+                Values greater than one retain a projection axis before
+                ``out_features``.
+        """
+
+        group_size: int
+        in_features: int
+        out_features: int
+        num_linears: int = 1
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.group_size = config.group_size
+        self.in_features = config.in_features
+        self.out_features = config.out_features
+        self.num_linears = config.num_linears
+        output_shape = (
+            (config.out_features,)
+            if config.num_linears == 1
+            else (config.num_linears, config.out_features)
+        )
+        self.weight = nn.Parameter(
+            torch.empty(config.group_size, *output_shape, config.in_features)
+        )
+
+    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
+        """Apply each grouped linear to rows selected by cumulative offsets.
+
+        Args:
+            input_RI: Input rows grouped by the selected linear.
+            offsets_E: Exclusive cumulative row end for each group.
+
+        Returns:
+            Output rows with an optional ``num_linears`` axis before the output
+            feature axis.
+        """
+        output_shape = self.weight.shape[1:-1]
+        weight_EOI = self.weight.flatten(1, -2)
+        output_RO = self._grouped_mm(
+            input_RI=input_RI,
+            weight_EOI=weight_EOI,
+            offsets_E=offsets_E,
+        )
+        return output_RO.reshape(*output_RO.shape[:-1], *output_shape)
+
+    def _grouped_mm(
+        self,
+        *,
+        input_RI: torch.Tensor,
+        weight_EOI: torch.Tensor,
+        offsets_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """Execute ``input_RI @ weight_EOI.transpose(-2, -1)`` by expert."""
+        return torch._grouped_mm(
+            input_RI,
+            weight_EOI.bfloat16().transpose(-2, -1),
+            offs=offsets_E,
+        )
+
+
 @spmd.register_local_autograd_function
 class _RouterGateLinearFunction(torch.autograd.Function):
     """Router projection with FP32 output and backward GEMMs."""
@@ -308,6 +385,7 @@ class RouterGateLinear(Linear):
 __all__ = [
     "CastLinear",
     "ColumnParallelLinear",
+    "GroupedLinear",
     "Linear",
     "RowParallelLinear",
     "RouterGateLinear",
