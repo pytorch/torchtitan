@@ -12,6 +12,8 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -98,12 +100,27 @@ class Attention(BaseAttention):
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
+    def _gather_tp_input(self, x: torch.Tensor) -> torch.Tensor:
+        """Gather the shared MLA input before its projection branches."""
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x
+        return spmd.redistribute(
+            x,
+            tp_group,
+            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            dst=spmd.R,
+            backward_options={"op_dtype": x.dtype},
+        )
+
     def forward(
         self,
         x: torch.Tensor,
         attention_masks: AttentionMasksType,
         positions: torch.Tensor | None = None,
     ):
+        x = self._gather_tp_input(x)
+
         num_tokens = x.shape[0]
 
         # Query projection
