@@ -721,19 +721,37 @@ class MoE(Module):
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
+        out_TD = remat.region(
+            self._compute_expert_output,
+            self.remat_region_name("experts"),
+            recompute=self.remat_should_recompute("experts"),
+        )(
+            x_TD,
+            routed_x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
+
+    def _compute_expert_output(
+        self,
+        x_TD: torch.Tensor,
+        routed_x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute routed and shared experts, then reduce their combined output."""
         out_TD = self.routed_experts(
             routed_x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-
-        shared_out_TD = (
-            self.shared_experts(x_TD) if self.shared_experts is not None else None
-        )
-
-        if shared_out_TD is not None:
-            out_TD = out_TD + shared_out_TD
+        if self.shared_experts is not None:
+            out_TD = out_TD + self.shared_experts(x_TD)
         return self._reduce_output_across_tp(out_TD)
 
     def _shard_expert_parallel_inputs(
@@ -773,19 +791,13 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return out_TD
-        out_TD = remat.region(
-            spmd.redistribute,
-            self.remat_region_name("tp_communication.output_reduce"),
-            recompute=self.remat_should_recompute("tp_communication"),
-        )(
+        return spmd.redistribute(
             out_TD,
             tp_group,
             src=spmd.P,
             dst=spmd.I,
             backward_options={"op_dtype": out_TD.dtype},
         )
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:

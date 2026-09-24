@@ -33,49 +33,50 @@ class SigmoidGatedFeedForward(FeedForward):
         super().__init__(config)
         self.gate = config.gate.build()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _compute_input_projections(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather the shared input once, then compute both input projections."""
         ep_enabled = spmd_sparse_mesh() is not None
         sp_enabled = spmd_dense_sp_enabled()
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if ep_enabled and tp_group is not None:
             src = spmd.S(0) if sp_enabled else spmd.I
-            if sp_enabled:
-                x = remat.region(
-                    spmd.redistribute,
-                    self.remat_region_name("tp_communication.input_gather"),
-                    recompute=self.remat_should_recompute("tp_communication"),
-                )(
-                    x,
-                    tp_group,
-                    src=src,
-                    dst=spmd.R,
-                    backward_options={"op_dtype": x.dtype},
-                )
-            else:
-                x = spmd.redistribute(
-                    x,
-                    tp_group,
-                    src=src,
-                    dst=spmd.R,
-                    backward_options={"op_dtype": x.dtype},
-                )
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=src,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
 
-        out_TD = super().forward(x)
-        gate_out_TD = remat.region(
-            self.gate,
-            self.remat_region_name("gate"),
-            recompute=self.remat_should_recompute("gate"),
-        )(x)
+        gate_up_T2F = self.w13(x_TD)
+        gate_out_T1 = self.gate(x_TD)
         if ep_enabled and sp_enabled and tp_group is not None:
-            gate_out_TD = spmd.redistribute(
-                gate_out_TD,
+            gate_out_T1 = spmd.redistribute(
+                gate_out_T1,
                 tp_group,
                 src=spmd.R,
                 dst=spmd.S(0),
-                backward_options={"op_dtype": gate_out_TD.dtype},
+                backward_options={"op_dtype": gate_out_T1.dtype},
             )
-        remat.recompute_needs_tensor(out_TD, gate_out_TD)
-        return torch.sigmoid(gate_out_TD) * out_TD
+        return gate_up_T2F, gate_out_T1
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate_up_T2F, gate_out_T1 = remat.region(
+            self._compute_input_projections,
+            self.remat_region_name("input_projections"),
+            recompute=self.remat_should_recompute("input_projections"),
+        )(x)
+        gate_TF, up_TF = gate_up_T2F.unbind(-2)
+        remat.recompute_needs_tensor(gate_TF, up_TF)
+        out_TD = remat.region(
+            self.w2,
+            self.remat_region_name("w2"),
+            recompute=self.remat_should_recompute("w2"),
+        )(self.activation_fn(gate_TF, up_TF))
+        remat.recompute_needs_tensor(out_TD, gate_out_T1)
+        return torch.sigmoid(gate_out_T1) * out_TD
 
 
 __all__ = ["SigmoidGatedFeedForward"]

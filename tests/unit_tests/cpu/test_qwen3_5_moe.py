@@ -15,7 +15,7 @@ from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
 
 
 class TestSigmoidGatedFeedForward(unittest.TestCase):
-    def test_shared_input_gather_is_a_remat_region_only_with_sp(self):
+    def test_shared_input_gather_and_projections_use_one_remat_region(self):
         shared_expert = SigmoidGatedFeedForward.Config(
             w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
             w2=Linear.Config(in_features=8, out_features=4),
@@ -27,7 +27,7 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
         for sp_enabled, expected_names, expected_redistributions in (
             (
                 False,
-                ["w13", "w2", "gate"],
+                ["input_projections", "w2"],
                 [
                     call(
                         x_TD,
@@ -40,7 +40,7 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
             ),
             (
                 True,
-                ["tp_communication.input_gather", "w13", "w2", "gate"],
+                ["input_projections", "w2"],
                 [
                     call(
                         x_TD,

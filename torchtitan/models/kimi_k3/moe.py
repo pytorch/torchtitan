@@ -9,6 +9,7 @@
 from dataclasses import dataclass
 
 import torch
+import torch_remat as remat
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.moe import MoE
@@ -73,6 +74,29 @@ class KimiLatentMoE(MoE):
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
+        out_TD = remat.region(
+            self._compute_latent_expert_output,
+            self.remat_region_name("experts"),
+            recompute=self.remat_should_recompute("experts"),
+        )(
+            x_TD,
+            routed_x_TD,
+            weights_TK,
+            expert_ids_TK,
+            num_tokens_per_expert_E,
+        )
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
+
+    def _compute_latent_expert_output(
+        self,
+        x_TD: torch.Tensor,
+        routed_x_TD: torch.Tensor,
+        weights_TK: torch.Tensor,
+        expert_ids_TK: torch.Tensor,
+        num_tokens_per_expert_E: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute latent and shared experts, then reduce their combined output."""
         routed_TD = self.routed_experts(
             self.routed_down(routed_x_TD),
             weights_TK,

@@ -130,7 +130,7 @@ def _shared_experts_config(
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
     depth_init = _depth_init(layer_id)
     return SigmoidGatedFeedForward.Config(
-        # The enclosing MoE gathers once because w13 and the sigmoid gate
+        # The shared expert gathers once because w13 and the sigmoid gate
         # consume the same input.
         w13=Linear.Config(
             in_features=dim,
