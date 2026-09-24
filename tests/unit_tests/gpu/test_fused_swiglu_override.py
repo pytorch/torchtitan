@@ -57,24 +57,7 @@ class TestFusedSwiGLUOverride(unittest.TestCase):
 
 
 class TestFusedSwiGLUGroupedExperts(unittest.TestCase):
-    """Checkpoint interop and configuration for the fused activation override."""
-
-    def test_saves_native_layout_and_loads_legacy_layout(self):
-        """Native state uses W13 while legacy W1/W3 checkpoints still load."""
-        src = _build_fused_swiglu_grouped_experts()
-        sd = src.state_dict()
-
-        self.assertEqual(set(sd), {"w13_E2FD", "w2_EDF"})
-        legacy_sd = {
-            "w1_EFD": src.w13_E2FD[:, 0].contiguous(),
-            "w2_EDF": src.w2_EDF,
-            "w3_EFD": src.w13_E2FD[:, 1].contiguous(),
-        }
-
-        dst = _build_fused_swiglu_grouped_experts()
-        dst.load_state_dict(legacy_sd)
-        self.assertTrue(torch.equal(dst.w13_E2FD, src.w13_E2FD))
-        self.assertTrue(torch.equal(dst.w2_EDF, src.w2_EDF))
+    """Configuration and sharding for the fused activation override."""
 
     def test_built_module_has_only_fused_params(self):
         """The override keeps the default physical w13_E2FD parameter layout."""

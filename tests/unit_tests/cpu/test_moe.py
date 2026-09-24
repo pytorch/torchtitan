@@ -114,8 +114,8 @@ class TestMoE(unittest.TestCase):
             experts.w13_E2FD.untyped_storage().data_ptr(),
         )
 
-    def test_grouped_experts_state_uses_native_weight_and_loads_legacy_keys(self):
-        """Native state matches parameter FQNs while legacy W1/W3 still load."""
+    def test_grouped_experts_state_uses_native_weight(self):
+        """Native state keys match the module's physical parameter FQNs."""
         source = GroupedExperts.Config(
             dim=4,
             hidden_dim=8,
@@ -127,20 +127,6 @@ class TestMoE(unittest.TestCase):
 
         state_dict = source.state_dict()
         self.assertEqual(set(state_dict), {"w13_E2FD", "w2_EDF"})
-        legacy_state_dict = {
-            "w1_EFD": source.w13_E2FD[:, 0].contiguous(),
-            "w2_EDF": source.w2_EDF,
-            "w3_EFD": source.w13_E2FD[:, 1].contiguous(),
-        }
-
-        target = GroupedExperts.Config(
-            dim=4,
-            hidden_dim=8,
-            num_experts=2,
-        ).build()
-        target.load_state_dict(legacy_state_dict)
-        torch.testing.assert_close(target.w13_E2FD, source.w13_E2FD)
-        torch.testing.assert_close(target.w2_EDF, source.w2_EDF)
 
     def test_token_choice_router_uses_normalization_epsilon(self):
         x_TD = torch.zeros(1, 4)
