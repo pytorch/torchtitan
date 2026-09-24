@@ -308,6 +308,7 @@ def muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.C
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.fsdp_defer_gradient_reduction = True
+    config.parallelism.fsdp_reshard_after_forward = "never"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.num_tokens_per_train_step = 65536
     return config
@@ -614,12 +615,10 @@ def llama3_debugmodel_fused_swiglu_tp2() -> Trainer.Config:
     return config
 
 
-def deepseek_v3_debugmodel_fused_grouped_experts_tp2_ep4() -> Trainer.Config:
+def deepseek_v3_debugmodel_fused_swiglu_tp2_ep4() -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.override.imports = [
-        "torchtitan.overrides.fused_swiglu.fused_grouped_experts"
-    ]
+    config.override.imports = ["torchtitan.overrides.fused_swiglu.fused_swiglu"]
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
     config.training.disable_cuda_graphs = True

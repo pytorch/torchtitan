@@ -15,15 +15,17 @@ from unittest.mock import patch
 import torch
 import torch_remat as remat
 
+from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import GQAttention
-from torchtitan.models.common.dist_gemm import (
-    AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
+from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RouterGateLinear,
+    RowParallelLinear,
 )
-from torchtitan.models.common.feed_forward import FeedForward, SigmoidGatedFeedForward
-from torchtitan.models.common.linear import Linear, RouterGateLinear
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
@@ -201,8 +203,8 @@ def _linear_config(in_features: int, out_features: int) -> Linear.Config:
 
 def _feed_forward_config() -> FeedForward.Config:
     return FeedForward.Config(
-        w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
-        w2=_linear_config(8, 4),
+        w13=ColumnParallelLinear.Config(in_features=4, out_features=8, num_linears=2),
+        w2=RowParallelLinear.Config(in_features=8, out_features=4),
     )
 
 
@@ -315,11 +317,6 @@ class TestRematRegions(unittest.TestCase):
 
     def test_feed_forward_variants_use_expected_region_boundaries(self):
         feed_forward_config = _feed_forward_config()
-        sigmoid_config = SigmoidGatedFeedForward.Config(
-            w13=feed_forward_config.w13,
-            w2=feed_forward_config.w2,
-            gate=_linear_config(4, 4),
-        )
 
         def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
             return torch.nn.functional.silu(gate) * up
@@ -328,25 +325,19 @@ class TestRematRegions(unittest.TestCase):
             "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
             side_effect=silu_and_mul,
         ):
-            dist_gemm_config = FeedForward.Config(
-                w13=AsyncColumnParallelLinear.Config(
-                    in_features=4,
-                    out_features=8,
-                    num_linears=2,
-                ),
-                w2=AsyncRowParallelLinear.Config(in_features=8, out_features=4),
-            )
+            async_config = AsyncTensorParallelTransform(
+                enable_sequence_parallel=True
+            ).transform(deepcopy(feed_forward_config))
             fused_config = deepcopy(feed_forward_config)
             fused_config.activation_fn = fused_swiglu(fused_config.activation_fn)
-            fused_dist_gemm_config = deepcopy(dist_gemm_config)
-            fused_dist_gemm_config.activation_fn = fused_swiglu(
-                fused_dist_gemm_config.activation_fn
+            fused_async_config = deepcopy(async_config)
+            fused_async_config.activation_fn = fused_swiglu(
+                fused_async_config.activation_fn
             )
             variants = (
-                (sigmoid_config.build(), ["w13", "w2", "gate"]),
-                (dist_gemm_config.build(), ["w13", "w2"]),
+                (async_config.build(), ["w13", "w2"]),
                 (fused_config.build(), ["w13", "w2"]),
-                (fused_dist_gemm_config.build(), ["w13", "w2"]),
+                (fused_async_config.build(), ["w13", "w2"]),
             )
             for feed_forward, expected_names in variants:
                 with self.subTest(feed_forward=type(feed_forward).__name__):

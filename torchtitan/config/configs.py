@@ -339,7 +339,9 @@ class CompileConfig:
 
 @dataclass(kw_only=True, slots=True)
 class CUDAGraphConfig:
-    components: list[str] = field(default_factory=lambda: ["forward_backward"])
+    components: Annotated[list[str], tyro.conf.Suppress] = field(
+        default_factory=lambda: ["forward_backward"]
+    )
     """Which training components to capture in separate CUDA graphs.
 
     ``training.disable_cuda_graphs`` disables every component.

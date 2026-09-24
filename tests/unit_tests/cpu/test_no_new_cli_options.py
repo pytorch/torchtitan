@@ -187,7 +187,6 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "training.disable_cuda_graphs",
         "training.dtype",
         "training.enable_cpu_offload",
-        "cuda_graph.components",
         "training.gc_debug",
         "training.gc_freq",
         "training.max_context_length",

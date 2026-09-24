@@ -1038,6 +1038,7 @@ class TestSimpleFSDP(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
     def get_input(self):
