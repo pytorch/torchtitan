@@ -1358,8 +1358,8 @@ class VLLMGenerator(Configurable):
         # Loading applies grouped-expert merge hooks and quantizes the BF16
         # receive buffers of MXFP8 inference linears into their FP8 shards.
         model.model.load_state_dict(model_sd, strict=False)
-        # MXFP8 inference weights use temporary BF16 receive buffers. Release
-        # them before all-gather refills the persistent FP8 compute operands.
+        # Release temporary BF16 receive buffers before restoring compute views
+        # or refreshing formats with independently owned compute operands.
         del model_sd
         model.finish_weight_sync()
         self.policy_version = version
