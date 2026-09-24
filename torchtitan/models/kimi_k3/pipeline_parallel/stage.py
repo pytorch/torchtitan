@@ -17,39 +17,8 @@ import torch
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining._utils import flatten_args
 
+from .cache import PPRankLocalCache
 from .layout import BlockLayoutTables
-
-
-class PPRankLocalCache:
-    """Blocks a rank holds per micro-batch and the gradient deposits, shared by its stages."""
-
-    def __init__(self) -> None:
-        self._blocks: dict[int, dict[int, torch.Tensor]] = {}
-        self._deposits: dict[tuple[int, int], torch.Tensor] = {}
-        self._counts: dict[tuple[int, int], int] = {}
-
-    def put(self, mb: int, block_idx: int, block_TD: torch.Tensor) -> None:
-        self._blocks.setdefault(mb, {})[block_idx] = block_TD
-
-    def blocks(self, mb: int) -> dict[int, torch.Tensor]:
-        return self._blocks.get(mb, {})
-
-    def release(self, mb: int) -> None:
-        """Free the blocks of ``mb``; the deposits stay until collected."""
-        self._blocks.pop(mb, None)
-
-    def deposit(self, mb: int, block_idx: int, grad_TD: torch.Tensor) -> None:
-        key = (mb, block_idx)
-        prior = self._deposits.get(key)
-        self._deposits[key] = grad_TD.clone() if prior is None else prior + grad_TD
-        self._counts[key] = self._counts.get(key, 0) + 1
-
-    def collect(self, mb: int, block_idx: int) -> tuple[torch.Tensor | None, int]:
-        key = (mb, block_idx)
-        return self._deposits.pop(key, None), self._counts.pop(key, 0)
-
-    def has_deposits(self, mb: int) -> bool:
-        return any(key[0] == mb for key in self._deposits)
 
 
 def _assemble_stack(
@@ -76,7 +45,7 @@ def _assemble_stack(
     return stack_TND.detach().requires_grad_(True), order
 
 
-def pack_outgoing_delta(
+def _pack_outgoing_delta(
     stack_out_TND: torch.Tensor,
     order_out: list[int],
     out_blocks: list[int],
@@ -94,7 +63,7 @@ def pack_outgoing_delta(
     return stack_out_TND.new_zeros(num_tokens, 0, dim)
 
 
-def split_stack_grad(
+def _split_stack_grad(
     grad_stack_TND: torch.Tensor | None,
     order: list[int],
     delta_blocks: list[int],
@@ -183,7 +152,7 @@ class AttnResPipelineStage(PipelineStage):
         if layout.cache:
             for i, b in enumerate(my_commits):
                 store.put(mb, b, stack_out_TND[:, len(order_in) + i].detach())
-        return pack_outgoing_delta(
+        return _pack_outgoing_delta(
             stack_out_TND, order_out, layout.delta_to_send(self.stage_index)
         )
 
@@ -258,6 +227,8 @@ class AttnResPipelineStage(PipelineStage):
         return (grad_hidden, grad_delta)
 
     def _collect_into(self, grad_col_TD: torch.Tensor | None, mb: int, b: int) -> None:
+        # Collect block b's deposits, one per later stage on this rank holding b;
+        # each such stage needs a stack gradient: a layer, the aggregation or a sent delta.
         layout, store = self.layout(), self.store()
         deposit, count = store.collect(mb, b)
         expected = layout.deposits_expected(b, self.stage_index)
@@ -301,7 +272,7 @@ class AttnResPipelineStage(PipelineStage):
                 f"stage {self.stage_index}: backward produced no gradient for "
                 "either input"
             )
-        grad_delta, deposits = split_stack_grad(grad_stack, order, delta_blocks, like)
+        grad_delta, deposits = _split_stack_grad(grad_stack, order, delta_blocks, like)
         for b, grad_TD in deposits.items():
             store.deposit(bwd_chunk_id, b, grad_TD)
         for j, b in enumerate(delta_blocks):
@@ -352,7 +323,7 @@ class AttnResPipelineStage(PipelineStage):
             return output
         hidden_out_TD, stack_out_TND = output
         order_out = order_in + layout.commits_at(self.stage_index)
-        payload_TND = pack_outgoing_delta(
+        payload_TND = _pack_outgoing_delta(
             stack_out_TND, order_out, layout.delta_to_send(self.stage_index)
         )
         return hidden_out_TD, payload_TND

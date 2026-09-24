@@ -21,8 +21,9 @@ from torchtitan.distributed.pipeline_parallel import (
 )
 from torchtitan.protocols.model import BaseModel
 
+from .cache import PPRankLocalCache
 from .layout import infer_block_layout_tables, layer_to_stage_from_split
-from .stage import AttnResPipelineStage, PPRankLocalCache
+from .stage import AttnResPipelineStage
 
 __all__ = ["pipeline_kimi_k3"]
 

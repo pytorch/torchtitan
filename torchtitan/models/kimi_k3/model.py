@@ -405,16 +405,9 @@ class KimiK3Model(MultimodalModel):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> KimiK3Model:
-        unsupported = [
-            name
-            for name, enabled in (("context parallel", parallel_dims.cp_enabled),)
-            if enabled
-        ]
-        if unsupported:
+        if parallel_dims.cp_enabled:
             raise NotImplementedError(
-                "Kimi K3 currently supports FSDP2 data parallelism and pipeline "
-                "parallelism only; "
-                f"disable {', '.join(unsupported)}."
+                "Kimi K3 does not support context parallelism yet."
             )
         if compile_config is not None and "model" in compile_config.components:
             raise NotImplementedError("Kimi K3 does not support model compilation yet.")

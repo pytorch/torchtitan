@@ -15,12 +15,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
 
 from torchtitan.models.kimi_k3.pipeline_parallel.layout import infer_block_layout_tables
-from torchtitan.models.kimi_k3.pipeline_parallel.stage import (
-    AttnResPipelineStage,
-    PPRankLocalCache,
-)
+from torchtitan.models.kimi_k3.pipeline_parallel.stage import AttnResPipelineStage
 
 NUM_LAYERS, LAYERS_PER_BLOCK = 16, 4
 NUM_BLOCKS = NUM_LAYERS // LAYERS_PER_BLOCK

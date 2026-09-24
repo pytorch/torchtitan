@@ -19,12 +19,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.models.kimi_k3.pipeline_parallel import _swap_in_attn_res_stages
+from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
 from torchtitan.models.kimi_k3.pipeline_parallel.stage import (
     _assemble_stack,
+    _pack_outgoing_delta,
+    _split_stack_grad,
     AttnResPipelineStage,
-    pack_outgoing_delta,
-    PPRankLocalCache,
-    split_stack_grad,
 )
 
 
@@ -47,25 +47,25 @@ class TestCarrier(unittest.TestCase):
     def test_payload_is_the_routed_columns_of_the_model_stack(self):
         T, D = 4, 8
         stack_out = torch.randn(T, 3, D, requires_grad=True)
-        payload = pack_outgoing_delta(stack_out, [0, 1, 2], [1, 2])
+        payload = _pack_outgoing_delta(stack_out, [0, 1, 2], [1, 2])
         self.assertEqual(tuple(payload.shape), (T, 2, D))
         self.assertTrue(torch.equal(payload[:, 0], stack_out[:, 1]))
         self.assertTrue(payload.requires_grad)
         self.assertEqual(
-            tuple(pack_outgoing_delta(stack_out, [0, 1, 2], []).shape), (T, 0, D)
+            tuple(_pack_outgoing_delta(stack_out, [0, 1, 2], []).shape), (T, 0, D)
         )
 
     def test_gradient_split_sends_the_received_and_deposits_the_stored(self):
         T, D = 4, 8
         grad_stack = torch.randn(T, 3, D)
         like = torch.zeros(T, D)
-        grad_delta, deposits = split_stack_grad(grad_stack, [0, 1, 2], [2], like)
+        grad_delta, deposits = _split_stack_grad(grad_stack, [0, 1, 2], [2], like)
         self.assertEqual(tuple(grad_delta.shape), (T, 1, D))
         self.assertTrue(grad_delta.is_contiguous())
         self.assertTrue(torch.equal(grad_delta[:, 0], grad_stack[:, 2]))
         self.assertEqual(set(deposits), {0, 1})
         self.assertTrue(torch.equal(deposits[1], grad_stack[:, 1]))
-        grad_delta, deposits = split_stack_grad(None, [0], [0], like)
+        grad_delta, deposits = _split_stack_grad(None, [0], [0], like)
         self.assertTrue(torch.equal(grad_delta, torch.zeros(T, 1, D)))
         self.assertEqual(deposits, {})
 
