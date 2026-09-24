@@ -150,8 +150,9 @@ class GroupedLinear(Module):
             group_size: Number of independently selected linear weights.
             in_features: Input features for each linear.
             out_features: Output features for each linear.
-            num_linears: Number of projections stored per group. Values greater
-                than one retain a projection axis before ``out_features``.
+            num_linears: Number of stacked linears per element in the group.
+                Values greater than one retain a projection axis before
+                ``out_features``.
         """
 
         group_size: int
