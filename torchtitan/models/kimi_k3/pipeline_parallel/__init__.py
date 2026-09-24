@@ -7,6 +7,7 @@
 """Pipeline parallelism for Kimi K3: core's split with the tower and the aggregation
 pinned to its ends, AttnRes stages, and the block routing tables."""
 
+import dataclasses
 import logging
 
 from torch.distributed.pipelining.schedules import (
@@ -17,7 +18,8 @@ from torch.distributed.pipelining.schedules import (
 from torch.distributed.pipelining.stage import _PipelineStageBase, PipelineStage
 
 from torchtitan.distributed.pipeline_parallel import (
-    pipeline_with_first_last_stage_modules,
+    get_module_fqns_per_model_part,
+    pipeline_llm,
 )
 from torchtitan.protocols.model import BaseModel
 
@@ -80,18 +82,22 @@ def _require_loop_style(
 def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs):
     """pipelining_fn for Kimi K3; with attn_res_cache a hop carries only the blocks the
     receiving rank lacks, without it the whole stack, and every rank must agree."""
-    (
-        pp_schedule,
-        model_parts,
-        has_first_stage,
-        has_last_stage,
-        split,
-    ) = pipeline_with_first_last_stage_modules(
-        model,
-        first_stage_module_fqns=model.pipeline_first_stage_module_fqns,
-        last_stage_module_fqns=model.pipeline_last_stage_module_fqns,
-        return_split=True,
-        **kwargs,
+    parallelism = kwargs["parallelism"]
+    split = parallelism.pipeline_parallel_module_fqns_per_model_part
+    if split is None:
+        split = get_module_fqns_per_model_part(
+            model,
+            first_stage_module_fqns=model.pipeline_first_stage_module_fqns,
+            last_stage_module_fqns=model.pipeline_last_stage_module_fqns,
+            parallel_dims=kwargs["parallel_dims"],
+            parallelism=parallelism,
+            model_config=kwargs["model_config"],
+        )
+        kwargs["parallelism"] = dataclasses.replace(
+            parallelism, pipeline_parallel_module_fqns_per_model_part=split
+        )
+    pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
+        model, **kwargs
     )
 
     stages = _swap_in_attn_res_stages(pp_schedule)

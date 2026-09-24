@@ -118,7 +118,8 @@ class BaseModel(Module, ABC):
             pipeline_with_first_last_stage_modules,
         )
 
-        if (
+        parallelism = kwargs["parallelism"]
+        if parallelism.pipeline_parallel_module_fqns_per_model_part is None and (
             self.pipeline_first_stage_module_fqns
             or self.pipeline_last_stage_module_fqns
         ):

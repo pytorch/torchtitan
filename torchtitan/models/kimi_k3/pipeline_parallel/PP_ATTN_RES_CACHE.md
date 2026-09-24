@@ -2,7 +2,7 @@
 
 Kimi K3 carries a stack of block residuals alongside the hidden state, and a
 pipeline hop has to carry that stack too. The split and the schedule are
-core's, through `pipeline_with_first_last_stage_modules`
+core's, through `get_module_fqns_per_model_part` and `pipeline_llm`
 ([`__init__.py`](__init__.py)); the stage that moves the stack is
 [`stage.py`](stage.py), the rank store is [`cache.py`](cache.py), and the
 tables that decide what each hop carries are [`layout.py`](layout.py).
