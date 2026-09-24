@@ -118,6 +118,7 @@ def _maybe_regional_inductor_backend(model: nn.Module, backend: str) -> str | Ca
     other aot_eager paths are left untouched. Other non-inductor backends can't
     be scooped here and raise rather than silently degrading.
     """
+    # TODO: Replace the private class marker with a function-wrapper-based API.
     has_inductor_region = any(
         getattr(module, "_has_inductor_region", False) for module in model.modules()
     )

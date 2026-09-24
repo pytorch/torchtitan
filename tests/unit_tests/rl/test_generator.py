@@ -333,17 +333,41 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
         )
 
 
-def test_qwen36_27b_config_applies_offset_rmsnorm_to_both_actors():
+@pytest.mark.parametrize(
+    "config_name",
+    [
+        "rl_grpo_qwen3_5_9b_varlen",
+        "rl_grpo_qwen3_5_9b_varlen_batch_invariant",
+        "rl_grpo_qwen3_5_debug_varlen",
+        "rl_grpo_qwen3_5_debug_varlen_batch_invariant",
+    ],
+)
+def test_qwen35_configs_compile_gated_rmsnorm_for_both_actors(config_name):
+    from torchtitan.rl.examples.alphabet_sort import config_registry
+
+    config = getattr(config_registry, config_name)()
+    override_import = (
+        "torchtitan.overrides.compiled_gated_rmsnorm.compiled_gated_rmsnorm"
+    )
+
+    assert config.trainer.override.imports == [override_import]
+    assert config.generator.override.imports == [override_import]
+
+
+def test_qwen36_27b_config_applies_rmsnorm_overrides_to_both_actors():
     from torchtitan.rl.examples.alphabet_sort.config_registry import (
         rl_grpo_qwen3_6_27b_varlen_perf,
     )
 
     config = rl_grpo_qwen3_6_27b_varlen_perf()
-    override_import = "torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm"
+    override_imports = [
+        "torchtitan.overrides.compiled_gated_rmsnorm.compiled_gated_rmsnorm",
+        "torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm",
+    ]
 
     assert config.hf_assets_path.endswith("Qwen3.6-27B")
-    assert config.trainer.override.imports == [override_import]
-    assert config.generator.override.imports == [override_import]
+    assert config.trainer.override.imports == override_imports
+    assert config.generator.override.imports == override_imports
     assert config.trainer.parallelism.data_parallel_shard_degree == 2
     assert config.trainer.parallelism.tensor_parallel_degree == 2
     assert config.generator.parallelism.tensor_parallel_degree == 4

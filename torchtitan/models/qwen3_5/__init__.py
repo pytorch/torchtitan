@@ -296,6 +296,7 @@ def _qwen35_deltanet_config(
         # Keep RMS normalization and gating in FP32 until the final output cast,
         # following the FLA behavior noted by Hugging Face:
         # https://github.com/huggingface/transformers/blob/7cd73d9df0c14b151c684b708a9f27d8d0349dfe/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L216-L218
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L216-L218
         norm=GatedRMSNorm.Config(
             dim=value_head_dim,
             eps=1e-6,
