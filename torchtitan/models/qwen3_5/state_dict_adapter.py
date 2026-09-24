@@ -76,7 +76,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             "model.language_model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.language_model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE (grouped 3D format, handled specially in to_hf/from_hf)
-            "model.language_model.layers.{}.mlp.experts.down_proj": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
+            "model.language_model.layers.{}.mlp.experts.down_proj": "layers.{}.moe.routed_experts.w2.weight",
             "model.language_model.layers.{}.mlp.gate.weight": "layers.{}.moe.router.gate.weight",
             # MoE shared expert
             "model.language_model.layers.{}.mlp.shared_expert.gate_proj.weight": "layers.{}.moe.shared_experts.w1.weight",
@@ -129,33 +129,22 @@ class Qwen35StateDictAdapter(StateDictAdapter):
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
         hf_state_dict = {}
 
-        moe_w1_by_layer: dict[str, Any] = {}
-        moe_w3_by_layer: dict[str, Any] = {}
         vision_qkv_by_layer: dict[str, dict[str, Any]] = {}
         deltanet_qkv_by_layer: dict[str, dict[str, Any]] = {}
 
         for tt_key, value in state_dict.items():
-            if "moe.routed_experts.inner_experts" in tt_key:
+            if ".moe.routed_experts." in tt_key:
                 tt_abstract_key = re.sub(r"(\d+)", "{}", tt_key, count=1)
                 # pyrefly: ignore [missing-attribute]
                 layer_num = re.search(r"\d+", tt_key).group(0)
 
-                if (
-                    tt_abstract_key
-                    == "layers.{}.moe.routed_experts.inner_experts.w1_EFD"
-                ):
-                    moe_w1_by_layer[layer_num] = value
+                if tt_abstract_key == "layers.{}.moe.routed_experts.w13.weight":
+                    hf_state_dict[
+                        f"{self.hf_language_model_prefix}.layers."
+                        f"{layer_num}.mlp.experts.gate_up_proj"
+                    ] = value.flatten(1, 2)
                     continue
-                elif (
-                    tt_abstract_key
-                    == "layers.{}.moe.routed_experts.inner_experts.w3_EFD"
-                ):
-                    moe_w3_by_layer[layer_num] = value
-                    continue
-                elif (
-                    tt_abstract_key
-                    == "layers.{}.moe.routed_experts.inner_experts.w2_EDF"
-                ):
+                elif tt_abstract_key == "layers.{}.moe.routed_experts.w2.weight":
                     hf_key = (
                         f"{self.hf_language_model_prefix}.layers."
                         f"{layer_num}.mlp.experts.down_proj"
@@ -229,14 +218,6 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     )
                 hf_state_dict[to_hf_map[tt_key]] = hf_value
 
-        # Fuse MoE w1 (gate) + w3 (up) → gate_up_proj
-        for layer_num in moe_w1_by_layer:
-            w1 = moe_w1_by_layer[layer_num]
-            w3 = moe_w3_by_layer[layer_num]
-            hf_state_dict[
-                f"{self.hf_language_model_prefix}.layers.{layer_num}.mlp.experts.gate_up_proj"
-            ] = torch.cat([w1, w3], dim=-2)
-
         # Fuse vision wq/wk/wv → qkv
         for layer_num, parts in vision_qkv_by_layer.items():
             for suffix in ("weight", "bias"):
@@ -286,18 +267,14 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 # pyrefly: ignore [missing-attribute]
                 idx = re.search(r"\d+", hf_key).group(0)
 
-                # MoE gate_up_proj -> split into w1 + w3
+                # MoE gate_up_proj -> canonical structured W13.
                 if (
                     hf_abstract_key
                     == f"{self.hf_language_model_prefix}.layers.{{}}.mlp.experts.gate_up_proj"
                 ):
-                    w1_hf, w3_hf = value.chunk(2, dim=-2)
                     tt_state_dict[
-                        f"layers.{idx}.moe.routed_experts.inner_experts.w1_EFD"
-                    ] = w1_hf
-                    tt_state_dict[
-                        f"layers.{idx}.moe.routed_experts.inner_experts.w3_EFD"
-                    ] = w3_hf
+                        f"layers.{idx}.moe.routed_experts.w13.weight"
+                    ] = value.unflatten(1, (2, -1))
                     continue
 
                 # MoE down_proj has the same layout as TT w2
@@ -305,9 +282,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                     hf_abstract_key
                     == f"{self.hf_language_model_prefix}.layers.{{}}.mlp.experts.down_proj"
                 ):
-                    tt_state_dict[
-                        f"layers.{idx}.moe.routed_experts.inner_experts.w2_EDF"
-                    ] = value
+                    tt_state_dict[f"layers.{idx}.moe.routed_experts.w2.weight"] = value
                     continue
 
                 # GatedDeltaNet fused in_proj_qkv → split into q/k/v

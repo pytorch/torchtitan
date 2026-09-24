@@ -28,8 +28,6 @@ TP = MeshAxisName.TP
 EP = MeshAxisName.EP
 EFSDP = MeshAxisName.EFSDP
 
-_GROUPED_EXPERT_PARAM_NAMES = ("w1_EFD", "w2_EDF", "w3_EFD")
-
 
 def expert_param_placement_sparse() -> SpmdType:
     """Sparse-family placement for routed-expert weights (EP enabled).
@@ -164,24 +162,26 @@ def _routed_experts_sharding_configs(
     *,
     enable_ep: bool,
     enable_sp: bool,
-) -> tuple[ShardingConfig, ShardingConfig | None]:
-    """Configs for RoutedExperts local SPMD and inner expert weight state."""
+) -> tuple[ShardingConfig, ShardingConfig | None, ShardingConfig | None]:
+    """Configs for the routed local-SPMD region and grouped linears."""
     if enable_ep:
         pre_experts_input_layout = (
             dense_sequence_parallel_placement()
             if enable_sp
             else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
         )
-        state_shardings: dict[str, SpmdType] = {
-            name: expert_param_placement_sparse()
-            for name in _GROUPED_EXPERT_PARAM_NAMES
-        }
+        w13_config = ShardingConfig(
+            state_shardings={"weight": expert_param_placement_sparse()}
+        )
+        w2_config = ShardingConfig(
+            state_shardings={"weight": expert_param_placement_sparse()}
+        )
         experts_input_layout = dense_sequence_parallel_placement()
-        inner_experts_sharding_config = ShardingConfig(state_shardings=state_shardings)
     else:
         pre_experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
         experts_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-        inner_experts_sharding_config = None
+        w13_config = None
+        w2_config = None
 
     tokens_per_expert_layout = _tokens_per_expert_placement(enable_ep=enable_ep)
 
@@ -216,7 +216,8 @@ def _routed_experts_sharding_configs(
             out_dst_shardings=desired_experts_output_layout,
             local_spmd=True,
         ),
-        inner_experts_sharding_config,
+        w13_config,
+        w2_config,
     )
 
 
@@ -275,10 +276,9 @@ def set_routed_moe_sharding_config(
     - ``moe.router``: input and padding-mask redistribution to the router's
       token layout, plus the expert-count buffer placement.
     - ``moe.router.gate``: Replicate weights and output.
-    - ``moe.routed_experts.inner_experts`` (``GroupedExperts``): expert-weight
-      ``state_shardings`` -- sparse ``{EP}`` when EP is enabled and unsharded
-      otherwise. The parent ``routed_experts`` holds the activation shardings
-      and local SPMD region.
+    - ``moe.routed_experts.{w13,w2}``: expert weights use sparse ``{EP}``
+      placements when EP is enabled and remain unsharded otherwise. The parent
+      owns the local-SPMD boundary.
 
     Args:
         moe_cfg: The ``MoE.Config`` instance to populate.
@@ -299,15 +299,13 @@ def set_routed_moe_sharding_config(
     moe_cfg.router.gate.sharding_config = _router_gate_sharding_config()
 
     # RoutedExperts local SPMD region: activation in/out, no params.
-    (
-        routed_experts_sharding_config,
-        inner_experts_sharding_config,
-    ) = _routed_experts_sharding_configs(
+    routed_experts_config, w13_config, w2_config = _routed_experts_sharding_configs(
         enable_ep=enable_ep,
         enable_sp=enable_sp,
     )
-    moe_cfg.routed_experts.sharding_config = routed_experts_sharding_config
-    moe_cfg.routed_experts.inner_experts.sharding_config = inner_experts_sharding_config
+    moe_cfg.routed_experts.sharding_config = routed_experts_config
+    moe_cfg.routed_experts.w13.sharding_config = w13_config
+    moe_cfg.routed_experts.w2.sharding_config = w2_config
 
 
 def set_shared_moe_sharding_config(

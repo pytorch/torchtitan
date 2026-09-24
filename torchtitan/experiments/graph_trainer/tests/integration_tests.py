@@ -218,6 +218,95 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
                     "--compile.mode aot_fx_trace",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
+                    "--training.num_tokens_per_train_step 4096",
+                ],
+            ],
+            "aot_fx_trace llama3 SPMD gradient accumulation",
+            "aot_fx_trace_llama3_spmd_gradient_accumulation",
+            ngpu=1,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.fsdp_param_unshard_mode in_graph",
+                    "--compile.fsdp_gradient_sync_mode in_graph",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
+                    "--training.num_tokens_per_train_step 16384",
+                ],
+            ],
+            "aot_fx_trace llama3 GA with in-graph FSDP collectives",
+            "aot_fx_trace_llama3_ga_in_graph_fsdp_collectives",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.fsdp_param_unshard_mode in_graph",
+                    "--compile.fsdp_gradient_sync_mode deferred_as_schedule_stage",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
+                    "--training.num_tokens_per_train_step 16384",
+                ],
+            ],
+            "aot_fx_trace llama3 GA with deferred FSDP REDUCE_GRAD",
+            "aot_fx_trace_llama3_ga_deferred_fsdp_reduce_grad",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.fsdp_param_unshard_mode " "extracted_in_schedule_stage",
+                    "--compile.fsdp_gradient_sync_mode in_graph",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
+                    "--training.num_tokens_per_train_step 16384",
+                ],
+            ],
+            "aot_fx_trace llama3 GA with extracted FSDP UNSHARD and "
+            "in-graph REDUCE_GRAD",
+            "aot_fx_trace_llama3_ga_extracted_fsdp_unshard_in_graph_reduce_grad",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
+                    "--compile.fsdp_param_unshard_mode " "extracted_in_schedule_stage",
+                    "--compile.fsdp_gradient_sync_mode deferred_as_schedule_stage",
+                    "--parallelism.data_parallel_shard_degree 4",
+                    "--training.num_tokens_per_microbatch_per_dp_rank 2048",
+                    "--training.num_tokens_per_train_step 16384",
+                ],
+            ],
+            "aot_fx_trace llama3 GA with extracted FSDP UNSHARD and "
+            "deferred REDUCE_GRAD",
+            "aot_fx_trace_llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--module graph_trainer.llama3",
+                    "--config graph_trainer_llama3_debugmodel",
+                    "--compile.mode aot_fx_trace",
                     "--compile.memory_policy sac_and_offload",
                     "--parallelism.data_parallel_shard_degree 4",
                     "--parallelism.tensor_parallel_degree 2",
@@ -227,6 +316,9 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_llama3_fsdp_tp_sac_and_offload",
             ngpu=8,
             skip_rocm_test=True,
+            # GraphRuntime must preserve offload/reload pairs when it
+            # extracts scheduled graph callables.
+            disabled=True,
         ),
         OverrideDefinitions(
             [
@@ -377,6 +469,7 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--compile.disable_passes "
                     "joint_transformer_block_bucketing_reordering_pass,"
                     "cuda_graph_pass",
+                    "--training.disable_cuda_graphs",
                     "--override.imports torchtitan.overrides.fused_mla.fused_mla,"
                     "torchtitan.overrides.fused_swiglu.fused_swiglu",
                     "--parallelism.data_parallel_shard_degree 2",

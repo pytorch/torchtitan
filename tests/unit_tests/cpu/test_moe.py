@@ -29,7 +29,6 @@ from torchtitan.models.common.linear import (
     RouterGateLinear,
 )
 from torchtitan.models.common.moe import (
-    GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
     TokenChoiceTopKRouter,
 )
@@ -87,14 +86,19 @@ class TestMoE(unittest.TestCase):
                 gate=RouterGateLinear.Config(in_features=4, out_features=4),
             )
 
-    def test_grouped_experts_use_configured_activation(self):
+    def test_routed_experts_use_configured_activation(self):
+        """Routed experts build and execute their configured binary activation."""
         activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
-        experts = GroupedExperts.Config(
+        config = make_routed_experts_config(
             dim=4,
             hidden_dim=8,
             num_experts=2,
-            activation_fn=activation_fn,
-        ).build()
+            top_k=1,
+            param_init={},
+            comm_backend="standard",
+        )
+        config.activation_fn = activation_fn
+        experts = config.build()
         gate_RF = torch.randn(3, 8)
         up_RF = torch.randn(3, 8)
 
@@ -367,7 +371,7 @@ class TestMoE(unittest.TestCase):
                 shared, _w13, w2 = _shared_experts_sharding_configs(
                     enable_ep=enable_ep, enable_sp=enable_sp
                 )
-                routed, _inner = _routed_experts_sharding_configs(
+                routed, _w13, _w2 = _routed_experts_sharding_configs(
                     enable_ep=enable_ep,
                     enable_sp=enable_sp,
                 )
@@ -437,7 +441,8 @@ class TestMoE(unittest.TestCase):
                 ),
                 routed_experts=SimpleNamespace(
                     sharding_config=None,
-                    inner_experts=SimpleNamespace(sharding_config=None),
+                    w13=SimpleNamespace(sharding_config=None),
+                    w2=SimpleNamespace(sharding_config=None),
                 ),
             )
 
@@ -486,7 +491,8 @@ class TestMoE(unittest.TestCase):
         )
         self.assertEqual(tp_type(routed.sharding_config.out_src_shardings), spmd.R)
         self.assertEqual(tp_type(routed.sharding_config.out_dst_shardings), spmd.R)
-        self.assertIsNone(routed.inner_experts.sharding_config)
+        self.assertIsNone(routed.w13.sharding_config)
+        self.assertIsNone(routed.w2.sharding_config)
 
 
 if __name__ == "__main__":
