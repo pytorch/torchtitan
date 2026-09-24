@@ -9,6 +9,7 @@ from functools import cache
 
 import torch
 import torch.nn.functional as F
+from attn_gym.sparse import lightning_indexer
 from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
 
@@ -16,6 +17,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
+from torchtitan.tools.utils import has_cuda_capability
 
 
 @cache
@@ -189,20 +191,33 @@ class Indexer(Module):
         ratio: int,
         topk: int,
     ) -> torch.Tensor:
-        """Select top-k compressed positions per folded query token."""
-        index_score = torch.einsum("shd,td->sht", idx_q, idx_k)
-        index_score = index_score.relu_() * idx_w.unsqueeze(-1)
-        index_score = index_score.sum(dim=1)
+        """Select top-k compressed positions per folded query token.
 
-        compress_causal_limit = (
-            torch.arange(1, seqlen + 1, device=idx_q.device).unsqueeze(1) // ratio
+        Uses Attention Gym's ``lightning_indexer``: score[t, s] is proportional
+        to sum_h(w[t, h] * relu(q[t, h] . k[s])) (it applies a further positive
+        scale, so the ranking is unchanged), with query ``t`` limited to
+        compressed positions ``s < (t + 1) // ratio``.
+
+        Returns:
+            int32 ``[seqlen, min(topk, seqlen // ratio)]`` indices into
+            ``idx_k``, in unspecified order. Slots a query cannot causally
+            select are ``-1``.
+        """
+        # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
+        # fall back; CPU, fp32, ROCm, and older GPUs use the reference
+        # implementation.
+        fused = (
+            idx_q.is_cuda
+            and idx_q.dtype in (torch.float16, torch.bfloat16)
+            and has_cuda_capability(9, 0)
         )
-        compress_causal_mask = (
-            torch.arange(seqlen // ratio, device=idx_q.device).repeat(seqlen, 1)
-            >= compress_causal_limit
+        topk_indices = lightning_indexer(
+            idx_q.unsqueeze(0),
+            idx_k.unsqueeze(0),
+            idx_w.unsqueeze(0),
+            min(topk, seqlen // ratio),
+            causal=True,
+            compress_ratio=ratio,
+            impl="fused" if fused else "reference",
         )
-        index_score = index_score + torch.where(
-            compress_causal_mask, torch.finfo(idx_q.dtype).min, 0
-        )
-        _, topk_indices = index_score.topk(min(topk, seqlen // ratio), dim=-1)
-        return topk_indices
+        return topk_indices.squeeze(0)
