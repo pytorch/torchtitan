@@ -328,6 +328,7 @@ class VLLMModelWrapper(Module):
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
             self.model = self.config.build()
+        self.model.requires_grad_(False)
 
         self.model = self.model.parallelize(
             parallel_dims=self.parallel_dims,
@@ -374,19 +375,12 @@ class VLLMModelWrapper(Module):
             _patch_vllm_all_reduce()
 
     def prepare_weight_sync(self) -> None:
-        """
-        Explicitly reshard to prepare sharded buffers for receiving weights.
+        """Expose parameter storage without freeing captured compute buffers.
 
-        free_unsharded = False:
-            To enable cudagraphs, we must keep around unsharded operands so
-            they can reuse the same addresses across weight syncs, which allows
-            us to reuse the same cudagraph and avoid recapture. By default,
-            `module.reshard` frees these unsharded operands.
-
-        force = True:
-            By default, `module.reshard` becomes a no-op if RAF=false, which
-            is always the case for inference. Here we force an explicit reshard
-            to bypass reading RAF.
+        DP=1 compute-ready MXFP8 and ordinary frozen BF16 weights share storage
+        with compute. Other formats still own separate compute buffers, so keep
+        the generic preservation path. Force the transition if FSDP is still
+        in forward state with reshard-after-forward disabled.
         """
         for module in self.model.modules():
             if not isinstance(module, FSDPModule):
@@ -394,10 +388,7 @@ class VLLMModelWrapper(Module):
             module.reshard(free_unsharded=False, force=True)
 
     def finish_weight_sync(self) -> None:
-        """
-        Explicitly unshard to refill the existing unsharded operands with
-        new values built from new weights.
-        """
+        """Restore compute views and refresh formats with separate operands."""
         # vLLM creates the compute storage during inference-mode graph capture,
         # so FSDP must also refill those inference tensors in inference mode
         with torch.inference_mode():

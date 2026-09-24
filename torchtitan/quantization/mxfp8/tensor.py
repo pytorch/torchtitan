@@ -32,7 +32,7 @@ _MXFP8_BLOCK_SIZE = 32
 
 @dataclass(frozen=True, slots=True)
 class _MXFP8LinearOperands:
-    """The independent MXFP8 tensors owned by one FSDP unshard lifetime.
+    """MXFP8 data and scale tensors consumed by linear compute.
 
     Everything here is quantized the same way: square 32x32 tiles, E4M3 qdata
     and one E8M0 scale per tile. ``swizzled`` on the scales names their memory
