@@ -318,10 +318,12 @@ class TestMoE(unittest.TestCase):
                 assert router_inputs is not None
                 self.assertIsNone(router_config.in_dst_shardings)
                 self.assertEqual(
+                    _per_axis_types(router_inputs["x_TD"])[MeshAxisName.TP],
+                    spmd.S(0) if enable_ep else spmd.R,
+                )
+                self.assertEqual(
                     _per_axis_types(router_inputs["padding_mask_T"]),
-                    _per_axis_types(
-                        token_id_placement(enable_sp=enable_sp and enable_ep)
-                    ),
+                    _per_axis_types(token_id_placement(enable_sp=enable_ep)),
                 )
 
     def test_shared_expert_ffn_leaves_w2_reduction_to_sharding_config(self):
@@ -338,7 +340,6 @@ class TestMoE(unittest.TestCase):
 
     def test_explicit_moe_tp_transitions_with_ep_without_sp(self):
         moe = MoE.__new__(MoE)
-        router = TokenChoiceTopKRouter.__new__(TokenChoiceTopKRouter)
         x_TD = torch.randn(4, 8)
         padding_mask_T = torch.zeros(4, dtype=torch.bool)
         tp_group = object()
@@ -361,8 +362,7 @@ class TestMoE(unittest.TestCase):
                 side_effect=lambda tensor, *_args, **_kwargs: tensor,
             ) as redistribute,
         ):
-            router._shard_inputs_for_routing(x_TD, padding_mask_T)
-            moe._shard_routed_experts_input(x_TD)
+            moe._shard_expert_parallel_inputs(x_TD, padding_mask_T)
             moe._reduce_output_across_tp(x_TD)
             self.assertEqual(
                 redistribute.call_args_list,
@@ -380,13 +380,6 @@ class TestMoE(unittest.TestCase):
                         src=spmd.R,
                         dst=spmd.S(0),
                         backward_options={"op_dtype": padding_mask_T.dtype},
-                    ),
-                    call(
-                        x_TD,
-                        tp_group,
-                        src=spmd.I,
-                        dst=spmd.S(0),
-                        backward_options={"op_dtype": x_TD.dtype},
                     ),
                     call(
                         x_TD,

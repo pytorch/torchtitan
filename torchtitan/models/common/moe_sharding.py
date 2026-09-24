@@ -73,22 +73,18 @@ def _router_sharding_config(*, enable_ep: bool, enable_sp: bool) -> ShardingConf
     """Router input contracts and expert-count buffer placement.
 
     The padding mask follows ``x_TD`` at the MoE and Router boundaries. Under
-    EP, the Router explicitly sequence-shards both inputs before routing.
+    EP, the enclosing MoE sequence-shards both inputs before calling the Router.
 
     EP off: input Replicate, gate computes on all tokens, output stays Replicate.
     EP on: input Shard(0) on tokens, gate computes on the local shard, and the
            output remains Shard(0).
     """
     if enable_ep:
-        input_layout = (
-            dense_sequence_parallel_placement()
-            if enable_sp
-            else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-        )
+        input_layout = dense_sequence_parallel_placement()
     else:
         input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
 
-    padding_mask_layout = token_id_placement(enable_sp=enable_sp and enable_ep)
+    padding_mask_layout = token_id_placement(enable_sp=enable_ep)
     return ShardingConfig(
         state_shardings={
             "tokens_per_expert_E": _tokens_per_expert_placement(enable_ep=enable_ep),
