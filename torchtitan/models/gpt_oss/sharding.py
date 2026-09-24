@@ -14,45 +14,20 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_gqa_inner_attention_local_spmd,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    expert_param_placement_sparse,
+    set_moe_block_padding_mask_sharding,
+    set_moe_sharding_config,
+)
 from torchtitan.models.gpt_oss.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.gpt_oss.model import GptOssModel, GptOssTransformerBlock
-
-
-# Routed-expert layout for ``GptOssGroupedExperts`` (mlp1/mlp2 fused
-# weights + biases): mlp1 colwise, mlp2 rowwise, mlp2_bias replicated.
-_GPT_OSS_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
-    "mlp1_weight_EGD": spmd.S(1),
-    "mlp1_bias_EG": spmd.S(1),
-    "mlp2_weight_EDF": spmd.S(2),
-    "mlp2_bias_ED": spmd.R,
-}
-
-
-def partial_bias_rowwise_config(*, output_sp: bool) -> ShardingConfig:
-    input_layout = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
-    out_dst = (
-        dense_sequence_parallel_placement()
-        if output_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-    )
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.S(1)),
-            "bias": dense_param_placement(tp=spmd.I),
-        },
-        in_src_shardings={"input": input_layout},
-        in_dst_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=out_dst,
-        local_spmd=True,
-    )
 
 
 def set_gpt_oss_sharding_config(
@@ -102,26 +77,33 @@ def _set_gpt_oss_layer_sharding(
     # sinks parameter is sharded across heads via state_shardings.
     attention.sharding_config = ShardingConfig(
         state_shardings={"sinks": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={
-            "x": attn_x_layout,
-        },
-        in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-        },
+        in_src_shardings={"x": attn_x_layout},
+        out_src_shardings=attn_x_layout,
     )
     attention.rope.sharding_config = ShardingConfig(
         state_shardings={"cache": dense_param_placement(tp=spmd.R)},
     )
-    attention.qkv_linear.wqkv.sharding_config = colwise_config()
-    attention.wo.sharding_config = partial_bias_rowwise_config(output_sp=enable_sp)
+    attention.qkv_linear.wqkv.sharding_config = colwise_config(
+        input_layout=attn_x_layout
+    )
+    attention.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
     set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # MoE FFN (all GPT-OSS blocks are MoE).
     if layer_cfg.moe is not None:
+        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
             enable_sp=enable_sp,
-            expert_param_layout=_GPT_OSS_EXPERTS_PARAM_LAYOUT,
         )
+        if enable_ep:
+            w13 = layer_cfg.moe.routed_experts.w13
+            w2 = layer_cfg.moe.routed_experts.w2
+            assert w13.sharding_config is not None
+            assert w2.sharding_config is not None
+            w13.sharding_config.state_shardings[
+                "bias"
+            ] = expert_param_placement_sparse()
+            w2.sharding_config.state_shardings["bias"] = expert_param_placement_sparse()

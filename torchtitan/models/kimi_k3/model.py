@@ -4,20 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Any, cast
 
 import spmd_types as spmd
 import torch
-from spmd_types import SpmdType
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    annotate_replicated_parameters,
+    spmd_dense_sp_enabled,
     spmd_local_context,
+    spmd_mesh_group,
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
@@ -25,6 +30,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
+    local_head_split,
     VarlenInnerAttention,
     VarlenMetadata,
 )
@@ -32,9 +38,11 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     get_vision_positions,
+    MultimodalModel,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
@@ -45,6 +53,7 @@ from torchtitan.protocols.module import Module
 
 from .kda import KDA
 from .moe import KimiLatentMoE
+from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
 
 KimiK3AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
@@ -111,9 +120,20 @@ class KimiMLAAttention(BaseAttention):
     ) -> torch.Tensor:
         del positions
 
-        num_tokens = x_TD.shape[0]
-        q_THK = self.wq_b(self.q_norm(self.wq_a(x_TD))).view(
-            num_tokens, self.n_heads, self.q_head_dim
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # The MLA and gate projections all consume x. Gather once at their
+            # common attention boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
+        q_THK = local_head_split(
+            self.wq_b(self.q_norm(self.wq_a(x_TD))), self.q_head_dim
         )
 
         compressed_kv_TC = self.wkv_a(x_TD)
@@ -122,9 +142,8 @@ class KimiMLAAttention(BaseAttention):
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
-        kv_THC = self.wkv_b(self.kv_norm(kv_latent_TC)).view(
-            num_tokens,
-            self.n_heads,
+        kv_THC = local_head_split(
+            self.wkv_b(self.kv_norm(kv_latent_TC)),
             self.qk_nope_head_dim + self.v_head_dim,
         )
         k_nope_THK, v_THV = torch.split(
@@ -132,10 +151,12 @@ class KimiMLAAttention(BaseAttention):
             [self.qk_nope_head_dim, self.v_head_dim],
             dim=-1,
         )
-        k_rope_THK = k_rope_TK.view(num_tokens, 1, self.qk_rope_head_dim).expand(
-            -1, self.n_heads, -1
-        )
-        k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
+        # Headless rope slice broadcast onto the local heads, as in DeepSeek-V3's MLA.
+        with spmd.local():
+            k_rope_THK = k_rope_TK.unsqueeze(1).expand(-1, k_nope_THK.shape[-2], -1)
+            k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
+            if spmd.is_type_checking():
+                spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
 
         out_THV = self.inner_attention(
             q_THK,
@@ -144,7 +165,7 @@ class KimiMLAAttention(BaseAttention):
             attention_masks=attention_masks,
             scale=self.scale,
         )
-        out_TD = out_THV.reshape(num_tokens, self.n_heads * self.v_head_dim)
+        out_TD = out_THV.flatten(-2)
         out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
         return self.wo(out_TD)
 
@@ -155,10 +176,7 @@ def _apply_attention_residual(
     projection: Linear,
     norm: RMSNorm,
 ) -> torch.Tensor:
-    """Apply Kimi's block-level attention residual in FP32.
-
-    TODO: Add TP Support. The current implementation assumes that the input tensors are on a single device.
-    """
+    """Apply Kimi's block-level attention residual in FP32."""
     assert norm.eps is not None
 
     values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
@@ -237,6 +255,8 @@ class KimiK3TransformerBlock(Module):
         block_residual_TND: torch.Tensor,
         attention_masks: KimiK3AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prefix_sum_TD = x_TD
 
@@ -279,14 +299,25 @@ class KimiK3TransformerBlock(Module):
         )
         h_TD = self.ffn_norm(h_TD)
         if self.moe is not None:
-            h_TD = self.moe(h_TD)
+            h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
         return prefix_sum_TD + h_TD, block_residual_TND
 
 
-class KimiK3Model(Decoder):
+class KimiK3Model(MultimodalModel):
+    state_dict_adapter_cls = KimiK3StateDictAdapter
+    multimodal_encoder_fqns = ("vision_encoder",)
+
+    @classmethod
+    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+        from torchtitan.components.optimizer import register_moe_quantile_balancing_hook
+
+        register_moe_quantile_balancing_hook(optimizers, model_parts, parallel_dims)
+
+    supports_pipeline_parallel = False
+
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         layers: list[KimiK3TransformerBlock.Config]
@@ -295,10 +326,27 @@ class KimiK3Model(Decoder):
         vision_encoder: KimiK3VisionEncoder.Config | None = None
 
         def update_from_config(self, *, config, **kwargs) -> None:
-            set_kimi_k3_sharding_config(
-                self, enable_ep=config.parallelism.expert_parallel_degree > 1
-            )
             Decoder.Config.update_from_config(self, config=config, **kwargs)
+            parallelism = config.parallelism
+
+            # Vision attention is also head-sharded; validate its head count.
+            tp = parallelism.tensor_parallel_degree
+            vision_heads = (
+                self.vision_encoder.block.attn.num_heads
+                if self.vision_encoder is not None
+                else None
+            )
+            if tp > 1 and vision_heads is not None and vision_heads % tp != 0:
+                raise ValueError(
+                    f"tensor_parallel_degree ({tp}) must divide "
+                    f"vision num_heads ({vision_heads})."
+                )
+
+            set_kimi_k3_sharding_config(
+                self,
+                enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -337,6 +385,51 @@ class KimiK3Model(Decoder):
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
 
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> KimiK3Model:
+        unsupported = [
+            name
+            for name, enabled in (
+                ("pipeline parallel", parallel_dims.pp_enabled),
+                ("context parallel", parallel_dims.cp_enabled),
+            )
+            if enabled
+        ]
+        if unsupported:
+            raise NotImplementedError(
+                "Kimi K3 currently supports FSDP2 data parallelism only; "
+                f"disable {', '.join(unsupported)}."
+            )
+        if compile_config is not None and "model" in compile_config.components:
+            raise NotImplementedError("Kimi K3 does not support model compilation yet.")
+
+        from torchtitan.distributed.utils import get_spmd_context
+
+        with get_spmd_context(parallel_dims=parallel_dims):
+            annotate_replicated_parameters(self, parallel_dims)
+            self._parallelize(parallel_dims)
+            if ac_config is not None:
+                policy = ac_config.build(dump_folder=dump_folder)
+                policy.apply(self)
+                if self.vision_encoder is not None:
+                    policy.apply(self.vision_encoder)
+            if not skip_dp:
+                self._apply_fsdp(
+                    parallel_dims=parallel_dims,
+                    training=training,
+                    parallelism=parallelism,
+                )
+        return self
+
     def preprocess_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
@@ -345,11 +438,13 @@ class KimiK3Model(Decoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks and annotate K3 multimodal inputs."""
+        del kwargs
         batch: dict[str, Any] = dict(input_dict)
         positions = batch.get("positions")
-        padding_mask = batch.pop("padding_mask", None)
+        padding_mask = batch.get("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
@@ -362,19 +457,7 @@ class KimiK3Model(Decoder):
                     max_context_length=max_context_length,
                 )
 
-        multimodal_layout = SpmdType({MeshAxisName.DP: spmd.V})
-        input_sharding = decoder_input_sharding()
-        input_sharding.update(
-            {
-                name: multimodal_layout
-                for name in (
-                    "pixel_values",
-                    "pixel_values_videos",
-                    "grid_thw",
-                    "grid_thw_videos",
-                )
-            }
-        )
+        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
         batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
 
         inputs = batch.pop("input")
@@ -468,6 +551,7 @@ class KimiK3Model(Decoder):
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
         attention_masks: KimiK3AttentionMaskDict | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
@@ -492,6 +576,7 @@ class KimiK3Model(Decoder):
                 block_residual_TND,
                 attention_masks,
                 positions,
+                padding_mask=padding_mask,
             )
 
         h_TD = _apply_attention_residual(

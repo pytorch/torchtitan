@@ -77,6 +77,9 @@ from torch._functorch.partitioners import (
 )
 from torch.fx._lazy_graph_module import _make_graph_module
 
+from torchtitan.experiments.graph_trainer.fsdp_patterns import (
+    find_fsdp_unshard_outputs_by_param,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     base_tensor_for_mutation_target,
     is_getitem_node,
@@ -327,11 +330,12 @@ def _forward_mutations_to_materialize(
 
 
 def _backward_passthrough_placeholders(
+    joint: fx.GraphModule,
     *,
     bwd_outputs: Sequence[object],
     backward_only_names: set[str],
 ) -> list[fx.Node]:
-    """Preserve metadata placeholders returned by backward directly.
+    """Preserve forward placeholders needed by backward.
 
     minimal_fx_tracer unwraps tensor subclasses into plain graph values. A
     DTensor gradient, for example, may flatten to ``(local_grad, device_mesh)``,
@@ -341,12 +345,18 @@ def _backward_passthrough_placeholders(
     will not select them; they still must be available to the extracted
     backward graph.
     """
+    backward_nodes = node_closure(bwd_outputs)
+    placeholders = list(joint.graph.find_nodes(op="placeholder"))
+    backward_placeholders = placeholder_dependencies(bwd_outputs)
+    backward_placeholders.update(
+        param
+        for param, outputs in find_fsdp_unshard_outputs_by_param(placeholders).items()
+        if any(output in backward_nodes for output in outputs)
+    )
     return unique_in_order(
         node
-        for node in bwd_outputs
-        if isinstance(node, fx.Node)
-        and node.op == "placeholder"
-        and node.name not in backward_only_names
+        for node in placeholders
+        if node in backward_placeholders and node.name not in backward_only_names
     )
 
 
@@ -436,6 +446,26 @@ def _backward_grad_inputs_from_schedule(
     return backward_grad_inputs, backward_grad_input_indices
 
 
+def _assign_must_be_in_fw_bw_to_effectful_ops(graph: fx.Graph) -> None:
+    """
+    ``_extract_graph_with_inputs_outputs`` uses must_be_in_forward and
+    must_be_in_backward meta annotations to correctly place effectful (e.g. mutations)
+    ops in forward and backward. Without those annotations, ops will be in both graphs.
+
+    Assign correct annotations based on the graph_trainer autograd_backward annotation.
+    """
+
+    for node in graph.nodes:
+        node.meta.pop("partitioner_tag", None)
+        if node.op != "call_function" or not node.is_impure():
+            continue
+        node.meta["partitioner_tag"] = (
+            "must_be_in_backward"
+            if node.meta.get("autograd_backward", False)
+            else "must_be_in_forward"
+        )
+
+
 def partition_joint_graph(
     traced: TracedResult,
     *,
@@ -508,9 +538,10 @@ def partition_joint_graph(
         backward_only_names=backward_only_names,
     )
 
-    # 2. Add metadata-only placeholders needed to rewrap backward outputs.
+    # 2. Add forward placeholders needed by backward.
     saved_values.extend(
         _backward_passthrough_placeholders(
+            joint,
             bwd_outputs=bwd_outputs,
             backward_only_names=backward_only_names,
         )
@@ -563,13 +594,13 @@ def partition_joint_graph(
     )
     bw_inputs = saved_values + backward_grad_inputs
 
+    _assign_must_be_in_fw_bw_to_effectful_ops(joint.graph)
     fw_graph = _extract_graph_with_inputs_outputs(
         joint.graph,
         fw_inputs,
         fw_outputs,
         fw_output_descs,
         "forward",
-        ignore_must_be_in_fw_bw=True,
     )
     bw_graph = _extract_graph_with_inputs_outputs(
         joint.graph,
@@ -577,7 +608,6 @@ def partition_joint_graph(
         bwd_outputs,
         bwd_output_descs,
         "backward",
-        ignore_must_be_in_fw_bw=True,
     )
     fw_module = _make_graph_module(joint, fw_graph)
     bw_module = _make_graph_module(joint, bw_graph)

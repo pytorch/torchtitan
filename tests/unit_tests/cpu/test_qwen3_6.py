@@ -10,7 +10,8 @@ import pytest
 
 pytest.importorskip("attn_gym")
 
-from torchtitan.models.qwen3_5 import Qwen35Model, Qwen35StateDictAdapter
+from torchtitan.models.qwen3_5 import Qwen35Model
+from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.models.qwen3_6 import model_registry, qwen3_6_configs
 from torchtitan.models.qwen3_6.config_registry import qwen36_27b, qwen36_35b_a3b
 
@@ -26,20 +27,19 @@ def test_qwen36_registry_exposes_released_flavors() -> None:
 
 @pytest.mark.parametrize("flavor", sorted(qwen3_6_configs))
 def test_qwen36_registry_builds_every_flavor(flavor: str) -> None:
-    model_spec = model_registry(
+    config = model_registry(
         flavor,
         moe_comm_backend=(
             "standard" if flavor == "debugmodel_moe" or "-A" in flavor else None
         ),
     )
 
-    assert model_spec.name == "qwen3_6"
-    assert model_spec.flavor == flavor
-    assert model_spec.state_dict_adapter is Qwen35StateDictAdapter
+    assert isinstance(config, Qwen35Model.Config)
+    assert Qwen35Model.state_dict_adapter_cls is Qwen35StateDictAdapter
 
 
 def test_qwen36_27b_matches_hugging_face_config() -> None:
-    config = cast(Qwen35Model.Config, model_registry("27B").model)
+    config = cast(Qwen35Model.Config, model_registry("27B"))
 
     assert config.dim == 5120
     assert len(config.layers) == 64
@@ -60,7 +60,7 @@ def test_qwen36_27b_matches_hugging_face_config() -> None:
 def test_qwen36_35b_a3b_matches_hugging_face_config() -> None:
     config = cast(
         Qwen35Model.Config,
-        model_registry("35B-A3B", moe_comm_backend="standard").model,
+        model_registry("35B-A3B", moe_comm_backend="standard"),
     )
 
     assert config.dim == 2048
@@ -87,8 +87,6 @@ def test_qwen36_recipes_use_released_hugging_face_paths() -> None:
     moe_config = qwen36_35b_a3b()
 
     assert dense_config.hf_assets_path.endswith("Qwen3.6-27B")
-    assert dense_config.model_spec is not None
-    assert dense_config.model_spec.name == "qwen3_6"
+    assert isinstance(dense_config.model, Qwen35Model.Config)
     assert moe_config.hf_assets_path.endswith("Qwen3.6-35B-A3B")
-    assert moe_config.model_spec is not None
-    assert moe_config.model_spec.name == "qwen3_6"
+    assert isinstance(moe_config.model, Qwen35Model.Config)

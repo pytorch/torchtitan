@@ -11,8 +11,12 @@ import torch
 
 from torchtitan.config import CompileConfig
 from torchtitan.distributed.compile import apply_compile
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.protocols.module import Module, ModuleDict
+from torchtitan.tools.utils import device_module, device_type
+
+
+device = torch.device(device_type)
 
 
 class TransformerBlock(Module):
@@ -44,27 +48,18 @@ class TinyModel(Module):
 
 class TestApplyCompile(unittest.TestCase):
     def test_async_tp_requires_model_compile(self):
-        invalid_configs = (
-            {"enable_async_tensor_parallel": True},
-            {
-                "enable": True,
-                "enable_async_tensor_parallel": True,
-                "components": ["loss"],
-            },
-        )
-        for kwargs in invalid_configs:
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "Async TP requires 'model' in --compile.components and "
-                    "--compile.enable",
-                ):
-                    CompileConfig(**kwargs)
+        with self.assertRaisesRegex(
+            ValueError,
+            "Async TP requires 'model' in --compile.components",
+        ):
+            CompileConfig(
+                enable_async_tensor_parallel=True,
+                components=["loss"],
+            )
 
     def test_apply_compile_configures_async_tp(self):
         model = TinyModel(num_layers=2, dim=128)
         compile_config = CompileConfig(
-            enable=True,
             enable_async_tensor_parallel=True,
         )
         parallel_dims = MagicMock(tp_enabled=True)
@@ -90,38 +85,69 @@ class TestApplyCompile(unittest.TestCase):
         finally:
             torch._inductor.config._micro_pipeline_tp = previous_micro_pipeline_tp
 
-    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
-    def test_grouped_mm_compiles_and_runs(self):
-        model = TinyModel(num_layers=2, dim=128).cuda()
-        compile_config = CompileConfig(backend="inductor")
-
-        apply_compile(
-            model,
-            compile_config=compile_config,
-            parallel_dims=MagicMock(tp_enabled=False),
-        )
-
-        from torchtitan.models.common.moe import GroupedExperts
-
+    @unittest.skipUnless(device_module.is_available(), "requires an accelerator")
+    def test_grouped_linear_compile_and_numerics(self):
+        """Compiled structured grouped GEMM matches independent expert GEMMs."""
         num_experts = 8
         dim = 128
         hidden_dim = 256
-        experts = GroupedExperts(
-            GroupedExperts.Config(
-                dim=dim,
-                hidden_dim=hidden_dim,
-                num_experts=num_experts,
+        w13 = (
+            GroupedLinear.Config(
+                group_size=num_experts,
+                in_features=dim,
+                out_features=hidden_dim,
+                num_linears=2,
             )
-        ).cuda()
+            .build()
+            .to(device=device)
+        )
         num_tokens_per_expert = torch.tensor(
-            [10, 8, 12, 9, 11, 7, 10, 13], dtype=torch.int32, device="cuda"
+            [10, 0, 12, 9, 11, 7, 10, 13],
+            dtype=torch.int32,
+            device=device,
         )
         total_tokens = num_tokens_per_expert.sum().item()
-        x = torch.randn(total_tokens, dim, device="cuda")
+        input_RI = torch.randn(
+            total_tokens,
+            dim,
+            device=device,
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+        reference_input_RI = input_RI.detach().clone().requires_grad_()
+        with torch.no_grad():
+            w13.weight.normal_()
+        reference_weight_E2OI = w13.weight.detach().clone().requires_grad_()
+        offsets = torch.cumsum(num_tokens_per_expert, dim=0, dtype=torch.int32)
 
-        output = experts(x, num_tokens_per_expert)
+        output_R2O = torch.compile(w13, fullgraph=True)(input_RI, offsets)
+        reference_chunks = []
+        start = 0
+        for expert, count in enumerate(num_tokens_per_expert.tolist()):
+            end = start + count
+            reference_chunks.append(
+                reference_input_RI[start:end]
+                @ reference_weight_E2OI[expert].bfloat16().flatten(0, 1).T
+            )
+            start = end
+        reference_R2O = torch.cat(reference_chunks).unflatten(-1, (2, hidden_dim))
 
-        self.assertEqual(output.shape, x.shape)
+        torch.testing.assert_close(output_R2O, reference_R2O, rtol=0, atol=0)
+        grad_R2O = torch.randn_like(output_R2O)
+        output_R2O.backward(grad_R2O)
+        reference_R2O.backward(grad_R2O)
+        torch.testing.assert_close(
+            input_RI.grad,
+            reference_input_RI.grad,
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            w13.weight.grad,
+            reference_weight_E2OI.grad,
+            rtol=0,
+            atol=0,
+        )
 
 
 if __name__ == "__main__":

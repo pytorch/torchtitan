@@ -30,7 +30,7 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             configs=[
                 recipes.flux_debugmodel_hsdp2x2_cp2_validation,
-                recipes.flux_debugmodel_test,
+                recipes.flux_debugmodel_inference_test,
             ],
             test_descr="HSDP+CP+Validation+Inference",
             test_name="hsdp+cp+validation+inference",

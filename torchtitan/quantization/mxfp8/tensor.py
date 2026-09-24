@@ -94,7 +94,14 @@ class _LinearShardedTensorWithMXFP8Compute(_ShardedFSDPTensor):
         logical_tensor: torch.Tensor,
         out: _MXFP8LinearOperands | None = None,
     ) -> _MXFP8LinearOperands:
-        operands = _quantize_mxfp8_weight(logical_tensor)
+        if logical_tensor.ndim > 2 and logical_tensor.shape[-2] % _MXFP8_BLOCK_SIZE:
+            raise ValueError(
+                "MXFP8 requires local matrix out_features divisible by "
+                f"{_MXFP8_BLOCK_SIZE}; got {logical_tensor.shape[-2]}. Adjust "
+                "the Linear out_features or TP degree so quantization "
+                "blocks do not span projection boundaries."
+            )
+        operands = _quantize_mxfp8_weight(logical_tensor.flatten(0, -2))
         if out is None:
             return operands
         out.weight_qdata_dgrad_NK.copy_(operands.weight_qdata_dgrad_NK)

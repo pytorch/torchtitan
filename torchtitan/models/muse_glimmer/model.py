@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -13,11 +15,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    spmd_dense_sp_enabled,
     spmd_local_context,
+    spmd_mesh_group,
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
@@ -38,6 +43,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
     build_vision_bank_indices,
     gather_vision_embeds,
+    MultimodalModel,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -46,6 +52,7 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols.module import Module
+from .state_dict_adapter import MuseGlimmerStateDictAdapter
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
 
@@ -114,6 +121,18 @@ class Attention(GQAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # qkv and the output gate both consume x, so gather once at their
+            # common attention boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
         num_tokens = x_TD.shape[0]
         xq, xk, xv = self.qkv_linear(x_TD)
 
@@ -259,7 +278,16 @@ class EmbeddingWithNorm(Module):
         return self.norm(self.embedding(tokens))
 
 
-class MuseGlimmerModel(Decoder):
+class MuseGlimmerModel(MultimodalModel):
+    state_dict_adapter_cls = MuseGlimmerStateDictAdapter
+    multimodal_encoder_fqns = ("vision_encoder",)
+    pipeline_first_stage_module_fqns = (
+        "vision_encoder",
+        "vision_adapter",
+        "vision_projection",
+        "perception_emb_norm",
+    )
+
     """Muse Glimmer decoder-only language model.
 
     Args:
@@ -357,6 +385,33 @@ class MuseGlimmerModel(Decoder):
             config.vision_adapter.build() if config.vision_adapter is not None else None
         )
 
+    def parallelize(
+        self,
+        *,
+        parallel_dims: ParallelDims,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> MuseGlimmerModel:
+        if self.vision_encoder is not None and parallel_dims.tp_enabled:
+            assert self.vision_encoder.num_heads % parallel_dims.tp == 0, (
+                f"vision num_heads ({self.vision_encoder.num_heads}) must be "
+                f"divisible by TP degree ({parallel_dims.tp})"
+            )
+
+        return super().parallelize(
+            parallel_dims=parallel_dims,
+            training=training,
+            parallelism=parallelism,
+            compile_config=compile_config,
+            ac_config=ac_config,
+            dump_folder=dump_folder,
+            skip_dp=skip_dp,
+        )
+
     def preprocess_inputs(
         self,
         input_dict: dict[str, torch.Tensor],
@@ -365,8 +420,10 @@ class MuseGlimmerModel(Decoder):
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build first-stage vision-bank indices and masks, then shard the batch."""
+        del kwargs
         from .sharding import vision_bank_indices_placement
 
         batch: dict[str, Any] = dict(input_dict)
@@ -494,6 +551,7 @@ class MuseGlimmerModel(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         *,
+        padding_mask: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         pixel_values_videos: torch.Tensor | None = None,
@@ -501,7 +559,7 @@ class MuseGlimmerModel(Decoder):
         vision_bank_indices_T: torch.Tensor | None = None,
     ):
         # Video inputs are rejected by preprocess_inputs.
-        del pixel_values_videos, grid_thw_videos
+        del padding_mask, pixel_values_videos, grid_thw_videos
 
         # Embedding stage: embed tokens (the scaleless norm is bundled inside
         # tok_embeddings) and inject vision features before the decoder layers.
