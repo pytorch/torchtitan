@@ -751,7 +751,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
             ),
         ]
     )
-    config.generator.cuda_graph = VLLMCudaGraphConfig(mode="FULL_AND_PIECEWISE")
+    config.generator.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
     # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
     # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
     config.generator.max_num_batched_tokens = 2048
@@ -1106,8 +1106,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            # GDN decode supports full capture; prefill breaks into eager pieces.
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL_AND_PIECEWISE"),
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
@@ -1195,7 +1194,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL_AND_PIECEWISE"),
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
