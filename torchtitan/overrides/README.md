@@ -201,6 +201,10 @@ the override package and defeat the no-touch goal.
 torchtitan_train --module llama3 --config llama3_8b \
     --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
 
+# Async tensor-parallel linear subclasses are preserved by the same override:
+torchtitan_train --module llama3 --config llama3_debugmodel_dist_gemm \
+    --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
+
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one
 # shell token (my_pkg.triton_rope.triton_rope is a placeholder for your override):
 torchtitan_train --module llama3 --config llama3_8b \
@@ -331,13 +335,13 @@ override can never silently affect what another matches.
 
 This same rule answers the parent/child question directly. Say override A
 targets a parent Config (e.g. `MoE.Config`) and override B targets a Config
-nested inside it (e.g. `GroupedExperts.Config`):
+nested inside it (e.g. `GroupedLinear.Config`):
 
 - **Disjoint subtrees** (A on `...layers.0.moe`, B on
-  `...layers.1.moe.routed_experts.inner_experts`) — the claimed nodes are
+  `...layers.1.moe.routed_experts.w13`) — the claimed nodes are
   unrelated, so both apply.
 - **Overlapping** (A on `...layers.0.moe`, B on
-  `...layers.0.moe.routed_experts.inner_experts`) — B's node is inside A's, the
+  `...layers.0.moe.routed_experts.w13`) — B's node is inside A's, the
   ancestor case above, so we **error**.
 
 We error rather than pick one of the two plausible behaviors implicitly:
@@ -378,7 +382,7 @@ machinery.
 | Override Target | Conflicts with a converter? | Notes |
 |-----------------|------------------------------|-------|
 | RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
-| GroupedExperts.Config | Possibly | `Float8GroupedExpertsConverter` rewrites this |
+| GroupedLinear.Config | Possibly | `Float8GroupedLinearConverter` rewrites this |
 | Linear.Config | Yes | Float8 and LoRA can replace these |
 
 Where a converter already rewrote a node, target that node by location with

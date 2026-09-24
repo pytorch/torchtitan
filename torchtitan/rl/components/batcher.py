@@ -266,11 +266,15 @@ class Batcher(Configurable):
             if num_trainable_groups >= self._num_prompts_per_train_step:
                 break
             cut += 1
-
             taken_metrics.extend(group.metrics)
             if group.training_samples:
                 num_trainable_groups += 1
-                taken_training_samples.extend(group.training_samples)
+
+        # Pack in group-id order so on-policy runs stay reproducible whatever the finish order.
+        for group in sorted(
+            self._groups_for_next_batch[:cut], key=lambda taken: taken.group_id
+        ):
+            taken_training_samples.extend(group.training_samples)
 
         # surplus carried over
         self._groups_for_next_batch = self._groups_for_next_batch[cut:]

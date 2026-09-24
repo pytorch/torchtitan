@@ -249,8 +249,8 @@ def test_cuda_graph_wrapper_restores_capture_allocated_gradients() -> None:
         )
 
         wrapper(torch.tensor(2.0))
-        assert gradient_state.parameters == (parameter,)
         assert parameter.grad is captured_gradient
+        assert frozen_parameter.grad is None
 
         parameter.grad = None
         wrapper(torch.tensor(3.0))

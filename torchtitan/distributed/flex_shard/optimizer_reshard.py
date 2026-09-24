@@ -33,27 +33,54 @@ class Owned:
 
 @dataclass(frozen=True, slots=True)
 class BlockShard:
-    """Shard fixed-size blocks without changing the tensor shape.
+    """Shard complete contiguous blocks without changing the tensor shape.
 
     The selected tensor dimension is partitioned into contiguous blocks of
-    ``block_size`` elements, and those blocks are sharded using the same
+    sizes from the repeating sequence ``block_sizes``, sharded using the same
     contiguous partitioning as ``Shard``. A block is never split between
     participants. ``BlockShard`` describes only distribution; it does not
     reshape or reinterpret the tensor.
+
+    ``block_sizes`` must be a nonempty tuple of positive integers. Use ``(R,)``
+    for uniform blocks of size R. For example, ``(128, 64)`` partitions 384 rows
+    into four independently shardable blocks of 128, 64, 128, and 64 rows. The
+    dimension must contain whole repetitions of this sequence. DistMuon treats
+    each block as one independent matrix.
     """
 
     dim: int
-    block_size: int
+    block_sizes: tuple[int, ...]
 
     def __post_init__(self) -> None:
         if isinstance(self.dim, bool) or not isinstance(self.dim, int):
             raise ValueError("BlockShard.dim must be an integer")
         if (
-            isinstance(self.block_size, bool)
-            or not isinstance(self.block_size, int)
-            or self.block_size <= 0
+            not isinstance(self.block_sizes, tuple)
+            or not self.block_sizes
+            or any(
+                isinstance(size, bool) or not isinstance(size, int) or size <= 0
+                for size in self.block_sizes
+            )
         ):
-            raise ValueError("BlockShard.block_size must be a positive integer")
+            raise ValueError(
+                "BlockShard.block_sizes must be a nonempty tuple of positive integers"
+            )
+
+    def num_blocks(self, dim_size: int) -> int:
+        """Return the block count for a dimension containing whole repetitions."""
+        period = sum(self.block_sizes)
+        num_periods, remainder = divmod(dim_size, period)
+        if remainder:
+            raise ValueError(
+                f"BlockShard dimension size {dim_size} must be divisible by "
+                f"block-size period {period}"
+            )
+        return num_periods * len(self.block_sizes)
+
+    def block_start(self, block_index: int) -> int:
+        """Return a block boundary, including the final dimension endpoint."""
+        num_periods, offset = divmod(block_index, len(self.block_sizes))
+        return num_periods * sum(self.block_sizes) + sum(self.block_sizes[:offset])
 
 
 _ComputeSharding = Owned | Replicate | Shard | BlockShard
@@ -116,7 +143,7 @@ class ComputeLayout:
     Each named axis uses one of four compute shardings: ``Owned`` assigns the
     complete subgroup-local logical tensor to one dynamically selected owner rank,
     ``Replicate`` assigns it to every rank, ``Shard`` partitions one tensor
-    dimension, and ``BlockShard`` partitions fixed-size blocks without changing
+    dimension, and ``BlockShard`` partitions complete blocks without changing
     the tensor shape.
     Multiple ``Owned`` shardings select one owner rank from their joint Cartesian
     group.
@@ -157,7 +184,7 @@ class ComputeLayout:
 
             ComputeLayout(
                 shardings_by_mesh_axis={
-                    "dp_shard": BlockShard(dim=0, block_size=4),
+                    "dp_shard": BlockShard(dim=0, block_sizes=(4,)),
                 }
             )
     """

@@ -81,6 +81,7 @@ class ParallelDims:
     pp: int
     ep: int
     world_size: int
+    enable_sequence_parallel: bool
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse the
     # same object instead of re-slicing a submesh on every lookup.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -99,6 +100,7 @@ class ParallelDims:
             pp=parallelism_config.pipeline_parallel_degree,
             ep=parallelism_config.expert_parallel_degree,
             world_size=world_size,
+            enable_sequence_parallel=parallelism_config.enable_sequence_parallel,
         )
 
     def __post_init__(self):
@@ -455,7 +457,8 @@ class ParallelDims:
 
         Example:
             >>> parallel_dims = ParallelDims(
-            ...     dp_replicate=2, dp_shard=2, cp=1, tp=2, pp=1, ep=1, world_size=8
+            ...     dp_replicate=2, dp_shard=2, cp=1, tp=2, pp=1, ep=1,
+            ...     world_size=8, enable_sequence_parallel=True
             ... )
             >>> meshes = parallel_dims.get_all_one_dimensional_meshes()
             >>> print(meshes.keys())
@@ -503,6 +506,10 @@ class ParallelDims:
     @property
     def tp_enabled(self):
         return self.tp > 1
+
+    @property
+    def sp_enabled(self):
+        return self.tp_enabled and self.enable_sequence_parallel
 
     @property
     def pp_enabled(self):

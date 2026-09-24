@@ -89,11 +89,6 @@ def generate() -> None:
     max_num_seqs = args.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
-    # FULL_AND_PIECEWISE reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time (the
-    # @eager_break_during_capture decorator in rl/model/attention.py).
-    if gen_config.cuda_graph.mode == "FULL_AND_PIECEWISE":
-        os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-
     # Register TorchTitan model with vLLM before engine creation
     register_to_vllm(
         model_config,
