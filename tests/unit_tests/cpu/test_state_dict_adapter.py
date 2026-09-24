@@ -155,9 +155,7 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         )
 
         hf_state_dict = adapter.to_hf(
-            {
-                "layers.1.moe.routed_experts.inner_experts.w13_E2FD": grouped_expert_weight
-            }
+            {"layers.1.moe.routed_experts.w13.weight": grouped_expert_weight}
         )
 
         expected_keys = {
@@ -188,7 +186,7 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         local_weight = torch.arange(8 * 2 * 2 * 3, dtype=torch.float32).reshape(
             8, 2, 2, 3
         )
-        key = "mtp_layers.0.moe.routed_experts.inner_experts.w13_E2FD"
+        key = "mtp_layers.0.moe.routed_experts.w13.weight"
         for placement in (Shard(0), Shard(2)):
             with self.subTest(placement=placement):
                 weight = DTensor.from_local(
@@ -222,7 +220,7 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                 adapter = DeepSeekV4StateDictAdapter(config, hf_assets_path=None)
                 hf_state_dict = adapter.to_hf(state_dict)
                 self.assertFalse(
-                    any("inner_experts.w13_E2FD" in key for key in hf_state_dict)
+                    any("routed_experts.w13" in key for key in hf_state_dict)
                 )
                 self.assertTrue(
                     any(
@@ -273,7 +271,9 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                 model.init_states()
                 mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("ep",))
                 for key, value in model.state_dict().items():
-                    if "moe.routed_experts.inner_experts" in key:
+                    if ".moe.routed_experts.w13." in key or key.endswith(
+                        ".moe.routed_experts.w2.weight"
+                    ):
                         module_path, name = key.rsplit(".", 1)
                         weight = DTensor.from_local(
                             value.clone(), mesh, (Shard(0),), run_check=False
@@ -308,7 +308,8 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
         # small enough for a CPU unit test.
         for layer_config in config.layers:
             assert layer_config.moe is not None
-            layer_config.moe.routed_experts.inner_experts.hidden_dim = 16
+            layer_config.moe.routed_experts.w13.out_features = 16
+            layer_config.moe.routed_experts.w2.in_features = 16
 
         model = config.build()
         model.init_states()

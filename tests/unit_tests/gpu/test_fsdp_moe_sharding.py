@@ -71,9 +71,11 @@ def _get_expert_shard_dims(model: Qwen3Model) -> tuple[int | None, int | None]:
     """Return the W13 and W2 shard dimensions."""
     for layer in model.layers.values():
         if layer.moe_enabled:
-            # pyrefly: ignore [missing-attribute]
-            experts = layer.moe.routed_experts.inner_experts
-            return _shard_dim(experts.w13_E2FD), _shard_dim(experts.w2_EDF)
+            routed_experts = layer.moe.routed_experts
+            return (
+                _shard_dim(routed_experts.w13.weight),
+                _shard_dim(routed_experts.w2.weight),
+            )
     return None, None
 
 
@@ -161,7 +163,8 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
         config = model_registry("debugmodel", seq_len=128, attn_backend="flex")
         for layer_config in config.layers:
-            layer_config.moe.routed_experts.inner_experts.hidden_dim = 16
+            layer_config.moe.routed_experts.w13.out_features = 16
+            layer_config.moe.routed_experts.w2.in_features = 16
         model = config.build().to(self.device_type)
         edp_mesh = init_device_mesh(
             self.device_type, (4, 2), mesh_dim_names=("efsdp", "ep")
@@ -181,9 +184,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         )
 
         for layer in model.layers.values():
-            experts = layer.moe.routed_experts.inner_experts
+            routed_experts = layer.moe.routed_experts
             self.assertEqual(
-                {_shard_dim(param) for param in experts.parameters()},
+                {_shard_dim(param) for param in routed_experts.parameters()},
                 {0},
             )
 
