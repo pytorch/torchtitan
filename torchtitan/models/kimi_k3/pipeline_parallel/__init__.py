@@ -12,6 +12,7 @@ import logging
 
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
+    _PipelineScheduleRuntime,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
 )
@@ -117,8 +118,10 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
         cache=attn_res_cache,
     )
     store = PPRankLocalCache()
+    # The action-list runtime issues each send as its own action, never fused with a receive.
+    wait_sends_at_backward = isinstance(pp_schedule, _PipelineScheduleRuntime)
     for stage in stages:
-        stage.set_routing(layout, store)
+        stage.set_routing(layout, store, wait_sends_at_backward=wait_sends_at_backward)
     logger.info(
         "Kimi K3 pipeline: %d stage(s) on this rank %s, block transport %s",
         len(stages),

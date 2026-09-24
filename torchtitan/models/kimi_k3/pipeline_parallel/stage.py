@@ -17,6 +17,7 @@ from typing import Any
 import torch
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining._utils import flatten_args
+from torch.distributed.pipelining.schedules import _batch_p2p
 from torch.distributed.pipelining.stage import _make_tensor_from_meta
 
 from .cache import PPRankLocalCache
@@ -85,6 +86,18 @@ def _split_stack_grad(
     return grad_delta_KTD, deposits
 
 
+class _PayloadFromStore(torch.autograd.Function):
+    """The payload read from the rank store, its gradient routed to the stage output it equals."""
+
+    @staticmethod
+    def forward(ctx, graph_KTD: torch.Tensor, stored_KTD: torch.Tensor) -> torch.Tensor:
+        return stored_KTD.detach()
+
+    @staticmethod
+    def backward(ctx, grad_KTD: torch.Tensor):
+        return grad_KTD, None
+
+
 class AttnResPipelineStage(PipelineStage):
     """``PipelineStage`` whose hops carry the block residual's delta."""
 
@@ -93,13 +106,22 @@ class AttnResPipelineStage(PipelineStage):
         self._layout: BlockLayoutTables | None = None
         self._store: PPRankLocalCache | None = None
         self._rows_needed = 0
+        self._wait_sends_at_backward = False
         # per micro-batch: the stack's block order and the blocks the delta carried in
         self._order: dict[int, list[int]] = {}
         self._delta_in: dict[int, list[int]] = {}
+        self._fwd_send_works: dict[int, list] = {}
 
-    def set_routing(self, layout: BlockLayoutTables, store: PPRankLocalCache) -> None:
+    def set_routing(
+        self,
+        layout: BlockLayoutTables,
+        store: PPRankLocalCache,
+        *,
+        wait_sends_at_backward: bool = False,
+    ) -> None:
         self._layout = layout
         self._store = store
+        self._wait_sends_at_backward = wait_sends_at_backward
         mine = [s for s, r in layout.stage_to_rank.items() if r == self.group_rank]
         self._rows_needed = max(
             len(layout.cache_at_entry(s))
@@ -140,41 +162,62 @@ class AttnResPipelineStage(PipelineStage):
         dtype = like.dtype if like is not None else torch.bfloat16
         return torch.empty(0, device=self.device, dtype=dtype)
 
-    # Receive buffers: the delta lands in the rank store, the payload gradient in a buffer
-    # allocated when its receive is posted; neither is held per micro-batch across steps.
+    # Receive buffers are allocated when the receive is posted and dropped once read, the delta
+    # straight into the rank store; torch's default keeps one per micro-batch across steps.
 
     def _setup_forward_recv_info(self, num_microbatches: int, has_backward: bool) -> None:
         super()._setup_forward_recv_info(num_microbatches, has_backward)
-        if self.is_first or not self._in_place():
+        if self.is_first:
             return
         for chunk_id in range(num_microbatches):
-            info = self.args_recv_info[chunk_id][1]
-            info.buffer = self._placeholder(info.buffer)
+            for info in self.args_recv_info[chunk_id]:
+                info.buffer = self._placeholder(info.buffer)
 
     def _setup_backward_recv_info(self, num_microbatches: int) -> None:
         super()._setup_backward_recv_info(num_microbatches)
         if self.is_last:
             return
         for mb_index in range(num_microbatches):
-            info = self.grad_recv_info[mb_index][1]
-            if info.buffer is not None:
-                info.buffer = self._placeholder(info.buffer)
+            for info in self.grad_recv_info[mb_index]:
+                if info.buffer is not None:
+                    info.buffer = self._placeholder(info.buffer)
 
     def get_fwd_recv_ops(self, fwd_chunk_id: int):
-        if not self.is_first and self._in_place():
-            layout, store = self.layout(), self.store()
+        if not self.is_first:
             hidden_info, delta_info = self.args_recv_info[fwd_chunk_id]
-            store.allocate(fwd_chunk_id, self._rows_needed, hidden_info.buffer)
-            delta_blocks = layout.delta_to_send(self.stage_index - 1)
-            first = delta_blocks[0] if delta_blocks else 0
-            delta_info.buffer = store.rows(fwd_chunk_id, first, len(delta_blocks))
+            hidden_info.buffer = _make_tensor_from_meta(
+                hidden_info.tensor_meta, self.device
+            )
+            if self._in_place():
+                layout, store = self.layout(), self.store()
+                store.allocate(fwd_chunk_id, self._rows_needed, hidden_info.buffer)
+                delta_blocks = layout.delta_to_send(self.stage_index - 1)
+                first = delta_blocks[0] if delta_blocks else 0
+                delta_info.buffer = store.rows(fwd_chunk_id, first, len(delta_blocks))
+            else:
+                delta_info.buffer = _make_tensor_from_meta(
+                    delta_info.tensor_meta, self.device
+                )
         return super().get_fwd_recv_ops(fwd_chunk_id)
+
+    def get_fwd_send_ops(self, fwd_chunk_id: int):
+        ops = super().get_fwd_send_ops(fwd_chunk_id)
+        if self._wait_sends_at_backward and self.has_backward and ops:
+            # A Work pins its tensors until waited and the schedule waits sends at the end of
+            # the step; this stage's backward of the micro-batch starts after the receiver used them.
+            self._fwd_send_works[fwd_chunk_id] = _batch_p2p(ops)
+            return []
+        for op in ops:
+            if op.tensor.dim() == 3:
+                # Pinned until the end of the step: send the payload's blocks, not the store buffer.
+                op.tensor = op.tensor.clone()
+        return ops
 
     def get_bwd_recv_ops(self, bwd_chunk_id: int):
         if self.has_backward and not self.is_last:
-            info = self.grad_recv_info[bwd_chunk_id][1]
-            if info.buffer is not None and info.tensor_meta is not None:
-                info.buffer = _make_tensor_from_meta(info.tensor_meta, self.device)
+            for info in self.grad_recv_info[bwd_chunk_id]:
+                if info.buffer is not None and info.tensor_meta is not None:
+                    info.buffer = _make_tensor_from_meta(info.tensor_meta, self.device)
         return super().get_bwd_recv_ops(bwd_chunk_id)
 
     def _assemble(
@@ -192,7 +235,6 @@ class AttnResPipelineStage(PipelineStage):
         if self._in_place():
             # The delta was received into its rows; the stack is a view of rows [0, N).
             store.mark(mb, delta_blocks)
-            self.args_recv_info[mb][1].buffer = self._placeholder(delta_KTD)
             order = sorted(set(expected) | set(delta_blocks))
             if order != list(range(len(order))):
                 raise RuntimeError(
@@ -216,9 +258,13 @@ class AttnResPipelineStage(PipelineStage):
             store.allocate(mb, self._rows_needed, stack_out_TND[:, 0])
             for i, b in enumerate(my_commits):
                 store.put(mb, b, stack_out_TND[:, len(order_in) + i].detach())
-        return _outgoing_delta(
-            stack_out_TND, order_out, layout.delta_to_send(self.stage_index)
-        )
+        out_blocks = layout.delta_to_send(self.stage_index)
+        payload_KTD = _outgoing_delta(stack_out_TND, order_out, out_blocks)
+        if self._in_place() and out_blocks:
+            # The blocks sit in the store, so the model's output stack need not outlive the forward.
+            stored_KTD = store.rows(mb, out_blocks[0], len(out_blocks))
+            payload_KTD = _PayloadFromStore.apply(payload_KTD, stored_KTD)
+        return payload_KTD
 
     def forward_one_chunk(
         self,
@@ -233,6 +279,8 @@ class AttnResPipelineStage(PipelineStage):
             order_in: list[int] = []
         else:
             hidden_TD, delta_KTD = self._retrieve_recv_activations(fwd_chunk_id)
+            for info in self.args_recv_info[fwd_chunk_id]:
+                info.buffer = self._placeholder(info.buffer)
             stack_TND = self._assemble(fwd_chunk_id, hidden_TD, delta_KTD)
             composite_args = (hidden_TD, stack_TND)
             order_in = self._order[fwd_chunk_id]
@@ -262,9 +310,9 @@ class AttnResPipelineStage(PipelineStage):
         grads = super()._retrieve_recv_grads(bwd_chunk_id)
         if self.is_last:
             return grads
-        info = self.grad_recv_info[bwd_chunk_id][1]
-        if info.buffer is not None:
-            info.buffer = self._placeholder(info.buffer)
+        for info in self.grad_recv_info[bwd_chunk_id]:
+            if info.buffer is not None:
+                info.buffer = self._placeholder(info.buffer)
         layout = self.layout()
         grad_hidden, grad_delta = grads
         mine = set(layout.commits_at(self.stage_index))
@@ -285,7 +333,7 @@ class AttnResPipelineStage(PipelineStage):
                 f"arrived for the payload carrying its own blocks "
                 f"{[out_blocks[j] for j in committed]}"
             )
-        grad_delta = grad_delta.clone()
+        # The receive buffer was allocated for this micro-batch alone, so the deposits add in place.
         for j in committed:
             self._collect_into(grad_delta[j], bwd_chunk_id, out_blocks[j])
         return (grad_hidden, grad_delta)
@@ -312,6 +360,8 @@ class AttnResPipelineStage(PipelineStage):
         full_backward: bool = True,
         last_backward=False,
     ):
+        for work in self._fwd_send_works.pop(bwd_chunk_id, []):
+            work.wait()
         super().backward_one_chunk(
             bwd_chunk_id,
             loss=loss,

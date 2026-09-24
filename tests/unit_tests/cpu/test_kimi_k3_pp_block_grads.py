@@ -9,7 +9,10 @@ import unittest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributed.pipelining.schedules import ScheduleInterleaved1F1B
+from torch.distributed.pipelining.schedules import (
+    _PipelineScheduleRuntime,
+    ScheduleInterleaved1F1B,
+)
 from torch.distributed.pipelining.stage import _PipelineStageBase
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -188,7 +191,11 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
         )
         store = PPRankLocalCache()
         for stage in stages:
-            stage.set_routing(layout, store)
+            stage.set_routing(
+                layout,
+                store,
+                wait_sends_at_backward=isinstance(schedule, _PipelineScheduleRuntime),
+            )
 
         def step(inputs, targets):
             losses: list[torch.Tensor] = []
