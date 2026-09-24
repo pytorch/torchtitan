@@ -123,6 +123,7 @@ def build_trainer_model(
         pp=parallelism.pipeline_parallel_degree,
         ep=parallelism.expert_parallel_degree,
         world_size=dist.get_world_size(),
+        enable_sequence_parallel=parallelism.enable_sequence_parallel,
     )
     dist_utils.set_determinism(
         parallel_dims,
@@ -666,12 +667,6 @@ class BitwiseParityTestBase(unittest.TestCase):
                 initial_load_in_hf=True,
                 initial_load_path=config.hf_assets_path,
             )
-
-        # The graph-break decorator reads this env var at import time, and
-        # register_to_vllm below triggers that import, so set it first.
-        gen_cuda_graph = config.generator.cuda_graph
-        if gen_cuda_graph.mode == "FULL_AND_PIECEWISE":
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
 
         register_to_vllm(
             config.model,

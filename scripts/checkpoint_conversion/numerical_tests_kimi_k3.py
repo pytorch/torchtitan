@@ -80,11 +80,17 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         layer.feed_forward for layer in tt_config.layers if layer.feed_forward
     )
     moe = next(layer.moe for layer in tt_config.layers if layer.moe)
+    shared_hidden_dim = moe.shared_experts.w13.out_features
+    expert_hidden_dim = moe.routed_experts.w2.in_features
+    if shared_hidden_dim % expert_hidden_dim:
+        raise ValueError(
+            "shared-expert hidden size must be a multiple of routed-expert hidden size"
+        )
 
     text_overrides = {
         "vocab_size": tt_config.vocab_size,
         "hidden_size": tt_config.dim,
-        "intermediate_size": dense_ffn.w13.out_features // 2,
+        "intermediate_size": dense_ffn.w13.out_features,
         "num_hidden_layers": len(tt_config.layers),
         "num_attention_heads": mla.n_heads,
         "num_key_value_heads": mla.n_heads,
@@ -98,13 +104,9 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         "activation_situ_linear_beta": dense_ffn.linear_beta,
         "num_experts": moe.num_experts,
         "num_experts_per_token": moe.router.top_k,
-        "num_shared_experts": (
-            moe.shared_experts.w13.out_features
-            // 2
-            // moe.routed_experts.inner_experts.hidden_dim
-        ),
+        "num_shared_experts": shared_hidden_dim // expert_hidden_dim,
         "moe_renormalize": moe.router.route_norm,
-        "moe_intermediate_size": moe.routed_experts.inner_experts.hidden_dim,
+        "moe_intermediate_size": expert_hidden_dim,
         "routed_expert_hidden_size": moe.routed_down.out_features,
         "routed_scaling_factor": moe.router.route_scale,
         "first_k_dense_replace": next(

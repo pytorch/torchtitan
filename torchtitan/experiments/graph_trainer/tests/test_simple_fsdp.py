@@ -42,6 +42,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             pp=1,
             ep=1,
             world_size=1,
+            enable_sequence_parallel=False,
         )
         training = TrainingConfig(
             mixed_precision_param="bfloat16",

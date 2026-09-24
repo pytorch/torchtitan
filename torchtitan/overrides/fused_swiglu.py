@@ -6,14 +6,14 @@
 
 # pyrefly: ignore-errors
 
-"""Fused SwiGLU overrides.
+"""Fused SwiGLU activation override.
 
 ``fused_swiglu`` replaces every ``SwiGLU`` activation selected by the override
-framework. ``fused_grouped_experts`` retains the grouped gate/up projection
-override until that projection becomes the core ``GroupedExperts`` default.
+framework, including dense feed-forwards, dist-GEMM feed-forwards, and grouped
+experts. Projection implementations remain unchanged.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import spmd_types as spmd
@@ -23,13 +23,9 @@ import triton.language as tl
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
-from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.protocols.sharding import ShardingConfig
 
 __all__ = [
-    "FusedGroupedExperts",
     "FusedSwiGLU",
-    "fused_grouped_experts",
     "fused_swiglu",
     "silu_and_mul_backward_kernel",
     "silu_and_mul_forward_kernel",
@@ -339,7 +335,9 @@ class FusedSwiGLU(BinaryActivationFn):
         up: torch.Tensor,
         **kwargs: Any,
     ) -> torch.Tensor:
-        del kwargs
+        offsets = kwargs.get("offsets")
+        if offsets is not None:
+            return silu_and_mul_op(gate, up, offsets)
         return _silu_and_mul_2d(gate, up)
 
 
@@ -370,105 +368,3 @@ def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
 )
 def fused_swiglu(cfg: SwiGLU.Config) -> FusedSwiGLU.Config:
     return derive(cfg, FusedSwiGLU.Config)
-
-
-class FusedGroupedExperts(GroupedExperts):
-    """Grouped experts with one physical interleaved gate/up parameter."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(GroupedExperts.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        del self.w1_EFD
-        del self.w3_EFD
-        self.w13 = torch.nn.Parameter(
-            torch.empty(config.num_experts, config.hidden_dim, 2, config.dim)
-        )
-        self.register_state_dict_post_hook(self._split_w13_on_save)
-        self.register_load_state_dict_pre_hook(self._merge_w13_on_load)
-
-    def forward(
-        self,
-        x_RD: torch.Tensor,
-        num_tokens_per_expert_E: torch.Tensor,
-    ) -> torch.Tensor:
-        E, F, _, D = self.w13.shape
-        offsets_E = torch.cumsum(num_tokens_per_expert_E, dim=0, dtype=torch.int32)
-        gate_up_R2F = self._grouped_mm(
-            A=x_RD.bfloat16(),
-            weight_EOI=self.w13.reshape(E, F * 2, D),
-            offs=offsets_E,
-        )
-        gate_RF, up_RF = gate_up_R2F.reshape(-1, F, 2).unbind(-1)
-        h_RF = silu_and_mul_op(gate_RF, up_RF, offsets_E)
-        return self._grouped_mm(A=h_RF, weight_EOI=self.w2_EDF, offs=offsets_E).type_as(
-            x_RD
-        )
-
-    @staticmethod
-    def _split_w13_on_save(module, state_dict, prefix, local_metadata) -> None:
-        """Expose fused experts under the logical w1/w3 checkpoint keys."""
-        w13 = state_dict.pop(f"{prefix}w13")
-        state_dict[f"{prefix}w1_EFD"] = w13[:, :, 0, :].contiguous()
-        state_dict[f"{prefix}w3_EFD"] = w13[:, :, 1, :].contiguous()
-
-    @staticmethod
-    def _merge_w13_on_load(module, state_dict, prefix, *args) -> None:
-        """Pack logical w1/w3 checkpoint entries into the fused parameter."""
-        gate_key = f"{prefix}w1_EFD"
-        up_key = f"{prefix}w3_EFD"
-        if gate_key not in state_dict or up_key not in state_dict:
-            return
-        state_dict[f"{prefix}w13"] = torch.stack(
-            [state_dict.pop(gate_key), state_dict.pop(up_key)], dim=2
-        )
-
-
-def _fuse_grouped_experts_param_init(param_init: dict | None) -> dict | None:
-    """Remap logical gate/up initializers onto the fused parameter."""
-    if param_init is None:
-        return None
-    gate_init = param_init.get("w1_EFD")
-    up_init = param_init.get("w3_EFD")
-    fused = {
-        key: value
-        for key, value in param_init.items()
-        if key not in ("w1_EFD", "w3_EFD")
-    }
-    if gate_init is not None and up_init is not None:
-
-        def init_w13(w13: torch.Tensor) -> None:
-            gate_init(w13[:, :, 0, :])
-            up_init(w13[:, :, 1, :])
-
-        fused["w13"] = init_w13
-    return fused or None
-
-
-def _fuse_grouped_experts_sharding(base: ShardingConfig) -> ShardingConfig:
-    """Replace logical gate/up shardings with the fused parameter sharding."""
-    state = dict(base.state_shardings)
-    gate_layout = state.pop("w1_EFD")
-    state.pop("w3_EFD")
-    state["w13"] = gate_layout
-    return replace(base, state_shardings=state)
-
-
-@override(
-    target=GroupedExperts.Config,
-    description="Fuse routed-experts gate/up projection and SwiGLU activation.",
-)
-def fused_grouped_experts(cfg: GroupedExperts.Config) -> GroupedExperts.Config:
-    if type(cfg) is not GroupedExperts.Config:
-        return cfg
-
-    fused = derive(
-        cfg,
-        FusedGroupedExperts.Config,
-        param_init=_fuse_grouped_experts_param_init(cfg.param_init),
-    )
-    if cfg.sharding_config is not None:
-        fused.sharding_config = _fuse_grouped_experts_sharding(cfg.sharding_config)
-    return fused

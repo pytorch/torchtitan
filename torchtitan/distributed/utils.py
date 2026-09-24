@@ -374,6 +374,7 @@ def get_spmd_context(
             set_spmd_meshes(
                 dense_mesh=dense_mesh,
                 sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+                dense_sp_enabled=parallel_dims.sp_enabled,
             )
 
             stack.enter_context(set_current_spmd_mesh(dense_mesh))

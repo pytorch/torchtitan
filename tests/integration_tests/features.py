@@ -294,12 +294,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
         ),
         OverrideDefinitions(
-            configs=[recipes.deepseek_v3_debugmodel_fused_grouped_experts_tp2_ep4],
+            configs=[recipes.deepseek_v3_debugmodel_fused_swiglu_tp2_ep4],
             test_descr=(
-                "Override: fuse grouped experts + FFNs on deepseek_v3 "
+                "Override: use Triton SwiGLU activation on deepseek_v3 "
                 "(FSDP2 + TP2 dense, EP4 sparse)"
             ),
-            test_name="override_fused_grouped_experts",
+            test_name="override_fused_swiglu_moe",
             ngpu=4,
             use_real_pg=True,
         ),
