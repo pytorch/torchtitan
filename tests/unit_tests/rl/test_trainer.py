@@ -103,7 +103,7 @@ def test_forward_backward_uses_global_token_count() -> None:
             ),
         ),
         parallel_dims=SimpleNamespace(fsdp_enabled=False),
-        _preprocess_microbatch_group=MagicMock(return_value=()),
+        _preprocess_microbatch_groups=MagicMock(return_value=[(), (), ()]),
         _run_forward_backward=MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
@@ -126,7 +126,7 @@ def test_forward_backward_uses_global_token_count() -> None:
     engine.gc_handler.run.assert_called_once_with(1)
     engine.optimizers.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3
-    assert engine._preprocess_microbatch_group.call_count == 3
+    engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
 
 
 def test_close_stops_training_engine() -> None:

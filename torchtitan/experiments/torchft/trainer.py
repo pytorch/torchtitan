@@ -51,7 +51,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         output_dir: str,
         fault_tolerance: FaultTolerance,
     ) -> None:
-        if config.training.enable_optimizer_cuda_graph:
+        if "optimizer" in config.cuda_graph.components:
             raise ValueError("Optimizer CUDA graphs are not supported with TorchFT.")
         # The base constructor invokes the distributed-runtime hook.
         self.fault_tolerance = fault_tolerance
@@ -253,6 +253,7 @@ class FaultTolerantTrainer(Configurable):
             config.fault_tolerance.enable
             and cuda_graphs_supported()
             and not config.training.disable_cuda_graphs
+            and "forward_backward" in config.cuda_graph.components
             and parallel_dims.fsdp_enabled
             and self.gradient_accumulation_steps > 1
         ):

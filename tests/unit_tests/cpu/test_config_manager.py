@@ -18,6 +18,7 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import (
     CompileConfig,
     ConfigManager,
+    CUDAGraphConfig,
     DebugConfig,
     ParallelismConfig,
     TrainingConfig,
@@ -53,6 +54,16 @@ def cuda_graphs_supported(value: bool):
 
 
 class TestConfigManager(unittest.TestCase):
+    def test_deferred_gradient_reduction_supports_all_reshard_policies(self):
+        for reshard_after_forward in ("default", "always", "never"):
+            with self.subTest(reshard_after_forward=reshard_after_forward):
+                config = ParallelismConfig(
+                    fsdp_defer_gradient_reduction=True,
+                    fsdp_reshard_after_forward=reshard_after_forward,
+                )
+                assert config.fsdp_defer_gradient_reduction
+                assert config.fsdp_reshard_after_forward == reshard_after_forward
+
     def test_model_config_args(self):
         """--module and --config together load the correct config."""
         config_manager = ConfigManager()
@@ -263,12 +274,25 @@ class TestConfigManager(unittest.TestCase):
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
         assert not config.training.disable_cuda_graphs
+        assert config.cuda_graph.components == ["forward_backward"]
+
+    def test_cuda_graph_components(self):
+        with pytest.raises(ValueError, match="Unknown cuda_graph.components"):
+            CUDAGraphConfig(components=["unknown"])
+
+        config = ConfigManager().parse_args(
+            ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
+        )
+        config.cuda_graph.components = ["optimizer"]
+
+        with pytest.raises(ValueError, match="requires the forward_backward component"):
+            config.__post_init__()
 
     def test_optimizer_cuda_graph_requires_cuda_graphs_enabled(self):
         config = ConfigManager().parse_args(
             ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
-        config.training.enable_optimizer_cuda_graph = True
+        config.cuda_graph.components.append("optimizer")
         config.training.disable_cuda_graphs = True
 
         with pytest.raises(ValueError, match="requires CUDA graphs"):
@@ -278,7 +302,7 @@ class TestConfigManager(unittest.TestCase):
         config = ConfigManager().parse_args(
             ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
-        config.training.enable_optimizer_cuda_graph = True
+        config.cuda_graph.components.append("optimizer")
         config.optimizer.implementation = "foreach"
 
         with pytest.raises(ValueError, match="fused implementation"):

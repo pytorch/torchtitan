@@ -129,7 +129,7 @@ def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None
 
 def test_ft_training_engine_rejects_optimizer_cuda_graph() -> None:
     config = SimpleNamespace(
-        training=SimpleNamespace(enable_optimizer_cuda_graph=True),
+        cuda_graph=SimpleNamespace(components=["forward_backward", "optimizer"]),
     )
 
     with (

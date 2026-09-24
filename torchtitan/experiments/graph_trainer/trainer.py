@@ -148,7 +148,7 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
-        if config.training.enable_optimizer_cuda_graph:
+        if "optimizer" in config.cuda_graph.components:
             raise ValueError(
                 "Optimizer CUDA graphs are not supported with GraphTrainer."
             )
@@ -186,7 +186,7 @@ class GraphTrainingEngine(TrainingEngine):
                 (1,), -1.0, device=self.device
             )
         self._run_forward_backward = partial(
-            self._forward_backward_microbatch_groups,
+            self._forward_backward_body,
             defer_fsdp_gradient_reduction=False,
         )
 
