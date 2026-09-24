@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torchtitan.models.common.decoder import Decoder
+    from torchtitan.models.common.moe import MoE
 
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
@@ -319,8 +320,7 @@ def apply_fsdp_to_decoder(
         # placement overrides.
         if getattr(transformer_block, "moe_enabled", False):
             assert hasattr(transformer_block, "moe")
-            # pyrefly: ignore [missing-attribute]
-            moe = transformer_block.moe
+            moe = cast("MoE", transformer_block.moe)
             routed_experts = moe.routed_experts
             num_experts = moe.num_experts
 
