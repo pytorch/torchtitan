@@ -15,7 +15,7 @@ from torch import nn, Tensor
 
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm, SiLU
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.protocols.module import Module, Sequential
 
 
@@ -118,7 +118,7 @@ class MLPEmbedder(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.in_layer = config.in_layer.build()
-        self.silu = SiLU.Config().build()
+        self.silu = nn.SiLU()
         self.out_layer = config.out_layer.build()
 
     def forward(self, x: Tensor) -> Tensor:
@@ -406,7 +406,7 @@ class LastLayer(Module):
         ).build()
         self.linear = config.linear.build()
         self.adaLN_modulation = Sequential(
-            SiLU.Config().build(),
+            nn.SiLU(),
             config.adaln_linear.build(),
         )
 

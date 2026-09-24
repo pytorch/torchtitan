@@ -241,6 +241,7 @@ class FlexInnerAttention(InnerAttention):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
 
+    _has_inductor_region: ClassVar[bool] = True
     inductor_configs: ClassVar[dict[str, bool]] = {
         "wrap_inductor_compiled_regions": True,
         # Recommended workflow: run once with max_autotune=True to discover
