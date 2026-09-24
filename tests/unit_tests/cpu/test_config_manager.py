@@ -53,6 +53,16 @@ def cuda_graphs_supported(value: bool):
 
 
 class TestConfigManager(unittest.TestCase):
+    def test_deferred_gradient_reduction_supports_all_reshard_policies(self):
+        for reshard_after_forward in ("default", "always", "never"):
+            with self.subTest(reshard_after_forward=reshard_after_forward):
+                config = ParallelismConfig(
+                    fsdp_defer_gradient_reduction=True,
+                    fsdp_reshard_after_forward=reshard_after_forward,
+                )
+                assert config.fsdp_defer_gradient_reduction
+                assert config.fsdp_reshard_after_forward == reshard_after_forward
+
     def test_model_config_args(self):
         """--module and --config together load the correct config."""
         config_manager = ConfigManager()

@@ -182,7 +182,7 @@ class GraphTrainingEngine(TrainingEngine):
                 (1,), -1.0, device=self.device
             )
         self._run_forward_backward = partial(
-            self._forward_backward_microbatch_groups,
+            self._forward_backward_body,
             defer_fsdp_gradient_reduction=False,
         )
 
