@@ -2,14 +2,15 @@ name: docker-builds
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .ci/docker/**
-      - .github/workflows/docker-builds.yml
   push:
     branches:
       - main
       - release/*
+    # A pull request opts in by applying the ciflow/docker label, which pushes
+    # this tag. Building on every PR that touches .ci/docker would hold an
+    # image builder for each one.
+    tags:
+      - ciflow/docker/*
     paths:
       - .ci/docker/**
       - .github/workflows/docker-builds.yml
