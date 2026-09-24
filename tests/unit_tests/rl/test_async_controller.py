@@ -206,7 +206,7 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
         assert not cell.padding_mask[cell.loss_mask].any()
 
 
-def test_batcher_uses_flat_rank_capacity_and_reports_padding_reduction() -> None:
+def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
     batcher = Batcher.Config().build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
@@ -227,7 +227,7 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding_reduction() -> None
     microbatch = batch.microbatches[0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
     assert not microbatch.padding_mask.any()
-    assert _metric_value(batch, "train_batch/padding_frac_before_load_balance") == 0.5
+    assert microbatch.num_valid_tokens == 8
     assert _metric_value(batch, "train_batch/padding_frac") == 0.0
 
 
@@ -246,6 +246,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
     assert batch is not None
     microbatch = batch.microbatches[0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
+    assert microbatch.num_valid_tokens == 3
     assert microbatch.padding_mask.tolist() == [
         False,
         False,
@@ -385,9 +386,9 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
 
     assert batch is not None
     assert len(batch.microbatches) == 3
-    assert _metric_value(
-        batch, "train_batch/padding_frac_before_load_balance"
-    ) == pytest.approx(1 / 6)
+    assert all(
+        microbatch.padding_mask.numel() == 6 for (microbatch,) in batch.microbatches
+    )
     assert _metric_value(batch, "train_batch/padding_frac") == pytest.approx(4 / 9)
 
 

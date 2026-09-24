@@ -260,11 +260,6 @@ class Batcher(Configurable):
             num_rollout_groups,
             num_metric_only_groups,
         ) = self._take_groups()
-        baseline_assignments = self._assign_with_row_packing(training_samples)
-        padding_frac_before = self._padding_fraction(
-            num_microbatches=len(baseline_assignments),
-            training_samples=training_samples,
-        )
         assignments = self._assign_training_samples_to_microbatches(training_samples)
         microbatches = [
             [self._pack_training_samples(samples) for samples in rank_assignments]
@@ -303,7 +298,6 @@ class Batcher(Configurable):
                     training_samples,
                     num_rollout_groups,
                     num_metric_only_groups,
-                    padding_frac_before=padding_frac_before,
                 ),
             ],
             # Trainer computes policy_age from these at consume time (faithful to what it trains on).
@@ -601,110 +595,6 @@ class Batcher(Configurable):
 
         bins.extend([] for _ in range(target_num_bins - len(bins)))
 
-    def _fill_empty_rank_assignments(
-        self, assignments: list[list[list[TrainingSample]]]
-    ) -> None:
-        """Move samples from non-singleton cells into otherwise empty DP cells."""
-        cells = [cell for microbatch in assignments for cell in microbatch]
-        for empty_cell in [cell for cell in cells if not cell]:
-            donor = max(
-                (cell for cell in cells if len(cell) > 1),
-                key=lambda cell: sum(
-                    self.num_tokens_to_pack(sample) for sample in cell
-                ),
-                default=None,
-            )
-            if donor is None:
-                break
-            sample_index = min(
-                range(len(donor)),
-                key=lambda index: self.num_tokens_to_pack(donor[index]),
-            )
-            empty_cell.append(donor.pop(sample_index))
-
-    def _assign_training_samples_to_rows(
-        self, training_samples: list[TrainingSample]
-    ) -> list[list[TrainingSample]]:
-        """Build the previous next-fit assignment for comparison and fallback.
-
-        Example:
-
-            # seq_len=10, training_sample effective lengths [5, 5, 5]
-            _assign_training_samples_to_rows([e5, e5, e5])  # -> [[e5, e5], [e5]]
-        """
-        rows: list[list[TrainingSample]] = []
-        current_row: list[TrainingSample] = []
-        current_len = 0
-        for training_sample in training_samples:
-            num_tokens_to_pack = self.num_tokens_to_pack(training_sample)
-
-            # A row must fit in one local microbatch, so the full microbatch
-            # document limit is also a valid upper bound for one row.
-            if current_row and (
-                current_len + num_tokens_to_pack > self.seq_len
-                or (
-                    self._max_num_documents is not None
-                    and len(current_row) >= self._max_num_documents
-                )
-            ):
-                rows.append(current_row)
-                current_row, current_len = [], 0
-
-            current_row.append(training_sample)
-            current_len += num_tokens_to_pack
-
-        if current_row:
-            rows.append(current_row)
-
-        return rows
-
-    def _assign_with_row_packing(
-        self, training_samples: list[TrainingSample]
-    ) -> list[list[list[TrainingSample]]]:
-        """Return assignments from the previous fixed-row policy."""
-        rows = self._assign_training_samples_to_rows(training_samples)
-        if self._max_num_documents is None:
-            rows_per_microbatch = self._num_rows_per_microbatch * self._dp_degree
-            num_microbatches = max(1, math.ceil(len(rows) / rows_per_microbatch))
-            num_cells = num_microbatches * self._dp_degree
-            cells: list[list[TrainingSample]] = [[] for _ in range(num_cells)]
-            for index, row in enumerate(rows):
-                cells[index % num_cells].extend(row)
-            return [
-                cells[start : start + self._dp_degree]
-                for start in range(0, num_cells, self._dp_degree)
-            ]
-
-        cells: list[list[TrainingSample]] = []
-        current_cell: list[TrainingSample] = []
-        current_num_rows = 0
-        current_num_documents = 0
-        for row in rows:
-            num_documents = len(row)
-            assert num_documents <= self._max_num_documents
-            if current_cell and (
-                current_num_rows >= self._num_rows_per_microbatch
-                or current_num_documents + num_documents > self._max_num_documents
-            ):
-                cells.append(current_cell)
-                current_cell = []
-                current_num_rows = 0
-                current_num_documents = 0
-            current_cell.extend(row)
-            current_num_rows += 1
-            current_num_documents += num_documents
-        if current_cell:
-            cells.append(current_cell)
-
-        num_microbatches = max(1, math.ceil(len(cells) / self._dp_degree))
-        cells.extend([] for _ in range(num_microbatches * self._dp_degree - len(cells)))
-        assignments = [
-            cells[start : start + self._dp_degree]
-            for start in range(0, len(cells), self._dp_degree)
-        ]
-        self._fill_empty_rank_assignments(assignments)
-        return assignments
-
     def num_tokens_to_pack(self, training_sample: TrainingSample) -> int:
         """Tokens this training_sample contributes to a packed input.
 
@@ -788,9 +678,7 @@ class Batcher(Configurable):
         )
         loss_mask = torch.tensor(packed_fields["loss_mask"], dtype=_DTYPES["loss_mask"])
         return TrainingMicrobatch(
-            input=torch.tensor(
-                packed_fields["input_ids"], dtype=_DTYPES["input_ids"]
-            ),
+            input=torch.tensor(packed_fields["input_ids"], dtype=_DTYPES["input_ids"]),
             labels=torch.tensor(packed_fields["labels"], dtype=_DTYPES["labels"]),
             positions=torch.tensor(positions, dtype=torch.long),
             generator_logprobs=generator_logprobs,
@@ -821,7 +709,6 @@ class Batcher(Configurable):
         training_samples: list[TrainingSample],
         num_rollout_groups: int,
         num_metric_only_groups: int,
-        padding_frac_before: float,
     ) -> list[m.Metric]:
         """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
         padding_frac = self._padding_fraction(
@@ -829,10 +716,6 @@ class Batcher(Configurable):
             training_samples=training_samples,
         )
         return [
-            m.Metric(
-                "train_batch/padding_frac_before_load_balance",
-                m.NoReduce(padding_frac_before),
-            ),
             m.Metric(
                 "train_batch/padding_frac",
                 m.NoReduce(padding_frac),
