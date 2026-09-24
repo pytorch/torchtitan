@@ -219,15 +219,15 @@ def pipeline_with_first_last_stage_modules(
             num_virtual_stages, num_layers, input_weight, output_weight
         )
 
-        def present(module_fqns: Sequence[str]) -> list[str]:
+        def get_present_modules(module_fqns: Sequence[str]) -> list[str]:
             return [
                 module_fqn
                 for module_fqn in module_fqns
                 if getattr(model, module_fqn, None) is not None
             ]
 
-        fqn_per_part[0][:0] = present(first_stage_module_fqns)
-        fqn_per_part[-1].extend(present(last_stage_module_fqns))
+        fqn_per_part[0][:0] = get_present_modules(first_stage_module_fqns)
+        fqn_per_part[-1].extend(get_present_modules(last_stage_module_fqns))
         # The caller's config is not touched.
         parallelism = dataclasses.replace(
             parallelism, pipeline_parallel_module_fqns_per_model_part=fqn_per_part
