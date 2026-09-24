@@ -57,27 +57,12 @@ def llama3_debugmodel_nvfp4_fsdp2() -> Trainer.Config:
     return config
 
 
-def kimi_k3_debugmodel_pp4_vp4() -> Trainer.Config:
+def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
+    from torchtitan.distributed.pipeline_parallel import (
+        _generate_llm_fqn_per_model_part,
+    )
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
-
-    config = kimi_k3_debugmodel()
-    _set_spmd_typechecking(config, typechecking=False)
-    config.parallelism.pipeline_parallel_degree = 4
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    config.parallelism.num_pp_microbatches = 4
-    # 16 stages: one layer per stage from layer 5 on, the head alone on the last.
-    config.parallelism.pipeline_parallel_module_fqns_per_model_part = [
-        ["vision_encoder", "tok_embeddings", "layers.0"],
-        ["layers.1", "layers.2"],
-        ["layers.3", "layers.4"],
-        *[[f"layers.{i}"] for i in range(5, 17)],
-        ["norm", "lm_head", "output_res_proj", "output_res_norm"],
-    ]
-    return config
-
-
-def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2() -> Trainer.Config:
-    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+    from torchtitan.models.kimi_k3.model import KimiK3Model
 
     config = kimi_k3_debugmodel()
     # Type checking stays off under pipeline parallelism, as the other pipeline
@@ -88,8 +73,21 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2() -> Trainer.Config:
     config.parallelism.enable_sequence_parallel = True
     config.parallelism.expert_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 4
+    # Four stages per rank (the default is two), the shape where a hop can carry
+    # no new block and a block has three later readers on its rank: core's split
+    # for that many stages, with the model's end modules pinned.
+    parallelism = config.parallelism
+    split = _generate_llm_fqn_per_model_part(
+        4 * parallelism.pipeline_parallel_degree,
+        len(config.model.layers),
+        parallelism.pipeline_parallel_first_stage_less_layers,
+        parallelism.pipeline_parallel_last_stage_less_layers,
+    )
+    split[0][:0] = KimiK3Model.pipeline_first_stage_module_fqns
+    split[-1].extend(KimiK3Model.pipeline_last_stage_module_fqns)
+    parallelism.pipeline_parallel_module_fqns_per_model_part = split
     # DistMuon does not support tensor parallelism yet (#3353), so this cell
     # keeps AdamW the way kimi_k3_debugmodel_mm does.
     config.optimizer = default_adamw(lr=8e-4)

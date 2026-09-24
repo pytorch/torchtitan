@@ -26,11 +26,11 @@ NUM_BLOCKS = NUM_LAYERS // LAYERS_PER_BLOCK
 HEAD, READOUT, INPUT = NUM_LAYERS, NUM_LAYERS + 1, NUM_LAYERS + 2
 DIM = NUM_LAYERS + 3
 TOKENS, MICROBATCHES, STEPS = 1, 4, 3
-# pp4 x vp4 with the head alone on the last stage, two layers per stage, and uneven stages
+# pp4 x vpp4 with the head alone on the last stage, two layers per stage, and uneven stages
 SPLITS = {
-    "pp4 x vp4, head alone": [[0], [1, 2]] + [[s + 1] for s in range(2, 15)] + [[]],
-    "pp4 x vp2": [[2 * s, 2 * s + 1] for s in range(8)],
-    "pp4 x vp2, blocks open inside stages": [
+    "pp4 x vpp4, head alone": [[0], [1, 2]] + [[s + 1] for s in range(2, 15)] + [[]],
+    "pp4 x vpp2": [[2 * s, 2 * s + 1] for s in range(8)],
+    "pp4 x vpp2, blocks open inside stages": [
         [0, 1],
         [2, 3, 4],
         [5],

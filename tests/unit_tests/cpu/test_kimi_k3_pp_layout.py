@@ -27,16 +27,6 @@ def _uneven_map() -> dict[int, int]:
 # Two ranks, two stages each, interleaved: stage s runs on rank s % 2.
 _STAGE_TO_RANK = {0: 0, 1: 1, 2: 0, 3: 1}
 
-# The split the B200 pp4 x vp4 cell spells out, repeated here so the test needs
-# no recipe module: 16 stages, one layer per stage from layer 5 on.
-_PP4_VP4_SPLIT = [
-    ["vision_encoder", "tok_embeddings", "layers.0"],
-    ["layers.1", "layers.2"],
-    ["layers.3", "layers.4"],
-    *[[f"layers.{i}"] for i in range(5, 17)],
-    ["norm", "lm_head", "output_res_proj", "output_res_norm"],
-]
-
 
 def _tables(cache: bool = True) -> BlockLayoutTables:
     return BlockLayoutTables(
@@ -46,18 +36,6 @@ def _tables(cache: bool = True) -> BlockLayoutTables:
         layer_to_stage=_uneven_map(),
         cache=cache,
     )
-
-
-_EIGHT_STAGES = [
-    ["vision_encoder", "tok_embeddings", "layers.0", "layers.1"],
-    ["layers.2", "layers.3", "layers.4"],
-    ["layers.5", "layers.6", "layers.7"],
-    ["layers.8", "layers.9"],
-    ["layers.10", "layers.11"],
-    ["layers.12", "layers.13"],
-    ["layers.14", "layers.15"],
-    ["layers.16", "norm", "lm_head", "output_res_proj", "output_res_norm"],
-]
 
 
 class TestRouting(unittest.TestCase):
@@ -124,7 +102,7 @@ class TestSplit(unittest.TestCase):
             cache=True,
         )
 
-    def test_the_pp2_vp2_cell_has_every_transport_path(self):
+    def test_the_default_pp2_vpp2_split_has_every_transport_path(self):
         from torchtitan.distributed.pipeline_parallel import (
             _generate_llm_fqn_per_model_part,
         )
@@ -141,8 +119,13 @@ class TestSplit(unittest.TestCase):
         self.assertEqual(tables.cache_at_entry(2), frozenset({0}))
         self.assertEqual(tables.cache_at_entry(3), frozenset({0, 1, 2}))
 
-    def test_an_eight_stage_split_collects_three_deposits_per_block(self):
-        split = _EIGHT_STAGES
+    def test_the_pp2_vpp4_cell_collects_three_deposits_per_block(self):
+        from torchtitan_recipes.tests.b200 import (
+            kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4,
+        )
+
+        parallelism = kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4().parallelism
+        split = parallelism.pipeline_parallel_module_fqns_per_model_part
         self.assertEqual(len(split), 8)
         self.assertEqual(split[0][:2], ["vision_encoder", "tok_embeddings"])
         self.assertEqual(split[-1][-2:], ["output_res_proj", "output_res_norm"])
@@ -158,13 +141,16 @@ class TestSplit(unittest.TestCase):
         self.assertEqual(tables.deposits_expected(0, 0), 3)
         self.assertEqual(tables.deposits_expected(0, 1), 3)
 
-    def test_the_pp4_vp4_cell_runs_one_layer_per_stage(self):
-        split = _PP4_VP4_SPLIT
-        self.assertEqual(len(split), 16)
-        self.assertEqual(sum(n.startswith("layers.") for s in split for n in s), 17)
-        self.assertEqual(
-            split[-1], ["norm", "lm_head", "output_res_proj", "output_res_norm"]
+    def test_pp4_vpp4_runs_one_layer_per_stage(self):
+        from torchtitan.distributed.pipeline_parallel import (
+            _generate_llm_fqn_per_model_part,
         )
+
+        # Core's split for 16 stages: one layer per stage from layer 5 on, the head
+        # alone on the last stage.
+        split = _generate_llm_fqn_per_model_part(16, 17)
+        self.assertEqual(sum(n.startswith("layers.") for s in split for n in s), 17)
+        self.assertEqual(split[-1], ["norm", "lm_head"])
         tables = self._tables(split, pp=4)
         self.assertEqual(
             [tables.producer_stage_of_block(b) for b in range(5)], [0, 2, 6, 10, 14]
