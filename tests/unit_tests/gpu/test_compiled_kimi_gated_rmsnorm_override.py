@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 
 import torchtitan.distributed.compile as compile_mod
-from torchtitan.overrides.inductor_gated_rmsnorm import InductorGatedRMSNorm
+from torchtitan.overrides.compiled_gated_rmsnorm import CompiledGatedRMSNorm
 
 
 _EPS = 1e-5
@@ -99,7 +99,7 @@ def _assert_matches_golden(
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-class TestInductorGatedRMSNormNumerics(unittest.TestCase):
+class TestCompiledGatedRMSNormNumerics(unittest.TestCase):
     def _run_case(
         self,
         shape: tuple[int, ...],
@@ -160,7 +160,7 @@ class TestInductorGatedRMSNormNumerics(unittest.TestCase):
         )
 
         target = (
-            InductorGatedRMSNorm(InductorGatedRMSNorm.Config(dim=shape[-1], eps=_EPS))
+            CompiledGatedRMSNorm(CompiledGatedRMSNorm.Config(dim=shape[-1], eps=_EPS))
             .cuda()
             .to(dtype)
         )
@@ -246,8 +246,8 @@ class TestInductorGatedRMSNormNumerics(unittest.TestCase):
                 )
 
                 target = (
-                    InductorGatedRMSNorm(
-                        InductorGatedRMSNorm.Config(
+                    CompiledGatedRMSNorm(
+                        CompiledGatedRMSNorm.Config(
                             dim=shape[-1],
                             eps=_EPS,
                             activation_fn=activation_fn,
@@ -287,7 +287,7 @@ class TestInductorGatedRMSNormNumerics(unittest.TestCase):
             shape, device="cuda", dtype=torch.bfloat16, generator=generator
         )
         target = (
-            InductorGatedRMSNorm(InductorGatedRMSNorm.Config(dim=shape[-1], eps=_EPS))
+            CompiledGatedRMSNorm(CompiledGatedRMSNorm.Config(dim=shape[-1], eps=_EPS))
             .cuda()
             .to(torch.bfloat16)
         )
@@ -317,7 +317,7 @@ class TestInductorGatedRMSNormNumerics(unittest.TestCase):
         compile_mod._regional_inductor_enabled = True
         try:
             target = (
-                InductorGatedRMSNorm(InductorGatedRMSNorm.Config(dim=128, eps=_EPS))
+                CompiledGatedRMSNorm(CompiledGatedRMSNorm.Config(dim=128, eps=_EPS))
                 .cuda()
                 .to(torch.bfloat16)
             )

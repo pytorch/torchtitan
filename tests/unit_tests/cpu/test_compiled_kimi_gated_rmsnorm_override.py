@@ -19,20 +19,20 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.kimi_k3 import model_registry
 from torchtitan.models.kimi_k3.kda import KimiGatedRMSNorm
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
-from torchtitan.overrides.inductor_gated_rmsnorm import (
-    inductor_kimi_gated_rmsnorm,
-    InductorGatedRMSNorm,
+from torchtitan.overrides.compiled_gated_rmsnorm import (
+    compiled_kimi_gated_rmsnorm,
+    CompiledGatedRMSNorm,
 )
 from torchtitan.protocols.sharding import ShardingConfig
 
 
 _OVERRIDE_TARGET = (
-    "torchtitan.overrides.inductor_gated_rmsnorm." "inductor_kimi_gated_rmsnorm"
+    "torchtitan.overrides.compiled_gated_rmsnorm." "compiled_kimi_gated_rmsnorm"
 )
 _KIMI_GATED_RMSNORM_OVERRIDE = _REGISTRY[_OVERRIDE_TARGET]
 
 
-class TestInductorGatedRMSNormOverride(unittest.TestCase):
+class TestCompiledGatedRMSNormOverride(unittest.TestCase):
     def setUp(self):
         _REGISTRY.setdefault(_OVERRIDE_TARGET, _KIMI_GATED_RMSNORM_OVERRIDE)
 
@@ -49,7 +49,7 @@ class TestInductorGatedRMSNormOverride(unittest.TestCase):
         self.assertGreater(num_gated_norms, 0)
         self.assertEqual(len(replacements), num_gated_norms)
         self.assertEqual(
-            len(list(config.traverse(InductorGatedRMSNorm.Config))),
+            len(list(config.traverse(CompiledGatedRMSNorm.Config))),
             num_gated_norms,
         )
 
@@ -60,9 +60,9 @@ class TestInductorGatedRMSNormOverride(unittest.TestCase):
             param_init={"weight": torch.nn.init.ones_},
         )
 
-        replacement = inductor_kimi_gated_rmsnorm(stock_config)
+        replacement = compiled_kimi_gated_rmsnorm(stock_config)
 
-        self.assertIsInstance(replacement, InductorGatedRMSNorm.Config)
+        self.assertIsInstance(replacement, CompiledGatedRMSNorm.Config)
         self.assertEqual(replacement.dim, stock_config.dim)
         self.assertEqual(replacement.eps, stock_config.eps)
         self.assertIs(replacement.activation_fn, torch.sigmoid)
@@ -91,7 +91,7 @@ class TestInductorGatedRMSNormOverride(unittest.TestCase):
             sharding_config=sharding,
         )
 
-        replacement = inductor_kimi_gated_rmsnorm(stock_config)
+        replacement = compiled_kimi_gated_rmsnorm(stock_config)
 
         self.assertIsNotNone(replacement.sharding_config)
         assert replacement.sharding_config is not None
@@ -112,13 +112,15 @@ class TestInductorGatedRMSNormOverride(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "sharding contracts"):
-            inductor_kimi_gated_rmsnorm(config)
+            compiled_kimi_gated_rmsnorm(config)
 
     def test_decorated_forward_preserves_stock_implementation(self):
         config = KimiGatedRMSNorm.Config(dim=128, eps=1e-5)
         stock = config.build()
-        compiled = inductor_kimi_gated_rmsnorm(config).build()
-        eager_forward = type(compiled)._compiled_forward._torchdynamo_orig_callable
+        compiled = compiled_kimi_gated_rmsnorm(config).build()
+        eager_forward = type(
+            compiled
+        )._compiled_gated_rms_norm._torchdynamo_orig_callable
 
         with torch.no_grad():
             weight = torch.randn(128)
@@ -139,7 +141,7 @@ class TestInductorGatedRMSNormOverride(unittest.TestCase):
 
         for activation_fn in (F.silu, F.relu):
             with self.subTest(activation_fn=activation_fn.__name__):
-                compiled = inductor_kimi_gated_rmsnorm(
+                compiled = compiled_kimi_gated_rmsnorm(
                     config,
                     activation_fn=activation_fn,
                 ).build()
@@ -147,7 +149,7 @@ class TestInductorGatedRMSNormOverride(unittest.TestCase):
                     compiled.weight.normal_()
                 eager_forward = type(
                     compiled
-                )._compiled_forward._torchdynamo_orig_callable
+                )._compiled_gated_rms_norm._torchdynamo_orig_callable
                 expected = F.rms_norm(
                     input.float(),
                     (input.shape[-1],),

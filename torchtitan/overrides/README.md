@@ -487,10 +487,10 @@ for the full recipe.
   `OffsetRMSNorm` with fused Triton forward and backward kernels while preserving
   the stock zero-centered weight and checkpoint layout. Activate it with
   `--override.imports torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm`.
-- `torchtitan/overrides/inductor_gated_rmsnorm.py` -- replaces Kimi K3
+- `torchtitan/overrides/compiled_gated_rmsnorm.py` -- replaces Kimi K3
   `KimiGatedRMSNorm` with its stock forward compiled by TorchInductor. Activate
   it with
-  `--override.imports torchtitan.overrides.inductor_gated_rmsnorm.inductor_kimi_gated_rmsnorm`.
+  `--override.imports torchtitan.overrides.compiled_gated_rmsnorm.compiled_kimi_gated_rmsnorm`.
 - `torchtitan/overrides/kimi_gated_rmsnorm.py` -- replaces Kimi K3
   `KimiGatedRMSNorm` with fused Triton forward and backward kernels. Activate it
   with

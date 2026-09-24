@@ -21,32 +21,29 @@ from torchtitan.models.kimi_k3.kda import KimiGatedRMSNorm
 
 
 __all__ = [
-    "InductorGatedRMSNorm",
-    "inductor_kimi_gated_rmsnorm",
+    "CompiledGatedRMSNorm",
+    "compiled_kimi_gated_rmsnorm",
 ]
 
 
-_INDUCTOR_CONFIGS = {
-    "wrap_inductor_compiled_regions": True,
-    "triton.cudagraphs": False,
-}
-
-
-class InductorGatedRMSNorm(GatedRMSNorm):
+class CompiledGatedRMSNorm(GatedRMSNorm):
     """RMSNorm with a compiled configurable unary output gate."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(GatedRMSNorm.Config):
         activation_fn: Callable[[torch.Tensor], torch.Tensor] = torch.sigmoid
 
-    inductor_configs: ClassVar[dict[str, bool]] = _INDUCTOR_CONFIGS
+    inductor_options: ClassVar[dict[str, bool]] = {
+        "wrap_inductor_compiled_regions": True,
+        "triton.cudagraphs": False,
+    }
 
     @torch.compile(
         backend="inductor",
         fullgraph=True,
-        options=_INDUCTOR_CONFIGS,
+        options=inductor_options,
     )
-    def _compiled_forward(
+    def _compiled_gated_rms_norm(
         self,
         x_THV: torch.Tensor,
         gate_THV: torch.Tensor,
@@ -58,8 +55,8 @@ class InductorGatedRMSNorm(GatedRMSNorm):
         x_THV: torch.Tensor,
         gate_THV: torch.Tensor,
     ) -> torch.Tensor:
-        with maybe_regional_inductor(self.inductor_configs):
-            return self._compiled_forward(x_THV, gate_THV)
+        with maybe_regional_inductor(self.inductor_options):
+            return self._compiled_gated_rms_norm(x_THV, gate_THV)
 
 
 @override(
@@ -67,11 +64,11 @@ class InductorGatedRMSNorm(GatedRMSNorm):
     exact=True,
     description="Compile Kimi K3 gated RMSNorm with TorchInductor.",
 )
-def inductor_kimi_gated_rmsnorm(
+def compiled_kimi_gated_rmsnorm(
     cfg: KimiGatedRMSNorm.Config,
     *,
     activation_fn: Callable[[torch.Tensor], torch.Tensor] = torch.sigmoid,
-) -> InductorGatedRMSNorm.Config:
+) -> CompiledGatedRMSNorm.Config:
     sharding_config = cfg.sharding_config
     if sharding_config is not None:
         input_shardings = (
@@ -85,20 +82,18 @@ def inductor_kimi_gated_rmsnorm(
         weight_sharding = sharding_config.state_shardings.get("weight")
         if x_sharding is None or gate_sharding is None or output_sharding is None:
             raise ValueError(
-                "Inductor GatedRMSNorm requires input and output sharding "
+                "CompiledGatedRMSNorm requires input and output sharding "
                 "contracts when a sharding config is present"
             )
         if weight_sharding is None:
-            raise ValueError(
-                "Inductor GatedRMSNorm requires a weight sharding contract"
-            )
+            raise ValueError("CompiledGatedRMSNorm requires a weight sharding contract")
         sharding_config = replace(
             sharding_config,
             local_spmd=True,
         )
     return derive(
         cfg,
-        InductorGatedRMSNorm.Config,
+        CompiledGatedRMSNorm.Config,
         activation_fn=activation_fn,
         sharding_config=sharding_config,
     )
