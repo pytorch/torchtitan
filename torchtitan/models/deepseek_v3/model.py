@@ -5,12 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
-from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
@@ -249,41 +247,6 @@ class DeepSeekV3Model(MTPDecoder):
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
-        def _decoder_flops_per_token(
-            self,
-            model: nn.Module,
-            seq_len: int,
-            *,
-            excluded_modules: Iterable[nn.Module | None] = (),
-        ) -> int:
-            decoder_flops_per_token = MTPDecoder.Config._decoder_flops_per_token(
-                self,
-                model,
-                seq_len,
-                excluded_modules=excluded_modules,
-            )
-            mtp_attention_flops_per_token = sum(
-                self._layer_flops_per_token(layer_config, seq_len)
-                for layer_config in self.mtp_layers
-            )
-
-            # The base parameter term counts one lm_head use. MTP applies that
-            # same output projection once more for every prediction depth.
-            lm_head = getattr(model, "lm_head", None)
-            mtp_lm_head_flops_per_token = 0
-            if isinstance(lm_head, nn.Module):
-                mtp_lm_head_flops_per_token = (
-                    6
-                    * len(self.mtp_layers)
-                    * sum(param.numel() for param in lm_head.parameters())
-                )
-
-            return (
-                decoder_flops_per_token
-                + mtp_lm_head_flops_per_token
-                + mtp_attention_flops_per_token
             )
 
     @classmethod

@@ -55,68 +55,69 @@ The folder should be organized as follows
 
 ## Batch FLOP estimation
 
-A model config implements `build_flops_estimator(model, *, seq_len)` and
-returns a `FlopsEstimator`. The factory may inspect the full meta-device model
-once. Its returned callback has this contract:
+TorchTitan asks each model to estimate the training work for the raw batch it
+receives. The result is a model-wide logical FLOP count; device-parallel scaling
+is handled later by the metrics code.
+
+### Lifecycle
+
+1. `TrainingEngine` calls `model_config.build_flops_estimator(model, seq_len=...)`
+   once, while the complete model is still available.
+2. The returned callback is called for every raw, DP-rank-local CPU batch, before
+   device transfer, model preprocessing, or context-parallel sharding.
+3. The trainer accumulates those estimates until the next metrics report.
+
+The callback interface is:
 
 ```python
 def estimate_flops(batch: Mapping[str, Any]) -> int:
     ...
 ```
 
-- `batch` is the raw, unsharded, DP-rank-local input mapping on CPU. The
-  callback runs before device transfer, model preprocessing, or context
-  parallel sharding.
-- The result is a Python `int` containing model-wide logical training FLOPs for
-  that batch.
-- Capture only precomputed Python scalars in the callback. Do not capture the
-  model, parameters, tensors, or bound methods.
-- Keep each invocation CPU-only and O(batch metadata). Inspect shapes and small
-  metadata such as `grid_thw`, but do not transfer data, call `.item()`, run a
-  collective, or enter model execution.
-- Access required fields directly. A missing field should raise `KeyError`
-  instead of silently guessing a substitute.
+### Fixed-shape decoders
 
-Every trainer calls `TrainingEngine.estimate_flops(raw_batch)`. Fixed-shape
-decoder models should multiply their cached per-token estimate by
-`batch["input"].numel()`. Other workloads should
-use the raw CPU field that actually determines their work rather than fabricate
-an `input` dependency.
+`Decoder.Config` implements the common case. It computes a cached cost per token
+from:
 
-Decoder model configs compose `flops_per_token()` directly from the attention
-config owned by each block. This does not require a shared transformer-block base
-class.
+- `6 x` the active matrix-multiplication parameters, excluding embedding
+  lookups; and
+- each layer attention or sequence-mixer cost.
 
-`BaseModel.Config.get_parameter_counts(model)` provides the default model-structure
-accounting path. Backends with a different pre-parallel module representation may
-override it while preserving the same total/active semantics.
+The callback multiplies that value by `batch["input"].numel()`. Attention and
+delta-rule configs own their formulas because they know details such as head
+dimensions, sliding windows, and recurrent state sizes. Decoder variants only
+override the layer or decoder aggregation when the architecture does extra work,
+such as MTP.
 
-`get_parameter_counts()` reports architectural total and active parameter
-counts. It includes embedding tables and relies on PyTorch's parameter iterator
-to count shared parameters only once. `active_parameter_flops_per_unit()` is a
-separate compute-oriented helper: it excludes embedding lookups and derives the
-conventional `6P` component for matrix-multiplication parameters. Both helpers
-weight routed-expert parameters by the expected active fraction
-`top_k / num_experts`; this is an expected-use estimate, not an observation of
-the router's choices for that batch. A model may instead consume compact CPU
-routing metadata when such metadata is already part of the raw batch and is
-needed to represent input-dependent work. It must not read routing results back
-from an accelerator.
+For MoE modules, active parameter accounting uses the expected fraction
+`top_k / num_experts`. `get_parameter_counts()` separately reports total and
+active architectural parameter counts, including embeddings.
 
-For multimodal models, keep scaling units disjoint. For example, partition
-parameter work into per-text-token, per-input-patch or frame, and
-per-vision-output-token terms, then add attention contractions separately. For
-block-diagonal attention over independently packed examples, count
-`sum(length_i**2)`, not `sum(length_i)**2`; the latter incorrectly introduces
-cross-example attention. `get_packed_vision_grids()` centralizes selecting
-present modalities and traversing their CPU grid metadata once. Each vision
-encoder config implements `build_vision_flops_estimator()` because attention segmentation, temporal
-pooling, spatial merging, and sparse attention are encoder semantics. The model
-config composes that estimator with text and any modules outside the encoder.
-Tests should cover fixed-path parity, variable and optional
-modalities, closure release, and invocation before device transfer or sharding.
+### Input-dependent models
 
-For reporting-window aggregation and TFLOPS/MFU semantics, see
+Models whose work depends on the batch compose their own estimator. For example,
+a multimodal model adds the cached decoder cost to a vision estimate derived from
+`grid_thw`. Vision encoders own that calculation because patch merging, temporal
+pooling, and attention segmentation differ between encoders.
+
+For packed block-diagonal attention, sum each example separately:
+`sum(length_i**2)`, not `sum(length_i)**2`. The latter counts attention between
+unrelated examples.
+
+### Callback requirements
+
+- Return a Python `int`.
+- Keep calls CPU-only and proportional to small batch metadata.
+- Capture only precomputed Python values. Do not retain the model, parameters,
+  tensors, or bound methods.
+- Read required fields directly so malformed batches fail with `KeyError`.
+- Do not transfer data, call `.item()`, run collectives, or execute the model.
+
+Tests should cover the fixed-path value, input-dependent shapes and modalities,
+model lifetime after building the callback, and invocation before device transfer
+or sharding.
+
+For metric aggregation and TFLOPS/MFU definitions, see
 [FLOPs, throughput, and MFU](../../docs/metrics.md#flops-throughput-and-mfu).
 
 ## Testing and Benchmarking

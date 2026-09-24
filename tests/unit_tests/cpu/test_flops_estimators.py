@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import gc
+import weakref
 from collections.abc import Callable
 
 import pytest
@@ -96,6 +98,34 @@ def test_decoder_estimator_preserves_flops(
 
     assert result == expected_flops
     assert type(result) is int
+
+
+@pytest.mark.parametrize(
+    ("model_registry", "flavor"),
+    [
+        pytest.param(llama3_registry, "debugmodel", id="decoder"),
+        pytest.param(muse_glimmer_registry, "debugmodel_mm", id="multimodal"),
+    ],
+)
+def test_flops_estimator_does_not_retain_model(
+    model_registry: Callable[..., BaseModel.Config],
+    flavor: str,
+) -> None:
+    model_config = model_registry(flavor, seq_len=16)
+    with torch.device("meta"):
+        model = model_config.build()
+    model_ref = weakref.ref(model)
+    tensor_refs = [
+        weakref.ref(tensor) for tensor in (*model.parameters(), *model.buffers())
+    ]
+
+    estimator = model_config.build_flops_estimator(model, seq_len=16)
+    del model
+    gc.collect()
+
+    assert model_ref() is None
+    assert all(tensor_ref() is None for tensor_ref in tensor_refs)
+    assert type(estimator({"input": torch.zeros(1, 16)})) is int
 
 
 def _text_batch() -> dict[str, torch.Tensor]:
