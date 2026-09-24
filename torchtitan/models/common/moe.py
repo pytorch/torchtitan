@@ -120,6 +120,10 @@ class RoutedExperts(Module):
         )
         if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
             for axis in ("dp", "cp"):
+                # Without EP, grouped_mm otherwise sees input:R, weight:V, and
+                # offsets:P in local SPMD type checking. spmd.P cannot currently
+                # mix with spmd.V, so expose offsets as replicated here.
+                # TODO(pianpwk): Relax this restriction in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         with maybe_set_sparse_mesh():
