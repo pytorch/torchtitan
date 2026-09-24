@@ -336,41 +336,12 @@ class TestMoE(unittest.TestCase):
         self.assertIs(type(config.w2), Linear.Config)
         self.assertEqual(config.w13.num_linears, 2)
 
-    def test_explicit_moe_tp_transitions_without_ep(self):
-        moe = MoE.__new__(MoE)
-        x_TD = torch.randn(4, 8)
-        padding_mask_T = torch.zeros(4, dtype=torch.bool)
-
-        with (
-            patch(
-                "torchtitan.models.common.moe.spmd_sparse_mesh",
-                return_value=None,
-            ),
-            patch(
-                "torchtitan.models.common.moe.spmd_dense_sp_enabled",
-                return_value=True,
-            ),
-            patch(
-                "torchtitan.models.common.moe._redistribute_tp",
-                side_effect=lambda tensor, **_kwargs: tensor,
-            ) as redistribute,
-        ):
-            actual_x, actual_mask = moe._prepare_inputs(x_TD, padding_mask_T)
-            self.assertIs(actual_x, x_TD)
-            self.assertIs(actual_mask, padding_mask_T)
-            self.assertEqual(
-                redistribute.call_args_list,
-                [
-                    call(x_TD, src=spmd.S(0), dst=spmd.R),
-                    call(padding_mask_T, src=spmd.S(0), dst=spmd.R),
-                ],
-            )
-
     def test_explicit_moe_tp_transitions_with_ep_without_sp(self):
         moe = MoE.__new__(MoE)
         router = TokenChoiceTopKRouter.__new__(TokenChoiceTopKRouter)
         x_TD = torch.randn(4, 8)
         padding_mask_T = torch.zeros(4, dtype=torch.bool)
+        tp_group = object()
 
         with (
             patch(
@@ -382,20 +353,48 @@ class TestMoE(unittest.TestCase):
                 return_value=False,
             ),
             patch(
-                "torchtitan.models.common.moe._redistribute_tp",
-                side_effect=lambda tensor, **_kwargs: tensor,
+                "torchtitan.models.common.moe.spmd_mesh_group",
+                return_value=tp_group,
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd.redistribute",
+                side_effect=lambda tensor, *_args, **_kwargs: tensor,
             ) as redistribute,
         ):
-            router._prepare_inputs(x_TD, padding_mask_T)
-            moe._prepare_routed_experts_input(x_TD)
-            moe._finalize_output(x_TD)
+            router._shard_inputs_for_routing(x_TD, padding_mask_T)
+            moe._shard_routed_experts_input(x_TD)
+            moe._reduce_output_across_tp(x_TD)
             self.assertEqual(
                 redistribute.call_args_list,
                 [
-                    call(x_TD, src=spmd.I, dst=spmd.S(0)),
-                    call(padding_mask_T, src=spmd.R, dst=spmd.S(0)),
-                    call(x_TD, src=spmd.I, dst=spmd.S(0)),
-                    call(x_TD, src=spmd.P, dst=spmd.I),
+                    call(
+                        x_TD,
+                        tp_group,
+                        src=spmd.I,
+                        dst=spmd.S(0),
+                        backward_options={"op_dtype": x_TD.dtype},
+                    ),
+                    call(
+                        padding_mask_T,
+                        tp_group,
+                        src=spmd.R,
+                        dst=spmd.S(0),
+                        backward_options={"op_dtype": padding_mask_T.dtype},
+                    ),
+                    call(
+                        x_TD,
+                        tp_group,
+                        src=spmd.I,
+                        dst=spmd.S(0),
+                        backward_options={"op_dtype": x_TD.dtype},
+                    ),
+                    call(
+                        x_TD,
+                        tp_group,
+                        src=spmd.P,
+                        dst=spmd.I,
+                        backward_options={"op_dtype": x_TD.dtype},
+                    ),
                 ],
             )
 

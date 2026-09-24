@@ -52,24 +52,6 @@ from .token_dispatcher import LocalTokenDispatcher
 #        for the up/gate projections and (E, D, F) for the down one)
 
 
-def _redistribute_tp(
-    x: torch.Tensor,
-    *,
-    src: spmd.PerMeshAxisSpmdType,
-    dst: spmd.PerMeshAxisSpmdType,
-) -> torch.Tensor:
-    tp_group = spmd_mesh_group(MeshAxisName.TP)
-    if tp_group is None or src == dst:
-        return x
-    return spmd.redistribute(
-        x,
-        tp_group,
-        src=src,
-        dst=dst,
-        backward_options={"op_dtype": x.dtype},
-    )
-
-
 class GroupedExperts(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -272,7 +254,7 @@ class TokenChoiceTopKRouter(Module):
             scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
         ).indices
 
-    def _prepare_inputs(
+    def _shard_inputs_for_routing(
         self,
         x_TD: torch.Tensor,
         padding_mask_T: torch.Tensor | None,
@@ -281,12 +263,24 @@ class TokenChoiceTopKRouter(Module):
         if spmd_sparse_mesh() is None or spmd_dense_sp_enabled():
             return x_TD, padding_mask_T
 
-        x_TD = _redistribute_tp(x_TD, src=spmd.I, dst=spmd.S(0))
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x_TD, padding_mask_T
+
+        x_TD = spmd.redistribute(
+            x_TD,
+            tp_group,
+            src=spmd.I,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": x_TD.dtype},
+        )
         if padding_mask_T is not None:
-            padding_mask_T = _redistribute_tp(
+            padding_mask_T = spmd.redistribute(
                 padding_mask_T,
+                tp_group,
                 src=spmd.R,
                 dst=spmd.S(0),
+                backward_options={"op_dtype": padding_mask_T.dtype},
             )
         return x_TD, padding_mask_T
 
@@ -309,7 +303,7 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
-        x_TD, padding_mask_T = self._prepare_inputs(x_TD, padding_mask_T)
+        x_TD, padding_mask_T = self._shard_inputs_for_routing(x_TD, padding_mask_T)
 
         # RouterGateLinear returns FP32, so configured scoring runs in FP32.
         scores_TE = self.score_func(self.gate(x_TD))
@@ -745,8 +739,6 @@ class MoE(Module):
         local SPMD region. When EP internally sequence-shards tokens across TP,
         the caller must provide a TP-divisible token count.
         """
-        x_TD, padding_mask_T = self._prepare_inputs(x_TD, padding_mask_T)
-
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
         (topk_scores_TK, topk_expert_ids_TK, routing_map_TE,) = self.router(
@@ -757,7 +749,7 @@ class MoE(Module):
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
-        routed_x_TD = self._prepare_routed_experts_input(x_TD)
+        routed_x_TD = self._shard_routed_experts_input(x_TD)
         out_TD = self.routed_experts(
             routed_x_TD,
             topk_scores_TK,
@@ -771,39 +763,37 @@ class MoE(Module):
 
         if shared_out_TD is not None:
             out_TD = out_TD + shared_out_TD
-        return self._finalize_output(out_TD)
+        return self._reduce_output_across_tp(out_TD)
 
-    def _prepare_inputs(
-        self,
-        x_TD: torch.Tensor,
-        padding_mask_T: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Prepare the input shared by all MoE branches."""
-        if spmd_sparse_mesh() is not None:
-            return x_TD, padding_mask_T
-
-        src = spmd.S(0) if spmd_dense_sp_enabled() else spmd.I
-        x_TD = _redistribute_tp(x_TD, src=src, dst=spmd.R)
-        if padding_mask_T is not None and spmd_dense_sp_enabled():
-            padding_mask_T = _redistribute_tp(
-                padding_mask_T,
-                src=spmd.S(0),
-                dst=spmd.R,
-            )
-        return x_TD, padding_mask_T
-
-    def _prepare_routed_experts_input(self, x_TD: torch.Tensor) -> torch.Tensor:
+    def _shard_routed_experts_input(self, x_TD: torch.Tensor) -> torch.Tensor:
         """Shard the routed branch when EP is used without dense SP."""
         if spmd_sparse_mesh() is None or spmd_dense_sp_enabled():
             return x_TD
-        return _redistribute_tp(x_TD, src=spmd.I, dst=spmd.S(0))
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x_TD
+        return spmd.redistribute(
+            x_TD,
+            tp_group,
+            src=spmd.I,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": x_TD.dtype},
+        )
 
-    def _finalize_output(self, out_TD: torch.Tensor) -> torch.Tensor:
-        """Restore the decoder activation type after branch combination."""
+    def _reduce_output_across_tp(self, out_TD: torch.Tensor) -> torch.Tensor:
+        """Reduce the combined partial output when dense SP is disabled."""
         if spmd_dense_sp_enabled():
             return out_TD
-        src = spmd.P if spmd_sparse_mesh() is not None else spmd.R
-        return _redistribute_tp(out_TD, src=src, dst=spmd.I)
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return out_TD
+        return spmd.redistribute(
+            out_TD,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.I,
+            backward_options={"op_dtype": out_TD.dtype},
+        )
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
