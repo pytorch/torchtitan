@@ -11,6 +11,7 @@ This module provides TorchTitanVLLMModel: Core model class that adapts
 TorchTitan models for vLLM.
 """
 
+import copy
 import dataclasses
 from dataclasses import dataclass
 from functools import partial
@@ -29,12 +30,14 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.config.transform.base import convert_config_type
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
+from torchtitan.quantization.mxfp8 import MXFP8Linear
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -48,6 +51,18 @@ logger = init_logger(__name__)
 
 def _replace_vllm_layer_configs(model_config):
     """Replace inner-computation configs with vLLM generation variants."""
+    # Inference config replacements must not mutate the trainer's config tree.
+    model_config = copy.deepcopy(model_config)
+    if MXFP8Linear is not None:
+        from torchtitan.quantization.mxfp8.inference import MXFP8InferenceLinear
+
+        for _, config, parent, attr in model_config.traverse(MXFP8Linear.Config):
+            replacement = convert_config_type(config, MXFP8InferenceLinear)
+            if isinstance(parent, list):
+                parent[attr] = replacement
+            else:
+                setattr(parent, attr, replacement)
+
     # These modules inspect the breakable-CUDA graph environment at import time.
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
@@ -390,10 +405,6 @@ class VLLMModelWrapper(Module):
                 if not isinstance(module, FSDPModule):
                     continue
                 module.unshard()
-        # TODO: Add FSDP APIs to free persistent BF16 sharded storage here and
-        # restore it in prepare_weight_sync before the next weight sync.
-        # E.g. FSDPModule._restore_sharded_params() in prepare_weight_sync
-        # E.g. FSDPModule._free_sharded_params() in finish_weight_sync
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
