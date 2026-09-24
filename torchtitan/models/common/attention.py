@@ -46,7 +46,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
-from torchtitan.tools.utils import round_up
+from torchtitan.tools.utils import device_type, round_up
 
 
 __all__ = [
@@ -258,9 +258,13 @@ class FlexInnerAttention(InnerAttention):
     }
 
     # pyrefly: ignore[no-matching-overload]
-    _compiled_flex_attn: ClassVar[Callable] = torch.compile(
-        flex_attention,
-        options=inductor_configs,
+    _compiled_flex_attn: ClassVar[Callable] = (
+        # torch_npu has no Inductor/Triton backend for the flex_attention
+        # kernel, so fall back to the eager (unfused) reference implementation
+        # on Ascend NPU.
+        flex_attention
+        if device_type == "npu"
+        else torch.compile(flex_attention, options=inductor_configs)
     )
 
     def __init__(self, config: Config) -> None:
@@ -586,7 +590,13 @@ def get_sliding_window_mask_mod(window_size: int) -> _mask_mod_signature:
     return sliding_window_mod
 
 
-_compiled_create_block_mask = torch.compile(create_block_mask)
+_compiled_create_block_mask = (
+    # Same eager fallback for torch_npu: compiling create_block_mask is also
+    # unsupported on Ascend NPU.
+    create_block_mask
+    if device_type == "npu"
+    else torch.compile(create_block_mask)
+)
 
 
 def create_attention_mask(*args, **kwargs):
