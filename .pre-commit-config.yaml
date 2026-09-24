@@ -76,6 +76,14 @@ repos:
 
 - repo: local
   hooks:
+    # Flag newly added CUDA-only code that has a torch.accelerator equivalent.
+    - id: check-accelerator-api
+      name: Check for CUDA-only code (use torch.accelerator)
+      language: system
+      pass_filenames: false
+      entry: python .github/scripts/check_accelerator_api.py
+      args: ["--base-ref", "origin/main"]
+
     # Check hyperlinks and external links
     - id: lychee-link-checker
       name: lychee-link-checker
