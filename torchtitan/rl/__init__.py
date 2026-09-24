@@ -31,19 +31,41 @@ To register TorchTitan models with vLLM:
     )
 """
 
+from __future__ import annotations
+
+from typing import Any, TYPE_CHECKING
+
 from torchtitan.rl._runtime import apply_env_defaults
 
 
-# ``python -m torchtitan.rl.train`` executes this package initializer
-# before train.py. Apply the defaults before the re-exports below import
-# vllm_wrapper, which imports torch.
+# ``python -m torchtitan.rl.train`` executes this package initializer before
+# train.py. Apply the defaults before a caller resolves either lazy vLLM API.
 apply_env_defaults()
 
-from torchtitan.rl.model.vllm_registry import register_to_vllm
-from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
+if TYPE_CHECKING:
+    from torchtitan.rl.model.vllm_registry import register_to_vllm
+    from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
 
 
 __all__ = [
     "VLLMModelWrapper",
     "register_to_vllm",  # Export register function for manual use
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily import vLLM-backed public APIs.
+
+    Most ``torchtitan.rl`` modules do not depend on vLLM. Keeping these
+    re-exports lazy allows those modules to be imported in CPU-only
+    environments while preserving the package-level public API.
+    """
+    if name == "register_to_vllm":
+        from torchtitan.rl.model.vllm_registry import register_to_vllm
+
+        return register_to_vllm
+    if name == "VLLMModelWrapper":
+        from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
+
+        return VLLMModelWrapper
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
