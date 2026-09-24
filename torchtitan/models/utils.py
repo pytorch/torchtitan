@@ -51,6 +51,41 @@ class MoEStateDictAdapter(StateDictAdapter):
         self.grouped_expert_weight_mesh = {}  # {titan_abstract_key: device_mesh}
         self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
 
+    @staticmethod
+    def _to_logical_expert_state(
+        state_dict: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Expose native W13 as logical gate/up tensors to model adapters."""
+        logical = dict(state_dict)
+        for key in list(logical):
+            if not key.endswith("routed_experts.inner_experts.w13_E2FD"):
+                continue
+            weight_E2FD = logical.pop(key)
+            prefix = key.removesuffix("w13_E2FD")
+            logical[f"{prefix}w1_EFD"] = weight_E2FD.select(1, 0)
+            logical[f"{prefix}w3_EFD"] = weight_E2FD.select(1, 1)
+        return logical
+
+    @staticmethod
+    def _to_native_expert_state(
+        state_dict: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Combine logical gate/up tensors into the native W13 parameter."""
+        native = dict(state_dict)
+        gate_keys = [
+            key for key in native if key.endswith("routed_experts.inner_experts.w1_EFD")
+        ]
+        for gate_key in gate_keys:
+            prefix = gate_key.removesuffix("w1_EFD")
+            up_key = f"{prefix}w3_EFD"
+            if up_key not in native:
+                raise ValueError(f"Missing routed-expert up weight for {gate_key}")
+            native[f"{prefix}w13_E2FD"] = torch.stack(
+                (native.pop(gate_key), native.pop(up_key)),
+                dim=1,
+            )
+        return native
+
     def _calculate_strided_shard_shard_indices(
         self,
         strided_shard_dim_degree: int,

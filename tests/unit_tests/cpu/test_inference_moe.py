@@ -92,6 +92,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         )
 
         self.assertEqual(len(replacements), 2)
+        self.assertIsInstance(cfg.routed_experts.inner_experts, GroupedExperts.Config)
         self.assertIsInstance(
             cfg.routed_experts.inner_experts.activation_fn, FusedSwiGLU.Config
         )
@@ -110,6 +111,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         )
 
         self.assertEqual(len(replacements), 1)
+        self.assertIsInstance(cfg.routed_experts.inner_experts, GroupedExperts.Config)
         self.assertIsInstance(
             cfg.routed_experts.inner_experts.activation_fn, FusedSwiGLU.Config
         )
@@ -145,6 +147,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         # Trainer imports only fused_swiglu: activation fused, dispatcher unchanged.
         apply_overrides(OverrideConfig(imports=[_FUSED_SWIGLU]), cfg)
 
+        self.assertIsInstance(cfg.routed_experts.inner_experts, GroupedExperts.Config)
         self.assertIsInstance(
             cfg.routed_experts.inner_experts.activation_fn, FusedSwiGLU.Config
         )

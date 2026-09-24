@@ -365,7 +365,7 @@ def _dist_muon_optimizer(
         "eps": 1e-8,
         "weight_decay": 0.1,
     }
-    expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
+    expert_projections = ("w13_E2FD", "w2_EDF")
 
     def compute_shardings_for_layer(
         layer_id: int,

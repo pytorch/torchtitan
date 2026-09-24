@@ -23,7 +23,6 @@ from torchtitan.models.common.moe import GroupedExperts
 from torchtitan.models.qwen3_5 import model_registry
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
-from torchtitan.overrides.fused_swiglu import fused_grouped_experts
 from torchtitan.protocols.sharding import ShardingConfig
 
 from torchtitan.rl.model.vllm_wrapper import (
@@ -90,9 +89,9 @@ def test_state_dict_layouts_include_native_qkv_weight():
     assert "qkv_linear.wv.weight" not in layouts
 
 
-def test_state_dict_layouts_include_split_expert_weights():
-    """Verify fused grouped-expert layouts use the exported split state-dict keys."""
-    colwise = dense_param_placement(tp=spmd.S(1))
+def test_state_dict_layouts_include_native_expert_weights():
+    """Verify fused grouped-expert layouts use native model-state keys."""
+    physical_colwise = dense_param_placement(tp=spmd.S(2))
     rowwise = dense_param_placement(tp=spmd.S(2))
     config = GroupedExperts.Config(
         dim=16,
@@ -100,22 +99,20 @@ def test_state_dict_layouts_include_split_expert_weights():
         num_experts=4,
         sharding_config=ShardingConfig(
             state_shardings={
-                "w1_EFD": colwise,
+                "w13_E2FD": physical_colwise,
                 "w2_EDF": rowwise,
-                "w3_EFD": colwise,
             }
         ),
     )
     model = torch.nn.Module()
-    model.experts = fused_grouped_experts(config).build()
+    model.experts = config.build()
     wrapper = VLLMModelWrapper.__new__(VLLMModelWrapper)
     torch.nn.Module.__init__(wrapper)
     wrapper.model = model
 
     layouts = wrapper.get_state_dict_layouts()
 
-    assert layouts["experts.w1_EFD"] is colwise
-    assert layouts["experts.w3_EFD"] is colwise
+    assert layouts["experts.w13_E2FD"] is physical_colwise
     assert layouts["experts.w2_EDF"] is rowwise
 
 
