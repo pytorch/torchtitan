@@ -22,6 +22,7 @@ from torchtitan.models.common import (
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    RowParallelLinear,
     Sigmoid,
     Softmax,
     TransformerBlock,
@@ -33,6 +34,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    make_shared_expert_ffn_config,
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -193,7 +195,7 @@ def make_mla_attention_config(
             out_features=n_heads * (qk_nope_head_dim + v_head_dim),
             param_init=linear_init,
         ),
-        wo=Linear.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * v_head_dim,
             out_features=dim,
             param_init=depth_init(layer_id),
@@ -297,7 +299,7 @@ def build_mla_moe_layers(
                     comm_backend=moe_comm_backend,
                     non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),
-                shared_experts=make_ffn_config(
+                shared_experts=make_shared_expert_ffn_config(
                     dim=dim,
                     hidden_dim=moe_hidden_dim * num_shared_experts,
                     w1_param_init=linear_init,

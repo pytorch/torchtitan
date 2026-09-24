@@ -19,6 +19,12 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
             ngpu=4,
         ),
         OverrideDefinitions(
+            configs=[recipes.kimi_k3_debugmodel_mm_muon],
+            test_descr="Kimi K3 multimodal per-head DistMuon FSDP and EP",
+            test_name="kimi_k3_mm_muon",
+            ngpu=2,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_mxfp8_fsdp2],
             test_descr="MXFP8 linear with an FSDP-managed weight cache",
             test_name="mxfp8_linear_fsdp",
