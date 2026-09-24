@@ -148,6 +148,7 @@ def build_minimal_trainer(
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
+            debug=DebugConfig(),
             training=TrainingConfig(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(
                 fsdp_defer_gradient_reduction=False,
@@ -157,7 +158,7 @@ def build_minimal_trainer(
 
     engine.config = trainer.config
     engine._run_forward_backward = partial(
-        engine._forward_backward_microbatch_groups,
+        engine._forward_backward_body,
         defer_fsdp_gradient_reduction=False,
     )
 

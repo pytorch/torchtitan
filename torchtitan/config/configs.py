@@ -167,7 +167,6 @@ class ParallelismConfig:
     fsdp_defer_gradient_reduction: bool = False
     """
     Defer FSDP gradient reduction until the last gradient accumulation step.
-    CUDA graph gradient accumulation always defers the reduction.
     """
 
     fsdp_symm_mem_scope: Annotated[FSDPSymmMemScope, tyro.conf.Suppress] = None
