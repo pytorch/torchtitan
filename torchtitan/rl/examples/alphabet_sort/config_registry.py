@@ -56,6 +56,9 @@ from torchtitan.rl.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
+_COMPILED_GATED_RMSNORM_OVERRIDE = (
+    "torchtitan.overrides.compiled_gated_rmsnorm.compiled_gated_rmsnorm"
+)
 
 # TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
 # verified.
@@ -1099,6 +1102,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                     global_vocab_size=decoder_vocab_size(model_config)
                 ),
             ),
+            override=OverrideConfig(imports=[_COMPILED_GATED_RMSNORM_OVERRIDE]),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -1113,6 +1117,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
                 top_p=0.95,
                 max_tokens=700,
             ),
+            override=OverrideConfig(imports=[_COMPILED_GATED_RMSNORM_OVERRIDE]),
         ),
     )
 
@@ -1183,6 +1188,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
                     global_vocab_size=decoder_vocab_size(model_config)
                 ),
             ),
+            override=OverrideConfig(imports=[_COMPILED_GATED_RMSNORM_OVERRIDE]),
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
@@ -1197,6 +1203,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
                 top_p=0.95,
                 max_tokens=256,
             ),
+            override=OverrideConfig(imports=[_COMPILED_GATED_RMSNORM_OVERRIDE]),
         ),
     )
 
@@ -1231,7 +1238,10 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
         "27B", seq_len=seq_len, attn_backend="varlen"
     )
     config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3.6-27B"
-    perf_imports = ["torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm"]
+    perf_imports = [
+        _COMPILED_GATED_RMSNORM_OVERRIDE,
+        "torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm",
+    ]
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
     assert isinstance(loss_config.loss_fn, GRPOLoss.Config)
