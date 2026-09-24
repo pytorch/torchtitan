@@ -11,18 +11,17 @@ This module provides TorchTitanVLLMModel: Core model class that adapts
 TorchTitan models for vLLM.
 """
 
+import copy
 import dataclasses
 from dataclasses import dataclass
 from functools import partial
-from typing import Any
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
-from spmd_types import SpmdType
-from torch.distributed.checkpoint import HuggingFaceStorageReader
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed._composable.fsdp import FSDPModule
+from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import (
     apply_overrides,
@@ -31,18 +30,14 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.config.transform.base import convert_config_type
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.distributed.spmd_types import (
-    current_spmd_mesh,
-    dtensor_to_plain_tensor_state_dict,
-    plain_tensor_to_dtensor_state_dict,
-)
+from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
-from torchtitan.protocols.sharding import resolve_placements
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.quantization.mxfp8 import MXFP8Linear
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -56,6 +51,18 @@ logger = init_logger(__name__)
 
 def _replace_vllm_layer_configs(model_config):
     """Replace inner-computation configs with vLLM generation variants."""
+    # Inference config replacements must not mutate the trainer's config tree.
+    model_config = copy.deepcopy(model_config)
+    if MXFP8Linear is not None:
+        from torchtitan.quantization.mxfp8.inference import MXFP8InferenceLinear
+
+        for _, config, parent, attr in model_config.traverse(MXFP8Linear.Config):
+            replacement = convert_config_type(config, MXFP8InferenceLinear)
+            if isinstance(parent, list):
+                parent[attr] = replacement
+            else:
+                setattr(parent, attr, replacement)
+
     # These modules inspect the breakable-CUDA graph environment at import time.
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
@@ -117,53 +124,6 @@ def _replace_vllm_layer_configs(model_config):
         new_layers.append(new_layer_cfg)
 
     return dataclasses.replace(model_config, layers=new_layers)
-
-
-class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
-    """Add plain local tensor handling to a model-format state-dict adapter."""
-
-    def __init__(
-        self,
-        adapter: BaseStateDictAdapter,
-        state_dict_layouts: dict[str, SpmdType],
-        parallel_dims: ParallelDims,
-    ) -> None:
-        self.adapter = adapter
-        self.state_dict_layouts = state_dict_layouts
-        self.parallel_dims = parallel_dims
-        self.fqn_to_index_mapping = adapter.fqn_to_index_mapping
-        self.hf_assets_path = adapter.hf_assets_path
-
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        return self.adapter.to_hf(
-            plain_tensor_to_dtensor_state_dict(
-                state_dict,
-                state_dict_layouts=self.state_dict_layouts,
-                parallel_dims=self.parallel_dims,
-            )
-        )
-
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        state_dict = self.adapter.from_hf(hf_state_dict)
-        # TODO(@andrewor14): Wrap the generator model with FSDP and revisit this
-        # explicit layout restoration once weights load into DTensor parameters.
-        for name, value in state_dict.items():
-            if isinstance(value, DTensor):
-                # Format conversions can reshard tensors, e.g. fused QKV splits.
-                # Restore the model's layout before discarding DTensor metadata.
-                state_dict[name] = value.redistribute(
-                    placements=resolve_placements(
-                        self.state_dict_layouts[name], value.device_mesh
-                    )
-                )
-        return dtensor_to_plain_tensor_state_dict(state_dict)
-
-    def get_hf_storage_reader(
-        self,
-        path: str,
-        from_quantized: bool = False,
-    ) -> HuggingFaceStorageReader:
-        return self.adapter.get_hf_storage_reader(path, from_quantized)
 
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
@@ -319,8 +279,8 @@ class VLLMModelWrapper(Module):
         training_parallelism = parallelism.to_training()
 
         # Build ParallelDims from the translated ParallelismConfig so TP/EP
-        # sharding sees the same mesh shape as vLLM. data_parallel_shard_degree
-        # carries vLLM's pure DP here (skip_dp=True below), not TorchTitan FSDP.
+        # sharding sees the same mesh shape as vLLM. The DP axis is represented
+        # as generator FSDP, which is always 1 to avoid all-gather.
         self.parallel_dims = ParallelDims(
             dp_replicate=training_parallelism.data_parallel_replicate_degree,
             dp_shard=training_parallelism.data_parallel_shard_degree,
@@ -376,12 +336,12 @@ class VLLMModelWrapper(Module):
             compile_config=compile_config,
             ac_config=None,
             dump_folder="",
-            # Generator inference replicates parameters across vLLM DP groups.
-            # Keep TP/EP sharding above, but do not translate dp_shard into
-            # TorchTitan FSDP/DDP here.
-            skip_dp=True,
         )
-
+        # FSDP requires calling the root module in forward while vllm expects
+        # the LM head to be called separately in compute_logits, so we need to
+        # skip the LM head in forward
+        # TODO: Pass skip_lm_head=True to Decoder.forward once that exists
+        self.model._skip_lm_head = True
         # Load initial weights based on checkpoint config.
         self._checkpointer_config = checkpointer_config
 
@@ -412,6 +372,39 @@ class VLLMModelWrapper(Module):
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallel_dims.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
+
+    def prepare_weight_sync(self) -> None:
+        """
+        Explicitly reshard to prepare sharded buffers for receiving weights.
+
+        free_unsharded = False:
+            To enable cudagraphs, we must keep around unsharded operands so
+            they can reuse the same addresses across weight syncs, which allows
+            us to reuse the same cudagraph and avoid recapture. By default,
+            `module.reshard` frees these unsharded operands.
+
+        force = True:
+            By default, `module.reshard` becomes a no-op if RAF=false, which
+            is always the case for inference. Here we force an explicit reshard
+            to bypass reading RAF.
+        """
+        for module in self.model.modules():
+            if not isinstance(module, FSDPModule):
+                continue
+            module.reshard(free_unsharded=False, force=True)
+
+    def finish_weight_sync(self) -> None:
+        """
+        Explicitly unshard to refill the existing unsharded operands with
+        new values built from new weights.
+        """
+        # vLLM creates the compute storage during inference-mode graph capture,
+        # so FSDP must also refill those inference tensors in inference mode
+        with torch.inference_mode():
+            for module in self.model.modules():
+                if not isinstance(module, FSDPModule):
+                    continue
+                module.unshard()
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
@@ -468,19 +461,11 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
-            # Get embeddings
-            h = self.model.tok_embeddings(input_ids)
-
-            # Pass through transformer layers
-            for layer in self.model.layers.values():
-                h = layer(h, attention_masks=None, positions=positions)
-
-            h = self.model.norm(h)
-        # Inference disables sequence parallelism, so final hidden states should
-        # already be replicated before returning to vLLM.
-        if isinstance(h, DTensor):
-            assert all(isinstance(p, Replicate) for p in h.placements)
-            h = h._local_tensor
+            h = self.model(
+                input_ids,
+                attention_masks=None,
+                positions=positions,
+            )
         return h
 
     def compute_logits(
@@ -526,11 +511,6 @@ class VLLMModelWrapper(Module):
                 model_config=self.config,
                 hf_assets_path=cfg.initial_load_path,
             )
-            sd_adapter = PlainToDTensorStateDictAdapter(
-                sd_adapter,
-                self.get_state_dict_layouts(),
-                self.parallel_dims,
-            )
 
         # Model-only CheckpointManager: initial_load_model_only=True (default)
         # ensures only MODEL state is loaded, so None optimizer/lr_scheduler
@@ -550,36 +530,6 @@ class VLLMModelWrapper(Module):
         # pool) has room. Without this, large models (e.g. 235B) OOM capture even though
         # the live weights fit.
         torch.cuda.empty_cache()
-
-    def get_state_dict_layouts(self) -> dict[str, SpmdType]:
-        """Return SPMD layouts keyed by the model's exposed state-dict names."""
-        layouts: dict[str, SpmdType] = {}
-
-        for module_fqn, module in self.model.named_modules():
-            module_prefix = f"{module_fqn}." if module_fqn else ""
-            sharding_config = getattr(module, "_sharding_config", None)
-            if sharding_config is not None:
-                for state_name, layout in sharding_config.state_shardings.items():
-                    layouts[f"{module_prefix}{state_name}"] = layout
-
-                # Fused grouped experts expose split gate/up state-dict keys
-                # while the layout is declared on the fused w13 parameter.
-                w13_layout = sharding_config.state_shardings.get("w13")
-                if w13_layout is not None:
-                    for state_name in ("w1_EFD", "w3_EFD"):
-                        layouts[f"{module_prefix}{state_name}"] = w13_layout
-
-            if module_fqn.rsplit(".", 1)[-1] == "vllm_attn":
-                for buffer_name, _ in module.named_buffers(recurse=False):
-                    if buffer_name in {
-                        "_k_scale",
-                        "_prob_scale",
-                        "_q_scale",
-                        "_v_scale",
-                    }:
-                        layouts[f"{module_prefix}{buffer_name}"] = SpmdType({})
-
-        return layouts
 
     def load_weights(self, weights_iter):
         """
