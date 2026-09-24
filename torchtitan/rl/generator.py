@@ -1355,11 +1355,12 @@ class VLLMGenerator(Configurable):
             strict=False,
             direct_rdma=False,
         )
-        # Fused grouped experts still expose hook-produced w1/w3 copies, so the
-        # in-place fill above does not reach their physical w13 parameter.
-        # Re-apply the state dict to run that module's merge hook. Other params,
-        # including native QKVLinear.wqkv, share storage with model_sd.
+        # Loading applies grouped-expert merge hooks and quantizes the BF16
+        # receive buffers of MXFP8 inference linears into their FP8 shards.
         model.model.load_state_dict(model_sd, strict=False)
+        # Release temporary BF16 receive buffers before restoring compute views
+        # or refreshing formats with independently owned compute operands.
+        del model_sd
         model.finish_weight_sync()
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
