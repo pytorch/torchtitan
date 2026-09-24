@@ -45,7 +45,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None
     assert shared_experts.sharding_config.in_src_shardings is not None
-    assert shared_experts.sharding_config.in_dst_shardings is not None
+    assert shared_experts.sharding_config.in_dst_shardings is None
     assert shared_experts.w13.sharding_config is not None
     assert shared_experts.w13.sharding_config.in_src_shardings is not None
     assert shared_experts.gate.sharding_config is not None

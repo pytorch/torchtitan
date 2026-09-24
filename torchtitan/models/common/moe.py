@@ -15,10 +15,14 @@ import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
+    spmd_dense_sp_enabled,
     spmd_local_context,
+    spmd_mesh_group,
     spmd_mesh_size,
+    spmd_sparse_mesh,
 )
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
@@ -46,6 +50,24 @@ from .token_dispatcher import LocalTokenDispatcher
 #       (roles, not model dims: the _grouped_mm seam takes the expert
 #        weight in its stored (E, O, I) orientation, which is (E, F, D)
 #        for the up/gate projections and (E, D, F) for the down one)
+
+
+def _redistribute_tp(
+    x: torch.Tensor,
+    *,
+    src: spmd.PerMeshAxisSpmdType,
+    dst: spmd.PerMeshAxisSpmdType,
+) -> torch.Tensor:
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None or src == dst:
+        return x
+    return spmd.redistribute(
+        x,
+        tp_group,
+        src=src,
+        dst=dst,
+        backward_options={"op_dtype": x.dtype},
+    )
 
 
 class GroupedExperts(Module):
@@ -250,6 +272,24 @@ class TokenChoiceTopKRouter(Module):
             scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
         ).indices
 
+    def _prepare_inputs(
+        self,
+        x_TD: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Shard router inputs when EP is used without dense SP."""
+        if spmd_sparse_mesh() is None or spmd_dense_sp_enabled():
+            return x_TD, padding_mask_T
+
+        x_TD = _redistribute_tp(x_TD, src=spmd.I, dst=spmd.S(0))
+        if padding_mask_T is not None:
+            padding_mask_T = _redistribute_tp(
+                padding_mask_T,
+                src=spmd.R,
+                dst=spmd.S(0),
+            )
+        return x_TD, padding_mask_T
+
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -269,6 +309,8 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
+        x_TD, padding_mask_T = self._prepare_inputs(x_TD, padding_mask_T)
+
         # RouterGateLinear returns FP32, so configured scoring runs in FP32.
         scores_TE = self.score_func(self.gate(x_TD))
 
@@ -698,14 +740,13 @@ class MoE(Module):
         Returns:
             Output ``(T, D)``.
 
-        Under TP, the MoE wrapper's ``sharding_config`` (set by
-        ``set_moe_sharding_config``) handles input/output redistribution:
-        input is redistributed from sp_layout to desired_input_layouts;
-        output is redistributed to sp_layout. GroupedExperts operates in a
-        local SPMD region. When EP internally
-        sequence-shards tokens across TP, the caller must provide a TP-divisible
-        token count.
+        The MoE wrapper owns the TP transitions shared across its router,
+        routed-expert, and shared-expert branches. GroupedExperts operates in a
+        local SPMD region. When EP internally sequence-shards tokens across TP,
+        the caller must provide a TP-divisible token count.
         """
+        x_TD, padding_mask_T = self._prepare_inputs(x_TD, padding_mask_T)
+
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
         (topk_scores_TK, topk_expert_ids_TK, routing_map_TE,) = self.router(
@@ -716,8 +757,9 @@ class MoE(Module):
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
+        routed_x_TD = self._prepare_routed_experts_input(x_TD)
         out_TD = self.routed_experts(
-            x_TD,
+            routed_x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
@@ -729,7 +771,39 @@ class MoE(Module):
 
         if shared_out_TD is not None:
             out_TD = out_TD + shared_out_TD
-        return out_TD
+        return self._finalize_output(out_TD)
+
+    def _prepare_inputs(
+        self,
+        x_TD: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Prepare the input shared by all MoE branches."""
+        if spmd_sparse_mesh() is not None:
+            return x_TD, padding_mask_T
+
+        src = spmd.S(0) if spmd_dense_sp_enabled() else spmd.I
+        x_TD = _redistribute_tp(x_TD, src=src, dst=spmd.R)
+        if padding_mask_T is not None and spmd_dense_sp_enabled():
+            padding_mask_T = _redistribute_tp(
+                padding_mask_T,
+                src=spmd.S(0),
+                dst=spmd.R,
+            )
+        return x_TD, padding_mask_T
+
+    def _prepare_routed_experts_input(self, x_TD: torch.Tensor) -> torch.Tensor:
+        """Shard the routed branch when EP is used without dense SP."""
+        if spmd_sparse_mesh() is None or spmd_dense_sp_enabled():
+            return x_TD
+        return _redistribute_tp(x_TD, src=spmd.I, dst=spmd.S(0))
+
+    def _finalize_output(self, out_TD: torch.Tensor) -> torch.Tensor:
+        """Restore the decoder activation type after branch combination."""
+        if spmd_dense_sp_enabled():
+            return out_TD
+        src = spmd.P if spmd_sparse_mesh() is not None else spmd.R
+        return _redistribute_tp(out_TD, src=src, dst=spmd.I)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:

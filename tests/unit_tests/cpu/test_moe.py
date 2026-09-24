@@ -6,6 +6,7 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import call, patch
 
 import spmd_types as spmd
 import torch
@@ -31,6 +32,7 @@ from torchtitan.models.common.linear import (
 from torchtitan.models.common.moe import (
     GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
+    MoE,
     TokenChoiceTopKRouter,
 )
 from torchtitan.models.common.moe_sharding import (
@@ -302,24 +304,10 @@ class TestMoE(unittest.TestCase):
                     enable_sp=enable_sp,
                 )
                 assert moe_config.in_src_shardings is not None
-                assert moe_config.in_dst_shardings is not None
+                self.assertIsNone(moe_config.in_dst_shardings)
                 self.assertEqual(
                     _per_axis_types(moe_config.in_src_shardings["padding_mask_T"]),
                     _per_axis_types(token_id_placement(enable_sp=enable_sp)),
-                )
-                self.assertEqual(
-                    _per_axis_types(moe_config.in_dst_shardings["padding_mask_T"]),
-                    _per_axis_types(
-                        token_id_placement(enable_sp=enable_sp and enable_ep)
-                    ),
-                )
-                self.assertEqual(
-                    moe_config.in_src_shardings["x_TD"].partition_spec[0],
-                    moe_config.in_src_shardings["padding_mask_T"].partition_spec[0],
-                )
-                self.assertEqual(
-                    moe_config.in_dst_shardings["x_TD"].partition_spec[0],
-                    moe_config.in_dst_shardings["padding_mask_T"].partition_spec[0],
                 )
 
                 router_config = _router_sharding_config(
@@ -327,22 +315,13 @@ class TestMoE(unittest.TestCase):
                     enable_sp=enable_sp,
                 )
                 router_inputs = router_config.in_src_shardings
-                router_desired_inputs = router_config.in_dst_shardings
                 assert router_inputs is not None
-                assert router_desired_inputs is not None
+                self.assertIsNone(router_config.in_dst_shardings)
                 self.assertEqual(
                     _per_axis_types(router_inputs["padding_mask_T"]),
                     _per_axis_types(
                         token_id_placement(enable_sp=enable_sp and enable_ep)
                     ),
-                )
-                self.assertEqual(
-                    router_desired_inputs["x_TD"].partition_spec[0],
-                    router_desired_inputs["padding_mask_T"].partition_spec[0],
-                )
-                self.assertEqual(
-                    _per_axis_types(router_desired_inputs["padding_mask_T"]),
-                    _per_axis_types(token_id_placement(enable_sp=enable_ep)),
                 )
 
     def test_shared_expert_ffn_leaves_w2_reduction_to_sharding_config(self):
@@ -356,6 +335,69 @@ class TestMoE(unittest.TestCase):
         self.assertIs(type(config.w13), ColumnParallelLinear.Config)
         self.assertIs(type(config.w2), Linear.Config)
         self.assertEqual(config.w13.num_linears, 2)
+
+    def test_explicit_moe_tp_transitions_without_ep(self):
+        moe = MoE.__new__(MoE)
+        x_TD = torch.randn(4, 8)
+        padding_mask_T = torch.zeros(4, dtype=torch.bool)
+
+        with (
+            patch(
+                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                return_value=None,
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.models.common.moe._redistribute_tp",
+                side_effect=lambda tensor, **_kwargs: tensor,
+            ) as redistribute,
+        ):
+            actual_x, actual_mask = moe._prepare_inputs(x_TD, padding_mask_T)
+            self.assertIs(actual_x, x_TD)
+            self.assertIs(actual_mask, padding_mask_T)
+            self.assertEqual(
+                redistribute.call_args_list,
+                [
+                    call(x_TD, src=spmd.S(0), dst=spmd.R),
+                    call(padding_mask_T, src=spmd.S(0), dst=spmd.R),
+                ],
+            )
+
+    def test_explicit_moe_tp_transitions_with_ep_without_sp(self):
+        moe = MoE.__new__(MoE)
+        router = TokenChoiceTopKRouter.__new__(TokenChoiceTopKRouter)
+        x_TD = torch.randn(4, 8)
+        padding_mask_T = torch.zeros(4, dtype=torch.bool)
+
+        with (
+            patch(
+                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                return_value=object(),
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                return_value=False,
+            ),
+            patch(
+                "torchtitan.models.common.moe._redistribute_tp",
+                side_effect=lambda tensor, **_kwargs: tensor,
+            ) as redistribute,
+        ):
+            router._prepare_inputs(x_TD, padding_mask_T)
+            moe._prepare_routed_experts_input(x_TD)
+            moe._finalize_output(x_TD)
+            self.assertEqual(
+                redistribute.call_args_list,
+                [
+                    call(x_TD, src=spmd.I, dst=spmd.S(0)),
+                    call(padding_mask_T, src=spmd.R, dst=spmd.S(0)),
+                    call(x_TD, src=spmd.I, dst=spmd.S(0)),
+                    call(x_TD, src=spmd.P, dst=spmd.I),
+                ],
+            )
 
     def test_expert_branch_layouts_before_moe_boundary(self):
         for enable_ep, enable_sp, expected in (
@@ -453,9 +495,9 @@ class TestMoE(unittest.TestCase):
 
         root = moe_config.sharding_config
         assert root is not None
-        assert root.in_dst_shardings is not None
-        self.assertEqual(tp_type(root.in_dst_shardings["x_TD"]), spmd.R)
-        self.assertEqual(tp_type(root.out_src_shardings), spmd.R)
+        self.assertIsNone(root.in_dst_shardings)
+        self.assertEqual(tp_type(root.out_src_shardings), spmd.I)
+        self.assertIsNone(root.out_dst_shardings)
 
         shared = moe_config.shared_experts
         assert shared.sharding_config.in_src_shardings is not None

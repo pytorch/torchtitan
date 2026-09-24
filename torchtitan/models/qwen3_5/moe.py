@@ -8,11 +8,14 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_sparse_mesh
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import _redistribute_tp
 
 
 class SigmoidGatedFeedForward(FeedForward):
@@ -27,12 +30,22 @@ class SigmoidGatedFeedForward(FeedForward):
         self.gate = config.gate.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if spmd_sparse_mesh() is not None:
+            src = spmd.S(0) if spmd_dense_sp_enabled() else spmd.I
+            x = _redistribute_tp(x, src=src, dst=spmd.R)
+
         out_TD = super().forward(x)
         gate_out_TD = remat.region(
             self.gate,
             self.remat_region_name("gate"),
             recompute=self.remat_should_recompute("gate"),
         )(x)
+        if spmd_sparse_mesh() is not None and spmd_dense_sp_enabled():
+            gate_out_TD = _redistribute_tp(
+                gate_out_TD,
+                src=spmd.R,
+                dst=spmd.S(0),
+            )
         remat.recompute_needs_tensor(out_TD, gate_out_TD)
         return torch.sigmoid(gate_out_TD) * out_TD
 
