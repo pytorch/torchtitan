@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Persistent MXFP8 inference weights with byte-preserving FSDP all-gather."""
+"""Persistent MXFP8 inference weights, shared with compute at FSDP degree 1."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributed.tensor import DTensor
 from torch.utils import _pytree as pytree
+from torch.utils._python_dispatch import return_and_correct_aliasing
 
 from .._fsdp_tensor import (
     _FSDPTensorBase,
@@ -271,10 +272,191 @@ class _MXFP8StorageTensor(_FSDPTensorBase):
             target.copy_(source)
 
 
+class _MXFP8ComputeStorageTensor(_FSDPTensorBase):
+    """Frozen compute-ready storage shared by DP=1 parameter and compute views."""
+
+    @staticmethod
+    def __new__(cls, qdata, scale_fprop, scale_dgrad, *, shape=None, stride=None):
+        with torch.inference_mode(qdata.is_inference()):
+            return _FSDPTensorBase.__new__(
+                cls,
+                qdata,
+                _logical_dtype=torch.bfloat16,
+                _logical_requires_grad=False,
+                _logical_size=qdata.shape if shape is None else shape,
+                _logical_stride=qdata.stride() if stride is None else stride,
+            )
+
+    def __init__(self, qdata, scale_fprop, scale_dgrad, *, shape=None, stride=None):
+        self._qdata = qdata
+        self._scale_fprop = scale_fprop
+        self._scale_dgrad = scale_dgrad
+        self.operands = _MXFP8LinearOperands(qdata, scale_fprop, scale_dgrad)
+
+    @classmethod
+    def from_bf16(cls, weight):
+        if weight.dtype != torch.bfloat16:
+            raise ValueError("MXFP8 inference requires BF16 source weights")
+        if weight.is_meta:
+            matrix = weight.flatten(0, -2)
+            rows, cols = matrix.shape
+            operands = _MXFP8LinearOperands(
+                torch.empty_like(matrix, dtype=torch.float8_e4m3fn),
+                _swizzle_scale(
+                    torch.empty(
+                        rows, cols // 32, device="meta", dtype=torch.float8_e8m0fnu
+                    )
+                ),
+                _swizzle_scale(
+                    torch.empty(
+                        cols, rows // 32, device="meta", dtype=torch.float8_e8m0fnu
+                    )
+                ),
+            )
+        else:
+            operands = _quantize_mxfp8_weight(weight.flatten(0, -2).contiguous())
+        return cls(
+            *_unsharded_inner_tensors(operands),
+            shape=weight.shape,
+            stride=weight.stride(),
+        )
+
+    def dequantize(self):
+        rows, cols = self._qdata.shape
+        scale = _unswizzle_scale(self._scale_fprop, rows, cols // 32)
+        return (
+            (self._qdata.float().unflatten(-1, (-1, 32)) * scale.float().unsqueeze(-1))
+            .flatten(-2)
+            .view(self.shape)
+            .bfloat16()
+        )
+
+    def __tensor_flatten__(self):
+        return ["_qdata", "_scale_fprop", "_scale_dgrad"], (
+            tuple(self.shape),
+            self.stride(),
+        )
+
+    @classmethod
+    def __tensor_unflatten__(cls, inner_tensors, metadata, outer_size, outer_stride):
+        shape, stride = metadata
+        return cls(
+            inner_tensors["_qdata"],
+            inner_tensors["_scale_fprop"],
+            inner_tensors["_scale_dgrad"],
+            shape=shape if outer_size is None else outer_size,
+            stride=stride if outer_stride is None else outer_stride,
+        )
+
+    @classmethod
+    # pyrefly: ignore [bad-param-name-override]
+    def __torch_dispatch__(cls, func, types, args, kwargs=None):
+        kwargs = dict(kwargs or {})
+        weight = args[0]
+        assert isinstance(weight, cls)
+        if func == torch.ops.aten.copy_.default:
+            source = args[1]
+            operands = (
+                source.operands
+                if isinstance(source, cls)
+                else _quantize_mxfp8_weight(source.flatten(0, -2).contiguous())
+            )
+            for target, value in zip(
+                _unsharded_inner_tensors(weight.operands),
+                _unsharded_inner_tensors(operands),
+                strict=True,
+            ):
+                target.copy_(value)
+            return weight
+
+        if func in {
+            torch.ops.aten.detach.default,
+            torch.ops.aten.alias.default,
+            torch.ops.aten.view.default,
+            torch.ops.aten.as_strided.default,
+            torch.ops.aten.slice.Tensor,
+            torch.ops.aten.split.Tensor,
+        }:
+            meta_args = pytree.tree_map_only(
+                cls,
+                lambda t: torch.empty_strided(
+                    t.shape, t.stride(), dtype=t.dtype, device="meta"
+                ),
+                args,
+            )
+
+            def wrap(view):
+                if (
+                    view.numel() != weight.numel()
+                    or view.storage_offset() != 0
+                    or not view.is_contiguous()
+                ):
+                    raise ValueError(
+                        "MXFP8 compute storage views must preserve the complete "
+                        "TP-local weight; use shardable storage for FSDP degree > 1"
+                    )
+                return cls(
+                    *_unsharded_inner_tensors(weight.operands),
+                    shape=view.shape,
+                    stride=view.stride(),
+                )
+
+            result = pytree.tree_map_only(
+                torch.Tensor, wrap, func(*meta_args, **kwargs)
+            )
+            return return_and_correct_aliasing(func, args, kwargs, result)
+
+        if func not in {
+            torch.ops.aten.empty_like.default,
+            torch.ops.aten.new_zeros.default,
+            torch.ops.aten.clone.default,
+            torch.ops.aten._to_copy.default,
+            torch.ops.aten._pin_memory.default,
+        }:
+            raise NotImplementedError(f"MXFP8 compute storage does not support {func}")
+        if "dtype" in kwargs and kwargs.pop("dtype") != torch.bfloat16:
+            raise ValueError("MXFP8 inference weights require logical BF16 dtype")
+        shape = weight.shape
+        if func == torch.ops.aten.new_zeros.default:
+            shape = args[1]
+            if torch.Size(shape).numel() != weight.numel():
+                raise ValueError("MXFP8 compute storage requires the full local weight")
+        tensors = [
+            func(
+                tensor,
+                *(
+                    (tensor.shape,)
+                    if func == torch.ops.aten.new_zeros.default
+                    else args[1:]
+                ),
+                **kwargs,
+            )
+            for tensor in _unsharded_inner_tensors(weight.operands)
+        ]
+        return cls(
+            *tensors,
+            shape=shape,
+            stride=torch.empty(shape, device="meta").stride(),
+        )
+
+    def fsdp_get_unsharded_view(self, mesh, module, mp_policy):
+        if mesh.size() != 1:
+            raise ValueError("MXFP8 compute storage requires FSDP degree 1")
+        if mp_policy.param_dtype not in (None, torch.bfloat16):
+            raise ValueError("MXFP8 inference requires BF16 compute metadata")
+        return _UnshardedFSDPTensor(
+            self._qdata,
+            self.operands,
+            _logical_size=self.shape,
+            _logical_stride=self.stride(),
+            _logical_dtype=torch.bfloat16,
+        )
+
+
 def _bf16_weight(weight, *, empty=False):
     """Materialize a BF16 tensor with the parameter's existing DTensor placement."""
     local = weight.to_local() if isinstance(weight, DTensor) else weight
-    assert isinstance(local, _MXFP8StorageTensor)
+    assert isinstance(local, (_MXFP8StorageTensor, _MXFP8ComputeStorageTensor))
     value = (
         torch.empty(local.shape, dtype=torch.bfloat16, device=local.device)
         if empty
@@ -294,9 +476,9 @@ def _bf16_weight(weight, *, empty=False):
 class MXFP8InferenceLinear(MXFP8Linear):
     """Install frozen FP8 storage after TP sharding and before fully_shard.
 
-    BF16 checkpoint and TorchStore updates are temporary. Copying them into
-    the parameter quantizes each complete local tile before the next unshard.
-    The ordinary MXFP8 forward consumes the existing FSDP operand container.
+    DP=1 storage already contains the compute operands, so a BF16 load updates
+    them in place. Multi-rank FSDP stores row-major scales and gathers packed
+    data and scales into separate operands. Both use the existing MXFP8 forward.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -314,8 +496,11 @@ class MXFP8InferenceLinear(MXFP8Linear):
                 f"32x32 tiles; got TP-local shape {tuple(weight.shape)} and "
                 f"FSDP degree {shard_degree}."
             )
+        storage_cls = (
+            _MXFP8ComputeStorageTensor if shard_degree == 1 else _MXFP8StorageTensor
+        )
         quantized = nn.Parameter(
-            _MXFP8StorageTensor.from_bf16(weight._tensor), requires_grad=False
+            storage_cls.from_bf16(weight._tensor), requires_grad=False
         )
         spmd.assert_type_like(quantized, weight)
         self.weight = quantized
@@ -323,7 +508,7 @@ class MXFP8InferenceLinear(MXFP8Linear):
     def _init_self_parameters(self) -> None:
         weight = self.weight
         local = weight.to_local() if isinstance(weight, DTensor) else weight
-        if not isinstance(local, _MXFP8StorageTensor):
+        if not isinstance(local, (_MXFP8StorageTensor, _MXFP8ComputeStorageTensor)):
             super()._init_self_parameters()
             return
         self.weight = nn.Parameter(
@@ -342,5 +527,5 @@ class MXFP8InferenceLinear(MXFP8Linear):
         local = (
             self.weight.to_local() if isinstance(self.weight, DTensor) else self.weight
         )
-        if isinstance(local, _MXFP8StorageTensor):
+        if isinstance(local, (_MXFP8StorageTensor, _MXFP8ComputeStorageTensor)):
             destination[prefix + "weight"] = _bf16_weight(self.weight)

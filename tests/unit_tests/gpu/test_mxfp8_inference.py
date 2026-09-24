@@ -27,6 +27,7 @@ from torchtitan.models.common.decoder_sharding import (  # noqa: E402
     dense_param_placement,
 )
 from torchtitan.protocols.sharding import ShardingConfig  # noqa: E402
+from torchtitan.quantization._fsdp_tensor import _unsharded_inner_tensors  # noqa: E402
 from torchtitan.quantization.mxfp8.linear import _MXFP8LinearFunction  # noqa: E402
 from torchtitan.quantization.mxfp8.tensor import _MXFP8LinearOperands  # noqa: E402
 
@@ -117,12 +118,15 @@ def _run_weight_updates(
                     sharding_config=ShardingConfig(
                         state_shardings={
                             "weight": dense_param_placement(tp=spmd.S(tp_dim)),
-                            "bias": dense_param_placement(tp=spmd.S(-1)),
+                            "bias": dense_param_placement(
+                                tp=spmd.S(-1) if tp_dim == -2 else spmd.R
+                            ),
                         }
                     ),
                 )
                 .build()
                 .bfloat16()
+                .requires_grad_(False)
             )
         with get_spmd_context(parallel_dims=parallel_dims):
             linear._parallelize(parallel_dims)
@@ -141,9 +145,19 @@ def _run_weight_updates(
         sharded = linear.weight
         assert isinstance(sharded, DTensor)
         local = sharded.to_local()
-        assert isinstance(local, inference._MXFP8StorageTensor)
+        shared_storage = parallel_dims.dp_shard == 1
+        storage_cls = (
+            inference._MXFP8ComputeStorageTensor
+            if shared_storage
+            else inference._MXFP8StorageTensor
+        )
+        assert isinstance(local, storage_cls)
         assert local._qdata.dtype == torch.float8_e4m3fn
-        assert local._scale.dtype == torch.float8_e8m0fnu
+        if shared_storage:
+            assert local._scale_fprop.dtype == torch.float8_e8m0fnu
+            assert local._scale_dgrad.dtype == torch.float8_e8m0fnu
+        else:
+            assert local._scale.dtype == torch.float8_e8m0fnu
         tp_rank = parallel_dims.get_mesh("tp").get_local_rank() if tp_degree > 1 else 0
         inputs = torch.randn(
             32,
@@ -161,15 +175,22 @@ def _run_weight_updates(
             torch.cuda.current_stream().wait_stream(stream)
             param_group = fully_shard.state(linear)._fsdp_param_group
             param = param_group.fsdp_params[0]
-            buffers = param._unsharded_inner_tensors
+            buffers = _unsharded_inner_tensors(param._unsharded_param.operands)
             pointers = tuple(t.data_ptr() for t in buffers)
+            if shared_storage:
+                assert pointers == tuple(
+                    t.data_ptr() for t in _unsharded_inner_tensors(local.operands)
+                )
+                assert all(p._unsharded_param_is_view for p in param_group.fsdp_params)
+                assert all(not p.all_gather_outputs for p in param_group.fsdp_params)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 captured = linear(inputs)
         previous_output = None
         for update in range(3):
             with torch.no_grad(), get_spmd_context(parallel_dims=parallel_dims):
-                linear.reshard(free_unsharded=False, force=True)
+                if not shared_storage:
+                    linear.reshard(free_unsharded=False, force=True)
                 state_dict = linear.state_dict()
                 destination = state_dict["weight"]
                 assert isinstance(destination, DTensor)
@@ -203,7 +224,8 @@ def _run_weight_updates(
                 ].contiguous()
                 expected_operands = quantize(tp_weight.flatten(0, -2))
                 with torch.inference_mode():
-                    linear.unshard()
+                    if not shared_storage:
+                        linear.unshard()
                     current_pointers = tuple(t.data_ptr() for t in buffers)
                     assert current_pointers == pointers
                     for actual, expected in zip(
@@ -222,6 +244,9 @@ def _run_weight_updates(
                             atol=0,
                         )
 
+                    bias = linear.bias
+                    if isinstance(bias, DTensor):
+                        bias = bias.to_local()
                     if real_mxfp8:
                         expected = _MXFP8LinearFunction.apply(
                             inputs,
@@ -230,16 +255,17 @@ def _run_weight_updates(
                             expected_operands.weight_scale_fprop_swizzled,
                             expected_operands.weight_qdata_dgrad_NK,
                             expected_operands.weight_scale_dgrad_swizzled,
-                            None if linear.bias is None else linear.bias.flatten(),
+                            None if bias is None else bias.flatten(),
                             "bf16",
                         )
                     else:
                         expected = torch.nn.functional.linear(
                             inputs,
                             _dequantize(expected_operands),
-                            None if linear.bias is None else linear.bias.flatten(),
+                            None if bias is None else bias.flatten(),
                         )
-                    expected = linear._unflatten_output(expected)
+                    if num_linears > 1:
+                        expected = expected.unflatten(-1, tp_weight.shape[:-1])
                     graph.replay()
                     torch.testing.assert_close(captured, expected, rtol=0, atol=0)
                     if previous_output is not None:
@@ -251,10 +277,16 @@ def _run_weight_updates(
                     )
 
         with torch.inference_mode():
-            linear.reshard(free_unsharded=False, force=True)
-            assert [t.dtype for t in param.all_gather_inputs] == [
-                torch.uint8,
-            ]
+            if shared_storage:
+                linear.reshard()
+                linear.unshard()
+                assert tuple(t.data_ptr() for t in buffers) == pointers
+                assert all(not p.all_gather_outputs for p in param_group.fsdp_params)
+                graph.replay()
+                torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+            else:
+                linear.reshard(free_unsharded=False, force=True)
+                assert [t.dtype for t in param.all_gather_inputs] == [torch.uint8]
         graph.reset()
     finally:
         inference._quantize_mxfp8_weight = original_quantize
@@ -263,7 +295,16 @@ def _run_weight_updates(
 
 @pytest.mark.parametrize(
     "num_linears,dp_degree,tp_degree,tp_dim",
-    [(1, 2, 1, -2), (2, 2, 1, -2), (2, 2, 2, -2), (1, 2, 2, -1), (2, 1, 2, -2)],
+    [
+        (1, 2, 1, -2),
+        (2, 2, 1, -2),
+        (2, 2, 2, -2),
+        (1, 2, 2, -1),
+        (1, 1, 1, -2),
+        (2, 1, 2, -2),
+        (1, 1, 2, -1),
+        (2, 1, 2, -1),
+    ],
 )
 def test_mxfp8_storage_collectives_and_graph_updates(
     num_linears, dp_degree, tp_degree, tp_dim
@@ -284,10 +325,11 @@ def test_mxfp8_storage_collectives_and_graph_updates(
     reason="MXFP8 GEMM requires two SM100 GPUs",
 )
 @pytest.mark.parametrize("num_linears", [1, 2])
-def test_mxfp8_inference_matches_bf16_storage(num_linears):
+@pytest.mark.parametrize("tp_degree", [1, 2])
+def test_mxfp8_inference_matches_bf16_storage(num_linears, tp_degree):
     mp.spawn(
         _run_weight_updates,
-        args=(2, get_free_port(), num_linears, 1, -2, True),
+        args=(2, get_free_port(), num_linears, tp_degree, -2, True),
         nprocs=2,
         join=True,
     )

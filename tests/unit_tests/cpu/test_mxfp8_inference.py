@@ -12,11 +12,14 @@ import torch
 
 pytest.importorskip("torchao")
 
+from torchtitan.quantization._fsdp_tensor import _unsharded_inner_tensors  # noqa: E402
 from torchtitan.quantization.mxfp8.inference import (  # noqa: E402
+    _MXFP8ComputeStorageTensor,
     _MXFP8StorageTensor,
     _swizzle_scale,
     _unswizzle_scale,
 )
+from torchtitan.quantization.mxfp8.tensor import _MXFP8LinearOperands  # noqa: E402
 
 
 def _storage(shape, *, offset=0):
@@ -154,4 +157,83 @@ def test_mxfp8_storage_rejects_incomplete_scale_groups():
             weight.stride(),
             None,
             SimpleNamespace(param_dtype=torch.bfloat16),
+        )
+
+
+@pytest.mark.parametrize("shape", [(128, 64), (160, 96), (2, 128, 64)])
+def test_mxfp8_compute_storage_materializes_and_preserves_views(shape):
+    with torch.device("meta"):
+        weight = _MXFP8ComputeStorageTensor.from_bf16(
+            torch.empty(shape, dtype=torch.bfloat16)
+        )
+        module = torch.nn.Module()
+        module.register_parameter(
+            "weight", torch.nn.Parameter(weight, requires_grad=False)
+        )
+    module.to_empty(device="cpu")
+    weight = module.weight
+    buffers = _unsharded_inner_tensors(weight.operands)
+    pointers = tuple(t.data_ptr() for t in buffers)
+    for view in (weight.detach(), weight.view(-1).as_strided(shape, weight.stride())):
+        assert (
+            tuple(t.data_ptr() for t in _unsharded_inner_tensors(view.operands))
+            == pointers
+        )
+    compute = weight.fsdp_get_unsharded_view(
+        SimpleNamespace(size=lambda: 1),
+        None,
+        SimpleNamespace(param_dtype=torch.bfloat16),
+    )
+    assert compute.shape == weight.shape
+    assert (
+        tuple(t.data_ptr() for t in _unsharded_inner_tensors(compute.operands))
+        == pointers
+    )
+    assert [t.dtype for t in buffers] == [
+        torch.float8_e4m3fn,
+        torch.float8_e8m0fnu,
+        torch.float8_e8m0fnu,
+    ]
+    assert all(
+        t.data_ptr() not in pointers
+        for t in _unsharded_inner_tensors(weight.clone().operands)
+    )
+    with pytest.raises(ValueError, match="complete TP-local weight"):
+        weight[..., :32, :]
+
+
+def test_mxfp8_bf16_load_updates_existing_compute_buffers(monkeypatch):
+    import torchtitan.quantization.mxfp8.inference as inference
+
+    with torch.device("meta"):
+        weight = _MXFP8ComputeStorageTensor.from_bf16(
+            torch.empty((128, 64), dtype=torch.bfloat16)
+        )
+    weight = torch.empty_like(weight, device="cpu")
+    compute = weight.fsdp_get_unsharded_view(
+        SimpleNamespace(size=lambda: 1),
+        None,
+        SimpleNamespace(param_dtype=torch.bfloat16),
+    )
+    buffers = _unsharded_inner_tensors(compute.operands)
+    pointers = tuple(t.data_ptr() for t in buffers)
+    for offset in (1, 3):
+        source = _storage((128, 64), offset=offset)
+        scales = source._scale
+        expected = _MXFP8LinearOperands(
+            source._qdata,
+            _swizzle_scale(scales),
+            _swizzle_scale(scales.view(torch.uint8)[::32].t().repeat_interleave(32, 0)),
+        )
+        monkeypatch.setattr(inference, "_quantize_mxfp8_weight", lambda _: expected)
+        weight.copy_(source.dequantize())
+        for actual, reference in zip(
+            buffers, _unsharded_inner_tensors(expected), strict=True
+        ):
+            torch.testing.assert_close(
+                actual.view(torch.uint8), reference.view(torch.uint8), rtol=0, atol=0
+            )
+        assert tuple(t.data_ptr() for t in buffers) == pointers
+        torch.testing.assert_close(
+            weight.dequantize(), source.dequantize(), rtol=0, atol=0
         )
