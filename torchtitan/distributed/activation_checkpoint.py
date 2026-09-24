@@ -174,19 +174,17 @@ class FullAC(ActivationCheckpointing):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
-        early_stop: bool = True
-        """Stop recomputation once all tensors needed by backward are available."""
+        pass
 
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
-        config = cast("FullAC.Config", self.config)
         return ptd_checkpoint_wrapper(
             module,
-            preserve_rng_state=config.preserve_rng_state,
-            determinism_check=config.determinism_check,
-            early_stop=config.early_stop,
-            debug=config.debug,
+            preserve_rng_state=self.config.preserve_rng_state,
+            determinism_check=self.config.determinism_check,
+            early_stop=True,
+            debug=self.config.debug,
         )
 
 
@@ -201,9 +199,6 @@ class SelectiveAC(ActivationCheckpointing):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
-        early_stop: bool = True
-        """Stop recomputation once all tensors needed by backward are available."""
-
         force_recompute_mm_shapes_by_fqns: list[str] = field(
             default_factory=lambda: ["moe.router.gate"]
         )
@@ -298,7 +293,7 @@ class SelectiveAC(ActivationCheckpointing):
             ),
             preserve_rng_state=config.preserve_rng_state,
             determinism_check=config.determinism_check,
-            early_stop=config.early_stop,
+            early_stop=True,
             debug=config.debug,
         )
 
