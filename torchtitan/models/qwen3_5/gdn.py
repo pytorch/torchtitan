@@ -69,11 +69,13 @@ class Qwen35GatedRMSNorm(GatedRMSNorm):
                 dim=config.dim,
                 eps=config.eps,
                 activation_fn=F.silu,
-                round_normalized_to_input_dtype=True,
             )
         )
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        # Keep RMS normalization and gating in FP32 until the final output cast,
+        # following the FLA behavior noted by Hugging Face:
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3_5/modeling_qwen3_5.py#L216-L218
         return super().forward(x, gate)
 
 

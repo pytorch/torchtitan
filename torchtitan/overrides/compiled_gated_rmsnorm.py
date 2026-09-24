@@ -94,7 +94,6 @@ def compiled_kimi_gated_rmsnorm(
         cfg,
         CompiledGatedRMSNorm.Config,
         activation_fn=torch.sigmoid,
-        round_normalized_to_input_dtype=False,
         sharding_config=sharding_config,
     )
 
@@ -130,6 +129,5 @@ def compiled_qwen35_gated_rmsnorm(
         cfg,
         CompiledGatedRMSNorm.Config,
         activation_fn=F.silu,
-        round_normalized_to_input_dtype=True,
         sharding_config=sharding_config,
     )

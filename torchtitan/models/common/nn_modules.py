@@ -159,13 +159,11 @@ class GatedRMSNorm(Module):
         dim: int
         eps: float
         activation_fn: Callable[[torch.Tensor], torch.Tensor]
-        round_normalized_to_input_dtype: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
         self.eps = config.eps
         self.activation_fn = config.activation_fn
-        self.round_normalized_to_input_dtype = config.round_normalized_to_input_dtype
         self.weight = nn.Parameter(torch.empty(config.dim))
 
     def forward(
@@ -180,8 +178,6 @@ class GatedRMSNorm(Module):
             self.weight.float(),
             self.eps,
         )
-        if self.round_normalized_to_input_dtype:
-            normalized = normalized.to(input_dtype)
         return (normalized * self.activation_fn(gate.float())).to(input_dtype)
 
 
