@@ -32,7 +32,7 @@ from torch.distributed.tensor._utils import (
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 from torch.fx.traceback import annotate
 
-from torchtitan.distributed.fsdp import _linear_param_shard_placements
+from torchtitan.distributed.fsdp import linear_param_shard_placements
 from torchtitan.protocols.module import Module
 
 from torchtitan.quantization._fsdp_tensor import (
@@ -440,12 +440,12 @@ def data_parallel(
     elif mode not in ("replicate", "fully_shard"):
         raise ValueError(f"Unsupported mode {mode}")
 
-    linear_param_shard_placements = _linear_param_shard_placements(model)
+    param_shard_placements = linear_param_shard_placements(model)
 
     def get_param_sharding(param: nn.Parameter) -> tuple[Placement, ...]:
         if mode == "replicate":
             return (Replicate(),)
-        placement = linear_param_shard_placements.get(param, Shard(shard_dim))
+        placement = param_shard_placements.get(param, Shard(shard_dim))
         if mode == "fully_shard":
             return (placement,)
         return (Replicate(), placement)
