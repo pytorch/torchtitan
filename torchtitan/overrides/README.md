@@ -488,9 +488,11 @@ for the full recipe.
   the stock zero-centered weight and checkpoint layout. Activate it with
   `--override.imports torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm`.
 - `torchtitan/overrides/compiled_gated_rmsnorm.py` -- replaces Kimi K3
-  `KimiGatedRMSNorm` with its stock forward compiled by TorchInductor. Activate
-  it with
-  `--override.imports torchtitan.overrides.compiled_gated_rmsnorm.compiled_kimi_gated_rmsnorm`.
+  `KimiGatedRMSNorm` or Qwen3.5 `Qwen35GatedRMSNorm` with their stock forward
+  compiled by TorchInductor. Activate the corresponding override with
+  `--override.imports torchtitan.overrides.compiled_gated_rmsnorm.compiled_kimi_gated_rmsnorm`
+  or
+  `--override.imports torchtitan.overrides.compiled_gated_rmsnorm.compiled_qwen35_gated_rmsnorm`.
 - `torchtitan/overrides/kimi_gated_rmsnorm.py` -- replaces Kimi K3
   `KimiGatedRMSNorm` with fused Triton forward and backward kernels. Activate it
   with

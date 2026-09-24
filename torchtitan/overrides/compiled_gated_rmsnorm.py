@@ -13,16 +13,20 @@ from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
+import torch.nn.functional as F
 
 from torchtitan.config import derive, override
 from torchtitan.distributed.compile import maybe_regional_inductor
+from torchtitan.models.common.decoder_sharding import attention_activation_placement
 from torchtitan.models.common.nn_modules import GatedRMSNorm
 from torchtitan.models.kimi_k3.kda import KimiGatedRMSNorm
+from torchtitan.models.qwen3_5.gdn import Qwen35GatedRMSNorm
 
 
 __all__ = [
     "CompiledGatedRMSNorm",
     "compiled_kimi_gated_rmsnorm",
+    "compiled_qwen35_gated_rmsnorm",
 ]
 
 
@@ -45,18 +49,18 @@ class CompiledGatedRMSNorm(GatedRMSNorm):
     )
     def _compiled_gated_rms_norm(
         self,
-        x_THV: torch.Tensor,
-        gate_THV: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
     ) -> torch.Tensor:
-        return GatedRMSNorm.forward(self, x_THV, gate_THV)
+        return GatedRMSNorm.forward(self, x, gate)
 
     def forward(
         self,
-        x_THV: torch.Tensor,
-        gate_THV: torch.Tensor,
+        x: torch.Tensor,
+        gate: torch.Tensor,
     ) -> torch.Tensor:
         with maybe_regional_inductor(self.inductor_options):
-            return self._compiled_gated_rms_norm(x_THV, gate_THV)
+            return self._compiled_gated_rms_norm(x, gate)
 
 
 @override(
@@ -66,34 +70,66 @@ class CompiledGatedRMSNorm(GatedRMSNorm):
 )
 def compiled_kimi_gated_rmsnorm(
     cfg: KimiGatedRMSNorm.Config,
-    *,
-    activation_fn: Callable[[torch.Tensor], torch.Tensor] = torch.sigmoid,
 ) -> CompiledGatedRMSNorm.Config:
     sharding_config = cfg.sharding_config
     if sharding_config is not None:
-        input_shardings = (
-            sharding_config.in_dst_shardings or sharding_config.in_src_shardings or {}
-        )
-        x_sharding = input_shardings.get("x_THV")
-        gate_sharding = input_shardings.get("gate_THV")
-        output_sharding = (
-            sharding_config.out_src_shardings or sharding_config.out_dst_shardings
-        )
-        weight_sharding = sharding_config.state_shardings.get("weight")
-        if x_sharding is None or gate_sharding is None or output_sharding is None:
+        if sharding_config.state_shardings.get("weight") is None:
             raise ValueError(
-                "CompiledGatedRMSNorm requires input and output sharding "
-                "contracts when a sharding config is present"
+                "Compiled KimiGatedRMSNorm requires a weight sharding contract"
             )
-        if weight_sharding is None:
-            raise ValueError("CompiledGatedRMSNorm requires a weight sharding contract")
+        activation = attention_activation_placement()
+        input_shardings = {
+            "x": activation,
+            "gate": activation,
+        }
         sharding_config = replace(
             sharding_config,
+            in_src_shardings=input_shardings,
+            in_dst_shardings=input_shardings,
+            out_src_shardings=activation,
+            out_dst_shardings=activation,
             local_spmd=True,
         )
     return derive(
         cfg,
         CompiledGatedRMSNorm.Config,
-        activation_fn=activation_fn,
+        activation_fn=torch.sigmoid,
+        round_normalized_to_input_dtype=False,
+        sharding_config=sharding_config,
+    )
+
+
+@override(
+    target=Qwen35GatedRMSNorm.Config,
+    exact=True,
+    description="Compile Qwen3.5 gated RMSNorm with TorchInductor.",
+)
+def compiled_qwen35_gated_rmsnorm(
+    cfg: Qwen35GatedRMSNorm.Config,
+) -> CompiledGatedRMSNorm.Config:
+    sharding_config = cfg.sharding_config
+    if sharding_config is not None:
+        if sharding_config.state_shardings.get("weight") is None:
+            raise ValueError(
+                "Compiled Qwen35GatedRMSNorm requires a weight sharding contract"
+            )
+        activation = attention_activation_placement()
+        input_shardings = {
+            "x": activation,
+            "gate": activation,
+        }
+        sharding_config = replace(
+            sharding_config,
+            in_src_shardings=input_shardings,
+            in_dst_shardings=input_shardings,
+            out_src_shardings=activation,
+            out_dst_shardings=activation,
+            local_spmd=True,
+        )
+    return derive(
+        cfg,
+        CompiledGatedRMSNorm.Config,
+        activation_fn=F.silu,
+        round_normalized_to_input_dtype=True,
         sharding_config=sharding_config,
     )

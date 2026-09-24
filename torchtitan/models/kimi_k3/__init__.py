@@ -44,8 +44,6 @@ from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
-KimiRMSNormGated = KimiGatedRMSNorm
-
 __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
     "KimiK3Model",

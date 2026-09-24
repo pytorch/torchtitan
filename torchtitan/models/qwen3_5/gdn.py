@@ -77,9 +77,6 @@ class Qwen35GatedRMSNorm(GatedRMSNorm):
         return super().forward(x, gate)
 
 
-RMSNormGated = Qwen35GatedRMSNorm
-
-
 @torch.library.custom_op(
     "torchtitan::recurrent_gdn_fwd", mutates_args=(), device_types="cuda"
 )

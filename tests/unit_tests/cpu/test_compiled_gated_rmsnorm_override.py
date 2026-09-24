@@ -8,7 +8,6 @@ import unittest
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
 
 from torchtitan.config import apply_overrides, OverrideConfig
 from torchtitan.config.override import _REGISTRY
@@ -16,7 +15,7 @@ from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     dense_param_placement,
 )
-from torchtitan.models.kimi_k3 import model_registry
+from torchtitan.models.kimi_k3 import model_registry as kimi_model_registry
 from torchtitan.models.kimi_k3.kda import KimiGatedRMSNorm
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.overrides.compiled_gated_rmsnorm import (
@@ -26,23 +25,23 @@ from torchtitan.overrides.compiled_gated_rmsnorm import (
 from torchtitan.protocols.sharding import ShardingConfig
 
 
-_OVERRIDE_TARGET = (
+_KIMI_OVERRIDE_TARGET = (
     "torchtitan.overrides.compiled_gated_rmsnorm." "compiled_kimi_gated_rmsnorm"
 )
-_KIMI_GATED_RMSNORM_OVERRIDE = _REGISTRY[_OVERRIDE_TARGET]
+_KIMI_OVERRIDE = _REGISTRY[_KIMI_OVERRIDE_TARGET]
 
 
 class TestCompiledGatedRMSNormOverride(unittest.TestCase):
     def setUp(self):
-        _REGISTRY.setdefault(_OVERRIDE_TARGET, _KIMI_GATED_RMSNORM_OVERRIDE)
+        _REGISTRY.setdefault(_KIMI_OVERRIDE_TARGET, _KIMI_OVERRIDE)
 
     def test_override_replaces_all_kimi_gated_rmsnorm_modules(self):
-        config = model_registry("debugmodel", attn_backend="flex")
+        config = kimi_model_registry("debugmodel", attn_backend="flex")
         set_kimi_k3_sharding_config(config, enable_sp=True, enable_ep=False)
         num_gated_norms = len(list(config.traverse(KimiGatedRMSNorm.Config)))
 
         replacements = apply_overrides(
-            OverrideConfig(imports=[_OVERRIDE_TARGET]),
+            OverrideConfig(imports=[_KIMI_OVERRIDE_TARGET]),
             config,
         )
 
@@ -98,21 +97,9 @@ class TestCompiledGatedRMSNormOverride(unittest.TestCase):
         self.assertTrue(replacement.sharding_config.local_spmd)
         self.assertEqual(
             replacement.sharding_config.in_src_shardings,
-            {"x_THV": activation, "gate_THV": activation},
+            {"x": activation, "gate": activation},
         )
         self.assertEqual(replacement.sharding_config.out_src_shardings, activation)
-
-    def test_override_requires_activation_sharding_contracts(self):
-        weight = dense_param_placement(tp=spmd.R)
-        config = KimiGatedRMSNorm.Config(
-            dim=128,
-            sharding_config=ShardingConfig(
-                state_shardings={"weight": weight},
-            ),
-        )
-
-        with self.assertRaisesRegex(ValueError, "sharding contracts"):
-            compiled_kimi_gated_rmsnorm(config)
 
     def test_decorated_forward_preserves_stock_implementation(self):
         config = KimiGatedRMSNorm.Config(dim=128, eps=1e-5)
@@ -133,33 +120,6 @@ class TestCompiledGatedRMSNormOverride(unittest.TestCase):
             eager_forward(compiled, input, gate),
             stock(input, gate),
         )
-
-    def test_configurable_unary_activation(self):
-        config = KimiGatedRMSNorm.Config(dim=128, eps=1e-5)
-        input = torch.randn(4, 3, 128)
-        gate = torch.randn_like(input)
-
-        for activation_fn in (F.silu, F.relu):
-            with self.subTest(activation_fn=activation_fn.__name__):
-                compiled = compiled_kimi_gated_rmsnorm(
-                    config,
-                    activation_fn=activation_fn,
-                ).build()
-                with torch.no_grad():
-                    compiled.weight.normal_()
-                eager_forward = type(
-                    compiled
-                )._compiled_gated_rms_norm._torchdynamo_orig_callable
-                expected = F.rms_norm(
-                    input.float(),
-                    (input.shape[-1],),
-                    compiled.weight.float(),
-                    compiled.eps,
-                ) * activation_fn(gate.float())
-                torch.testing.assert_close(
-                    eager_forward(compiled, input, gate),
-                    expected.to(input.dtype),
-                )
 
 
 if __name__ == "__main__":

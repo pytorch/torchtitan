@@ -53,9 +53,6 @@ class KimiGatedRMSNorm(GatedRMSNorm):
         return super().forward(x_THV, gate_THV)
 
 
-KimiRMSNormGated = KimiGatedRMSNorm
-
-
 class KDAKernel(Module):
     """Apply KDA preprocessing and the Attention Gym kernel."""
 

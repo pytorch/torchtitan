@@ -10,15 +10,11 @@ import torch
 import torch.nn.functional as F
 
 from torchtitan.models.common.nn_modules import GatedRMSNorm
-from torchtitan.models.kimi_k3.kda import KimiGatedRMSNorm, KimiRMSNormGated
-from torchtitan.models.qwen3_5.gdn import Qwen35GatedRMSNorm, RMSNormGated
+from torchtitan.models.kimi_k3.kda import KimiGatedRMSNorm
+from torchtitan.models.qwen3_5.gdn import Qwen35GatedRMSNorm
 
 
 class TestGatedRMSNorm(unittest.TestCase):
-    def test_legacy_names_are_preserved(self):
-        self.assertIs(KimiRMSNormGated, KimiGatedRMSNorm)
-        self.assertIs(RMSNormGated, Qwen35GatedRMSNorm)
-
     def test_model_specific_defaults_use_shared_implementation(self):
         kimi_config = KimiGatedRMSNorm.Config(dim=8)
         qwen_config = Qwen35GatedRMSNorm.Config(dim=8)

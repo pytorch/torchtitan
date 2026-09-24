@@ -45,8 +45,6 @@ from .rope import MRoPE
 
 from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
 
-RMSNormGated = Qwen35GatedRMSNorm
-
 __all__ = [
     "Qwen35Model",
     "qwen3_5_configs",
