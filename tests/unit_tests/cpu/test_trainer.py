@@ -506,12 +506,14 @@ def test_training_engine_owns_gradient_accumulation_cuda_graph_warmup() -> None:
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
+                sdc_replayer=None,
+                debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
                 parallelism=SimpleNamespace(
+                    enable_sequence_parallel=False,
                     fsdp_defer_gradient_reduction=True,
                     fsdp_reshard_after_forward="never",
                 ),
-                sdc_replayer=None,
             ),
             parallel_dims=SimpleNamespace(pp_enabled=False, fsdp_enabled=True),
             _forward_backward_body=eager_forward_backward,
@@ -572,9 +574,13 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                training=SimpleNamespace(disable_cuda_graphs=False),
-                parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
                 sdc_replayer=None,
+                debug=SimpleNamespace(spmd_typechecking=False),
+                training=SimpleNamespace(disable_cuda_graphs=False),
+                parallelism=SimpleNamespace(
+                    enable_sequence_parallel=False,
+                    fsdp_defer_gradient_reduction=False,
+                ),
             ),
             parallel_dims=SimpleNamespace(pp_enabled=False),
             _forward_backward_body=eager_forward_backward,
@@ -971,6 +977,7 @@ def _run_forward_backward_recording_all_reduce(
     *,
     dp_replicate_enabled: bool,
     gradient_accumulation_steps: int,
+    defer_fsdp_gradient_reduction: bool = False,
 ) -> list[bool]:
     part = _RecordingFSDPPart()
     engine = cast(
@@ -991,15 +998,19 @@ def _run_forward_backward_recording_all_reduce(
         engine,
         [("input", "labels", {}, {})] * gradient_accumulation_steps,
         torch.tensor(gradient_accumulation_steps),
-        defer_fsdp_gradient_reduction=False,
+        defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
     )
     return part.requires_all_reduce_calls
 
 
-def test_hsdp_skips_replicate_all_reduce_until_last_accum_group():
+@pytest.mark.parametrize("defer_fsdp_gradient_reduction", [False, True])
+def test_hsdp_skips_replicate_all_reduce_until_last_accum_group(
+    defer_fsdp_gradient_reduction: bool,
+) -> None:
     flags = _run_forward_backward_recording_all_reduce(
         dp_replicate_enabled=True,
         gradient_accumulation_steps=3,
+        defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
     )
     assert flags == [False, False, True]
 
@@ -1012,7 +1023,10 @@ def test_hsdp_keeps_all_reduce_on_single_accum_group() -> None:
     assert flags == [True]
 
 
-def test_pp_hsdp_skips_replicate_all_reduce_until_last_accum_group() -> None:
+@pytest.mark.parametrize("defer_fsdp_gradient_reduction", [False, True])
+def test_pp_hsdp_skips_replicate_all_reduce_until_last_accum_group(
+    defer_fsdp_gradient_reduction: bool,
+) -> None:
     model_parts = [_RecordingFSDPPart(), _RecordingFSDPPart()]
     engine = cast(
         TrainingEngine,
@@ -1032,7 +1046,7 @@ def test_pp_hsdp_skips_replicate_all_reduce_until_last_accum_group() -> None:
         engine,
         [(None, [{}], None)] * 2,
         torch.tensor(2),
-        defer_fsdp_gradient_reduction=False,
+        defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
     )
 
     for model_part in model_parts:

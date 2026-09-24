@@ -65,6 +65,7 @@ def run_worker(args):
         pp=1,
         ep=args.ep,
         world_size=world_size,
+        enable_sequence_parallel=True,
     )
     parallel_dims.build_mesh()
 

@@ -183,7 +183,7 @@ class FullAC(ActivationCheckpointing):
             module,
             preserve_rng_state=self.config.preserve_rng_state,
             determinism_check=self.config.determinism_check,
-            early_stop=False,
+            early_stop=True,
             debug=self.config.debug,
         )
 
@@ -293,7 +293,7 @@ class SelectiveAC(ActivationCheckpointing):
             ),
             preserve_rng_state=config.preserve_rng_state,
             determinism_check=config.determinism_check,
-            early_stop=False,
+            early_stop=True,
             debug=config.debug,
         )
 

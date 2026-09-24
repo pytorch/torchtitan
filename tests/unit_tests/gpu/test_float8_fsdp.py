@@ -18,14 +18,14 @@ from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 pytest.importorskip("torchao")
 
 import torchtitan.quantization.float8.tensor as float8_tensor  # noqa: E402
-from torchtitan.models.common.moe import GroupedExperts  # noqa: E402
+from torchtitan.models.common.linear import GroupedLinear  # noqa: E402
 from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
 from torchtitan.quantization.float8 import (  # noqa: E402
-    _get_float8_grouped_experts_cls,
+    _get_float8_grouped_linear_cls,
     Float8Linear,
 )
 from torchtitan.quantization.float8.tensor import (  # noqa: E402
-    _GroupedExpertsShardedTensorWithFloat8Compute,
+    _GroupedLinearShardedTensorWithFloat8Compute,
     _LinearShardedTensorWithFloat8Compute,
 )
 
@@ -157,7 +157,7 @@ def test_float8_fsdp_tensor_lifecycle(reshard_after_forward):
     )
 
 
-def _run_float8_grouped_experts_fsdp_lifecycle(
+def _run_float8_grouped_linear_fsdp_lifecycle(
     rank: int,
     world_size: int,
     port: int,
@@ -178,18 +178,23 @@ def _run_float8_grouped_experts_fsdp_lifecycle(
     float8_tensor._quantize_float8_grouped_weight = counted_quantize_weight
     try:
         mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
-        float8_cls = _get_float8_grouped_experts_cls(GroupedExperts)
-        experts = (
-            float8_cls.Config(dim=128, hidden_dim=128, num_experts=4)
+        float8_cls = _get_float8_grouped_linear_cls(GroupedLinear)
+        grouped_linear = (
+            float8_cls.Config(
+                group_size=4,
+                in_features=128,
+                out_features=128,
+                num_linears=2,
+            )
             .build()
             .cuda()
             .bfloat16()
         )
         with torch.no_grad():
-            for parameter in experts.parameters():
+            for parameter in grouped_linear.parameters():
                 parameter._tensor.normal_(std=0.02)
         fully_shard(
-            experts,
+            grouped_linear,
             mesh=mesh,
             mp_policy=MixedPrecisionPolicy(
                 param_dtype=torch.bfloat16,
@@ -197,42 +202,37 @@ def _run_float8_grouped_experts_fsdp_lifecycle(
             ),
             reshard_after_forward=reshard_after_forward,
         )
-        input_RD = torch.randn(
+        input_RI = torch.randn(
             64,
             128,
             device="cuda",
             dtype=torch.bfloat16,
             requires_grad=True,
         )
-        num_tokens_per_expert_E = torch.full(
-            (4,),
-            16,
-            device="cuda",
-            dtype=torch.int64,
-        )
+        offsets_E = torch.arange(16, 65, 16, device="cuda", dtype=torch.int32)
 
         if reshard_after_forward:
-            output_RD = experts(input_RD, num_tokens_per_expert_E)
-            weight_params = _get_weight_params(experts)
+            output_R2O = grouped_linear(input_RI, offsets_E)
+            weight_params = _get_weight_params(grouped_linear)
             inner_tensor_ids = tuple(
                 tuple(map(id, param._unsharded_inner_tensors))
                 for param in weight_params
             )
-            assert num_quantize_calls == 3
+            assert num_quantize_calls == 1
             assert all(
                 isinstance(
                     parameter.to_local(),
-                    _GroupedExpertsShardedTensorWithFloat8Compute,
+                    _GroupedLinearShardedTensorWithFloat8Compute,
                 )
-                for parameter in experts.parameters()
+                for parameter in grouped_linear.parameters()
             )
             assert all(
                 tensor.untyped_storage().size() == 0
                 for param in weight_params
                 for tensor in param._unsharded_inner_tensors
             )
-            output_RD.sum().backward()
-            assert num_quantize_calls == 6
+            output_R2O.sum().backward()
+            assert num_quantize_calls == 2
             assert (
                 tuple(
                     tuple(map(id, param._unsharded_inner_tensors))
@@ -241,18 +241,18 @@ def _run_float8_grouped_experts_fsdp_lifecycle(
                 == inner_tensor_ids
             )
         else:
-            experts.set_is_last_backward(False)
-            experts.set_reshard_after_backward(False)
-            experts.set_requires_gradient_sync(False)
+            grouped_linear.set_is_last_backward(False)
+            grouped_linear.set_reshard_after_backward(False)
+            grouped_linear.set_requires_gradient_sync(False)
             outputs = [
-                experts(input_RD, num_tokens_per_expert_E),
-                experts(input_RD, num_tokens_per_expert_E),
+                grouped_linear(input_RI, offsets_E),
+                grouped_linear(input_RI, offsets_E),
             ]
-            weight_params = _get_weight_params(experts)
-            assert num_quantize_calls == 3
+            weight_params = _get_weight_params(grouped_linear)
+            assert num_quantize_calls == 1
             assert all(
                 isinstance(parameter, _UnshardedFSDPTensor)
-                for parameter in experts.parameters()
+                for parameter in grouped_linear.parameters()
             )
             assert all(
                 tensor.untyped_storage().size() > 0
@@ -260,18 +260,18 @@ def _run_float8_grouped_experts_fsdp_lifecycle(
                 for tensor in param._unsharded_inner_tensors
             )
             outputs[0].sum().backward(retain_graph=True)
-            assert num_quantize_calls == 3
-            experts.set_is_last_backward(True)
-            experts.set_reshard_after_backward(True)
-            experts.set_requires_gradient_sync(True)
+            assert num_quantize_calls == 1
+            grouped_linear.set_is_last_backward(True)
+            grouped_linear.set_reshard_after_backward(True)
+            grouped_linear.set_requires_gradient_sync(True)
             outputs[1].sum().backward()
-            assert num_quantize_calls == 3
+            assert num_quantize_calls == 1
             assert all(
                 isinstance(
                     parameter.to_local(),
-                    _GroupedExpertsShardedTensorWithFloat8Compute,
+                    _GroupedLinearShardedTensorWithFloat8Compute,
                 )
-                for parameter in experts.parameters()
+                for parameter in grouped_linear.parameters()
             )
     finally:
         float8_tensor._quantize_float8_grouped_weight = original_quantize_weight
@@ -279,9 +279,10 @@ def _run_float8_grouped_experts_fsdp_lifecycle(
 
 
 @pytest.mark.parametrize("reshard_after_forward", [True, False])
-def test_float8_grouped_experts_fsdp_tensor_lifecycle(reshard_after_forward):
+def test_float8_grouped_linear_fsdp_tensor_lifecycle(reshard_after_forward):
+    """FSDP reuses or rebuilds one grouped weight according to RAF policy."""
     mp.spawn(
-        _run_float8_grouped_experts_fsdp_lifecycle,
+        _run_float8_grouped_linear_fsdp_lifecycle,
         args=(2, get_free_port(), reshard_after_forward),
         nprocs=2,
         join=True,
