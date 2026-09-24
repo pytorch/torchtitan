@@ -54,11 +54,14 @@ __all__ = [
     "BACKWARD_WITH_REDUCE_GRAD",
     "FULL_FORWARD_BACKWARD",
     "GraphRuntime",
+    "ZERO_GRAD_ACCUMS",
     "register_graph_schedule",
 ]
 
 
 class _GraphComputationType(Enum):
+    # Reset graph-owned gradient accumulators before schedule microbatches run.
+    ZERO_GRAD_ACCUMS = "ZERO_GRAD_ACCUMS"
     # Backward graph with gradient reduction extracted into REDUCE_GRAD.
     BACKWARD = "BACKWARD"
     # Backward graph that includes gradient reduction.
@@ -69,6 +72,7 @@ class _GraphComputationType(Enum):
     FULL_FORWARD_BACKWARD = "FULL_FORWARD_BACKWARD"
 
 
+ZERO_GRAD_ACCUMS = _GraphComputationType.ZERO_GRAD_ACCUMS
 BACKWARD = _GraphComputationType.BACKWARD
 BACKWARD_WITH_REDUCE_GRAD = _GraphComputationType.BACKWARD_WITH_REDUCE_GRAD
 BACKWARD_WEIGHT_WITH_REDUCE_GRAD = (
@@ -466,6 +470,13 @@ class GraphRuntime:
         stage.state.sharded_param_grads = []
         stage._graph_pp_grads_scaled = False
 
+    def _handle_zero_grad_accums(self, action: _Action, ctx: _PipelineContext) -> None:
+        self.ensure_ready(ctx)
+        _, stage = _stage_map_and_stage_from_action(self.schedule, action)
+        graphs = self.stage_graphs[stage.stage_index]
+        stage.state.unsharded_param_grads = graphs.zero_grad_()
+        stage.state.sharded_param_grads = []
+
     @staticmethod
     def _initialize_split_grad_accumulators(
         stage: GraphPipelineStage,
@@ -521,6 +532,8 @@ class GraphRuntime:
         *,
         grad_reduction_in_backward: bool,
     ) -> None:
+        if graphs.accumulates_gradients_in_graph:
+            return
         if grad_reduction_in_backward:
             self._accumulate_direct_stage_backward_grads(stage, graphs, grads)
             return
@@ -556,15 +569,18 @@ class GraphRuntime:
             runtime_validate=stage._runtime_validate,
         )
         self.schedule.backward_counter[stage.stage_index] += 1
-        if _grad_reduction_runs_in_joint(self.schedule, action):
-            reduced_grads = graphs.reduce_grads(
-                param_grads,
-                runtime_validate=stage._runtime_validate,
-            )
-            self._accumulate_direct_stage_backward_grads(stage, graphs, reduced_grads)
-        else:
-            self._initialize_split_grad_accumulators(stage, param_grads)
-            _accumulate_stage_unsharded_grads(stage, param_grads)
+        if not graphs.accumulates_gradients_in_graph:
+            if _grad_reduction_runs_in_joint(self.schedule, action):
+                reduced_grads = graphs.reduce_grads(
+                    param_grads,
+                    runtime_validate=stage._runtime_validate,
+                )
+                self._accumulate_direct_stage_backward_grads(
+                    stage, graphs, reduced_grads
+                )
+            else:
+                self._initialize_split_grad_accumulators(stage, param_grads)
+                _accumulate_stage_unsharded_grads(stage, param_grads)
         stage.output_chunks.append(loss)
         self.schedule._internal_losses.append(loss)
 
@@ -904,6 +920,7 @@ def register_graph_schedule(
     # (action, context) -> None handlers but are outside PyTorch's accepted
     # computation types.
     for computation_type, handler in (
+        (ZERO_GRAD_ACCUMS, runtime._handle_zero_grad_accums),
         (BACKWARD, runtime._handle_backward),
         (BACKWARD_WITH_REDUCE_GRAD, runtime._handle_backward),
         (BACKWARD_WEIGHT_WITH_REDUCE_GRAD, runtime._handle_backward_weight),

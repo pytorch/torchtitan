@@ -40,6 +40,7 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_parameter_gradient,
     BOXED_CODEGEN_META,
     compute_annotated_loss,
     compute_parameter_gradients,
@@ -110,6 +111,10 @@ from torchtitan.experiments.graph_trainer.registry import (
     TRACE_INPUT_PREPARERS,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
+from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
+    fuse_wgrad_accumulation_pass,
+    insert_graph_gradient_accumulation,
+)
 from torchtitan.protocols.model import BaseModel
 
 
@@ -345,6 +350,7 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
 
     modules: _StageGraphModules
     meta: _StageGraphMeta
+    grad_accumulators: tuple[Any, ...] = ()
     compiled: bool = False
 
     def __post_init__(self) -> None:
@@ -363,6 +369,25 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
     @property
     def supports_backward_input_weight_split(self) -> bool:
         return self.modules.bw_di is not None and self.modules.bw_dw is not None
+
+    @property
+    def accumulates_gradients_in_graph(self) -> bool:
+        return bool(self.grad_accumulators)
+
+    def zero_grad_(self) -> list[Any]:
+        grads = self._grad_accumulator_args()
+        if grads:
+            torch._foreach_zero_(grads)
+        return list(self.grad_accumulators)
+
+    def _grad_accumulator_args(self) -> list[torch.Tensor]:
+        return list(
+            {
+                id(grad): grad
+                for grad in self.grad_accumulators
+                if isinstance(grad, torch.Tensor)
+            }.values()
+        )
 
     def unshard_params(
         self,
@@ -609,19 +634,22 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
         """Run the full backward graph.
 
         Calling convention:
-            ``full_bw(*backward_inputs)``
+            ``full_bw(*backward_inputs, *grad_accumulators)``
             ``-> (*param_grads, *input_grads)``
         """
 
         return self._split_full_backward_outputs(
             _execute_graph_module(
                 self.modules.full_bw,
-                self._backward_args(
-                    stage_output,
-                    saved_values_for_backward,
-                    output_grads_from_next,
-                    runtime_validate=runtime_validate,
-                ),
+                [
+                    *self._backward_args(
+                        stage_output,
+                        saved_values_for_backward,
+                        output_grads_from_next,
+                        runtime_validate=runtime_validate,
+                    ),
+                    *self._grad_accumulator_args(),
+                ],
             )
         )
 
@@ -663,7 +691,8 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
         """Run the weight-gradient graph.
 
         Calling convention:
-            ``bw_dw(*saved_for_weight_backward) -> (*param_grads)``
+            ``bw_dw(*saved_for_weight_backward, *grad_accumulators)``
+            ``-> (*param_grads)``
         """
 
         if self.modules.bw_dw is None:
@@ -671,7 +700,10 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
         return list(
             _execute_graph_module(
                 self.modules.bw_dw,
-                list(saved_values_for_backward_weight),
+                [
+                    *saved_values_for_backward_weight,
+                    *self._grad_accumulator_args(),
+                ],
             )
         )
 
@@ -749,6 +781,13 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
             module=self.module,
             precompile_meshes=self.runtime_meshes,
         )
+
+    @property
+    def accumulates_gradients_in_graph(self) -> bool:
+        return False
+
+    def zero_grad_(self) -> list[Any]:
+        return []
 
     def unshard_params(
         self,
@@ -838,7 +877,27 @@ class GraphTrainerScheduledJointStageGraphs(JointStageGraphs):
 
     modules: _ScheduledJointGraphModules
     meta: _ScheduledJointGraphMeta
+    grad_accumulators: tuple[Any, ...] = ()
     runtime_meshes: tuple[DeviceMesh, ...] = ()
+
+    @property
+    def accumulates_gradients_in_graph(self) -> bool:
+        return bool(self.grad_accumulators)
+
+    def _grad_accumulator_args(self) -> list[torch.Tensor]:
+        return list(
+            {
+                id(grad): grad
+                for grad in self.grad_accumulators
+                if isinstance(grad, torch.Tensor)
+            }.values()
+        )
+
+    def zero_grad_(self) -> list[Any]:
+        grads = self._grad_accumulator_args()
+        if grads:
+            torch._foreach_zero_(grads)
+        return list(self.grad_accumulators)
 
     def unshard_params(
         self,
@@ -904,6 +963,7 @@ class GraphTrainerScheduledJointStageGraphs(JointStageGraphs):
             ],
             runtime_validate=runtime_validate,
         )
+        full_args.extend(self._grad_accumulator_args())
         return full_args
 
     def forward_backward(
@@ -1144,6 +1204,13 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     )
 
     if not compile_config.enable_passes:
+        traced.gm = apply_graph_passes(
+            traced.gm,
+            traced.example_inputs,
+            construct_mandatory_graph_passes(),
+            compile_config=compile_config,
+            respect_disable_passes=False,
+        )
         return
     if model_config is None or parallelism is None:
         raise ValueError(
@@ -1281,6 +1348,8 @@ def _build_joint_stage_graph(
     parallel_dims: ParallelDims,
     extract_fsdp_param_unshard: bool = False,
     extract_fsdp_grad_reduction: bool = False,
+    accumulate_gradients_in_graph: bool = False,
+    fuse_wgrad_accumulation: bool = False,
 ) -> None:
     """Build the monolithic PP=1 graph with optional FSDP boundary extraction."""
     if not stage.is_first or not stage.is_last or len(args) != 1:
@@ -1297,14 +1366,16 @@ def _build_joint_stage_graph(
         kwargs,
     )
     requires_graph_extraction = (
-        extract_fsdp_param_unshard or extract_fsdp_grad_reduction
+        extract_fsdp_param_unshard
+        or extract_fsdp_grad_reduction
+        or accumulate_gradients_in_graph
     )
     runtime_meshes = None
     if compile_config.precompile_artifact_dir:
         if requires_graph_extraction:
             raise ValueError(
                 "PP=1 precompiled artifacts do not support extracted FSDP "
-                "boundaries"
+                "boundaries or in-graph gradient accumulation"
             )
         storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
         if not storage.exists(_FX_TRACE_ARTIFACT_KEY):
@@ -1447,6 +1518,17 @@ def _build_joint_stage_graph(
         )
 
     full_output_names = output_names(fsdp_full.compute_module)
+    grad_accumulators: tuple[Any, ...] = ()
+    if accumulate_gradients_in_graph:
+        grad_accumulators = insert_graph_gradient_accumulation(
+            fsdp_full.compute_module,
+            num_param_grads=num_param_grad_values,
+            param_grad_output_start=1,
+            device=stage.device,
+        )
+        if fuse_wgrad_accumulation:
+            fuse_wgrad_accumulation_pass(fsdp_full.compute_module)
+
     modules = _ScheduledJointGraphModules(
         full_fwd_bwd=fsdp_full.compute_module,
         unshard=fsdp_full.unshard_module,
@@ -1502,6 +1584,7 @@ def _build_joint_stage_graph(
             unshard_flat_param_indices=fsdp_full.unshard_flat_param_indices,
             num_full_param_inputs=fsdp_full.num_compute_param_inputs,
         ),
+        grad_accumulators=grad_accumulators,
     )
 
 
@@ -1519,6 +1602,8 @@ def _build_stage_graphs(
     compile_graphs: bool = True,
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
+    accumulate_gradients_in_graph: bool = False,
+    fuse_wgrad_accumulation: bool = False,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     maybe_register_blockmask_pytree_node()
@@ -1566,11 +1651,14 @@ def _build_stage_graphs(
                 target,
                 loss_kwargs,
             )
-            grad_params = [
-                p
-                for _, p in stage.submod.named_parameters(remove_duplicate=False)
-                if p.requires_grad
+            named_grad_params = [
+                (name, parameter)
+                for name, parameter in stage.submod.named_parameters(
+                    remove_duplicate=False
+                )
+                if parameter.requires_grad
             ]
+            grad_params = [parameter for _, parameter in named_grad_params]
             grad_inputs = [
                 *grad_params,
                 *_grad_input_leaves(stage_args, stage_kwargs),
@@ -1580,9 +1668,19 @@ def _build_stage_graphs(
                 grad_inputs,
                 allow_unused=True,
             )
+            param_grads = tuple(
+                None
+                if grad is None
+                else annotate_parameter_gradient(grad, parameter_fqn)
+                for (parameter_fqn, _), grad in zip(
+                    named_grad_params,
+                    grads[: len(grad_params)],
+                    strict=True,
+                )
+            )
             return (
                 loss,
-                tuple(grads[: len(grad_params)]),
+                param_grads,
                 tuple(grads[len(grad_params) :]),
             )
 
@@ -1600,11 +1698,14 @@ def _build_stage_graphs(
             output = stage.submod(*stage_args, **stage_kwargs)
             flat_outputs, _ = pytree.tree_flatten(output)
             flat_output_grads, _ = pytree.tree_flatten(output_grads_from_next)
-            grad_params = [
-                p
-                for _, p in stage.submod.named_parameters(remove_duplicate=False)
-                if p.requires_grad
+            named_grad_params = [
+                (name, parameter)
+                for name, parameter in stage.submod.named_parameters(
+                    remove_duplicate=False
+                )
+                if parameter.requires_grad
             ]
+            grad_params = [parameter for _, parameter in named_grad_params]
             grad_inputs = [
                 *grad_params,
                 *_grad_input_leaves(stage_args, stage_kwargs),
@@ -1615,9 +1716,19 @@ def _build_stage_graphs(
                 grad_outputs=flat_output_grads,
                 allow_unused=True,
             )
+            param_grads = tuple(
+                None
+                if grad is None
+                else annotate_parameter_gradient(grad, parameter_fqn)
+                for (parameter_fqn, _), grad in zip(
+                    named_grad_params,
+                    grads[: len(grad_params)],
+                    strict=True,
+                )
+            )
             return (
                 output,
-                tuple(grads[: len(grad_params)]),
+                param_grads,
                 tuple(grads[len(grad_params) :]),
             )
 
@@ -1743,6 +1854,24 @@ def _build_stage_graphs(
         num_param_grads=num_param_grad_values,
         num_input_grads=num_input_grad_values,
     )
+    grad_accumulators: tuple[Any, ...] = ()
+    if accumulate_gradients_in_graph:
+        grad_accumulators = insert_graph_gradient_accumulation(
+            fsdp_bw.compute_module,
+            num_param_grads=num_param_grad_values,
+            device=stage.device,
+        )
+        if didw_split is not None:
+            insert_graph_gradient_accumulation(
+                didw_split.bw_dw_module,
+                num_param_grads=num_param_grad_values,
+                device=stage.device,
+                accumulators=grad_accumulators,
+            )
+        if fuse_wgrad_accumulation:
+            fuse_wgrad_accumulation_pass(fsdp_bw.compute_module)
+            if didw_split is not None:
+                fuse_wgrad_accumulation_pass(didw_split.bw_dw_module)
     # 6. Attach the callable container and the GraphTrainer-only metadata used
     # to pack/unpack its flat graph inputs and outputs.
     graph_modules = _StageGraphModules(
@@ -1778,6 +1907,7 @@ def _build_stage_graphs(
     stage.graphs = GraphTrainerStageGraphs(
         modules=graph_modules,
         meta=graph_meta,
+        grad_accumulators=grad_accumulators,
     )
     logger.info(
         "GraphPP traced stage %s: fwd_outputs=%s saved=%s "
@@ -1828,6 +1958,10 @@ class GraphTrainerStageGraphProvider:
             from forward into a separately scheduled graph.
         extract_fsdp_grad_reduction: Whether to extract FSDP gradient reduction
             from backward into a separately scheduled graph.
+        accumulate_gradients_in_graph: Whether backward graphs accumulate raw
+            gradients into persistent stage-owned buffers.
+        fuse_wgrad_accumulation: Whether compatible WGrad producers write
+            directly into those buffers.
         trainer_config: Full Trainer configuration for PP=1, or ``None`` for
             PP>1 schedules.
     """
@@ -1838,6 +1972,8 @@ class GraphTrainerStageGraphProvider:
     parallelism: ParallelismConfig | None
     extract_fsdp_param_unshard: bool = True
     extract_fsdp_grad_reduction: bool = True
+    accumulate_gradients_in_graph: bool = False
+    fuse_wgrad_accumulation: bool = False
     trainer_config: "GraphTrainer.Config | None" = None
     parallel_dims: ParallelDims | None = None
     _warned_cuda_graph: bool = False
@@ -1930,6 +2066,8 @@ class GraphTrainerStageGraphProvider:
                     parallel_dims=self.parallel_dims,
                     extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
                     extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
+                    accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,
+                    fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
                 )
             return {}
 
@@ -1949,6 +2087,8 @@ class GraphTrainerStageGraphProvider:
                 compile_graphs=False,
                 extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
                 extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
+                accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,
+                fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
             )
 
         required_overlap_pairs = stage_builder._required_multiplex_pairs(schedule)

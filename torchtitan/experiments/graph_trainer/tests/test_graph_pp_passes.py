@@ -70,6 +70,9 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_MESH_AXIS_NAMES_META,
     FSDP_PARAM_FQNS_META,
 )
+from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
+    insert_graph_gradient_accumulation,
+)
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.trainer import Trainer
@@ -1924,6 +1927,53 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             split.compute_output_names[1:3],
         )
         self.assertEqual(split.compute_output_names[-1], "input_grad")
+
+    def test_unbucketed_split_accumulates_before_one_final_bucket(self) -> None:
+        gm = _make_unbucketed_action_graph("reduce_scatter")
+        split = extract_fsdp_reduce_grad_graph(gm, num_param_grads=2)
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected an extracted reduce-grad graph")
+
+        accumulators = insert_graph_gradient_accumulation(
+            split.compute_module,
+            num_param_grads=2,
+            device=torch.device("cpu"),
+        )
+        torch._foreach_zero_(list(accumulators))
+        microbatches = (
+            (torch.tensor([1.0, 3.0]), torch.tensor([-1.0, 2.0, 4.0])),
+            (torch.tensor([-2.0, 1.0]), torch.tensor([3.0, 0.5, -1.0])),
+            (torch.tensor([4.0, -3.0]), torch.tensor([2.0, -2.0, 0.25])),
+        )
+        for microbatch in microbatches:
+            _FakeCollectiveInterpreter(split.compute_module).run(
+                *microbatch,
+                *accumulators,
+            )
+
+        input_names = _placeholder_names(split.reduce_grad_module)
+        num_outputs = len(
+            split.reduce_grad_module.graph.find_nodes(op="output")[0].args[0]
+        )
+        merge_all_reduce_scatters(
+            split.reduce_grad_module,
+        )
+        actual = _FakeCollectiveInterpreter(split.reduce_grad_module).run(*accumulators)
+        expected = tuple(sum(values) for values in zip(*microbatches, strict=True))
+        _assert_tensor_sequence_equal(self, actual, expected)
+        self.assertEqual(_placeholder_names(split.reduce_grad_module), input_names)
+        self.assertEqual(
+            len(split.reduce_grad_module.graph.find_nodes(op="output")[0].args[0]),
+            num_outputs,
+        )
+        self.assertEqual(
+            sum(
+                node.target == torch.ops.bucketing._pre_bucket_reduce_scatter.default
+                for node in split.reduce_grad_module.graph.nodes
+            ),
+            1,
+        )
 
     def test_unbucketed_hsdp_chain_is_extracted(self) -> None:
         for order in ("reduce_scatter_first", "all_reduce_first"):

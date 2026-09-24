@@ -26,6 +26,17 @@ class StageGraphs(Protocol):
         ``param_grads_for_accumulation`` converts them to live parameter order.
     """
 
+    @property
+    def accumulates_gradients_in_graph(self) -> bool:
+        """Return whether backward writes into graph-owned accumulators."""
+
+    def zero_grad_(self) -> list[Any]:
+        """Zero graph-owned gradient accumulators.
+
+        Calling convention:
+            ``zero_grad_() -> flat_gradient_accumulators``
+        """
+
     def unshard_params(
         self,
         flat_param_values: list[Any],
