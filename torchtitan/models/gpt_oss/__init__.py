@@ -30,10 +30,10 @@ from torchtitan.models.common.config_utils import (
     make_token_dispatcher_config,
 )
 from torchtitan.models.common.linear import PartialBiasRowwiseLinear
-from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from .model import Attention, GptOssModel, GptOssTransformerBlock
-from .moe import GptOssGroupedLinear, GptOssMoE, GptOssSwiGLU
+from .moe import GptOssGroupedLinear, GptOssSwiGLU
 
 __all__ = [
     "GptOssModel",
@@ -199,7 +199,7 @@ def _build_gptoss_layers(
             moe_comm_backend=moe_comm_backend,
             non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
-        moe_cfg = GptOssMoE.Config(
+        moe_cfg = MoE.Config(
             num_experts=num_experts,
             load_balance_coeff=load_balance_coeff,
             routed_experts=routed_experts_cfg,
