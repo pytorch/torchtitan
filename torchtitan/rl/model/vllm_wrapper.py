@@ -329,6 +329,7 @@ class VLLMModelWrapper(Module):
             pp=training_parallelism.pipeline_parallel_degree,
             ep=training_parallelism.expert_parallel_degree,
             world_size=dist.get_world_size(),
+            enable_sequence_parallel=training_parallelism.enable_sequence_parallel,
         )
 
         # Fill sharding configs on the config BEFORE build so every sub-module
@@ -560,13 +561,6 @@ class VLLMModelWrapper(Module):
             if sharding_config is not None:
                 for state_name, layout in sharding_config.state_shardings.items():
                     layouts[f"{module_prefix}{state_name}"] = layout
-
-                # Fused grouped experts expose split gate/up state-dict keys
-                # while the layout is declared on the fused w13 parameter.
-                w13_layout = sharding_config.state_shardings.get("w13")
-                if w13_layout is not None:
-                    for state_name in ("w1_EFD", "w3_EFD"):
-                        layouts[f"{module_prefix}{state_name}"] = w13_layout
 
             if module_fqn.rsplit(".", 1)[-1] == "vllm_attn":
                 for buffer_name, _ in module.named_buffers(recurse=False):

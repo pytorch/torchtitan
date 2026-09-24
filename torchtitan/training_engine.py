@@ -626,11 +626,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         for accumulation_index, prepared_inputs in enumerate(microbatch_groups):
             is_last_accumulation_step = accumulation_index == num_accumulation_steps - 1
 
-            if (
-                not defer_fsdp_gradient_reduction
-                and self.parallel_dims.dp_replicate_enabled
-            ):
-                # Reduce shards every group, then all-reduce replicas once.
+            if self.parallel_dims.dp_replicate_enabled:
+                # All-reduce HSDP replicas only with the final accumulated gradient.
                 for model_part in self.model_parts:
                     fsdp_root = cast(FSDPModule, model_part)
                     fsdp_root.set_requires_all_reduce(is_last_accumulation_step)

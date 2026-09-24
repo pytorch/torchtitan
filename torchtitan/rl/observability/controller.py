@@ -10,11 +10,14 @@
 # but components/ may not be the right home either.
 
 import contextlib
+import logging
 import time
 from collections import defaultdict
 
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Rollout
+
+logger = logging.getLogger(__name__)
 
 
 class MetricsTimer:
@@ -169,37 +172,40 @@ def compute_policy_age_metrics(
     trainer_policy_version: int,
     min_policy_versions: list[int],
     target_offpolicy_steps: int,
-    max_offpolicy_steps: int,
+    max_offpolicy_steps: int | None,
 ) -> list[m.Metric]:
     """Age of each packed training sample at the moment the trainer consumes the batch.
 
     Computed in the trainer loop (not at pack time) so the logged age is faithful to the version the
-    batch actually trains against, and so the consume-time freshness invariant is checked here.
+    batch actually trains against. Without a bound (`max_offpolicy_steps=None`) samples older than the
+    target are counted and warned about, never rejected. With a bound, exceeding it is an invariant
+    failure: the window makes it impossible.
 
     Args:
         trainer_policy_version: Policy version that will consume this batch.
         min_policy_versions: Oldest sampled policy version for each packed training sample.
-        target_offpolicy_steps: Target steady-state offpolicy steps used to size
-            the active buffer.
-        max_offpolicy_steps: Hard consume-time offpolicy step limit derived from
-            ``window_fraction``.
+        target_offpolicy_steps: Target mean offpolicy steps used to size the active buffer.
+        max_offpolicy_steps: Hard consume-time offpolicy step limit, `target + windowed_fifo_batches`;
+            None when there is no window.
 
     Example:
-        # trainer at v=10; training samples' oldest versions [8, 9] -> ages [2, 1]
+        # trainer at v=10; training samples' oldest versions [8, 9, 5] -> ages [2, 1, 5]
         compute_policy_age_metrics(
             trainer_policy_version=10,
-            min_policy_versions=[8, 9],
+            min_policy_versions=[8, 9, 5],
             target_offpolicy_steps=3,
-            max_offpolicy_steps=3,
+            max_offpolicy_steps=None,
         )
-        # -> train_batch/policy_age mean 1.5, train_batch/policy_age_max 2
+        # -> train_batch/policy_age mean 2.67, train_batch/policy_age_max 5,
+        #    train_batch/pct_samples_over_target_age 33.3, one logger.warning (uncapped, 5 > 3)
+        # with max_offpolicy_steps=4 the same batch raises RuntimeError (5 > 4)
     """
     policy_ages = [
         trainer_policy_version - min_policy_version
         for min_policy_version in min_policy_versions
     ]
     max_policy_age = max(policy_ages, default=0)
-    if max_policy_age > max_offpolicy_steps:
+    if max_offpolicy_steps is not None and max_policy_age > max_offpolicy_steps:
         raise RuntimeError(
             "rollout backpressure admitted stale training data: "
             f"max_policy_age={max_policy_age}, "
@@ -207,9 +213,25 @@ def compute_policy_age_metrics(
             f"max_offpolicy_steps={max_offpolicy_steps}, "
             f"trainer_policy_version={trainer_policy_version}"
         )
+    num_samples_over_target_age = sum(
+        policy_age > target_offpolicy_steps for policy_age in policy_ages
+    )
+    pct_samples_over_target_age = 100.0 * num_samples_over_target_age / len(policy_ages)
+    if max_offpolicy_steps is None and num_samples_over_target_age:
+        logger.warning(
+            f"Training batch contains {num_samples_over_target_age} samples "
+            f"({pct_samples_over_target_age:.1f}%) older than target_offpolicy_steps={target_offpolicy_steps} "
+            f"(max_policy_age={max_policy_age}, trainer_policy_version={trainer_policy_version}). "
+            "Oldest-ready consumption with no cap trains these instead of dropping them; "
+            "frequent hits indicate a heavy generation tail."
+        )
     return [
         m.Metric("train_batch/policy_age", m.Mean.from_list(policy_ages)),
         m.Metric("train_batch/policy_age_max", m.NoReduce(float(max_policy_age))),
+        m.Metric(
+            "train_batch/pct_samples_over_target_age",
+            m.NoReduce(pct_samples_over_target_age),
+        ),
     ]
 
 

@@ -288,6 +288,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
     def _make_fsdp_model(self, dim=16, n_layers=3):
@@ -578,7 +579,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.moe.router",
                     "layers.1.moe.shared_experts",
                 ],
-                "layers.1.moe.routed_experts.inner_experts",
+                [
+                    "layers.1.moe.routed_experts.w13",
+                    "layers.1.moe.routed_experts.w2",
+                ],
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -653,7 +657,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
             )
             for plan_fqn in (
                 "layers.1.attention",
-                "layers.1.moe.routed_experts.inner_experts",
+                "layers.1.moe.routed_experts.w13",
             )
         ]
         fwd_dense1 = self._tag_fsdp_schedule_node(
@@ -678,7 +682,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
             )
             for plan_fqn in (
                 "layers.0.attention",
-                "layers.0.moe.routed_experts.inner_experts",
+                "layers.0.moe.routed_experts.w13",
             )
         ]
         bwd_dense0 = self._tag_fsdp_schedule_node(
@@ -778,14 +782,14 @@ class TestFsdpDenseSchedulerPass(TestCase):
             shared_prep,
             [
                 "layers.1.attention",
-                "layers.1.moe.routed_experts.inner_experts",
+                "layers.1.moe.routed_experts.w13",
             ],
             "fwd",
         )
         buckets = []
         for plan_fqn in (
             "layers.1.attention",
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts.w13",
         ):
             bucket = graph.call_function(
                 torch.ops.bucketing._pre_bucket_all_gather.default,
@@ -1704,12 +1708,12 @@ class TestFsdpDenseSchedulerPass(TestCase):
                 c10d.all_to_all_single.default,
                 args=(ffn_norm, [], [], "ep_pg"),
             ),
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts",
             backward=True,
         )
         moe_dispatch_wait = self._tag_fsdp_schedule_node(
             graph.call_function(c10d.wait_tensor.default, args=(moe_dispatch,)),
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts",
             backward=True,
         )
         dense1_attention = self._tag_fsdp_schedule_node(
@@ -1785,6 +1789,7 @@ class TestOverlapPgIsolationPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
     def _get_fsdp_pg_name(self):
@@ -1935,6 +1940,30 @@ class TestApplySACPass(TestCase):
     def _get_call_function_nodes(self, gm):
         """Return all call_function nodes from the graph."""
         return [n for n in gm.graph.nodes if n.op == "call_function"]
+
+    def test_none_policy_disables_activation_rematerialization(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 2))
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(memory_policy="none")
+        )
+        tag_with_memory_policy_pass(gm, config=config)
+        selective_activation_remat_pass(gm)
+
+        self.assertEqual(fwd.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertFalse(
+            any(
+                node.name.endswith("_recomputed")
+                for node in gm.graph.nodes
+                if node.op == "call_function"
+            )
+        )
 
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""
@@ -2676,6 +2705,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
         model_config = llama3_model_registry("debugmodel")
@@ -4404,7 +4434,13 @@ class TestChunkPasses(TestCase):
             ],
             buckets,
         )
-        self.assertIn("layers.1.moe.routed_experts.inner_experts", buckets)
+        self.assertIn(
+            [
+                "layers.1.moe.routed_experts.w13",
+                "layers.1.moe.routed_experts.w2",
+            ],
+            buckets,
+        )
         self.assertNotIn("layers.1", buckets)
 
     def test_prepare_ep_overlap_trace_inputs_marks_batch_dims(self):

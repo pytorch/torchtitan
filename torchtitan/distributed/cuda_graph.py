@@ -118,7 +118,50 @@ class CUDAGraphInputSpec:
 
 
 class CUDAGraphGradientState:
-    """Keep capture-created parameter gradients alive across graph replays."""
+    """Keep capture-created parameter gradients alive across graph replays.
+
+    Why this state can reduce memory use:
+
+    1. ``set_to_none=True`` without ``CUDAGraphGradientState`` fails after the
+       first capture.
+       Autograd allocates a gradient during capture and assigns it to
+       ``param.grad``. The next ``zero_grad`` clears that Python reference.
+       CUDA graph replay runs the captured GPU work, but it does not repeat the
+       ``param.grad`` assignment. The optimizer then sees ``param.grad is None``
+       and skips the parameter update.
+
+    2. ``set_to_none=False`` avoids that failure, but eager warmup allocates the
+       gradient before capture, outside the CUDA graph memory pool. Capture only
+       records writes into that existing gradient buffer. Its lifetime overlaps
+       the complete forward-backward graph::
+
+           time           forward             backward          optimizer
+           gradient       [===============================================]
+           forward temp   [==========]
+           backward temp                       [=========]
+
+       The graph allocator cannot reuse the gradient storage for these temporary
+       tensors because their lifetimes overlap.
+
+    3. With ``CUDAGraphGradientState``, ``set_to_none=True`` leaves gradients
+       absent when capture starts. Autograd allocates them from the CUDA graph
+       memory pool during backward, after many forward tensors have expired::
+
+           time           forward             backward          optimizer
+           forward temp   [==========]
+           gradient                            [=========================]
+           shared block   [forward temp]       [gradient                 ]
+
+       During capture, the CUDA graph pool may reuse storage released by forward
+       tensors for later gradients. This state then keeps those gradient tensors
+       alive and restores each ``param.grad`` reference after replay. This makes
+       ``set_to_none=True`` safe.
+
+    Args:
+        parameters: Parameters whose capture-created ``.grad`` tensors are
+            recorded and restored. Parameters that do not require gradients and
+            duplicate parameters are ignored.
+    """
 
     def __init__(self, parameters: Iterable[torch.nn.Parameter]) -> None:
         unique_parameters: list[torch.nn.Parameter] = []
@@ -127,38 +170,42 @@ class CUDAGraphGradientState:
             if parameter.requires_grad and id(parameter) not in seen:
                 seen.add(id(parameter))
                 unique_parameters.append(parameter)
-        self.parameters = tuple(unique_parameters)
-        self._gradients: tuple[
+        self._parameters = tuple(unique_parameters)
+        self._captured_parameter_gradients: tuple[
             tuple[torch.nn.Parameter, torch.Tensor], ...
         ] | None = None
 
     def require_cleared(self) -> None:
-        if any(parameter.grad is not None for parameter in self.parameters):
+        if any(parameter.grad is not None for parameter in self._parameters):
             raise RuntimeError(
                 "All parameter gradients must be None before CUDA graph capture "
                 "and replay."
             )
 
     def record(self) -> None:
-        assert self._gradients is None, "CUDA graph gradients were already recorded"
-        self._gradients = tuple(
+        assert (
+            self._captured_parameter_gradients is None
+        ), "CUDA graph gradients were already recorded"
+        self._captured_parameter_gradients = tuple(
             (parameter, gradient)
-            for parameter in self.parameters
+            for parameter in self._parameters
             if (gradient := parameter.grad) is not None
         )
 
     def restore(self) -> None:
-        assert self._gradients is not None, "CUDA graph gradients were not recorded"
-        for parameter, gradient in self._gradients:
+        assert (
+            self._captured_parameter_gradients is not None
+        ), "CUDA graph gradients were not recorded"
+        for parameter, gradient in self._captured_parameter_gradients:
             parameter.grad = gradient
 
     def teardown(self) -> None:
-        if self._gradients is None:
+        if self._captured_parameter_gradients is None:
             return
-        for parameter, gradient in self._gradients:
+        for parameter, gradient in self._captured_parameter_gradients:
             if parameter.grad is gradient:
                 parameter.grad = None
-        self._gradients = None
+        self._captured_parameter_gradients = None
 
 
 class _CUDAGraphManager:
