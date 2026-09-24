@@ -144,7 +144,9 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
             (1, 1),
             mesh_dim_names=("replicate", "shard"),
         )
-        local_weight = torch.arange(8 * 2 * 3, dtype=torch.float32).reshape(8, 2, 3)
+        local_weight = torch.arange(8 * 2 * 2 * 3, dtype=torch.float32).reshape(
+            8, 2, 2, 3
+        )
         grouped_expert_weight = DTensor.from_local(
             local_weight,
             mesh,
@@ -153,21 +155,23 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         )
 
         hf_state_dict = adapter.to_hf(
-            {"layers.1.moe.routed_experts.inner_experts.w1_EFD": grouped_expert_weight}
+            {"layers.1.moe.routed_experts.w13.weight": grouped_expert_weight}
         )
 
         expected_keys = {
-            f"model.layers.1.mlp.experts.{expert}.gate_proj.weight"
+            f"model.layers.1.mlp.experts.{expert}.{projection}_proj.weight"
             for expert in range(8)
+            for projection in ("gate", "up")
         }
         self.assertEqual(set(hf_state_dict), expected_keys)
         for expert in range(8):
-            key = f"model.layers.1.mlp.experts.{expert}.gate_proj.weight"
-            self.assertIsInstance(hf_state_dict[key], DTensor)
-            torch.testing.assert_close(
-                hf_state_dict[key].to_local(),
-                local_weight[expert],
-            )
+            for index, projection in enumerate(("gate", "up")):
+                key = f"model.layers.1.mlp.experts.{expert}.{projection}_proj.weight"
+                self.assertIsInstance(hf_state_dict[key], DTensor)
+                torch.testing.assert_close(
+                    hf_state_dict[key].to_local(),
+                    local_weight[expert, index],
+                )
 
     def test_roundtrip_preserves_mtp_expert_placements(self) -> None:
         build_config, _ = deepseekv3_configs["debugmodel"]
@@ -179,13 +183,19 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         )
         adapter = DeepSeekV3StateDictAdapter(config, hf_assets_path=None)
         mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("ep",))
-        local_weight = torch.arange(8 * 2 * 3, dtype=torch.float32).reshape(8, 2, 3)
-        weight = DTensor.from_local(local_weight, mesh, (Shard(0),), run_check=False)
-        key = "mtp_layers.0.moe.routed_experts.inner_experts.w1_EFD"
-        restored = adapter.from_hf(adapter.to_hf({key: weight}))
-        self.assertIsInstance(restored[key], DTensor)
-        self.assertEqual(restored[key].placements, weight.placements)
-        torch.testing.assert_close(restored[key], weight, rtol=0, atol=0)
+        local_weight = torch.arange(8 * 2 * 2 * 3, dtype=torch.float32).reshape(
+            8, 2, 2, 3
+        )
+        key = "mtp_layers.0.moe.routed_experts.w13.weight"
+        for placement in (Shard(0), Shard(2)):
+            with self.subTest(placement=placement):
+                weight = DTensor.from_local(
+                    local_weight, mesh, (placement,), run_check=False
+                )
+                restored = adapter.from_hf(adapter.to_hf({key: weight}))
+                self.assertIsInstance(restored[key], DTensor)
+                self.assertEqual(restored[key].placements, weight.placements)
+                torch.testing.assert_close(restored[key], weight, rtol=0, atol=0)
 
 
 class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
@@ -209,6 +219,21 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
 
                 adapter = DeepSeekV4StateDictAdapter(config, hf_assets_path=None)
                 hf_state_dict = adapter.to_hf(state_dict)
+                self.assertFalse(
+                    any("routed_experts.w13" in key for key in hf_state_dict)
+                )
+                self.assertTrue(
+                    any(
+                        ".ffn.experts." in key and key.endswith(".w1.weight")
+                        for key in hf_state_dict
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        ".ffn.experts." in key and key.endswith(".w3.weight")
+                        for key in hf_state_dict
+                    )
+                )
                 for depth in range(num_mtp_layers):
                     sink_key = f"mtp.{depth}.attn.attn_sink"
                     torch.testing.assert_close(
@@ -246,7 +271,9 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                 model.init_states()
                 mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("ep",))
                 for key, value in model.state_dict().items():
-                    if "moe.routed_experts.inner_experts" in key:
+                    if ".moe.routed_experts.w13." in key or key.endswith(
+                        ".moe.routed_experts.w2.weight"
+                    ):
                         module_path, name = key.rsplit(".", 1)
                         weight = DTensor.from_local(
                             value.clone(), mesh, (Shard(0),), run_check=False
@@ -281,7 +308,8 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
         # small enough for a CPU unit test.
         for layer_config in config.layers:
             assert layer_config.moe is not None
-            layer_config.moe.routed_experts.inner_experts.hidden_dim = 16
+            layer_config.moe.routed_experts.w13.out_features = 16
+            layer_config.moe.routed_experts.w2.in_features = 16
 
         model = config.build()
         model.init_states()

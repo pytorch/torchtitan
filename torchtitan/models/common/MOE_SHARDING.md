@@ -41,5 +41,5 @@ dispatch and computation.
   boundary reduces `Partial` to `Shard(0)` before the paths are added.
 - **Routed experts** (`RoutedExperts`): the local SPMD region runs
   dispatch/compute/combine on local tensors while checking its input and
-  output layout contracts. The expert-weight `state_shardings` live on its
-  `GroupedExperts` child and are unsharded when EP and dense TP are disabled.
+  output layout contracts. Expert-weight `state_shardings` live on its `w13`
+  and `w2` grouped linears and are unsharded when EP is disabled.

@@ -80,6 +80,21 @@ def test_batcher_counts_trainable_groups_not_rollouts() -> None:
     assert group_is_trainable
 
 
+def test_batcher_packs_groups_in_id_order_regardless_of_arrival() -> None:
+    batcher = _build_batcher(num_prompts_per_train_step=2)
+    late_group = _trainable_group(7, num_samples=1)
+    early_group = _trainable_group(3, num_samples=1)
+    late_group.training_samples[0].min_policy_version = 7
+    early_group.training_samples[0].min_policy_version = 3
+
+    # g7 finishes first; the packed batch still lists g3 before g7.
+    batcher.add_training_samples(training_sample_group=late_group)
+    batch, _ = batcher.add_training_samples(training_sample_group=early_group)
+
+    assert batch is not None
+    assert batch.min_policy_versions == [3, 7]
+
+
 def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     # Metric-only (empty) groups do not count toward the target and cannot form a zero-token batch;
     # they ride along until a trainable group completes the batch.
@@ -304,7 +319,9 @@ def test_rollout_id_to_string_is_callable_and_uses_int_group_id() -> None:
 
 def test_take_finalized_does_not_release_active_slot() -> None:
     async def run() -> None:
-        buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
+        buffer = RolloutGroupWorkBuffer.Config().build(
+            max_active_rollout_groups=1, window_size=None
+        )
         if not await buffer.wait_for_slot():
             raise RuntimeError("buffer closed unexpectedly")
         await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
@@ -323,7 +340,9 @@ def test_take_finalized_does_not_release_active_slot() -> None:
 
 def test_untrainable_group_releases_before_training() -> None:
     async def run() -> None:
-        buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
+        buffer = RolloutGroupWorkBuffer.Config().build(
+            max_active_rollout_groups=1, window_size=None
+        )
         batcher = Batcher.Config().build(
             num_tokens_per_microbatch_per_dp_rank=16384,
             max_context_length=2048,
@@ -350,24 +369,17 @@ def test_untrainable_group_releases_before_training() -> None:
     asyncio.run(run())
 
 
-def test_compute_policy_age_metrics_raises_on_consume_time_staleness() -> None:
-    with pytest.raises(RuntimeError, match="admitted stale training data"):
-        compute_policy_age_metrics(
-            trainer_policy_version=4,
-            min_policy_versions=[0],
-            target_offpolicy_steps=3,
-            max_offpolicy_steps=3,
-        )
-
-
-def test_compute_policy_age_metrics_uses_hard_offpolicy_limit() -> None:
+def test_compute_policy_age_metrics_raises_beyond_cap() -> None:
+    # cap 4 (S=3, windowed_fifo_batches=1): age 4 passes, age 5 raises
     metrics = compute_policy_age_metrics(
         trainer_policy_version=4,
         min_policy_versions=[0],
         target_offpolicy_steps=3,
         max_offpolicy_steps=4,
     )
-    assert any(metric.key == "train_batch/policy_age_max" for metric in metrics)
+    aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert aggregated["train_batch/policy_age_max"] == 4
+    assert aggregated["train_batch/pct_samples_over_target_age"] == 100.0
 
     with pytest.raises(RuntimeError, match="admitted stale training data"):
         compute_policy_age_metrics(
@@ -378,16 +390,48 @@ def test_compute_policy_age_metrics_uses_hard_offpolicy_limit() -> None:
         )
 
 
-def _fifo_buffer(*, capacity: int, window_size: int = 1) -> RolloutGroupWorkBuffer:
-    return RolloutGroupWorkBuffer.Config().build(
-        max_active_rollout_groups=capacity,
-        window_size=window_size,
+def test_compute_policy_age_metrics_uncapped_trains_over_target_age_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # no cap; one sample comes back at age S+3=6: counted and warned, not raised
+    with caplog.at_level(logging.WARNING):
+        metrics = compute_policy_age_metrics(
+            trainer_policy_version=10,
+            min_policy_versions=[4, 9, 8],
+            target_offpolicy_steps=3,
+            max_offpolicy_steps=None,
+        )
+
+    aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert aggregated["train_batch/policy_age/mean"] == 3
+    assert aggregated["train_batch/policy_age_max"] == 6
+    assert aggregated["train_batch/pct_samples_over_target_age"] == pytest.approx(
+        100 / 3
     )
+    assert "1 samples (33.3%) older than target_offpolicy_steps=3" in caplog.text
 
 
-def test_work_buffer_rejects_window_larger_than_capacity() -> None:
-    with pytest.raises(ValueError, match="window_size"):
-        _fifo_buffer(capacity=2, window_size=3)
+def test_compute_policy_age_metrics_uncapped_is_quiet_within_target(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        metrics = compute_policy_age_metrics(
+            trainer_policy_version=10,
+            min_policy_versions=[7, 9],
+            target_offpolicy_steps=3,
+            max_offpolicy_steps=None,
+        )
+
+    aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert aggregated["train_batch/policy_age/mean"] == 2
+    assert aggregated["train_batch/pct_samples_over_target_age"] == 0.0
+    assert caplog.text == ""
+
+
+def _buffer(*, capacity: int, window_size: int | None) -> RolloutGroupWorkBuffer:
+    return RolloutGroupWorkBuffer.Config().build(
+        max_active_rollout_groups=capacity, window_size=window_size
+    )
 
 
 async def _admit(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
@@ -402,11 +446,12 @@ async def _finalize(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
 
 def test_windowed_fifo_takes_within_anchored_window() -> None:
     async def run() -> None:
-        # Window [g0, g3]: g1/g2/g3 may bypass stuck g0; g4 remains blocked.
-        buffer = _fifo_buffer(capacity=8, window_size=4)
+        # P=4, windowed_fifo_batches=1 -> window of 4 ids [g0, g3]: g1/g2/g3 may bypass stuck g0; g4 waits.
+        buffer = _buffer(capacity=8, window_size=4)
         for group_id in range(5):
             await _admit(buffer, group_id)
-        await buffer.claim_next()  # g0 -> INFLIGHT and stuck
+        claimed_group_ids = [(await buffer.claim_next()).group_id for _ in range(5)]
+        assert claimed_group_ids == [0, 1, 2, 3, 4]
         for group_id in (1, 2, 3, 4):
             await _finalize(buffer, group_id)
 
@@ -419,7 +464,41 @@ def test_windowed_fifo_takes_within_anchored_window() -> None:
         assert not taker.done()  # g4 is finalized but outside the anchored window
 
         await _finalize(buffer, 0)
-        assert (await taker).group_id == 0
+        await asyncio.sleep(0)
+        assert taker.done()
+        assert taker.result().group_id == 0
         assert (await buffer.take_finalized()).group_id == 4
+
+    asyncio.run(run())
+
+
+def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
+    async def run() -> None:
+        # S=1, P=4 -> 8 slots, no window. g0..g4 INFLIGHT; g0 never finishes; g1..g4 finish out of id order.
+        buffer = _buffer(capacity=8, window_size=None)
+        for group_id in range(8):
+            await _admit(buffer, group_id)
+        claimed_group_ids = [(await buffer.claim_next()).group_id for _ in range(5)]
+        assert claimed_group_ids == [0, 1, 2, 3, 4]
+        for group_id in (3, 1, 4, 2):
+            await _finalize(buffer, group_id)
+
+        # A full batch of P=4 is taken oldest-ready first, without waiting on g0.
+        for expected_group_id in (1, 2, 3, 4):
+            taker = asyncio.create_task(buffer.take_finalized())
+            await asyncio.sleep(0)
+            assert taker.done()
+            assert taker.result().group_id == expected_group_id
+
+        # The remaining wait is for generation (nothing finalized), not for the head g0.
+        taker = asyncio.create_task(buffer.take_finalized())
+        await asyncio.sleep(0)
+        assert not taker.done()
+        await buffer.claim_next()  # g5 -> INFLIGHT
+        await buffer.claim_next()  # g6 -> INFLIGHT
+        await _finalize(buffer, 6)
+        await asyncio.sleep(0)
+        assert taker.done()
+        assert taker.result().group_id == 6
 
     asyncio.run(run())
