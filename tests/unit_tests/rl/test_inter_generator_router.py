@@ -64,13 +64,72 @@ class _Actor:
 
 
 def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
-    return InterGeneratorRouter(
-        InterGeneratorRouter.Config(
-            strategy=strategy or LeastLoadedRoutingStrategy.Config(),
-            hot_swap=hot_swap,
-        ),
-        generators=actors,
-    )
+    config = InterGeneratorRouter.Config(hot_swap=hot_swap)
+    if strategy is not None:
+        config.strategy = strategy
+    return InterGeneratorRouter(config, generators=actors)
+
+
+def test_default_sticks_to_generator_and_balances_new_sessions():
+    async def _run():
+        actors = [
+            _Actor("gen0", wait_generate=True),
+            _Actor("gen1", wait_generate=True),
+        ]
+        router = _router(actors)
+        assert isinstance(router._config.strategy, StickySessionRoutingStrategy.Config)
+
+        first = asyncio.create_task(
+            router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+        )
+        await actors[0].generate.started.wait()
+
+        # Reuse the pinned generator even though a second generator is idle.
+        second = asyncio.create_task(
+            router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+        )
+        await asyncio.sleep(0)
+        assert len(actors[0].generate.calls) == 2
+        assert actors[1].generate.calls == []
+
+        # A new session still chooses the least-loaded generator.
+        third = asyncio.create_task(
+            router._route("generate", routing_ctx=RoutingContext(session_id="s1"))
+        )
+        await actors[1].generate.started.wait()
+
+        for actor in actors:
+            actor.generate.release.set()
+        assert await first == "gen0"
+        assert await second == "gen0"
+        assert await third == "gen1"
+
+    asyncio.run(_run())
+
+
+def test_default_uses_least_loaded_for_requests_without_a_session():
+    async def _run():
+        actors = [
+            _Actor("gen0", wait_generate=True),
+            _Actor("gen1", wait_generate=True),
+        ]
+        router = _router(actors)
+
+        first = asyncio.create_task(
+            router._route("generate", routing_ctx=RoutingContext())
+        )
+        await actors[0].generate.started.wait()
+        second = asyncio.create_task(
+            router._route("generate", routing_ctx=RoutingContext())
+        )
+        await actors[1].generate.started.wait()
+
+        for actor in actors:
+            actor.generate.release.set()
+        assert await first == "gen0"
+        assert await second == "gen1"
+
+    asyncio.run(_run())
 
 
 def test_least_loaded_routes_to_lowest_reserved_load():
@@ -79,7 +138,7 @@ def test_least_loaded_routes_to_lowest_reserved_load():
             _Actor("gen0", wait_generate=True),
             _Actor("gen1", wait_generate=True),
         ]
-        router = _router(actors)
+        router = _router(actors, strategy=LeastLoadedRoutingStrategy.Config())
 
         first = asyncio.create_task(
             router._route("generate", routing_ctx=RoutingContext(estimated_cost=3))
@@ -123,7 +182,7 @@ def test_route_releases_reserved_load_on_failure():
 def test_least_loaded_tie_break_spreads_over_a_changing_candidate_set():
     async def _run():
         actors = [_Actor(f"gen{i}") for i in range(4)]
-        router = _router(actors)
+        router = _router(actors, strategy=LeastLoadedRoutingStrategy.Config())
 
         # gen1 drains for a weight sync on every other request, so the candidate
         # set alternates between four and three generators. Each route finishes
