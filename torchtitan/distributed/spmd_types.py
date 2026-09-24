@@ -16,13 +16,8 @@ from typing import Any
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.parallel_dims import (
-    MeshAxisName,
-    ParallelDims,
-    unfold_dp_axes,
-)
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 
 
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
@@ -33,11 +28,9 @@ __all__ = [
     "annotate_input_spmd_types",
     "annotate_replicated_parameters",
     "current_spmd_mesh",
-    "dtensor_to_plain_tensor_state_dict",
     "spmd_axes",
     "spmd_local_context",
     "maybe_set_sparse_mesh",
-    "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
     "spmd_dense_sp_enabled",
     "spmd_mesh_group",
@@ -64,48 +57,6 @@ def spmd_axes(layout: spmd.SpmdType) -> tuple[MeshAxisName, ...]:
             )
         axes.append(MeshAxisName(axis))
     return tuple(axes)
-
-
-def plain_tensor_to_dtensor_state_dict(
-    state_dict: dict[str, Any],
-    *,
-    state_dict_layouts: Mapping[str, spmd.SpmdType],
-    parallel_dims: ParallelDims,
-) -> dict[str, Any]:
-    """Represent plain local state tensors as DTensors for state transfer."""
-    from torchtitan.protocols.sharding import resolve_placements
-
-    dtensor_state_dict = dict(state_dict)
-    with torch.no_grad():
-        for name, target in state_dict.items():
-            if not isinstance(target, torch.Tensor) or isinstance(target, DTensor):
-                continue
-
-            layout = state_dict_layouts.get(name)
-            if layout is None:
-                raise KeyError(f"{name} is missing SPMD layout metadata")
-
-            mesh = parallel_dims.get_activated_mesh(unfold_dp_axes(spmd_axes(layout)))
-            if mesh is None:
-                continue
-
-            dtensor_state_dict[name] = DTensor.from_local(
-                target,
-                mesh,
-                resolve_placements(layout, mesh),
-                run_check=False,
-            )
-    return dtensor_state_dict
-
-
-def dtensor_to_plain_tensor_state_dict(
-    state_dict: dict[str, Any],
-) -> dict[str, Any]:
-    """Replace DTensor state-dict entries with their plain local tensors."""
-    return {
-        name: value.to_local() if isinstance(value, DTensor) else value
-        for name, value in state_dict.items()
-    }
 
 
 def set_spmd_meshes(
