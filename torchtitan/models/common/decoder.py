@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -32,6 +32,8 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher_config
+from torchtitan.models.flops import active_parameter_flops_per_unit
+from torchtitan.protocols import FlopsEstimator
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -129,6 +131,33 @@ class Decoder(BaseModel):
                 (layer.moe for layer in self.layers if layer.moe is not None),
                 None,
             )
+
+        def _layer_flops_per_token(self, layer_config: Any, seq_len: int) -> int:
+            return layer_config.attention.flops_per_token(seq_len)
+
+        def _decoder_flops_per_token(
+            self,
+            model: torch.nn.Module,
+            seq_len: int,
+            *,
+            excluded_modules: Iterable[torch.nn.Module | None] = (),
+        ) -> int:
+            return active_parameter_flops_per_unit(
+                model,
+                excluded_modules=excluded_modules,
+            ) + sum(
+                self._layer_flops_per_token(layer_config, seq_len)
+                for layer_config in self.layers
+            )
+
+        def build_flops_estimator(
+            self,
+            model: torch.nn.Module,
+            *,
+            seq_len: int,
+        ) -> FlopsEstimator:
+            decoder_flops_per_token = self._decoder_flops_per_token(model, seq_len)
+            return lambda batch: decoder_flops_per_token * batch["input"].numel()
 
         def update_from_config(
             self,

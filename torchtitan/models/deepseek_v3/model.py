@@ -5,12 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import math
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
-from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
@@ -24,10 +22,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 from torchtitan.protocols.module import Module
 
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
@@ -62,6 +57,14 @@ class Attention(BaseAttention):
             default_factory=FlexInnerAttention.Config
         )
         mscale: float = 1.0
+
+        def flops_per_token(self, seq_len: int) -> int:
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                seq_len=seq_len,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -215,41 +218,6 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         return x
 
 
-def get_deepseek_v3_nparams_and_flops(
-    model_config: MTPDecoder.Config,
-    model: nn.Module,
-    seq_len: int,
-    *,
-    modules_excluded_from_active_params: Iterable[nn.Module | None] = (),
-) -> tuple[int, int]:
-    """Estimate DeepSeek-style decoder FLOPs from the final model config."""
-    nparams, active_nparams = get_nparams_and_active_nparams(
-        model,
-        modules_excluded_from_active_params=modules_excluded_from_active_params,
-    )
-
-    attention_op_flops = 0
-    for layers in (model_config.layers, model_config.mtp_layers):
-        for layer in layers:
-            attention = layer.attention
-            attention_op_flops += quadratic_attention_flops_per_token(
-                num_heads=attention.n_heads,
-                qk_head_dim=(attention.qk_nope_head_dim + attention.qk_rope_head_dim),
-                v_head_dim=attention.v_head_dim,
-                seq_len=seq_len,
-            )
-
-    # The base parameter term counts one lm_head use. MTP applies that same
-    # output projection once more for every prediction depth.
-    lm_head = getattr(model, "lm_head", None)
-    if isinstance(lm_head, nn.Module):
-        active_nparams += len(model_config.mtp_layers) * sum(
-            param.numel() for param in lm_head.parameters()
-        )
-
-    return nparams, 6 * active_nparams + attention_op_flops
-
-
 class DeepSeekV3Model(MTPDecoder):
     state_dict_adapter_cls = DeepSeekV3StateDictAdapter
 
@@ -280,11 +248,6 @@ class DeepSeekV3Model(MTPDecoder):
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
 
     @classmethod
     def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:

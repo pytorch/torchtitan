@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, ClassVar, Self, TYPE_CHECKING
+from typing import Any, ClassVar, Self, TYPE_CHECKING, TypeAlias
 
 import torch
 
@@ -16,6 +17,8 @@ from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 from .module import Module
+
+FlopsEstimator: TypeAlias = Callable[[Mapping[str, Any]], int]
 
 if TYPE_CHECKING:
     from torchtitan.components.optimizer import OptimizersContainer
@@ -97,8 +100,20 @@ class BaseModel(Module, ABC):
         ) -> None:
             pass
 
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            """Return total and architecturally active parameter counts."""
+            from torchtitan.models.flops import get_parameter_counts as count_parameters
+
+            return count_parameters(model)
+
         @abstractmethod
-        def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+        ) -> FlopsEstimator:
+            """Build a CPU estimator for logical FLOPs in one raw input batch."""
             pass
 
     state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None

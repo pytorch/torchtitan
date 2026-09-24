@@ -12,7 +12,7 @@ The folder should be organized as follows
   - NOTE: We prioritize readability over flexibility. The preferred style is to not share modules among different models, except for the most common and complicated ones.
   - Define a Model class inheriting from a base model (e.g. `Decoder` from `torchtitan/models/common/decoder.py`).
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
-    - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
+    - `build_flops_estimator()` builds the model-owned callback used to estimate the work of each input batch. See [Batch FLOP estimation](#batch-flop-estimation).
     - `update_from_config()` updates the model config from training configs (e.g. syncing seq_len, handling hardware-specific settings).
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model config registry. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
@@ -52,6 +52,73 @@ The folder should be organized as follows
   - Include instructions to download model checkpoints for continued pretraining or post training.
   - Update the current status of development, including the supported features and coming features.
   - This is optional for offline exploration.
+
+## Batch FLOP estimation
+
+TorchTitan asks each model to estimate the training work for the raw batch it
+receives. The result is a model-wide logical FLOP count; device-parallel scaling
+is handled later by the metrics code.
+
+### Lifecycle
+
+1. `TrainingEngine` calls `model_config.build_flops_estimator(model, seq_len=...)`
+   once, while the complete model is still available.
+2. The returned callback is called for every raw, DP-rank-local CPU batch, before
+   device transfer, model preprocessing, or context-parallel sharding.
+3. The trainer accumulates those estimates until the next metrics report.
+
+The callback interface is:
+
+```python
+def estimate_flops(batch: Mapping[str, Any]) -> int:
+    ...
+```
+
+### Fixed-shape decoders
+
+`Decoder.Config` implements the common case. It computes a cached cost per token
+from:
+
+- `6 x` the active matrix-multiplication parameters, excluding embedding
+  lookups; and
+- each layer attention or sequence-mixer cost.
+
+The callback multiplies that value by `batch["input"].numel()`. Attention and
+delta-rule configs own their formulas because they know details such as head
+dimensions, sliding windows, and recurrent state sizes. Decoder variants only
+override the layer or decoder aggregation when the architecture does extra work,
+such as MTP.
+
+For MoE modules, active parameter accounting uses the expected fraction
+`top_k / num_experts`. `get_parameter_counts()` separately reports total and
+active architectural parameter counts, including embeddings.
+
+### Input-dependent models
+
+Models whose work depends on the batch compose their own estimator. For example,
+a multimodal model adds the cached decoder cost to a vision estimate derived from
+`grid_thw`. Vision encoders own that calculation because patch merging, temporal
+pooling, and attention segmentation differ between encoders.
+
+For packed block-diagonal attention, sum each example separately:
+`sum(length_i**2)`, not `sum(length_i)**2`. The latter counts attention between
+unrelated examples.
+
+### Callback requirements
+
+- Return a Python `int`.
+- Keep calls CPU-only and proportional to small batch metadata.
+- Capture only precomputed Python values. Do not retain the model, parameters,
+  tensors, or bound methods.
+- Read required fields directly so malformed batches fail with `KeyError`.
+- Do not transfer data, call `.item()`, run collectives, or execute the model.
+
+Tests should cover the fixed-path value, input-dependent shapes and modalities,
+model lifetime after building the callback, and invocation before device transfer
+or sharding.
+
+For metric aggregation and TFLOPS/MFU definitions, see
+[FLOPs, throughput, and MFU](../../docs/metrics.md#flops-throughput-and-mfu).
 
 ## Testing and Benchmarking
 - Numerics testing

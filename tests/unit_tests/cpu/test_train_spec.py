@@ -26,8 +26,8 @@ class FakeModel(BaseModel):
         def update_from_config(self, *, config, **kwargs):
             pass
 
-        def get_nparams_and_flops(self, model, seq_len):
-            return 0, 0
+        def build_flops_estimator(self, model, *, seq_len):
+            return lambda batch: 0
 
     def __init__(self, config: Config):
         super().__init__()

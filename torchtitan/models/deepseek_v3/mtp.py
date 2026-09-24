@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -202,6 +203,41 @@ class MTPDecoder(Decoder):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         mtp_layers: list = field(default_factory=list)
+
+        def _decoder_flops_per_token(
+            self,
+            model: torch.nn.Module,
+            seq_len: int,
+            *,
+            excluded_modules: Iterable[torch.nn.Module | None] = (),
+        ) -> int:
+            decoder_flops_per_token = Decoder.Config._decoder_flops_per_token(
+                self,
+                model,
+                seq_len,
+                excluded_modules=excluded_modules,
+            )
+            mtp_attention_flops_per_token = sum(
+                self._layer_flops_per_token(layer_config, seq_len)
+                for layer_config in self.mtp_layers
+            )
+
+            # The base parameter term counts one lm_head use. MTP applies that
+            # same output projection once more for every prediction depth.
+            lm_head = getattr(model, "lm_head", None)
+            mtp_lm_head_flops_per_token = 0
+            if isinstance(lm_head, torch.nn.Module):
+                mtp_lm_head_flops_per_token = (
+                    6
+                    * len(self.mtp_layers)
+                    * sum(param.numel() for param in lm_head.parameters())
+                )
+
+            return (
+                decoder_flops_per_token
+                + mtp_lm_head_flops_per_token
+                + mtp_attention_flops_per_token
+            )
 
         def update_from_config(
             self,

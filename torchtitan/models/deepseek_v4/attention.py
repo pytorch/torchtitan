@@ -16,6 +16,7 @@ from torchtitan.models.common.attention import BaseAttention, FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 
 from .compressor import Compressor, Indexer
 
@@ -393,6 +394,33 @@ class Attention(BaseAttention):
         compressor: Compressor.Config | None = None
         compressor_128: Compressor.Config | None = None
         indexer: Indexer.Config | None = None
+
+        def flops_per_token(self, seq_len: int) -> int:
+            flops = quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                seq_len=seq_len,
+                sliding_window_size=self.inner_attention.window_size,
+            )
+            if self.compress_ratio <= 1:
+                return flops
+
+            compressed_seq_len = seq_len // self.compress_ratio
+            if self.compress_ratio == 4:
+                flops += (
+                    6 * self.index_n_heads * self.index_head_dim * compressed_seq_len
+                )
+                compressed_seq_len = min(
+                    compressed_seq_len,
+                    self.inner_attention.index_topk,
+                )
+            return flops + quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                seq_len=compressed_seq_len,
+            )
 
     def __init__(self, config: Config):
         super().__init__()

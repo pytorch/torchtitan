@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -138,22 +139,42 @@ def test_policy_version_is_restored_with_training_engine_state() -> None:
     assert trainer.policy_version == 7
 
 
-def test_forward_backward_accumulates_microbatch_metrics() -> None:
+def test_forward_backward_accumulates_microbatch_metrics_and_flops() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         global_valid_tokens = torch.tensor(3)
+        loss_mesh = object()
+        reduced_num_flops = 7.5
+        events: list[tuple[str, int]] = []
         engine = SimpleNamespace(
             device=torch.device("cpu"),
             num_completed_steps=4,
             ntokens_seen=10,
             prepare_step=MagicMock(return_value=global_valid_tokens),
             sdc_replayer=None,
+            estimate_flops=MagicMock(),
+            parallel_dims=SimpleNamespace(
+                dp_replicate=2,
+                dp_shard=1,
+                cp=2,
+                get_optional_mesh=MagicMock(return_value=loss_mesh),
+            ),
         )
         mean_metric = torch.tensor(0.0)
         max_metric = torch.tensor(0.0)
         metric_values = iter([(1.0, 4.0), (2.0, 3.0)])
 
+        def estimate_flops(raw_batch):
+            batch_index = raw_batch["batch_index"]
+            assert raw_batch["input"].device.type == "cpu"
+            events.append(("estimate", batch_index))
+            return {1: 13, 2: 17}[batch_index]
+
+        engine.estimate_flops.side_effect = estimate_flops
+
         def forward_backward_microbatch(**kwargs):
+            batch_index = kwargs["microbatch_group"][0].model_kwargs["batch_index"]
+            events.append(("forward_backward", batch_index))
             mean_value, max_value = next(metric_values)
             mean_metric.fill_(mean_value)
             max_metric.fill_(max_value)
@@ -168,7 +189,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         )
         trainer.engine = engine
         trainer.config = Trainer.Config()
-        trainer.dp_rank = 0
+        trainer.dp_rank = 1
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -185,12 +206,22 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             padding_mask=torch.tensor([False]),
             num_valid_tokens=1,
             generator_logprobs=torch.tensor([0.0]),
+            model_kwargs={"batch_index": 1},
             loss_mask=torch.tensor([True]),
             advantages=torch.tensor([1.0]),
         )
 
-        result = await Trainer.forward_backward_steps(trainer, [[batch], [batch]], 3)
-
+        second_batch = replace(
+            batch, input=torch.tensor([2]), model_kwargs={"batch_index": 2}
+        )
+        other_rank_batch = MagicMock(spec=TrainingMicrobatch)
+        other_rank_batch.as_input_dict.side_effect = AssertionError("wrong DP rank")
+        training_data = [[other_rank_batch, batch], [other_rank_batch, second_batch]]
+        with patch(
+            "torchtitan.rl.trainer.dist_utils.dist_mean",
+            return_value=reduced_num_flops,
+        ) as mean_flops:
+            result = await Trainer.forward_backward_steps(trainer, training_data, 3)
         engine.prepare_step.assert_called_once_with(3, num_accumulation_steps=2)
         assert engine.forward_backward_microbatch.call_count == 2
         assert [
@@ -211,6 +242,21 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         )
         assert trainer._step_num_tokens_per_dp_rank == 2
         assert trainer._reduce_forward_backward_metrics.call_count == 2
+        assert engine.estimate_flops.call_count == 2
+        assert events == [
+            ("estimate", 1),
+            ("forward_backward", 1),
+            ("estimate", 2),
+            ("forward_backward", 2),
+        ]
+        mean_flops.assert_called_once()
+        local_num_flops_tensor = mean_flops.call_args.args[0]
+        torch.testing.assert_close(
+            local_num_flops_tensor,
+            torch.tensor(30.0, dtype=torch.float64),
+        )
+        assert mean_flops.call_args.kwargs == {"mesh": loss_mesh}
+        assert trainer._optimizer_step_mean_num_flops == reduced_num_flops
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 
     asyncio.run(run())
@@ -231,6 +277,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             get_peak_stats=MagicMock(return_value=device_mem_stats),
             reset_peak_stats=MagicMock(),
         )
+        grad_norm = torch.tensor(2.0)
         engine = SimpleNamespace(
             lr_schedulers=SimpleNamespace(
                 get_metrics=MagicMock(
@@ -240,21 +287,22 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             parallel_dims=SimpleNamespace(non_data_parallel_size=1),
             num_completed_steps=4,
             ntokens_seen=12,
-            num_flops_per_token=200,
             has_quantization=False,
             device_memory_monitor=device_memory_monitor,
-            optimizer_step=MagicMock(return_value=torch.tensor(2.0)),
+            optimizer_step=MagicMock(return_value=grad_norm),
             save_checkpoint=MagicMock(),
             step_profiler=MagicMock(),
         )
         engine.optimizer_step.side_effect = lambda: (
             setattr(engine, "num_completed_steps", engine.num_completed_steps + 1),
-            torch.tensor(2.0),
+            grad_norm,
         )[1]
         trainer.engine = engine
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
+        mean_num_flops = 2000.0
+        trainer._optimizer_step_mean_num_flops = mean_num_flops
 
         with (
             patch("torchtitan.rl.trainer.time.perf_counter", return_value=2.0),
@@ -297,7 +345,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             num_tokens=10,
             elapsed_time=2.0,
             non_data_parallel_size=1,
-            num_flops_per_token=200,
+            num_flops=2000.0,
             gpu_peak_flops=1000,
             has_quantization=False,
         )

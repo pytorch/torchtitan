@@ -94,12 +94,24 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
     if not hasattr(trainer, "optimizer_step"):
         trainer.optimizer_step = lambda: TrainingEngine.optimizer_step(trainer)
 
+    if not hasattr(trainer, "estimate_flops"):
+        trainer.estimate_flops = MagicMock(return_value=1)
+    if not hasattr(trainer.config.training, "num_tokens_per_microbatch_per_dp_rank"):
+        trainer.config.training.num_tokens_per_microbatch_per_dp_rank = 1
+    if not hasattr(trainer.parallel_dims, "dp_replicate"):
+        trainer.parallel_dims.dp_replicate = 1
+    if not hasattr(trainer.parallel_dims, "dp_shard"):
+        trainer.parallel_dims.dp_shard = 1
+    if not hasattr(trainer.parallel_dims, "cp"):
+        trainer.parallel_dims.cp = 1
+
     return SimpleNamespace(
         engine=trainer,
         config=trainer.config,
         gradient_accumulation_steps=trainer.gradient_accumulation_steps,
         num_pp_microbatches=trainer.num_pp_microbatches,
         metrics_processor=trainer.metrics_processor,
+        _local_num_flops_since_last_log=0,
     )
 
 
@@ -132,6 +144,154 @@ def test_microbatch_generator_preserves_labels() -> None:
     assert output is microbatch
     assert output.labels is labels
     assert trainer.metrics_processor.ntokens_since_last_log == 1
+
+
+def _metric_boundary_trainer(
+    *,
+    should_log: bool = False,
+    gradient_accumulation_steps: int = 2,
+    num_pp_microbatches: int = 3,
+    num_tokens_per_microbatch: int = 11,
+    dp_cp_enabled: bool = False,
+    dp_degree: int = 1,
+    cp_degree: int = 1,
+) -> tuple[SimpleNamespace, SimpleNamespace]:
+    metrics_processor = SimpleNamespace(
+        should_log=MagicMock(return_value=should_log),
+        log=MagicMock(),
+        ntokens_since_last_log=0,
+        data_loading_times=[],
+    )
+    engine = SimpleNamespace(
+        num_completed_steps=0,
+        ntokens_seen=0,
+        parallel_dims=SimpleNamespace(
+            dp_enabled=False,
+            dp_cp_enabled=dp_cp_enabled,
+            ep_enabled=False,
+            dp_replicate=dp_degree,
+            dp_shard=1,
+            cp=cp_degree,
+            get_optional_mesh=lambda name: None,
+        ),
+        device=torch.device("cpu"),
+        estimate_flops=MagicMock(return_value=7),
+        prepare_step=MagicMock(side_effect=lambda value, **kwargs: value),
+        forward_backward_microbatch=MagicMock(return_value=torch.tensor(1.0)),
+        lr_schedulers=SimpleNamespace(get_metrics=MagicMock(return_value={})),
+        optimizer_step=MagicMock(return_value=torch.tensor(2.0)),
+    )
+    trainer = SimpleNamespace(
+        engine=engine,
+        config=SimpleNamespace(
+            training=SimpleNamespace(
+                num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch,
+            )
+        ),
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        num_pp_microbatches=num_pp_microbatches,
+        metrics_processor=metrics_processor,
+        _local_num_flops_since_last_log=0,
+    )
+    return trainer, engine
+
+
+def test_train_step_estimates_each_complete_raw_microbatch_before_preprocessing() -> None:
+    trainer, engine = _metric_boundary_trainer(
+        gradient_accumulation_steps=2,
+        num_pp_microbatches=2,
+    )
+    microbatches = [
+        _DictTrainingMicrobatch(
+            {
+                "input": torch.full((1,), index, dtype=torch.int64),
+                "labels": torch.ones(1, dtype=torch.long),
+                "batch_index": index,
+            }
+        )
+        for index in range(4)
+    ]
+    events: list[tuple[str, int]] = []
+
+    def estimate_flops(raw_batch):
+        batch_index = raw_batch["batch_index"]
+        assert raw_batch["input"].device.type == "cpu"
+        assert microbatches[batch_index].to_input_dict_calls == []
+        events.append(("estimate", batch_index))
+        return batch_index + 1
+
+    def forward_backward_microbatch(*, microbatch_group, **kwargs):
+        for microbatch in microbatch_group:
+            batch_index = microbatch.as_input_dict()["batch_index"]
+            microbatch.to_input_dict("cpu")
+            events.append(("forward_backward", batch_index))
+        return torch.tensor(1.0)
+
+    engine.estimate_flops.side_effect = estimate_flops
+    engine.forward_backward_microbatch.side_effect = forward_backward_microbatch
+
+    Trainer.train_step(trainer, iter(microbatches))
+
+    assert engine.estimate_flops.call_count == 4
+    assert events == [
+        ("estimate", 0),
+        ("estimate", 1),
+        ("estimate", 2),
+        ("estimate", 3),
+        ("forward_backward", 0),
+        ("forward_backward", 1),
+        ("forward_backward", 2),
+        ("forward_backward", 3),
+    ]
+    assert trainer._local_num_flops_since_last_log == 10
+
+
+def test_logging_reduces_flops_without_changing_existing_metric_reductions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer, engine = _metric_boundary_trainer(
+        should_log=True,
+        gradient_accumulation_steps=1,
+        num_pp_microbatches=2,
+        dp_cp_enabled=True,
+        dp_degree=2,
+        cp_degree=3,
+    )
+    trainer._local_num_flops_since_last_log = 100
+    engine.estimate_flops.side_effect = [13, 17]
+    engine.ntokens_seen = 23
+    loss_mesh = object()
+    engine.parallel_dims.get_optional_mesh = MagicMock(return_value=loss_mesh)
+    monkeypatch.setattr(
+        "torchtitan.trainer.collect_aux_loss_metrics", lambda parallel_dims: {}
+    )
+    legacy_dist_sum = MagicMock(side_effect=[1.0, 23.0])
+    legacy_dist_max = MagicMock(return_value=2.0)
+    monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_sum", legacy_dist_sum)
+    monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_max", legacy_dist_max)
+    mean_flops = MagicMock(return_value=130.0)
+    monkeypatch.setattr("torchtitan.trainer.dist_utils.dist_mean", mean_flops)
+
+    Trainer.train_step(trainer, iter([_batch(), _batch()]))
+
+    assert legacy_dist_sum.call_count == 2
+    legacy_dist_max.assert_called_once()
+    mean_flops.assert_called_once()
+    local_num_flops_tensor = mean_flops.call_args.args[0]
+    torch.testing.assert_close(
+        local_num_flops_tensor,
+        torch.tensor(130.0, dtype=torch.float64),
+    )
+    assert mean_flops.call_args.kwargs == {"mesh": loss_mesh}
+    trainer.metrics_processor.log.assert_called_once_with(
+        0,
+        1.0,
+        2.0,
+        2.0,
+        extra_metrics={"n_tokens_seen": 23.0},
+        num_flops=130.0,
+    )
+    assert trainer._local_num_flops_since_last_log == 0
 
 
 def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage(
@@ -674,9 +834,12 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     )
     data_iterator = iter([_batch() for _ in range(3)])
 
-    with patch(
-        "torchtitan.training_engine.dist_utils.clip_grad_norm_",
-        return_value=torch.tensor(4.0),
+    with (
+        patch(
+            "torchtitan.training_engine.dist_utils.clip_grad_norm_",
+            return_value=torch.tensor(4.0),
+        ),
+        patch("torchtitan.trainer.collect_aux_loss_metrics", return_value={}),
     ):
         Trainer.train_step(_training_loop(trainer), data_iterator)
 
@@ -686,6 +849,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         6.0,
         4.0,
         extra_metrics={"n_tokens_seen": 3},
+        num_flops=3.0,
     )
     assert trainer.num_completed_steps == 1
 
@@ -810,6 +974,79 @@ def test_loading_checkpoint_rearms_replay_schedule():
     assert disabled.num_completed_steps == 1
 
 
+def test_engine_rejects_negative_flops_estimate() -> None:
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(flops_estimator=lambda batch: -1),
+    )
+
+    with pytest.raises(ValueError, match="num_flops must be non-negative"):
+        TrainingEngine.estimate_flops(engine, {})
+
+
+def test_engine_builds_estimator_before_pp_fragmentation(caplog) -> None:
+    caplog.set_level("INFO", logger="torchtitan.training_engine")
+    events: list[str] = []
+
+    class Model(torch.nn.Linear):
+        state_dict_adapter_cls = None
+
+        def init_weights(self, *, buffer_device: torch.device | None = None) -> None:
+            pass
+
+        def pipeline(self, **kwargs):
+            events.append("pipeline")
+            return object(), [self], True, True
+
+    def get_parameter_counts(model):
+        assert next(model.parameters()).is_meta
+        events.append("parameter_counts")
+        return 2, 2
+
+    def build_flops_estimator(model, *, seq_len):
+        assert next(model.parameters()).is_meta
+        events.append("estimator")
+        return lambda batch: 0
+
+    engine = cast(Any, object.__new__(TrainingEngine))
+    engine.config = SimpleNamespace(
+        loss=SimpleNamespace(build=lambda **kwargs: object()),
+        training=SimpleNamespace(
+            dtype="float32",
+            enable_cpu_offload=False,
+            max_context_length=16,
+        ),
+        parallelism=SimpleNamespace(),
+        activation_checkpoint=None,
+    )
+    engine.model_config = SimpleNamespace(
+        build=lambda: Model(1, 1),
+        get_parameter_counts=get_parameter_counts,
+        build_flops_estimator=build_flops_estimator,
+    )
+    engine.device = torch.device("cpu")
+    engine.parallel_dims = SimpleNamespace(pp_enabled=True)
+    engine.output_dir = "."
+
+    with patch(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        return_value=contextlib.nullcontext(),
+    ):
+        TrainingEngine._initialize_model(
+            engine,
+            compile_config=None,
+            hf_assets_path="",
+        )
+
+    assert events == ["parameter_counts", "estimator", "pipeline"]
+    assert engine.model_param_count == 2
+    assert engine.model_active_param_count == 2
+    assert (
+        "Model SimpleNamespace size: 2 total parameters, 2 active parameters"
+        in caplog.messages
+    )
+
+
 def test_initialize_preserves_phase_order():
     events = []
     model_mem_stats = object()
@@ -870,7 +1107,7 @@ def test_compute_training_performance_metrics():
         num_tokens=20,
         elapsed_time=2.0,
         non_data_parallel_size=2,
-        num_flops_per_token=200,
+        num_flops=4000,
         gpu_peak_flops=1000,
         has_quantization=False,
     )

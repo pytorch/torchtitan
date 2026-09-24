@@ -45,6 +45,7 @@ from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
@@ -703,6 +704,10 @@ class BaseAttention(Module):
         n_heads: int
         inner_attention: Module.Config
 
+        def flops_per_token(self, seq_len: int) -> int:
+            """Return non-parameter training FLOPs per input token."""
+            raise NotImplementedError
+
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
 
@@ -813,6 +818,17 @@ class GQAttention(BaseAttention):
                     f"n_heads ({self.n_heads}) must be divisible by "
                     f"n_kv_heads ({n_kv_heads})"
                 )
+
+        def flops_per_token(self, seq_len: int) -> int:
+            head_dim = (
+                self.head_dim if self.head_dim is not None else self.dim // self.n_heads
+            )
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=head_dim,
+                v_head_dim=head_dim,
+                seq_len=seq_len,
+            )
 
     def __init__(self, config: Config):
         super().__init__()

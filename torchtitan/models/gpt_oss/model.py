@@ -33,10 +33,7 @@ from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 from torchtitan.protocols.module import Module
 
 from .state_dict_adapter import GptOssStateDictAdapter
@@ -70,6 +67,15 @@ class Attention(BaseAttention):
         sliding_window_size: int | None = None
         """Per-layer causal sliding-window size"""
         rope: RoPE.Config
+
+        def flops_per_token(self, seq_len: int) -> int:
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                seq_len=seq_len,
+                sliding_window_size=self.sliding_window_size,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -225,22 +231,6 @@ class GptOssModel(Decoder):
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            nparams, active_nparams = get_nparams_and_active_nparams(model)
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=attention.head_dim,
-                    v_head_dim=attention.head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=attention.sliding_window_size,
-                )
-            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

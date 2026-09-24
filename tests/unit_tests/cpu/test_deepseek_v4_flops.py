@@ -21,10 +21,12 @@ class TestDeepSeekV4Flops(unittest.TestCase):
         with torch.device("meta"):
             model = model_config.build()
 
-        self.assertEqual(
-            model_config.get_nparams_and_flops(model, seq_len=4096),
-            (290_942_278_866, 92_762_352_876),
-        )
+        estimator = model_config.build_flops_estimator(model, seq_len=4096)
+        self.assertIsNotNone(estimator)
+        assert estimator is not None
+        estimated_flops = estimator({"input": torch.empty(4096, dtype=torch.long)})
+        self.assertIsInstance(estimated_flops, int)
+        self.assertEqual(estimated_flops, 92_762_352_876 * 4096)
 
 
 if __name__ == "__main__":

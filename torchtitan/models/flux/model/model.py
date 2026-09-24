@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast, Self
 
@@ -20,9 +21,9 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.flops import quadratic_attention_flops_per_token
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
-
 from torchtitan.models.flux.model.layers import (
     DoubleStreamBlock,
     EmbedND,
@@ -38,8 +39,7 @@ from torchtitan.models.flux.utils import (
     pack_latents,
     preprocess_data,
 )
-from torchtitan.models.utils import quadratic_attention_flops_per_token
-from torchtitan.protocols import BaseModel
+from torchtitan.protocols import BaseModel, FlopsEstimator
 from torchtitan.protocols.module import ModuleList
 
 from .state_dict_adapter import FluxStateDictAdapter
@@ -89,9 +89,20 @@ class FluxModel(BaseModel):
 
             set_flux_sharding_config(self)
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
+        def build_flops_estimator(
+            self,
+            model: nn.Module,
+            *,
+            seq_len: int,
+        ) -> FlopsEstimator:
+            flops_per_token = self._flops_per_token(model, seq_len)
+
+            def estimate_flops(batch: Mapping[str, Any]) -> int:
+                return batch["labels"].shape[0] * seq_len * flops_per_token
+
+            return estimate_flops
+
+        def _flops_per_token(self, model: nn.Module, seq_len: int) -> int:
             nparams = sum(p.numel() for p in model.parameters())
 
             # Base: 6 FLOPs per parameter per token (fwd + bwd for linear
@@ -156,7 +167,7 @@ class FluxModel(BaseModel):
                 * self.depth
             )
 
-            return nparams, num_flops_per_token
+            return num_flops_per_token
 
     def __init__(self, config: Config):
         super().__init__()
@@ -240,7 +251,6 @@ class FluxModel(BaseModel):
             fully_shard,
             MixedPrecisionPolicy,
         )
-
         from torchtitan.distributed.fsdp import (
             disable_fsdp_gradient_division,
             enable_fsdp_symm_mem,

@@ -164,6 +164,7 @@ class FaultTolerantTrainer(Configurable):
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
     engine: FaultTolerantTrainingEngine
+    _local_num_flops_since_last_log: int
 
     @record
     def __init__(self, config: Config):
@@ -227,6 +228,7 @@ class FaultTolerantTrainer(Configurable):
             config_dict=config.to_dict(),
         )
         color = self.metrics_processor.color
+        self._local_num_flops_since_last_log = 0
 
         self.num_pp_microbatches = num_pp_microbatches
         num_tokens_per_dp_rank = (
@@ -260,7 +262,6 @@ class FaultTolerantTrainer(Configurable):
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
-        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
 
         # initialize device memory monitor and get peak flops for MFU calculation
         device_memory_monitor = engine.device_memory_monitor
@@ -354,6 +355,12 @@ class FaultTolerantTrainer(Configurable):
                 microbatch_group.append(microbatch)
             microbatch_groups.append(microbatch_group)
 
+        optimizer_step_flops = sum(
+            engine.estimate_flops(microbatch.as_input_dict())
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        )
+
         # Keep the global token count on device so loss normalization does not
         # introduce a CPU synchronization in the training path.
         global_valid_tokens = torch.tensor(
@@ -388,6 +395,7 @@ class FaultTolerantTrainer(Configurable):
                     accumulated_loss.add_(detached_loss)
 
         grad_norm = engine.optimizer_step()
+        self._local_num_flops_since_last_log += optimizer_step_flops
 
         # log metrics
         if not should_log:
@@ -395,11 +403,10 @@ class FaultTolerantTrainer(Configurable):
 
         assert accumulated_loss is not None
 
+        ft_pg = engine.ft_manager.loss_sync_pg
+        live_ft_size = ft_pg.size() if ft_pg is not None else 1
+        loss_mesh = parallel_dims.get_optional_mesh("loss")
         if parallel_dims.dp_cp_enabled:
-            # FT addition: use ft_manager.loss_sync_pg for extra process group
-            ft_pg = engine.ft_manager.loss_sync_pg
-            loss_mesh = parallel_dims.get_optional_mesh("loss")
-
             # For global_avg_loss, we want the average loss across all ranks:
             # accumulated_loss = local_loss_sum / global_valid_tokens
             # global_avg_loss = sum(local_loss_sum) / global_valid_tokens
@@ -423,13 +430,24 @@ class FaultTolerantTrainer(Configurable):
                     ft_pg,
                 ),
             )
-            # ft_pg is None in semi-sync training.
             if ft_pg is not None:
                 # Avoid artificial jumps in logged loss when replicas leave or rejoin.
-                global_avg_loss /= ft_pg.size()
+                global_avg_loss /= live_ft_size
         else:
             global_avg_loss = global_max_loss = accumulated_loss.item()
             global_ntokens_seen = engine.ntokens_seen
+
+        local_num_flops_tensor = torch.tensor(
+            self._local_num_flops_since_last_log,
+            dtype=torch.float64,
+            device=engine.device,
+        )
+        mean_num_flops = dist_utils.dist_mean(
+            local_num_flops_tensor,
+            mesh=loss_mesh,
+            extra_pg=ft_pg,
+        )
+        grad_norm = float(grad_norm.item())
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
@@ -440,9 +458,11 @@ class FaultTolerantTrainer(Configurable):
             engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
-            grad_norm.item(),
+            grad_norm,
             extra_metrics=extra_metrics,
+            num_flops=mean_num_flops,
         )
+        self._local_num_flops_since_last_log = 0
 
     @record
     def train(self):
@@ -498,6 +518,7 @@ class FaultTolerantTrainer(Configurable):
                     self.validator.validate(
                         engine.model_parts, engine.num_completed_steps
                     )
+                    self._local_num_flops_since_last_log = 0
 
                 # signal the profiler that the next profiling step has started
                 profiler.step()

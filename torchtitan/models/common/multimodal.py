@@ -12,7 +12,8 @@ fusion over a full token sequence. ``build_vision_bank_indices`` and
 packed-bank row for every placeholder token.
 """
 
-from typing import Self
+from collections.abc import Mapping
+from typing import Any, Self
 
 import spmd_types as spmd
 import torch
@@ -27,6 +28,7 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 from .decoder import Decoder
+from .vision_encoder import VisionGrid
 
 
 class MultimodalModel(Decoder):
@@ -117,6 +119,23 @@ class MultimodalModel(Decoder):
             training=training,
             parallelism=parallelism,
         )
+
+
+def get_packed_vision_grids(
+    batch: Mapping[str, Any],
+    *,
+    modality_fields: tuple[tuple[str, str], ...],
+) -> tuple[VisionGrid, ...]:
+    """Extract packed vision grids from a raw CPU batch."""
+    grids: list[VisionGrid] = []
+    for pixel_values_key, grid_thw_key in modality_fields:
+        if batch.get(pixel_values_key) is None:
+            continue
+        grids.extend(
+            (temporal, grid_h, grid_w)
+            for temporal, grid_h, grid_w in batch[grid_thw_key].tolist()
+        )
+    return tuple(grids)
 
 
 def get_vision_positions(
