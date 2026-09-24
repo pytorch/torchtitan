@@ -7,6 +7,11 @@ This directory contains tests for the torchtitan project, including unit tests a
 - `unit_tests/cpu/`: Unit tests that run without a GPU
 - `unit_tests/gpu/`: Tests that require GPUs; multi-GPU tests use the
   `multi_gpu` pytest marker
+- `unit_tests/rl/`: Unit tests for `torchtitan.rl`. GPU and vLLM tests live
+  here. The 8gpu RL workflow currently runs a subset (`test_vllm_wrapper.py`
+  and three classes in `test_bitwise_parity.py`). The CPU unit job collects a
+  CPU-safe subset as an explicit file list; the directory is not collected
+  wholesale because importing `torchtitan.rl` requires vLLM.
 - `integration_tests/`: Contains integration tests that test multiple components together
   - `features.py`: Tests for torchtitan features and composability
   - `flux.py`: Tests for the FLUX model
@@ -140,6 +145,10 @@ hardware-specific workflows.
 - GPU tests that require multiple physical devices use the `multi_gpu` pytest
   marker. The 1-GPU lane selects `not multi_gpu`, while the multi-GPU lane
   selects `multi_gpu` from the same GPU directory.
+- RL unit tests live in `unit_tests/rl/`. Many require vLLM or a GPU and are
+  not collected by the CPU or GPU unit jobs. The 8gpu RL workflow currently
+  runs a subset of them and has no `pull_request` trigger. CPU-safe modules
+  are listed in `.github/workflows/unit_test_cpu.yaml`.
 
 ## Running Tests
 
@@ -210,6 +219,9 @@ pytest -s tests/unit_tests/gpu/ -m "not multi_gpu"
 
 # Multi-GPU tests
 pytest -s tests/unit_tests/gpu/ -m multi_gpu
+
+# RL CPU-safe example (see unit_test_cpu.yaml for the CI file list)
+pytest -s tests/unit_tests/rl/test_metrics.py
 ```
 
 ### Running Specific Unit Test Files

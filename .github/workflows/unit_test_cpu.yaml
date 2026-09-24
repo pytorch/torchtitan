@@ -39,3 +39,19 @@ jobs:
         # RUNNER_TEMP are owned by the host uid, which the container user (ci-user) can't write.
         export COVERAGE_FILE=/tmp/.coverage
         pytest tests/unit_tests/cpu --cov=. --cov-report=xml:/tmp/coverage.xml --durations=20 -vv
+
+        # CPU-safe RL subset. Do not collect tests/unit_tests/rl wholesale:
+        # torchtitan.rl.__init__ imports vLLM, and other modules need GPU,
+        # Monarch, TorchStore, or verifiers.
+        pytest tests/unit_tests/rl/test_async_controller.py \
+          tests/unit_tests/rl/test_batch_invariance.py \
+          tests/unit_tests/rl/test_losses.py \
+          tests/unit_tests/rl/test_metrics.py \
+          tests/unit_tests/rl/test_rollout_recorder.py \
+          tests/unit_tests/rl/test_rollout_utils.py \
+          tests/unit_tests/rl/test_runtime_env.py \
+          tests/unit_tests/rl/test_search_r1.py \
+          tests/unit_tests/rl/test_token_env.py \
+          tests/unit_tests/rl/test_vllm_registry.py \
+          tests/unit_tests/rl/test_weight_sync.py \
+          --durations=20 -vv
