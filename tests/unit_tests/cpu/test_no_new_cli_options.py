@@ -376,6 +376,7 @@ _GUARDED_CONFIGS = (
     ("kimi_k2_7", "kimi_k2_5_debugmodel"),
     ("kimi_k3", "kimi_k3_debugmodel"),
     ("muse_glimmer", "muse_glimmer_debugmodel_mm"),
+    ("gemma4", "gemma4_debugmodel"),
 )
 
 
