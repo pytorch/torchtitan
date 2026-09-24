@@ -41,6 +41,8 @@ from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
+    add_zero_vision_dependency,
+    build_dummy_vision_inputs,
     build_vision_bank_indices,
     gather_vision_embeds,
     MultimodalModel,
@@ -432,11 +434,12 @@ class MuseGlimmerModel(MultimodalModel):
         pixel_values_videos = batch.get("pixel_values_videos")
         grid_thw_videos = batch.get("grid_thw_videos")
         special_tokens = batch.get("special_tokens")
+        has_images = pixel_values is not None
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError(
                 "Muse Glimmer vision encoder does not support video inputs."
             )
-        if pixel_values is not None:
+        if has_images:
             vision_encoder_config = cast(
                 MuseGlimmerModel.Config, self.config
             ).vision_encoder
@@ -504,20 +507,23 @@ class MuseGlimmerModel(MultimodalModel):
         return inputs, labels, batch
 
     def _get_vision_features(
-        self, pixel_values: torch.Tensor, grid_thw: torch.Tensor
+        self,
+        pixel_values: torch.Tensor | None,
+        grid_thw: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Encode packed ``pixel_values`` and adapter-project into features.
+        """Encode packed pixels into the normalized LLM-dimension vision bank.
 
-        Mirrors qwen3_5's ``_get_vision_embeds``: runs the owned encoder +
-        adapter and returns ``[T, adapter_dim]``. ``pixel_values`` contains all
-        visual patches packed into one sequence, and ``grid_thw`` describes each
-        visual item's contiguous segment.
+        ``pixel_values`` contains all visual patches packed into one sequence,
+        and ``grid_thw`` describes each visual item's contiguous segment.
         """
         assert self.vision_encoder is not None and self.vision_adapter is not None
-        feats = self.vision_adapter(
+        assert self.vision_projection is not None
+        assert self.perception_emb_norm is not None
+        assert pixel_values is not None and grid_thw is not None
+        vision_features_VD = self.vision_adapter(
             self.vision_encoder(pixel_values, grid_thw=grid_thw)
         )
-        return feats
+        return self.perception_emb_norm(self.vision_projection(vision_features_VD))
 
     def _prepare_multimodal_embeds(
         self,
@@ -528,17 +534,24 @@ class MuseGlimmerModel(MultimodalModel):
         vision_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
         """Build and inject image embeddings on the embedding pipeline stage."""
-        if pixel_values is None:
+        if self.vision_encoder is None:
             return h_TD
-        assert grid_thw is not None
-        assert vision_bank_indices_T is not None
-        assert self.vision_projection is not None
-        assert self.perception_emb_norm is not None
 
-        vision_features_VD = self._get_vision_features(pixel_values, grid_thw)
-        vision_bank_VD = self.perception_emb_norm(
-            self.vision_projection(vision_features_VD)
-        )
+        image_is_dummy = pixel_values is None
+        if image_is_dummy:
+            grid_size = self.vision_encoder.downsample_factor
+            pixel_values, grid_thw = build_dummy_vision_inputs(
+                patch_dim=self.vision_encoder.conv1_linear.in_features,
+                grid_thw=(1, grid_size, grid_size),
+                device=h_TD.device,
+            )
+        vision_bank_VD = self._get_vision_features(pixel_values, grid_thw)
+        if image_is_dummy:
+            return add_zero_vision_dependency(h_TD, vision_bank_VD)
+
+        assert grid_thw is not None
+        if vision_bank_indices_T is None:
+            raise ValueError("vision_bank_indices_T is required for image inputs")
         return gather_vision_embeds(
             h_TD,
             vision_bank_VD=vision_bank_VD,

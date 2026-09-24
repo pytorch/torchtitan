@@ -37,6 +37,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
+    add_zero_vision_dependency,
+    build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
@@ -513,16 +515,27 @@ class KimiK3Model(MultimodalModel):
                 "pixel_values and grid_thw must either both be provided or "
                 "both be omitted."
             )
-        if pixel_values is None:
-            return embeddings_TD
+        is_dummy = pixel_values is None
+        if is_dummy:
+            if self.vision_encoder is None:
+                return embeddings_TD
+            kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
+            pixel_values, grid_thw = build_dummy_vision_inputs(
+                patch_dim=self.vision_encoder.patch_embed.in_features,
+                grid_thw=(1, kernel_h, kernel_w),
+                device=embeddings_TD.device,
+            )
         assert grid_thw is not None
         if self.vision_encoder is None:
             raise ValueError("pixel_values were provided without a vision encoder.")
-        if special_tokens is None:
-            raise ValueError("special_tokens are required for multimodal inputs.")
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        if is_dummy:
+            return add_zero_vision_dependency(embeddings_TD, vision_embeds)
+
+        if special_tokens is None:
+            raise ValueError("special_tokens are required for multimodal inputs.")
         # MoonViT collapses time and merges spatially, so the text-side token
         # count per item is (h/kh)*(w/kw), independent of t.
         kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
