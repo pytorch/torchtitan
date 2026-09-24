@@ -258,7 +258,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
     ]
 
 
-def test_batcher_uses_first_fit_decreasing_across_dp_ranks() -> None:
+def test_batcher_balances_packing_across_dp_ranks() -> None:
     batcher = Batcher.Config().build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
@@ -278,7 +278,7 @@ def test_batcher_uses_first_fit_decreasing_across_dp_ranks() -> None:
     assert [
         [int((~rank.padding_mask).sum().item()) for rank in microbatch]
         for microbatch in batch.microbatches
-    ] == [[7, 5]]
+    ] == [[6, 6]]
 
 
 def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
@@ -298,7 +298,7 @@ def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
     batcher._expand_bins_by_splitting(bins, target_num_bins=4)
 
     assert [len(bin_) for bin_ in bins] == [3, 3, 3, 3]
-    assert [batcher._attention_workload(bin_) for bin_ in bins] == [300] * 4
+    assert [batcher._attention_workload(bin_) for bin_ in bins] == [400] * 4
 
 
 def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
@@ -327,8 +327,8 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
     )
     samples = _variable_length_group(
         0,
-        # Effective lengths are [6, 6, 6, 4, 4, 4]. FFD produces three bins,
-        # then redistribution aligns the count to four DP inputs.
+        # Effective lengths are [6, 6, 6, 4, 4, 4]. FFD finds three bins,
+        # then LPT repacks into four DP inputs.
         token_lengths=[7, 7, 7, 5, 5, 5],
     ).training_samples
 
@@ -340,7 +340,7 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
 
     # Global sorting puts similarly expensive bins in each concurrent DP group.
     # Reversing the second group pairs its lighter bin with the first rank.
-    assert workloads == [[52, 36], [32, 36]]
+    assert workloads == [[52, 52], [36, 52]]
 
 
 def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
@@ -354,7 +354,7 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
     samples = _variable_length_group(
         0,
         # Effective lengths are [10, 8, 6, 4]. The document limit forces each
-        # sample into its own bin, with workloads [100, 64, 36, 16].
+        # sample into its own bin, with padding-aware workloads [100, 68, 52, 52].
         token_lengths=[11, 9, 7, 5],
     ).training_samples
 
@@ -364,8 +364,8 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
         for microbatch in assignments
     ]
 
-    assert workloads == [[100, 64], [16, 36]]
-    assert [sum(rank_workloads) for rank_workloads in zip(*workloads)] == [116, 100]
+    assert workloads == [[100, 68], [52, 52]]
+    assert [sum(rank_workloads) for rank_workloads in zip(*workloads)] == [152, 120]
 
 
 def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> None:

@@ -46,6 +46,56 @@ _DTYPES: dict[str, torch.dtype] = {
 }
 
 
+def assign_sorted_bins_to_dp_ranks(
+    workloads: list[int], *, dp_degree: int, num_pp_microbatches: int
+) -> list[list[int]]:
+    """Assign D-wide rows of sorted bins to DP ranks within each G step.
+
+    ``workloads`` is ordered from highest to lowest attention cost. For each
+    row of D bins, give the heaviest bin to the rank with the lowest cost
+    accumulated in this G step, the next to the next-lowest rank, and so on.
+    Rank totals reset for the next G step; every rank receives exactly one
+    bin from each of its M rows. This is a greedy heuristic: it does not
+    guarantee a smaller maximum rank cost than alternating zig-zag. For M=1,
+    keep the original global zig-zag rank order.
+
+    Example:
+        # D=2, M=3; the bins are already sorted by attention cost.
+        assign_sorted_bins_to_dp_ranks(
+            [20, 10, 9, 8, 7, 1], dp_degree=2, num_pp_microbatches=3
+        )
+        # -> [[0, 1], [3, 2], [5, 4]] (bin indices per rank, per row)
+        # Rank totals are [29, 26], versus [35, 20] for zig-zag.
+    """
+    assert dp_degree > 0 and num_pp_microbatches > 0
+    num_bins_per_step = dp_degree * num_pp_microbatches
+    assert len(workloads) % num_bins_per_step == 0
+
+    assignments: list[list[int]] = []
+    for step_start in range(0, len(workloads), num_bins_per_step):
+        rank_workloads = [0] * dp_degree
+        for microbatch in range(num_pp_microbatches):
+            row_start = step_start + microbatch * dp_degree
+            rank_assignments = [0] * dp_degree
+            # Preserve the original global zig-zag when M=1, and break ties
+            # with the original within-step zig-zag when M>1.
+            if num_pp_microbatches == 1:
+                tie_direction = -1 if step_start // num_bins_per_step % 2 else 1
+            else:
+                tie_direction = -1 if microbatch % 2 else 1
+            ranks_by_workload = sorted(
+                range(dp_degree),
+                key=lambda rank: (rank_workloads[rank], tie_direction * rank),
+            )
+            for offset, rank in enumerate(ranks_by_workload):
+                bin_index = row_start + offset
+                rank_assignments[rank] = bin_index
+                rank_workloads[rank] += workloads[bin_index]
+            assignments.append(rank_assignments)
+
+    return assignments
+
+
 class Batcher(Configurable):
     """Accumulate `num_prompts_per_train_step` groups and packs
     `[num_microbatches][dp_degree]` flat `TrainingMicrobatch`es.
@@ -298,45 +348,52 @@ class Batcher(Configurable):
         )
 
     def _assign_training_samples_to_microbatches(
-        self, training_samples: list[TrainingSample]
+        self,
+        training_samples: list[TrainingSample],
+        *,
+        num_pp_microbatches: int = 1,
     ) -> list[list[list[TrainingSample]]]:
-        """Pack and schedule samples using the following steps.
+        """Pack samples into an FFD-derived grid and balance its attention work.
 
-        The future PP layout is ``[G][M][D]``, where G is the number of outer
-        gradient accumulation steps, M is the number of PP microbatches, and D
-        is the DP degree. RL currently has M=1 and returns ``[G][D]``.
+        T is the token capacity per DP rank, D the DP degree, and M the number
+        of PP microbatches per outer gradient accumulation step. First-fit
+        decreasing (FFD) determines B bins subject to T and max_num_documents.
+        Round B up to ``ceil(B / (M * D)) * M * D`` slots, then try
+        longest-processing-time (LPT) packing: place longest samples first in
+        the feasible bin with the least ``sum(L**2)`` document work. If any
+        sample cannot fit, discard the partial LPT assignment and reuse FFD,
+        splitting its bins to fill the extra slots where possible. Both paths
+        have the same grid size and therefore the same total padding fraction.
 
-        1. Use first-fit decreasing (FFD) to pack samples into fixed-capacity
-           bins, with each bin becoming one flat trainer input.
-        2. Round the number of bins up to a multiple of D. With PP this target
-           will be ``G * M * D``; the current M=1 target is ``G * D``.
-        3. Fill each added slot from the current highest-workload multi-sample
-           bins. Keep an empty bin only when no sample can be moved.
-        4. Estimate each bin workload as ``sum(L**2)`` over its samples.
-        5. Sort all bins by workload in descending order.
-        6. Partition the sorted bins into consecutive D-wide groups, so the D
-           inputs executed concurrently have similar workloads.
-        7. Reverse every other D-wide group. In a ``[G][M][D]`` layout, this
-           zig-zag pairs heavier and lighter PP microbatches on each replica.
+        Sort the bins by padding-aware attention cost (see
+        ``_attention_workload``), group consecutive bins into D-wide rows, and
+        greedily assign each row's heaviest bin to the rank with the least
+        cumulative cost in its G step. This heuristic does not guarantee an
+        optimal or zig-zag-dominating maximum rank cost. With M=1 it preserves
+        the original alternating rank order between G steps.
+
+        The logical layout is ``[G][M][D]``; this method returns the first
+        two axes flattened as ``[G * M][D]``. The RL trainer currently uses
+        M=1; M>1 is available for PP scheduling tests.
         """
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
 
-        # Step 1: pack samples into the minimum number of bins found by FFD.
+        # Step 1: find the bin count with FFD, retaining its fallback packing.
         ordered_samples = sorted(
             training_samples,
             key=self.num_tokens_to_pack,
             reverse=True,
         )
-        bins: list[list[TrainingSample]] = []
-        bin_num_tokens: list[int] = []
+        ffd_bins: list[list[TrainingSample]] = []
+        ffd_bin_num_tokens: list[int] = []
 
         for training_sample in ordered_samples:
             num_tokens = self.num_tokens_to_pack(training_sample)
             destination = next(
                 (
                     index
-                    for index, bin_ in enumerate(bins)
-                    if bin_num_tokens[index] + num_tokens <= num_tokens_per_rank
+                    for index, bin_ in enumerate(ffd_bins)
+                    if ffd_bin_num_tokens[index] + num_tokens <= num_tokens_per_rank
                     and (
                         self._max_num_documents is None
                         or len(bin_) < self._max_num_documents
@@ -345,38 +402,104 @@ class Batcher(Configurable):
                 None,
             )
             if destination is None:
-                bins.append([])
-                bin_num_tokens.append(0)
-                destination = len(bins) - 1
+                ffd_bins.append([])
+                ffd_bin_num_tokens.append(0)
+                destination = len(ffd_bins) - 1
 
-            bins[destination].append(training_sample)
-            bin_num_tokens[destination] += num_tokens
+            ffd_bins[destination].append(training_sample)
+            ffd_bin_num_tokens[destination] += num_tokens
 
-        # Step 2: make the current M=1 grid rectangular in D.
-        target_num_bins = math.ceil(len(bins) / self._dp_degree) * self._dp_degree
+        # Step 2: make the [G][M][D] grid rectangular.
+        num_bins_per_step = num_pp_microbatches * self._dp_degree
+        assert num_bins_per_step > 0
+        target_num_bins = (
+            math.ceil(len(ffd_bins) / num_bins_per_step) * num_bins_per_step
+        )
 
-        # Step 3: redistribute samples from heavy bins before adding padding.
-        self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
+        # Step 3: repack across the entire grid, preserving the FFD bin count.
+        bins = self._pack_with_lpt(ordered_samples, target_num_bins=target_num_bins)
+        if bins is None:
+            bins = ffd_bins
+            self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
 
-        # Steps 4-5: estimate full-attention work and order bins by that cost.
+        # Step 4: estimate attention work, including tail padding.
         bins.sort(key=self._attention_workload, reverse=True)
 
-        num_microbatches = len(bins) // self._dp_degree
-        assignments = []
-        for microbatch in range(num_microbatches):
-            # Step 6: adjacent bins form one concurrently executed DP group.
-            rank_assignments = bins[
-                microbatch * self._dp_degree : (microbatch + 1) * self._dp_degree
-            ]
-            # Step 7: zig-zag adjacent groups across DP replicas.
-            if microbatch % 2:
-                rank_assignments.reverse()
-            assignments.append(rank_assignments)
-        return assignments
+        # Steps 5-6: keep adjacent bins together and balance their rank totals.
+        bin_indices_by_rank = assign_sorted_bins_to_dp_ranks(
+            [self._attention_workload(bin_) for bin_ in bins],
+            dp_degree=self._dp_degree,
+            num_pp_microbatches=num_pp_microbatches,
+        )
+        return [
+            [bins[index] for index in rank_indices]
+            for rank_indices in bin_indices_by_rank
+        ]
 
     def _attention_workload(self, training_samples: list[TrainingSample]) -> int:
-        """Estimate packed full-attention work as the sum of squared lengths."""
-        return sum(self.num_tokens_to_pack(sample) ** 2 for sample in training_samples)
+        """Estimate document and tail-padding attention as squared lengths.
+
+        For packed sample lengths L and token capacity T, let
+        ``q, r = divmod(T - sum(L), seq_len)``. The estimate is
+        ``sum(L**2) + q * seq_len**2 + r**2``. Padding positions reset at
+        seq_len, so even an empty bin costs ``(T // seq_len) * seq_len**2``.
+        This models the existing padding segments without increasing their
+        number or changing fixed-size varlen metadata.
+        """
+        sample_lengths = [
+            self.num_tokens_to_pack(sample) for sample in training_samples
+        ]
+        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        num_full_padding_segments, remaining_padding = divmod(
+            num_tokens_per_bin - sum(sample_lengths), self.seq_len
+        )
+        return (
+            sum(length**2 for length in sample_lengths)
+            + num_full_padding_segments * self.seq_len**2
+            + remaining_padding**2
+        )
+
+    def _pack_with_lpt(
+        self,
+        ordered_samples: list[TrainingSample],
+        *,
+        target_num_bins: int,
+    ) -> list[list[TrainingSample]] | None:
+        """Put longest samples in the lowest-workload feasible fixed bin.
+
+        The workload is document ``sum(L**2)``: padding-aware work can decrease
+        when a bin receives samples, so it is not an LPT placement key.
+        Return None if token or document capacity blocks a sample; the caller
+        then discards this partial assignment and uses the FFD fallback.
+        """
+        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        bins: list[list[TrainingSample]] = [[] for _ in range(target_num_bins)]
+        bin_num_tokens = [0] * target_num_bins
+        bin_workloads = [0] * target_num_bins
+
+        for sample in ordered_samples:
+            num_tokens = self.num_tokens_to_pack(sample)
+            destination = min(
+                (
+                    index
+                    for index, bin_ in enumerate(bins)
+                    if bin_num_tokens[index] + num_tokens <= num_tokens_per_bin
+                    and (
+                        self._max_num_documents is None
+                        or len(bin_) < self._max_num_documents
+                    )
+                ),
+                key=bin_workloads.__getitem__,
+                default=None,
+            )
+            if destination is None:
+                return None
+
+            bins[destination].append(sample)
+            bin_num_tokens[destination] += num_tokens
+            bin_workloads[destination] += num_tokens**2
+
+        return bins
 
     def _expand_bins_by_splitting(
         self,
@@ -384,14 +507,14 @@ class Batcher(Configurable):
         *,
         target_num_bins: int,
     ) -> None:
-        """Fill new bins by redistributing samples from the heaviest donors.
+        """Fill extra FFD grid slots from multi-sample bins when this lowers cost.
 
         A max-heap tracks each bin with more than one sample by attention
-        workload. For every required bin, repeatedly move the shortest sample
-        from the current heaviest donor while the move reduces the workload gap
-        between them. Filling also stops at the new bin's token or document
-        limit. Keeping one sample in every donor avoids replacing one empty bin
-        with another.
+        workload. For every required bin, move a sample from the current
+        heaviest donor only if it reduces the higher of the two bins' estimated
+        costs, including padding. Filling stops at the new bin's
+        token or document limit. Keeping one sample in every donor avoids
+        replacing one empty bin with another.
 
         Every successful inner-loop iteration moves one sample. The outer loop
         either appends a non-empty bin or stops and pads the remaining slots, so
@@ -399,7 +522,7 @@ class Batcher(Configurable):
         """
         num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
         donor_heap = [
-            (-self._attention_workload(bin_), index)
+            (-self._attention_workload(bin_), -len(bin_), index)
             for index, bin_ in enumerate(bins)
             if len(bin_) > 1
         ]
@@ -408,40 +531,54 @@ class Batcher(Configurable):
         while len(bins) < target_num_bins:
             new_bin: list[TrainingSample] = []
             new_bin_num_tokens = 0
-            new_bin_workload = 0
-            skipped_donors: list[tuple[int, int]] = []
+            skipped_donors: list[tuple[int, int, int]] = []
 
             while donor_heap and (
                 self._max_num_documents is None
                 or len(new_bin) < self._max_num_documents
             ):
-                negative_workload, donor_index = heapq.heappop(donor_heap)
+                negative_workload, _, donor_index = heapq.heappop(donor_heap)
                 donor = bins[donor_index]
-                sample_index = min(
-                    range(len(donor)),
-                    key=lambda index: self.num_tokens_to_pack(donor[index]),
-                )
-                sample = donor[sample_index]
-                num_tokens = self.num_tokens_to_pack(sample)
-                sample_workload = num_tokens**2
                 donor_workload = -negative_workload
-                if (
-                    new_bin_num_tokens + num_tokens > num_tokens_per_bin
-                    or sample_workload >= donor_workload - new_bin_workload
-                ):
-                    skipped_donors.append((negative_workload, donor_index))
+                new_bin_workload = self._attention_workload(new_bin)
+                current_max_workload = max(donor_workload, new_bin_workload)
+                best_move: tuple[int, int, int, int] | None = None
+                for sample_index, sample in enumerate(donor):
+                    num_tokens = self.num_tokens_to_pack(sample)
+                    if new_bin_num_tokens + num_tokens > num_tokens_per_bin:
+                        continue
+                    donor_after = self._attention_workload(
+                        donor[:sample_index] + donor[sample_index + 1 :]
+                    )
+                    new_bin_after = self._attention_workload([*new_bin, sample])
+                    max_after = max(donor_after, new_bin_after)
+                    if max_after >= current_max_workload:
+                        continue
+                    move = (max_after, -num_tokens, sample_index, donor_after)
+                    if best_move is None or move < best_move:
+                        best_move = move
+
+                if best_move is None:
+                    skipped_donors.append((negative_workload, -len(donor), donor_index))
                     continue
 
+                _, negative_num_tokens, sample_index, donor_after = best_move
+                num_tokens = -negative_num_tokens
+                sample = donor[sample_index]
                 donor.pop(sample_index)
                 new_bin.append(sample)
                 new_bin_num_tokens += num_tokens
-                new_bin_workload += sample_workload
 
                 if len(donor) > 1:
                     heapq.heappush(
                         donor_heap,
-                        (negative_workload + sample_workload, donor_index),
+                        (-donor_after, -len(donor), donor_index),
                     )
+
+                # Filling the new bin can make a previously skipped move useful.
+                for donor_entry in skipped_donors:
+                    heapq.heappush(donor_heap, donor_entry)
+                skipped_donors.clear()
 
             for donor_entry in skipped_donors:
                 heapq.heappush(donor_heap, donor_entry)
@@ -451,7 +588,10 @@ class Batcher(Configurable):
 
             bins.append(new_bin)
             if len(new_bin) > 1:
-                heapq.heappush(donor_heap, (-new_bin_workload, len(bins) - 1))
+                heapq.heappush(
+                    donor_heap,
+                    (-self._attention_workload(new_bin), -len(new_bin), len(bins) - 1),
+                )
 
         bins.extend([] for _ in range(target_num_bins - len(bins)))
 
