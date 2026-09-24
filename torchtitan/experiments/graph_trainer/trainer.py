@@ -205,13 +205,9 @@ class GraphTrainingEngine(TrainingEngine):
         if accumulation_index == 0:
             self.loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
 
-        if self.parallel_dims.dp_replicate_enabled and (
-            self.num_accumulation_steps == 1 or self.config.training.disable_cuda_graphs
-        ):
-            is_last = accumulation_index == self.num_accumulation_steps - 1
-            for part in self.model_parts:
-                part.set_requires_all_reduce(is_last)  # pyrefly: ignore[not-callable]
-
+        # SimpleFSDP and AutoParallel materialize gradient collectives in the
+        # traced microbatch and do not implement FSDPModule.set_requires_all_reduce.
+        # External gradient accumulation therefore communicates each microbatch.
         def compute_forward_backward() -> torch.Tensor:
             assert len(microbatch_group) == 1
             microbatch = microbatch_group[0]
