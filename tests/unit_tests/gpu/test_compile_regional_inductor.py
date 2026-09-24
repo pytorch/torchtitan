@@ -18,8 +18,12 @@ from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.linear import Linear
 
 
+class _RegionalModule(torch.nn.Module):
+    _has_inductor_region = True
+
+
 class TestRegionalInductorBackend(unittest.TestCase):
-    """CPU tests for FlexInnerAttention regional_inductor backend selection.
+    """CPU tests for regional_inductor backend selection.
 
     These exercise only the backend-selection decision and the resulting
     annotation toggle; compilation is never run, so no GPU is required.
@@ -47,6 +51,11 @@ class TestRegionalInductorBackend(unittest.TestCase):
         backend = _maybe_regional_inductor_backend(self._dense, "aot_eager")
         self.assertEqual(backend, "aot_eager")
         self.assertFalse(compile_mod._regional_inductor_enabled)
+
+    def test_aot_eager_with_non_flex_region_scoops(self):
+        backend = _maybe_regional_inductor_backend(_RegionalModule(), "aot_eager")
+        self.assertTrue(callable(backend))
+        self.assertTrue(compile_mod._regional_inductor_enabled)
 
     def test_other_backend_with_flex_raises(self):
         with self.assertRaises(ValueError):
