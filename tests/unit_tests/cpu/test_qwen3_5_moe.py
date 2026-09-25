@@ -56,6 +56,13 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
                         dst=spmd.S(0),
                         backward_options={"op_dtype": x_TD.dtype},
                     ),
+                    call(
+                        ANY,
+                        tp_group,
+                        src=spmd.P,
+                        dst=spmd.S(0),
+                        backward_options={"op_dtype": x_TD.dtype},
+                    ),
                 ],
             ),
         ):
@@ -71,6 +78,18 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
                 ),
                 patch(
                     "torchtitan.models.qwen3_5.moe.spmd_mesh_group",
+                    return_value=tp_group,
+                ),
+                patch(
+                    "torchtitan.models.common.moe.spmd_sparse_mesh",
+                    return_value=object(),
+                ),
+                patch(
+                    "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                    return_value=sp_enabled,
+                ),
+                patch(
+                    "torchtitan.models.common.moe.spmd_mesh_group",
                     return_value=tp_group,
                 ),
                 patch(

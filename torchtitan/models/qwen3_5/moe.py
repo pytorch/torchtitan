@@ -18,22 +18,22 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_group,
     spmd_sparse_mesh,
 )
-from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe import SharedExpertFeedForward
 
 
-class SigmoidGatedFeedForward(FeedForward):
+class SigmoidGatedFeedForward(SharedExpertFeedForward):
     """Qwen3.5 shared FFN with a per-token sigmoid output gate."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FeedForward.Config):
+    class Config(SharedExpertFeedForward.Config):
         gate: Linear.Config
 
     def __init__(self, config: Config):
         super().__init__(config)
         self.gate = config.gate.build()
 
-    def _compute_input_projections(
+    def _gather_shared_input_and_compute_projections(
         self, x_TD: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Gather the shared input once, then compute both input projections."""
@@ -64,14 +64,14 @@ class SigmoidGatedFeedForward(FeedForward):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up_T2F, gate_out_T1 = remat.region(
-            self._compute_input_projections,
+            self._gather_shared_input_and_compute_projections,
             self.remat_region_name("input_projections"),
             recompute=self.remat_should_recompute("input_projections"),
         )(x)
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
         remat.recompute_needs_tensor(gate_TF, up_TF)
         out_TD = remat.region(
-            self.w2,
+            self._compute_output_projection,
             self.remat_region_name("w2"),
             recompute=self.remat_should_recompute("w2"),
         )(self.activation_fn(gate_TF, up_TF))

@@ -27,7 +27,12 @@ from torchtitan.models.common.linear import (
     RouterGateLinear,
     RowParallelLinear,
 )
-from torchtitan.models.common.moe import RoutedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    MoE,
+    RoutedExperts,
+    SharedExpertFeedForward,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
@@ -128,6 +133,17 @@ class _RoutedExpertsBlock(Module):
             topk_expert_ids_T1,
             num_tokens_per_expert_1,
         ).sum()
+
+
+class _MoEOutputReductionBlock(Module):
+    def __init__(self):
+        super().__init__()
+        self.moe = MoE.__new__(MoE)
+        Module.__init__(self.moe)
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        out_TD = self.moe._all_reduce_moe_output_across_tp(x_TD)
+        return out_TD.square().sum()
 
 
 class _CountingGroupedLinear(GroupedLinear):
@@ -455,6 +471,88 @@ class TestRematRegions(unittest.TestCase):
                     (w13.num_forwards, w2.num_forwards),
                     expected_counts,
                 )
+
+    def test_moe_tp_output_reduction_region_controls_recomputation(self):
+        for save_regions, expected_reductions in (
+            ([], 2),
+            (["moe.tp_output_reduction"], 1),
+        ):
+            with self.subTest(save_regions=save_regions):
+                model = _RematModel(_MoEOutputReductionBlock())
+                RegionAC.Config(save_regions=save_regions).build().apply(model)
+                num_reductions = 0
+
+                def counted_redistribute(tensor, *_args, **_kwargs):
+                    nonlocal num_reductions
+                    num_reductions += 1
+                    return tensor * 2
+
+                with (
+                    patch(
+                        "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                        return_value=False,
+                    ),
+                    patch(
+                        "torchtitan.models.common.moe.spmd_mesh_group",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "torchtitan.models.common.moe.spmd.redistribute",
+                        new=counted_redistribute,
+                    ),
+                ):
+                    x_TD = torch.randn(3, 4, requires_grad=True)
+                    model(x_TD).backward()
+
+                self.assertEqual(num_reductions, expected_reductions)
+                self.assertIsNotNone(x_TD.grad)
+
+    def test_shared_w2_region_controls_reduce_scatter_recomputation(self):
+        for save_regions, expected_reductions in (
+            ([], 2),
+            (["feed_forward.w2"], 1),
+        ):
+            with self.subTest(save_regions=save_regions):
+                shared_expert = SharedExpertFeedForward.Config(
+                    w13=Linear.Config(
+                        in_features=4,
+                        out_features=8,
+                        num_linears=2,
+                    ),
+                    w2=Linear.Config(in_features=8, out_features=4),
+                ).build()
+                model = _RematModel(_FeedForwardBlock(shared_expert))
+                RegionAC.Config(save_regions=save_regions).build().apply(model)
+                num_reductions = 0
+
+                def counted_redistribute(tensor, *_args, **_kwargs):
+                    nonlocal num_reductions
+                    num_reductions += 1
+                    return tensor * 2
+
+                with (
+                    patch(
+                        "torchtitan.models.common.moe.spmd_sparse_mesh",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                        return_value=True,
+                    ),
+                    patch(
+                        "torchtitan.models.common.moe.spmd_mesh_group",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "torchtitan.models.common.moe.spmd.redistribute",
+                        new=counted_redistribute,
+                    ),
+                ):
+                    x_TD = torch.randn(3, 4, requires_grad=True)
+                    model(x_TD).backward()
+
+                self.assertEqual(num_reductions, expected_reductions)
+                self.assertIsNotNone(x_TD.grad)
 
     def test_grouped_linear_variants_use_expected_region_boundaries(self):
         configs = (

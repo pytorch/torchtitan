@@ -31,6 +31,7 @@ from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttentio
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
+    PartialRowParallelLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
@@ -310,7 +311,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         ).transform(config)
 
         self.assertIs(type(transformed.w13), AsyncColumnParallelLinear.Config)
-        self.assertIs(type(transformed.w2), Linear.Config)
+        self.assertIs(type(transformed.w2), PartialRowParallelLinear.Config)
 
     def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
         from torchtitan.models.muse_glimmer import muse_glimmer_configs
@@ -374,6 +375,19 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         ).transform(config)
 
         self.assertIs(type(transformed), InvariantRowParallelLinear.Config)
+
+    def test_async_transform_skips_partial_row_parallel_linear(self):
+        config = PartialRowParallelLinear.Config(
+            in_features=4,
+            out_features=4,
+            bias=True,
+        )
+
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(config)
+
+        self.assertIs(type(transformed), PartialRowParallelLinear.Config)
 
     def test_async_transform_conflicts_with_lora(self):
         config = self._model_config()

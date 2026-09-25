@@ -104,8 +104,8 @@ def _router_gate_sharding_config() -> ShardingConfig:
     )
 
 
-def shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
-    """Shard shared-expert w2 locally and reduce at its module boundary."""
+def shared_expert_rowwise_config() -> ShardingConfig:
+    """Shard shared-expert w2 and declare its local partial output."""
     return ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.S(1)),
@@ -115,7 +115,6 @@ def shared_expert_rowwise_config(*, output_layout: SpmdType) -> ShardingConfig:
             "input": dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
         },
         out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=output_layout,
     )
 
 
@@ -143,7 +142,7 @@ def _shared_experts_sharding_configs(
             out_src_shardings=output_layout,
         ),
         stacked_colwise_config(input_layout=input_layout),
-        shared_expert_rowwise_config(output_layout=output_layout),
+        shared_expert_rowwise_config(),
     )
 
 
@@ -173,14 +172,6 @@ def _routed_experts_sharding_configs(
         if enable_ep
         else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     )
-    desired_experts_output_layout = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(
-            tp=spmd.P if enable_ep else spmd.R, cp=spmd.S(0)
-        )
-    )
-
     return (
         ShardingConfig(
             in_src_shardings={
@@ -189,14 +180,7 @@ def _routed_experts_sharding_configs(
                 "topk_expert_ids_TK": experts_input_layout,
                 "num_local_tokens_per_expert_E": tokens_per_expert_layout,
             },
-            in_dst_shardings={
-                "x_TD": experts_input_layout,
-                "topk_scores_TK": experts_input_layout,
-                "topk_expert_ids_TK": experts_input_layout,
-                "num_local_tokens_per_expert_E": tokens_per_expert_layout,
-            },
             out_src_shardings=experts_output_layout,
-            out_dst_shardings=desired_experts_output_layout,
             local_spmd=True,
         ),
         w13_config,

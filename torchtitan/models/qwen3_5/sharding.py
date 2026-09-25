@@ -237,9 +237,7 @@ def set_sigmoid_gated_feed_forward_sharding_config(
     shared_experts.w13.sharding_config = stacked_colwise_config(
         input_layout=replicated_input_layout
     )
-    shared_experts.w2.sharding_config = shared_expert_rowwise_config(
-        output_layout=output_layout
-    )
+    shared_experts.w2.sharding_config = shared_expert_rowwise_config()
     shared_experts.gate.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),

@@ -32,6 +32,7 @@ from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
+    PartialRowParallelLinear,
     RowParallelLinear,
 )
 
@@ -371,9 +372,13 @@ class NVFP4Linear(Linear):
                 }
                 if isinstance(
                     instance,
-                    (ColumnParallelLinear, RowParallelLinear),
+                    (
+                        ColumnParallelLinear,
+                        PartialRowParallelLinear,
+                        RowParallelLinear,
+                    ),
                 ):
-                    # The explicit TP class owns its collective in forward.
+                    # The explicit TP class owns its TP behavior in forward.
                     # Making the entire module local would hide that boundary.
                     instance._sharding_config = replace(
                         sc,

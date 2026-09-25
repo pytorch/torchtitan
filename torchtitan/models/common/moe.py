@@ -148,6 +148,30 @@ class RoutedExperts(Module):
         return out_TD
 
 
+class SharedExpertFeedForward(FeedForward):
+    """Shared FFN that keeps its SP output reduction inside its w2 region."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FeedForward.Config):
+        pass
+
+    def _compute_output_projection(self, hidden_TF: torch.Tensor) -> torch.Tensor:
+        out_TD = super()._compute_output_projection(hidden_TF)
+        if spmd_sparse_mesh() is None or not spmd_dense_sp_enabled():
+            return out_TD
+
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return out_TD
+        return spmd.redistribute(
+            out_TD,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": out_TD.dtype},
+        )
+
+
 class TokenChoiceTopKRouter(Module):
     """This class implements token-choice routing. In token-choice top-K routing, each token is
     routed to top K experts based on the router scores.
@@ -692,9 +716,10 @@ class MoE(Module):
         runs in a local SPMD region. When EP internally sequence-shards tokens
         across TP, the caller must provide a TP-divisible token count.
         """
-        routed_x_TD, routed_padding_mask_T = self._shard_expert_parallel_inputs(
-            x_TD, padding_mask_T
-        )
+        (
+            routed_x_TD,
+            routed_padding_mask_T,
+        ) = self._shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
 
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
@@ -706,40 +731,18 @@ class MoE(Module):
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
-        out_TD = remat.region(
-            self._compute_expert_output,
-            self.remat_region_name("experts"),
-            recompute=self.remat_should_recompute("experts"),
-        )(
-            x_TD,
-            routed_x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
-        )
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
-
-    def _compute_expert_output(
-        self,
-        x_TD: torch.Tensor,
-        routed_x_TD: torch.Tensor,
-        topk_scores_TK: torch.Tensor,
-        topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute routed and shared experts, then reduce their combined output."""
         out_TD = self.routed_experts(
             routed_x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
+        out_TD = self._zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
             out_TD = out_TD + self.shared_experts(x_TD)
-        return self._reduce_output_across_tp(out_TD)
+        return self._all_reduce_moe_output_across_tp(out_TD)
 
-    def _shard_expert_parallel_inputs(
+    def _shard_routed_branch_inputs_across_tp(
         self,
         x_TD: torch.Tensor,
         padding_mask_T: torch.Tensor | None,
@@ -769,20 +772,44 @@ class MoE(Module):
             )
         return x_TD, padding_mask_T
 
-    def _reduce_output_across_tp(self, out_TD: torch.Tensor) -> torch.Tensor:
+    def _zero_fill_routed_output_to_tp_partial(
+        self, routed_output_TD: torch.Tensor
+    ) -> torch.Tensor:
+        """Zero-fill the routed token shard before combining TP partials."""
+        if spmd_sparse_mesh() is None or spmd_dense_sp_enabled():
+            return routed_output_TD
+
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return routed_output_TD
+        return spmd.redistribute(
+            routed_output_TD,
+            tp_group,
+            src=spmd.S(0),
+            dst=spmd.P,
+            backward_options={"op_dtype": routed_output_TD.dtype},
+        )
+
+    def _all_reduce_moe_output_across_tp(self, out_TD: torch.Tensor) -> torch.Tensor:
         """Reduce the combined partial output when dense SP is disabled."""
         if spmd_dense_sp_enabled():
             return out_TD
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return out_TD
-        return spmd.redistribute(
+        out_TD = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("tp_output_reduction"),
+            recompute=self.remat_should_recompute("tp_output_reduction"),
+        )(
             out_TD,
             tp_group,
             src=spmd.P,
             dst=spmd.I,
             backward_options={"op_dtype": out_TD.dtype},
         )
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
