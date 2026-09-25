@@ -56,6 +56,7 @@ class RoutedExperts(Module):
         w2: GroupedLinear.Config
         token_dispatcher: LocalTokenDispatcher.Config
         activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
+        expert_output_postprocess: Module.Config | None = None
 
         def __post_init__(self) -> None:
             if self.w13.group_size != self.w2.group_size:
@@ -79,6 +80,11 @@ class RoutedExperts(Module):
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
+        self.expert_output_postprocess = (
+            config.expert_output_postprocess.build()
+            if config.expert_output_postprocess is not None
+            else None
+        )
         self.token_dispatcher = config.token_dispatcher.build()
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -125,6 +131,8 @@ class RoutedExperts(Module):
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E).type_as(routed_input_RD)
+            if self.expert_output_postprocess is not None:
+                routed_output_RD = self.expert_output_postprocess(routed_output_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
