@@ -57,5 +57,18 @@ jobs:
           --index-strategy unsafe-best-match \
           --constraint .ci/docker/requirements-rl.txt
 
+        # The shared HF cache is read-only and does not contain this tokenizer.
+        # Fetch only tokenizer files into a writable cache (no model weights).
+        export MUSE_GLIMMER_TOKENIZER="$(python -c '
+        import os
+        from huggingface_hub import snapshot_download
+
+        print(snapshot_download(
+            "meta-models/Muse-Glimmer-30B",
+            cache_dir=os.path.join(os.environ["RUNNER_TEMP"], "rl-hf-cache"),
+            allow_patterns=["config.json", "tokenizer*.json", "chat_template.jinja"],
+        ))
+        ')"
+
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
         pytest tests/rl/unit_tests --strict-markers --durations=20 -vv
