@@ -15,7 +15,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -478,16 +479,19 @@ class MuseGlimmerModel(MultimodalModel):
                     max_context_length=max_context_length,
                 )
 
-        input_sharding = {
+        input_shardings = {
             **decoder_input_sharding(),
             **multimodal_input_sharding(include_cp_axis=True),
         }
-        input_sharding["vision_bank_indices_T"] = vision_bank_indices_placement(
+        input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel
         )
         if parallel_dims.cp_enabled:
-            batch = self._cp_shard_inputs(
-                batch, input_sharding, parallel_dims, parallelism
+            batch = self._prepare_cp_batch(
+                batch,
+                input_shardings=input_shardings,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
             )
         if (
             parallelism.enable_sequence_parallel
@@ -500,7 +504,7 @@ class MuseGlimmerModel(MultimodalModel):
                 src=spmd.I,
                 dst=spmd.S(0),
             )
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_shardings)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")

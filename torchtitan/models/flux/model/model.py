@@ -10,12 +10,9 @@ from typing import Any, cast, Self
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
-from torchtitan.config import (
-    CompileConfig,
-    ParallelismConfig,
-    TORCH_DTYPE_MAP,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
@@ -32,7 +29,10 @@ from torchtitan.models.flux.model.layers import (
     SingleStreamBlock,
     timestep_embedding,
 )
-from torchtitan.models.flux.sharding import annotate_flux_forward_inputs
+from torchtitan.models.flux.sharding import (
+    annotate_flux_forward_inputs,
+    flux_input_sharding,
+)
 from torchtitan.models.flux.utils import (
     create_position_encoding_for_latents,
     pack_latents,
@@ -280,7 +280,7 @@ class FluxModel(BaseModel):
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Encode a raw image-text batch and prepare flow-matching inputs."""
-        del parallelism, max_num_documents, max_context_length
+        del max_num_documents, max_context_length
         autoencoder = cast(AutoEncoder | None, kwargs["autoencoder"])
         clip_encoder = cast(FluxEmbedder, kwargs["clip_encoder"])
         t5_encoder = cast(FluxEmbedder, kwargs["t5_encoder"])
@@ -317,21 +317,40 @@ class FluxModel(BaseModel):
             target = pack_latents(noise - image_encodings)
 
         if parallel_dims.cp_enabled:
-            from torchtitan.distributed.context_parallel import cp_shard
-
-            (
-                latents,
-                latent_pos_enc,
-                t5_encodings,
-                text_pos_enc,
-                target,
-            ), _ = cp_shard(
-                parallel_dims.get_mesh("cp"),
-                (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
-                None,
-                load_balancer_type=None,
-                input_seq_dims=1,
+            cp_inputs = {
+                "img": latents,
+                "img_ids": latent_pos_enc,
+                "txt": t5_encodings,
+                "txt_ids": text_pos_enc,
+                "target": target,
+            }
+            input_sharding = flux_input_sharding()
+            load_balancer_config = parallelism.context_parallel_load_balancer
+            load_balancer = (
+                load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        cp_inputs, input_shardings=input_sharding
+                    ),
+                    context_metadata=None,
+                )
+                if load_balancer_config is not None
+                else None
             )
+            permutation = (
+                load_balancer.generate_permutation()
+                if load_balancer is not None
+                else None
+            )
+            cp_inputs = context_parallel.shard_inputs(
+                cp_inputs,
+                input_shardings=input_sharding,
+                permutation=permutation,
+            )
+            latents = cp_inputs["img"]
+            latent_pos_enc = cp_inputs["img_ids"]
+            t5_encodings = cp_inputs["txt"]
+            text_pos_enc = cp_inputs["txt_ids"]
+            target = cp_inputs["target"]
 
         return (
             latents,

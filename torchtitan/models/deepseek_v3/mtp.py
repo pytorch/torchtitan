@@ -18,10 +18,10 @@ from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
 from torchtitan.config import (
     CompileConfig,
     FSDPSymmMemScope,
-    ParallelismConfig,
     TORCH_DTYPE_MAP,
     TrainingConfig,
 )
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -290,12 +290,6 @@ class MTPDecoder(Decoder):
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
         del kwargs
-        # Function-local import avoids a circular import
-        # (context_parallel.api -> models.common -> decoder).
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
         batch: dict[str, Any] = dict(input_dict)
         tokens = batch["input"]
         labels = batch["labels"]
@@ -309,7 +303,7 @@ class MTPDecoder(Decoder):
             if self.mtp_layers is not None
             else range(0)
         )
-        input_sharding = decoder_input_sharding()
+        input_shardings = decoder_input_sharding()
         for depth in depths:
             mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
                 tokens,
@@ -330,9 +324,9 @@ class MTPDecoder(Decoder):
             batch[f"mtp_input_tokens_{depth}"] = mtp_input_tokens
             batch[f"mtp_labels_{depth}"] = mtp_labels
             batch[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask
-            input_sharding[f"mtp_input_tokens_{depth}"] = input_sharding["input"]
-            input_sharding[f"mtp_labels_{depth}"] = input_sharding["labels"]
-            input_sharding[f"mtp_input_valid_mask_{depth}"] = input_sharding["input"]
+            input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
+            input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
+            input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
 
         if positions is not None:
             inner = self.config.first_full_attention_backend
@@ -347,14 +341,13 @@ class MTPDecoder(Decoder):
                 )
 
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
+            batch = self._prepare_cp_batch(
                 batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+                input_shardings=input_shardings,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
             )
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_shardings)
 
         main_tokens = batch.pop("input")
         main_labels = batch.pop("labels")

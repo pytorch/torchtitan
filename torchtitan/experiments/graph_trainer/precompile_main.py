@@ -260,7 +260,8 @@ def _precompile_aot_fx_trace(
                 positions=positions,
             )
 
-    # TODO: Add CP support — call prepare_context_parallel_input here
+    # TODO: Add CP support by generating a permutation and
+    # sharding inputs here.
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
     # dimension, matching the trainer's preprocess_inputs path.
     if parallel_dims.cp_enabled:

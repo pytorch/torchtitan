@@ -15,8 +15,8 @@ from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import iterate_and_close_dataloader, Validator
-from torchtitan.config import ParallelismConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import context_parallel, ParallelDims, utils as dist_utils
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model import BaseModel
 
@@ -25,6 +25,7 @@ from .flux_datasets import FluxValidationDatasetConfig
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
+from .sharding import flux_input_sharding
 from .tokenizer import FluxTokenizerContainer
 from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
 
@@ -126,7 +127,6 @@ class FluxValidator(Validator):
         clip_encoder: FluxEmbedder,
         dump_folder: str,
     ):
-        # pyrefly: ignore [read-only]
         self.device = device
         self._dtype = _dtype
         self.autoencoder = autoencoder
@@ -270,21 +270,43 @@ class FluxValidator(Validator):
 
             # Apply CP sharding if enabled
             if parallel_dims.cp_enabled:
-                from torchtitan.distributed.context_parallel import cp_shard
-
-                (
-                    latents,
-                    latent_pos_enc,
-                    t5_encodings,
-                    text_pos_enc,
-                    target,
-                ), _ = cp_shard(
-                    parallel_dims.get_mesh("cp"),
-                    (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
-                    None,  # No attention masks for Flux
-                    load_balancer_type=None,
-                    input_seq_dims=1,
-                )
+                cp_inputs = {
+                    "img": latents,
+                    "img_ids": latent_pos_enc,
+                    "txt": t5_encodings,
+                    "txt_ids": text_pos_enc,
+                    "target": target,
+                }
+                input_sharding = flux_input_sharding()
+                with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
+                    load_balancer_config = (
+                        self.parallelism.context_parallel_load_balancer
+                    )
+                    load_balancer = (
+                        load_balancer_config.build(
+                            seq_len=context_parallel.get_cp_input_seq_len(
+                                cp_inputs, input_shardings=input_sharding
+                            ),
+                            context_metadata=None,
+                        )
+                        if load_balancer_config is not None
+                        else None
+                    )
+                    permutation = (
+                        load_balancer.generate_permutation()
+                        if load_balancer is not None
+                        else None
+                    )
+                    cp_inputs = context_parallel.shard_inputs(
+                        cp_inputs,
+                        input_shardings=input_sharding,
+                        permutation=permutation,
+                    )
+                latents = cp_inputs["img"]
+                latent_pos_enc = cp_inputs["img_ids"]
+                t5_encodings = cp_inputs["txt"]
+                text_pos_enc = cp_inputs["txt_ids"]
+                target = cp_inputs["target"]
 
             with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
                 latent_noise_pred = model(

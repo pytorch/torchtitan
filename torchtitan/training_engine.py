@@ -33,10 +33,10 @@ from torchtitan.config.configs import (
     CommConfig,
     CompileConfig,
     DebugConfig,
-    ParallelismConfig,
     TrainingConfig,
 )
 from torchtitan.config.override import OverrideConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
@@ -539,7 +539,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     input_dict = microbatch.to_input_dict(
                         self.device, non_blocking=True
                     )
-                    with sl.log_trace_span("preprocess_inputs"):
+                    with (
+                        sl.log_trace_span("preprocess_inputs"),
+                        dist_utils.get_spmd_context(parallel_dims=self.parallel_dims),
+                    ):
                         inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
                             0
                         ].preprocess_inputs(
@@ -577,7 +580,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             assert len(microbatch_group) == 1
             microbatch = microbatch_group[0]
             input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
-            with sl.log_trace_span("preprocess_inputs"):
+            with (
+                sl.log_trace_span("preprocess_inputs"),
+                dist_utils.get_spmd_context(parallel_dims=self.parallel_dims),
+            ):
                 inputs, labels, extra_kwargs = self.model_parts[0].preprocess_inputs(
                     input_dict,
                     parallel_dims=self.parallel_dims,

@@ -10,21 +10,28 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, TYPE_CHECKING
+from typing import cast, Generic, Literal, TypeVar
 
 import spmd_types as spmd
 
 import torch
+import torch.distributed as dist
+from torch.nn.attention.flex_attention import BlockMask
+from torch.utils import _pytree as pytree
 
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
-
-if TYPE_CHECKING:
-    from torch.distributed.device_mesh import DeviceMesh
+from torchtitan.models.common.attention import (
+    create_attention_mask,
+    FlexAttentionMetadata,
+    FlexInnerAttention,
+    VarlenAttentionMetadata,
+    VarlenInnerAttention,
+)
 
 __all__ = [
     "CPInnerAttention",
@@ -37,28 +44,38 @@ __all__ = [
 _TOKEN_DIM = 0
 _HEAD_DIM = 1
 
+_GlobalContextMetadataT = TypeVar("_GlobalContextMetadataT")
+_LocalContextMetadataT = TypeVar("_LocalContextMetadataT")
 
-class CPInnerAttention(ABC):
-    """Inner attention that owns its context-parallel behavior."""
+
+class CPInnerAttention(ABC, Generic[_GlobalContextMetadataT, _LocalContextMetadataT]):
+    """Inner attention that owns CP execution and metadata preparation.
+
+    Subclasses implement the CP attention algorithm and prepare its context
+    metadata for rank-local execution.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         pass
 
-    @classmethod
+    # TODO(acisseJZhong): Let each attention backend own and prepare only its
+    # corresponding metadata instead of receiving the model-level container.
+    @staticmethod
     @abstractmethod
-    def cp_shard(
-        cls,
-        input_dict: dict[str, Any],
-        input_shardings: dict[str, Any] | None,
-        cp_mesh: "DeviceMesh",
-        load_balancer_type: str | None,
-        ptrr_mask_key: str | None,
-    ) -> dict[str, Any]:
-        """Shard model inputs for this attention implementation."""
+    def prepare_cp_metadata(
+        context_metadata: _GlobalContextMetadataT,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> _LocalContextMetadataT:
+        """Prepare local metadata; ``None`` means contiguous CP sharding."""
+        raise NotImplementedError
 
 
-class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
+class KVAllGatherCPFlexInnerAttention(
+    CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata],
+    FlexInnerAttention,
+):
     """FlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
@@ -70,25 +87,148 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
         super().__init__(config)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
-    @classmethod
-    def cp_shard(
-        cls,
-        input_dict: dict[str, Any],
-        input_shardings: dict[str, Any] | None,
-        cp_mesh: "DeviceMesh",
-        load_balancer_type: str | None,
-        ptrr_mask_key: str | None,
-    ) -> dict[str, Any]:
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
+    @staticmethod
+    def prepare_cp_metadata(
+        context_metadata: FlexAttentionMetadata,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> FlexAttentionMetadata:
+        """Shard global BlockMask metadata to match the model-input partition."""
+        if not isinstance(context_metadata, (BlockMask, Mapping)):
+            raise ValueError(
+                "K/V all-gather context parallelism requires BlockMask metadata, "
+                f"but got {type(context_metadata).__name__}."
+            )
+
+        flat_metadata, spec = pytree.tree_flatten(
+            context_metadata,
+            is_leaf=lambda value: isinstance(value, BlockMask),
+        )
+        if not any(isinstance(value, BlockMask) for value in flat_metadata):
+            raise ValueError(
+                "K/V all-gather context parallelism requires BlockMask metadata."
+            )
+
+        flat_local_metadata = [
+            (
+                KVAllGatherCPFlexInnerAttention._shard_block_mask(
+                    value,
+                    permutation=permutation,
+                )
+                if isinstance(value, BlockMask)
+                else value
+            )
+            for value in flat_metadata
+        ]
+        return cast(
+            FlexAttentionMetadata,
+            pytree.tree_unflatten(flat_local_metadata, spec),
         )
 
-        return prepare_context_parallel_input(
-            input_dict,
-            input_shardings,
-            cp_mesh,
-            load_balancer_type,
-            ptrr_mask_key,
+    @staticmethod
+    def _shard_block_mask(
+        block_mask: BlockMask,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> BlockMask:
+        """Build a rank-local BlockMask for K/V all-gather CP.
+
+        The returned mask covers the current rank's Q shard and the global K/V
+        sequence. Its mask function maps local Q and global K/V positions from
+        the permuted sequence back to their original global indices before
+        applying the input mask function. The input block size and full-block
+        representation are preserved.
+
+        Args:
+            block_mask: BlockMask for the unsharded global sequence.
+            permutation: Global token permutation applied before CP sharding,
+                with shape ``[1, seq_len]`` or ``[batch, seq_len]``. ``None``
+                selects contiguous sharding without token reordering.
+
+        Returns:
+            A local-Q/global-KV BlockMask for the current CP rank.
+
+        Raises:
+            NotImplementedError: If the global Q length cannot be evenly
+                divided into complete Q blocks across CP ranks.
+            ValueError: If ``permutation`` has an invalid shape or sequence
+                length.
+        """
+        global_q_len, global_kv_len = block_mask.seq_lengths
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "CP metadata preparation requires an active multi-rank CP mesh axis."
+            )
+        cp_size = cp_group.size()
+        cp_rank = dist.get_rank(cp_group)
+        q_block_size, _ = block_mask.BLOCK_SIZE
+        if global_q_len % (cp_size * q_block_size) != 0:
+            raise NotImplementedError(
+                f"Global Q length ({global_q_len}) must be divisible by CP size "
+                f"({cp_size}) * Q block size ({q_block_size})."
+            )
+
+        if permutation is not None:
+            if permutation.ndim != 2:
+                raise ValueError(
+                    "CP permutation must have shape [1, seq_len] or "
+                    f"[batch, seq_len], but got {tuple(permutation.shape)}."
+                )
+            if permutation.shape[1] != global_q_len:
+                raise ValueError(
+                    f"CP permutation length ({permutation.shape[1]}) must match "
+                    f"global Q length ({global_q_len})."
+                )
+
+        local_q_len = global_q_len // cp_size
+        mask_mod = block_mask.mask_mod
+
+        def _unpermute_idx(
+            batch_idx: torch.Tensor, post_permutation_idx: torch.Tensor
+        ) -> torch.Tensor:
+            if permutation is None:
+                return post_permutation_idx
+            if permutation.shape[0] == 1:
+                return permutation[0][post_permutation_idx]
+            return permutation[batch_idx][post_permutation_idx]
+
+        def _local_q_idx_to_global_q_idx(local_q_idx: torch.Tensor) -> torch.Tensor:
+            local_block_idx, local_block_offset = (
+                local_q_idx // q_block_size,
+                local_q_idx % q_block_size,
+            )
+            num_local_blocks = local_q_len // q_block_size
+            global_block_idx = num_local_blocks * cp_rank + local_block_idx
+            return global_block_idx * q_block_size + local_block_offset
+
+        def _local_mask_mod(
+            batch_idx: torch.Tensor,
+            head_idx: torch.Tensor,
+            local_q_idx: torch.Tensor,
+            global_kv_idx: torch.Tensor,
+        ) -> torch.Tensor:
+            # The original mask_mod expects indices in the pre-permutation order.
+            return mask_mod(
+                batch_idx,
+                head_idx,
+                _unpermute_idx(
+                    batch_idx,
+                    _local_q_idx_to_global_q_idx(local_q_idx),
+                ),
+                _unpermute_idx(batch_idx, global_kv_idx),
+            )
+
+        return create_attention_mask(
+            _local_mask_mod,
+            block_mask.kv_num_blocks.shape[0],
+            block_mask.kv_num_blocks.shape[1],
+            local_q_len,
+            global_kv_len,
+            device=block_mask.kv_num_blocks.device,
+            BLOCK_SIZE=block_mask.BLOCK_SIZE,
+            # Preserve whether the global mask stores full blocks separately.
+            separate_full_blocks=block_mask.full_kv_num_blocks is not None,
         )
 
     def forward(
@@ -116,37 +256,26 @@ class KVAllGatherCPFlexInnerAttention(CPInnerAttention, FlexInnerAttention):
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
 
-class UlyssesCPInnerAttention(CPInnerAttention):
-    """Move CP sharding between the token and head dimensions."""
+class UlyssesCPInnerAttention(
+    CPInnerAttention[_GlobalContextMetadataT, _GlobalContextMetadataT]
+):
+    """Move CP sharding from tokens to heads while keeping metadata global."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config):
         pass
 
-    @classmethod
-    def cp_shard(
-        cls,
-        input_dict: dict[str, Any],
-        input_shardings: dict[str, Any] | None,
-        cp_mesh: "DeviceMesh",
-        load_balancer_type: str | None,
-        ptrr_mask_key: str | None,
-    ) -> dict[str, Any]:
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
+    @staticmethod
+    def prepare_cp_metadata(
+        context_metadata: _GlobalContextMetadataT,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> _GlobalContextMetadataT:
+        del context_metadata, permutation
+        raise RuntimeError(
+            "Ulysses CP keeps context metadata global; "
+            "prepare_cp_metadata must not be called."
         )
-
-        attention_masks = input_dict.pop("attention_masks", None)
-        prepare_context_parallel_input(
-            input_dict,
-            input_shardings,
-            cp_mesh,
-            None,
-            None,
-        )
-        if attention_masks is not None:
-            input_dict["attention_masks"] = attention_masks
-        return input_dict
 
     def forward(
         self,
@@ -182,7 +311,9 @@ class UlyssesCPInnerAttention(CPInnerAttention):
         )
 
 
-class UlyssesCPFlexInnerAttention(UlyssesCPInnerAttention, FlexInnerAttention):
+class UlyssesCPFlexInnerAttention(
+    UlyssesCPInnerAttention[FlexAttentionMetadata], FlexInnerAttention
+):
     """FlexInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)
@@ -190,7 +321,9 @@ class UlyssesCPFlexInnerAttention(UlyssesCPInnerAttention, FlexInnerAttention):
         pass
 
 
-class UlyssesCPVarlenInnerAttention(UlyssesCPInnerAttention, VarlenInnerAttention):
+class UlyssesCPVarlenInnerAttention(
+    UlyssesCPInnerAttention[VarlenAttentionMetadata], VarlenInnerAttention
+):
     """VarlenInnerAttention under Ulysses CP."""
 
     @dataclass(kw_only=True, slots=True)

@@ -14,7 +14,14 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.distributed import context_parallel
+from torchtitan.distributed.context_parallel import (
+    ContextParallelLoadBalancer,
+    HeadTailCPLoadBalancer,
+    PTRRFlexAttentionCPLoadBalancer,
+)
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
@@ -26,6 +33,7 @@ from torchtitan.models.common.cp_attention import (
     UlyssesCPInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
 
 class TestKernelSelection(unittest.TestCase):
@@ -45,21 +53,253 @@ class TestKernelSelection(unittest.TestCase):
     def test_plain_flex_is_not_a_cp_kernel(self):
         self.assertNotIsInstance(get_attention_config("flex"), CPInnerAttention.Config)
 
-    def test_cp_inner_attention_owns_input_sharding(self):
-        batch = {"input": torch.arange(8)}
-        sharded = {"input": torch.arange(4)}
-        mesh = object()
-        with mock.patch(
-            "torchtitan.distributed.context_parallel.api."
-            "prepare_context_parallel_input",
-            return_value=sharded,
-        ) as prepare:
-            result = KVAllGatherCPFlexInnerAttention.cp_shard(
-                batch, None, mesh, "headtail", None
+    def test_all_gather_prepares_only_block_masks(self):
+        block_mask = object.__new__(BlockMask)
+        sliding_block_mask = object.__new__(BlockMask)
+        linear_attention_metadata = object()
+        context_metadata = {
+            "quadratic_attention": block_mask,
+            "sliding_attention": sliding_block_mask,
+            "linear_attention": linear_attention_metadata,
+        }
+        sharded_block_mask = object.__new__(BlockMask)
+        sharded_sliding_block_mask = object.__new__(BlockMask)
+        permutation = torch.arange(8).unsqueeze(0)
+        with mock.patch.object(
+            KVAllGatherCPFlexInnerAttention,
+            "_shard_block_mask",
+            side_effect=(sharded_block_mask, sharded_sliding_block_mask),
+        ) as shard_block_mask:
+            result = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+                context_metadata,
+                permutation=permutation,
             )
 
-        self.assertIs(result, sharded)
-        prepare.assert_called_once_with(batch, None, mesh, "headtail", None)
+        assert isinstance(result, dict)
+        self.assertIs(result["quadratic_attention"], sharded_block_mask)
+        self.assertIs(result["sliding_attention"], sharded_sliding_block_mask)
+        self.assertIs(result["linear_attention"], linear_attention_metadata)
+        self.assertEqual(
+            shard_block_mask.call_args_list,
+            [
+                mock.call(
+                    block_mask,
+                    permutation=permutation,
+                ),
+                mock.call(
+                    sliding_block_mask,
+                    permutation=permutation,
+                ),
+            ],
+        )
+
+    def test_all_gather_prepares_single_block_mask(self):
+        block_mask = object.__new__(BlockMask)
+        sharded_block_mask = object.__new__(BlockMask)
+        permutation = torch.arange(8).unsqueeze(0)
+        with mock.patch.object(
+            KVAllGatherCPFlexInnerAttention,
+            "_shard_block_mask",
+            return_value=sharded_block_mask,
+        ) as shard_block_mask:
+            result = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+                block_mask,
+                permutation=permutation,
+            )
+
+        self.assertIs(result, sharded_block_mask)
+        shard_block_mask.assert_called_once_with(
+            block_mask,
+            permutation=permutation,
+        )
+
+
+class TestFluxCpSharding(unittest.TestCase):
+    def test_flux_input_sharding_uses_sequence_dim_one(self):
+        from torchtitan.models.flux.sharding import flux_input_sharding
+
+        input_shardings = flux_input_sharding()
+
+        self.assertEqual(
+            set(input_shardings),
+            {"img", "img_ids", "txt", "txt_ids", "target"},
+        )
+        for sharding in input_shardings.values():
+            cp = sharding.local_type[MeshAxisName.CP]
+            self.assertIsInstance(cp, spmd.Shard)
+            self.assertEqual(cp.dim, 1)
+
+
+class TestDecoderCpSharding(unittest.TestCase):
+    def test_config_builds_selected_load_balancer(self):
+        input_T = torch.arange(8)
+        block_mask = object.__new__(BlockMask)
+        cp_group = SimpleNamespace(size=lambda: 2)
+        spmd_mesh = SimpleNamespace(device_type="cuda")
+        cases = (
+            (HeadTailCPLoadBalancer, None),
+            (
+                PTRRFlexAttentionCPLoadBalancer,
+                block_mask,
+            ),
+        )
+        with mock.patch(
+            "torchtitan.distributed.context_parallel._HeadTailLoadBalancer"
+        ), mock.patch(
+            "torchtitan.distributed.context_parallel._PTRRLoadBalancer"
+        ), mock.patch(
+            "torchtitan.distributed.context_parallel.spmd_mesh_group",
+            return_value=cp_group,
+        ), mock.patch(
+            "torchtitan.distributed.context_parallel.current_spmd_mesh",
+            return_value=spmd_mesh,
+        ):
+            for load_balancer_type, context_metadata in cases:
+                with self.subTest(load_balancer_type=load_balancer_type.__name__):
+                    load_balancer = load_balancer_type.Config().build(
+                        seq_len=input_T.shape[0],
+                        context_metadata=context_metadata,
+                    )
+                    self.assertIs(type(load_balancer), load_balancer_type)
+
+    def test_base_load_balancer_config_is_not_buildable(self):
+        with self.assertRaises(NotImplementedError):
+            ContextParallelLoadBalancer.Config().build()
+
+    def test_no_shardable_inputs_is_a_noop(self):
+        batch = {"attention_masks": object()}
+        result = context_parallel.shard_inputs(
+            batch,
+            input_shardings={},
+            permutation=None,
+        )
+
+        self.assertIs(result, batch)
+
+    def test_common_input_sharding_does_not_modify_metadata(self):
+        input_T = torch.arange(8)
+        labels_T = torch.arange(8)
+        attention_metadata = object()
+        batch = {
+            "input": input_T,
+            "labels": labels_T,
+            "attention_masks": attention_metadata,
+        }
+        sharded_input_T = input_T[:4]
+        sharded_labels_T = labels_T[:4]
+        cp_group = SimpleNamespace(size=lambda: 2)
+        spmd_mesh = SimpleNamespace(device_type="cuda")
+        permutation = torch.arange(8).unsqueeze(0)
+        torch_load_balancer = mock.Mock()
+        torch_load_balancer._generate_indices.return_value = permutation
+
+        with mock.patch(
+            "torchtitan.distributed.context_parallel._HeadTailLoadBalancer",
+            return_value=torch_load_balancer,
+        ) as create_load_balancer, mock.patch(
+            "torchtitan.distributed.context_parallel.spmd.shard",
+            side_effect=(sharded_input_T, sharded_labels_T),
+        ) as shard_input, mock.patch(
+            "torchtitan.distributed.context_parallel.spmd_mesh_group",
+            return_value=cp_group,
+        ), mock.patch(
+            "torchtitan.distributed.context_parallel.current_spmd_mesh",
+            return_value=spmd_mesh,
+        ):
+            load_balancer = HeadTailCPLoadBalancer.Config().build(
+                seq_len=input_T.shape[0],
+                context_metadata=attention_metadata,
+            )
+            assert isinstance(load_balancer, ContextParallelLoadBalancer)
+            permutation = load_balancer.generate_permutation()
+            result = context_parallel.shard_inputs(
+                batch,
+                input_shardings=decoder_input_sharding(),
+                permutation=permutation,
+            )
+
+        self.assertIs(result, batch)
+        self.assertIs(result["input"], sharded_input_T)
+        self.assertIs(result["labels"], sharded_labels_T)
+        self.assertIs(result["attention_masks"], attention_metadata)
+        create_load_balancer.assert_called_once_with(8, 2, "cuda")
+        self.assertEqual(shard_input.call_count, 2)
+        self.assertIs(shard_input.call_args_list[0].args[1], cp_group)
+
+    def test_headtail_uses_the_first_named_cp_input(self):
+        tokens_BS = torch.arange(8).view(1, 8)
+        cp_group = SimpleNamespace(size=lambda: 2)
+        spmd_mesh = SimpleNamespace(device_type="cuda")
+
+        with mock.patch(
+            "torchtitan.distributed.context_parallel._HeadTailLoadBalancer"
+        ) as create_load_balancer, mock.patch(
+            "torchtitan.distributed.context_parallel.spmd_mesh_group",
+            return_value=cp_group,
+        ), mock.patch(
+            "torchtitan.distributed.context_parallel.current_spmd_mesh",
+            return_value=spmd_mesh,
+        ):
+            load_balancer = HeadTailCPLoadBalancer.Config().build(
+                seq_len=tokens_BS.shape[1],
+                context_metadata=None,
+            )
+            load_balancer.generate_permutation()
+
+        create_load_balancer.assert_called_once_with(8, 2, "cuda")
+
+    def test_ptrr_is_rebuilt_from_each_batch_mask(self):
+        input_T = torch.arange(8)
+        first_mask = object.__new__(BlockMask)
+        second_mask = object.__new__(BlockMask)
+        cp_group = SimpleNamespace(size=lambda: 2)
+        config = PTRRFlexAttentionCPLoadBalancer.Config()
+
+        with mock.patch(
+            "torchtitan.distributed.context_parallel._PTRRLoadBalancer"
+        ) as create_load_balancer, mock.patch(
+            "torchtitan.distributed.context_parallel.spmd_mesh_group",
+            return_value=cp_group,
+        ):
+            first_load_balancer = config.build(
+                seq_len=input_T.shape[0],
+                context_metadata=first_mask,
+            )
+            first_load_balancer.generate_permutation()
+            second_load_balancer = config.build(
+                seq_len=input_T.shape[0],
+                context_metadata=second_mask,
+            )
+            second_load_balancer.generate_permutation()
+
+        self.assertEqual(
+            create_load_balancer.call_args_list,
+            [mock.call(first_mask, 2), mock.call(second_mask, 2)],
+        )
+
+    def test_ptrr_uses_configured_mask_key(self):
+        input_T = torch.arange(8)
+        first_mask = object.__new__(BlockMask)
+        selected_mask = object.__new__(BlockMask)
+        cp_group = SimpleNamespace(size=lambda: 2)
+        config = PTRRFlexAttentionCPLoadBalancer.Config(mask_key="selected")
+
+        with mock.patch(
+            "torchtitan.distributed.context_parallel._PTRRLoadBalancer"
+        ) as create_load_balancer, mock.patch(
+            "torchtitan.distributed.context_parallel.spmd_mesh_group",
+            return_value=cp_group,
+        ):
+            load_balancer = config.build(
+                seq_len=input_T.shape[0],
+                context_metadata={
+                    "first": first_mask,
+                    "selected": selected_mask,
+                },
+            )
+            load_balancer.generate_permutation()
+
+        create_load_balancer.assert_called_once_with(selected_mask, 2)
 
 
 class _FakeMesh:
@@ -234,27 +474,6 @@ class TestUlysses(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown backend"):
             get_attention_config("ulysses_cp_flex")
 
-    def test_keeps_its_mask_global(self):
-        mask = object()
-        batch = {"input": torch.arange(8), "attention_masks": mask}
-
-        def shard(inputs, *args):
-            self.assertNotIn("attention_masks", inputs)
-            inputs["input"] = inputs["input"][:4]
-            return inputs
-
-        with mock.patch(
-            "torchtitan.distributed.context_parallel.api."
-            "prepare_context_parallel_input",
-            side_effect=shard,
-        ):
-            result = UlyssesCPFlexInnerAttention.cp_shard(
-                batch, None, object(), None, None
-            )
-
-        self.assertIs(result["attention_masks"], mask)
-        self.assertEqual(result["input"].shape, (4,))
-
     def test_reshards_sequence_to_heads_and_back(self):
         q, k, v = (torch.randn(8, 4, 16) for _ in range(3))
         calls = []
@@ -287,12 +506,6 @@ class TestUlyssesVarlen(unittest.TestCase):
         config = UlyssesCPVarlenInnerAttention.Config()
         self.assertIsInstance(config, UlyssesCPInnerAttention.Config)
         self.assertIsInstance(config, VarlenInnerAttention.Config)
-
-    def test_uses_shared_input_sharding(self):
-        self.assertIs(
-            UlyssesCPVarlenInnerAttention.cp_shard.__func__,
-            UlyssesCPFlexInnerAttention.cp_shard.__func__,
-        )
 
     def test_dispatches_to_varlen_inner_attention(self):
         q, k, v = (torch.randn(8, 4, 16) for _ in range(3))

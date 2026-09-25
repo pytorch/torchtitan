@@ -9,7 +9,7 @@ import unittest.mock
 from types import SimpleNamespace
 
 import torch
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.qwen3 import model_registry
 

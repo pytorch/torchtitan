@@ -15,7 +15,8 @@ from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import Configurable, ParallelismConfig
+from torchtitan.config import Configurable
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.observability import structured_logger as sl
@@ -215,17 +216,22 @@ class Validator(BaseValidator):
                     [] if self.pp_has_last_stage else None
                 )
 
-                for input_dict in microbatch_group:
-                    inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
-                        input_dict,
-                        parallel_dims=self.parallel_dims,
-                        parallelism=self.parallelism,
-                    )
-                    if self.pp_has_first_stage:
-                        arg_mbs.append((inputs,))  # pyrefly: ignore[bad-argument-type]
-                    kwarg_mbs.append(extra_kwargs)
-                    if target_mbs is not None:
-                        target_mbs.append(labels)  # pyrefly: ignore[bad-argument-type]
+                with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
+                    for input_dict in microbatch_group:
+                        inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
+                            input_dict,
+                            parallel_dims=self.parallel_dims,
+                            parallelism=self.parallelism,
+                        )
+                        if self.pp_has_first_stage:
+                            arg_mbs.append(
+                                (inputs,)
+                            )  # pyrefly: ignore[bad-argument-type]
+                        kwarg_mbs.append(extra_kwargs)
+                        if target_mbs is not None:
+                            target_mbs.append(
+                                labels
+                            )  # pyrefly: ignore[bad-argument-type]
 
                 with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
                     losses = [] if self.pp_has_last_stage else None
@@ -247,12 +253,12 @@ class Validator(BaseValidator):
             else:
                 assert len(microbatch_group) == 1
                 input_dict = microbatch_group[0]
-                inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
-                    input_dict,
-                    parallel_dims=self.parallel_dims,
-                    parallelism=self.parallelism,
-                )
                 with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
+                    inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
+                        input_dict,
+                        parallel_dims=self.parallel_dims,
+                        parallelism=self.parallelism,
+                    )
                     assert len(model_parts) == 1
                     predictions = model_parts[0](inputs, **extra_kwargs)
                     loss_sum, _ = self.loss_fn(predictions, labels)
