@@ -16,7 +16,7 @@ Describe the run before starting the loop:
 - **Target model / config**: e.g. `Llama3 8B FSDP=4 TP=2 bs=1 on 8×H100`.
 - **Starting graph**: e.g. empty `construct_default_graph_passes` (raw
   aten graph) vs. the production pass set (cleanup + bucketing + regional
-  Inductor + CUDA graphs already applied).
+  Inductor already applied).
 - **Scaffolding level**: which of {curated IDEAS, in-repo reference
   implementations, online research} the agent may use. Tighten the
   *Reading scope* below to match.

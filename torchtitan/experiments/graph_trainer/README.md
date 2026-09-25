@@ -8,7 +8,7 @@ This experiment demonstrates graph-based distributed training in torchtitan thro
 - **Full train step graph capture** — `make_fx`-based `minimal_fx_tracer` traces forward + loss + backward (and optionally `optimizer.step`) into a single FX graph, without AOTAutograd partitioning, giving full visibility and control over the entire computation.
 - **[SimpleFSDP](https://arxiv.org/abs/2411.00284)** — A compiler-based FSDP that represents sharding as parameterized collectives within the computation graph, making it fully tracer-friendly while achieving memory and throughput improvements over eager FSDP2.
 - **Tensor-granularity memory policy** — Each activation can independently be saved, recomputed, or offloaded to the CPU, unlike module-level eager SAC. Different strategies mix freely within a single layer.
-- **Graph pass pipeline** — Structured into default (numerics-preserving) and opt-in performance passes: bucketing for comm/compute overlap, async TP, regional/full Inductor compilation, CUDA graphs, CPU offload, and selective activation remat.
+- **Graph pass pipeline** — Structured into default (numerics-preserving) and opt-in performance passes: bucketing for comm/compute overlap, async TP, regional/full Inductor compilation, CPU offload, and selective activation remat.
 - **Pre-compile (Compile-on-One-Rank)** — Compile on a single GPU, serialize the artifact, and load on all ranks at training time — skipping compilation entirely. Config fingerprinting detects stale artifacts.
 - **Composable parallelism** — FSDP + TP + EP in the graph, with async tensor parallel (micro-pipeline TP via symmetric memory) as an opt-in graph pass.
 - **Debug tooling** — tlparse integration for browser-based graph inspection, and CUDA graph kernel annotations in profiler traces.
@@ -58,7 +58,7 @@ GraphPP is the pipeline-parallel path for GraphTrainer models.
 It reuses TorchTitan's eager PP module splitting and PyTorch PP schedules, then
 traces one representative microbatch per local stage with GraphTrainer's
 `minimal_fx_tracer`. The resulting per-stage graph bundles are reused for later
-microbatches; `GraphPipelineRuntime` only executes the prebuilt callable for each PP
+microbatches; `PipelineRuntime` only executes the prebuilt callable for each PP
 schedule action.
 
 Design references:
@@ -95,9 +95,9 @@ live `param.grad`. Internal values remain flat because they never leave GraphPP
 graph execution: saved-for-backward tensors, unsharded FSDP params, raw grad
 leaves, reduce-grad inputs, and multiplexed intermediate outputs.
 
-Current limitations: GraphPP does not load precompile artifacts yet, CUDA graph
-capture should target the `GraphPipelineRuntime` steady-state path in a future change,
-and EP-overlap annotations will be composed with GraphPP in a later PR.
+Current limitations: GraphPP does not load precompile artifacts yet, looped PP
+schedules do not support CUDA graph capture yet, and EP-overlap annotations will
+be composed with GraphPP in a later PR.
 
 ### Compiler Optimizations
 
@@ -120,10 +120,10 @@ MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_671b ./run_tra
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.memory_policy cpu_offload_all
 
 # Disable CUDA graphs (for debugging)
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.disable_passes cuda_graph_pass
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --training.disable_cuda_graphs
 
 # Disable specific passes by name
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.disable_passes custom_codegen_pass,cuda_graph_pass
+MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.disable_passes custom_codegen_pass
 
 # Disable all graph passes (for debugging)
 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.no-enable_passes
@@ -199,8 +199,9 @@ AutoParallel is only responsible for producing the placed model. After that,
 GraphTrainer captures the full train step with `minimal_fx_tracer` and applies
 the normal graph pass pipeline: the configured memory policy, selective
 activation remat, CPU offload, bucketing and overlap passes, regional or full
-Inductor compilation, CUDA graph compatibility checks, and any other enabled
-GraphTrainer passes. This keeps AutoParallel placement composable with the same
+Inductor compilation, and any other enabled GraphTrainer passes. TorchTitan
+captures the resulting training step with its standard CUDA graph runtime. This
+keeps AutoParallel placement composable with the same
 compiler options used by manually parallelized GraphTrainer models.
 
 AutoParallel can choose different sharding, collective schedules, and operator

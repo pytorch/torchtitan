@@ -39,11 +39,10 @@ backward (and optionally optimizer.step) — as one flat FX graph. No separate g
 opaque boundaries. Full visibility into every operation — in particular, all backward
 computations are explicit.
 
-**Every optimization is a graph pass.** Activation checkpointing, CUDA graph,
-CPU offload, communication overlap, kernel fusion — all expressed as
-transformations on the same graph. Passes compose naturally because they share a common
-representation. Adding a new optimization means writing a new pass, not
-threading hooks through the entire stack.
+**Graph transformations compose.** Activation checkpointing, CPU offload,
+communication overlap, and kernel fusion are expressed as transformations on
+the same graph. Runtime services such as CUDA graph capture stay in TorchTitan's
+shared training runtime.
 
 **SimpleFSDP.** A compiler-friendly replacement for FSDP2 that expresses
 all-gather and reduce-scatter as traceable DTensor operations. The
@@ -51,9 +50,8 @@ collectives show up as nodes in the graph, so they can be reordered,
 fused, and overlapped by passes — not hidden behind opaque module hooks.
 
 **CUDA graph becomes manageable.** With a graph, all computation is explicit
-— no hidden autograd state, no opaque memory management. Piecewise
-CUDA graph wrapping is straightforward because you can see exactly what
-needs to be captured.
+— no hidden autograd state, no opaque memory management. TorchTitan can capture
+the full training step through its standard runtime path.
 
 **Hardware heterogeneity.** Most non-GPU accelerators — TPUs, Trainium, and
 others — assume the existence of a graph and perform better with a full

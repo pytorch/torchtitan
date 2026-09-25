@@ -18,7 +18,6 @@ from torch._guards import tracing
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
 )
-from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
@@ -42,11 +41,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
-)
-from torchtitan.experiments.graph_trainer.cuda_graph import (
-    insert_kernel_annotations_pass,
-    is_cuda_graph_fully_compatible,
-    is_cuda_graph_node_compatible,
 )
 from torchtitan.experiments.graph_trainer.decompositions import (
     apply_decompositions_pass,
@@ -2262,8 +2256,8 @@ class TestApplySACPass(TestCase):
         self.assertIsNot(dup.meta["custom"], fwd_node.meta["custom"])
         self.assertEqual(dup.meta["custom"][_MODULE_FQN], "layers.0.attention_norm")
         # Mutating the dup's annotation must not leak into the original.
-        dup.meta["custom"]["cuda_graph_partition"] = "cuda_graph_9"
-        self.assertNotIn("cuda_graph_partition", fwd_node.meta["custom"])
+        dup.meta["custom"]["partition"] = "partition_9"
+        self.assertNotIn("partition", fwd_node.meta["custom"])
 
 
 class TestFullMemoryPolicy(TestCase):
@@ -4326,10 +4320,7 @@ class TestChunkPasses(TestCase):
             )
 
         return [
-            pass_name(pass_fn)
-            for pass_fn in compile_time_passes(
-                traced_result, config, use_cuda_graph=False
-            )
+            pass_name(pass_fn) for pass_fn in compile_time_passes(traced_result, config)
         ]
 
     def test_ep_overlap_pass_pipeline_order(self):
@@ -4396,7 +4387,7 @@ class TestChunkPasses(TestCase):
                     ValueError,
                     "Graph EP chunking does not support tensor_parallel_degree > 1",
                 ):
-                    compile_time_passes(traced_result, config, use_cuda_graph=False)
+                    compile_time_passes(traced_result, config)
 
     def test_fsdp_dense_region_scheduler_pass_gating(self):
         def transformer_batch_default(config):
@@ -6866,7 +6857,7 @@ class TestRemoveIdentitySlicePass(TestCase):
 
 
 class TestAnnotateModuleFqns(TestCase):
-    """Unit tests for annotate_module_fqns and insert_kernel_annotations_pass."""
+    """Unit tests for annotate_module_fqns."""
 
     def _trace_and_get_fqns(self, model, *args):
         """Trace fwd+bwd via minimal_fx_tracer and return module_fqn annotations."""
@@ -7037,61 +7028,6 @@ class TestAnnotateModuleFqns(TestCase):
 
         self.assertIn("a", fqns)
         self.assertIn("b", fqns)
-
-    def _build_annotated_gm(self):
-        """Build a GraphModule with module_fqn annotations on its nodes."""
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        n1 = graph.call_function(torch.relu, (x,))
-        n1.meta["custom"] = {_MODULE_FQN: "attn"}
-        n2 = graph.call_function(torch.sigmoid, (n1,))
-        n2.meta["custom"] = {_MODULE_FQN: "attn"}
-        n3 = graph.call_function(torch.tanh, (n2,))
-        n3.meta["custom"] = {_MODULE_FQN: "ffn"}
-        graph.output(n3)
-        return torch.fx.GraphModule(torch.nn.Module(), graph)
-
-    def test_insert_kernel_annotations_pass_inserts_calls(self):
-        """When tools ID is available, the pass inserts enter/exit calls."""
-        if _is_tools_id_unavailable():
-            self.skipTest("cudaGraphNodeGetToolsId not available")
-
-        gm = self._build_annotated_gm()
-        num_before = sum(1 for n in gm.graph.nodes if n.op == "call_function")
-
-        insert_kernel_annotations_pass(gm)
-
-        num_after = sum(1 for n in gm.graph.nodes if n.op == "call_function")
-        # 2 scopes (attn, ffn) = 2 enters + 2 exits = 4 new nodes
-        self.assertEqual(num_after - num_before, 4)
-
-    def test_insert_kernel_annotations_pass_noop_when_unavailable(self):
-        """When tools ID is unavailable, the pass leaves the graph unchanged."""
-        gm = self._build_annotated_gm()
-        num_before = len(list(gm.graph.nodes))
-
-        with patch(
-            "torch.cuda._graph_annotations._is_tools_id_unavailable",
-            return_value=True,
-        ):
-            insert_kernel_annotations_pass(gm)
-
-        num_after = len(list(gm.graph.nodes))
-        self.assertEqual(num_before, num_after)
-
-    def test_insert_kernel_annotations_pass_noop_without_metadata(self):
-        """The pass should not insert anything when no custom metadata exists."""
-        graph = torch.fx.Graph()
-        x = graph.placeholder("x")
-        n1 = graph.call_function(torch.relu, (x,))
-        graph.output(n1)
-        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
-
-        num_before = len(list(gm.graph.nodes))
-        insert_kernel_annotations_pass(gm)
-        num_after = len(list(gm.graph.nodes))
-
-        self.assertEqual(num_before, num_after)
 
 
 class TestNormalizeViewOpsAsReshape(TestCase):
@@ -7770,31 +7706,6 @@ class TestEliminateDeadCodePass(TestCase):
         eliminate_dead_code_pass(gm)
         targets = [n.target for n in gm.graph.nodes if n.op == "call_function"]
         self.assertIn(torch.ops.aten.copy_.default, targets)
-
-
-class TestIsFullCudaGraphCompatible(TestCase):
-    """Pure-CPU tests for the per-node CUDA-graph-safety predicate and the
-    whole-graph gate built on it."""
-
-    def test_clean_graph_is_cuda_graph_fully_compatible(self):
-        g = torch.fx.Graph()
-        x = g.placeholder("x")
-        relu = g.call_function(torch.ops.aten.relu.default, (x,))
-        g.output(relu)
-        gm = torch.fx.GraphModule(torch.nn.Module(), g)
-        self.assertTrue(is_cuda_graph_node_compatible(relu))
-        self.assertTrue(is_cuda_graph_fully_compatible(gm))
-
-    def test_local_scalar_dense_is_unsafe(self):
-        # _local_scalar_dense (.item()/.tolist()) extracts a host scalar a CUDA
-        # graph replay can't reproduce -> unsafe, so the graph is not one piece.
-        g = torch.fx.Graph()
-        x = g.placeholder("x")
-        s = g.call_function(torch.ops.aten._local_scalar_dense.default, (x,))
-        g.output(s)
-        gm = torch.fx.GraphModule(torch.nn.Module(), g)
-        self.assertFalse(is_cuda_graph_node_compatible(s))
-        self.assertFalse(is_cuda_graph_fully_compatible(gm))
 
 
 class TestEagerChunking(TestCase):

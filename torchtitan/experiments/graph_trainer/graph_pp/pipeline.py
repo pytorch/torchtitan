@@ -358,7 +358,6 @@ def _register_graph_runtime(
     loss_fn: LossFunction,
     trainer_config: "GraphTrainer.Config | None",
     parallel_dims: ParallelDims,
-    warn_if_cuda_graph_pass_requested: bool,
 ) -> GraphRuntime:
     """Bind GraphTrainer graph construction to an already chosen schedule.
 
@@ -380,8 +379,6 @@ def _register_graph_runtime(
         trainer_config=trainer_config,
         parallel_dims=parallel_dims,
     )
-    if warn_if_cuda_graph_pass_requested:
-        graph_provider._warn_if_cuda_graph_pass_requested()
     return register_graph_schedule(schedule, graph_provider=graph_provider)
 
 
@@ -456,7 +453,6 @@ def _make_spmd_graph_runtime(
         loss_fn=loss_fn,
         trainer_config=trainer_config,
         parallel_dims=parallel_dims,
-        warn_if_cuda_graph_pass_requested=False,
     )
 
 
@@ -490,7 +486,6 @@ def _make_pipeline_parallel_graph_runtime(
         loss_fn=loss_fn,
         trainer_config=None,
         parallel_dims=parallel_dims,
-        warn_if_cuda_graph_pass_requested=True,
     )
 
 

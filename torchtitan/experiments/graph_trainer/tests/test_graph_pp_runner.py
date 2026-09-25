@@ -548,17 +548,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(ctx.losses, [])
         self.assertEqual(schedule._internal_losses, [loss])
 
-    def test_graph_pp_warns_when_cuda_graph_pass_is_enabled(self) -> None:
-        provider = GraphTrainerStageGraphProvider(
-            loss_fn=lambda pred, target: (pred.sum(), {}),
-            compile_config=GraphTrainerCompileConfig(enable_passes=True),
-            model_config=None,
-            parallelism=None,
-        )
-
-        with self.assertWarnsRegex(UserWarning, "use_cuda_graph=False"):
-            provider._warn_if_cuda_graph_pass_requested()
-
     def test_single_stage_schedule_hard_errors(self) -> None:
         with self.assertRaisesRegex(ValueError, "runtime PP schedule"):
             _validate_graph_pp_config(
@@ -1055,7 +1044,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertIs(compiled, gm)
         final_inductor_passes.assert_called_once_with(
             compile_config,
-            use_cuda_graph=False,
             boxed_codegen=True,
         )
         apply_graph_passes.assert_called_once()

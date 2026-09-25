@@ -33,16 +33,16 @@ def _build_llama3_tests() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         # === GraphRuntime tests ===
-        # Note: aot_fx_trace applies CUDA graph by default, so skip_rocm_test=True.
+        # Note: TorchTitan enables CUDA graphs by default, so skip_rocm_test=True.
         #
-        # Disable cuda_graph: replaying coalesced FSDP collectives with CP fails
+        # Disable CUDA graphs: replaying coalesced FSDP collectives with CP fails
         # with "CUDA error: invalid argument".
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.llama3",
                     "--config graph_trainer_llama3_debugmodel",
-                    "--compile.disable_passes cuda_graph_pass",
+                    "--training.disable_cuda_graphs",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",
@@ -254,19 +254,17 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
         # === GraphRuntime tests ===
         # Note: standard DSv3 MoE load-balancing introduces CUDA-to-CPU
         # transfers incompatible with CUDA graph capture, so this fused test
-        # explicitly disables CUDA graphs in both the trainer and graph passes.
+        # explicitly disables CUDA graphs in the trainer.
         #
         # TODO: Re-enable FSDP bucketing when its stable topological sort
         # supports the fused MLA Q kernel's mutating custom-op boundary.
         OverrideDefinitions(
             [
                 [
-                    "--training.disable_cuda_graphs",
                     "--module graph_trainer.deepseek_v3",
                     "--config graph_trainer_deepseek_v3_debugmodel",
                     "--compile.disable_passes "
-                    "joint_transformer_block_bucketing_reordering_pass,"
-                    "cuda_graph_pass",
+                    "joint_transformer_block_bucketing_reordering_pass",
                     "--training.disable_cuda_graphs",
                     "--override.imports torchtitan.overrides.fused_mla.fused_mla,"
                     "torchtitan.overrides.fused_swiglu.fused_swiglu",
@@ -450,14 +448,14 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
 def _build_qwen3_tests() -> list[OverrideDefinitions]:
     """Qwen3-based integration tests (dense + MoE)."""
     return [
-        # Disable cuda_graph: replaying coalesced FSDP collectives with CP fails
+        # Disable CUDA graphs: replaying coalesced FSDP collectives with CP fails
         # with "CUDA error: invalid argument".
         OverrideDefinitions(
             [
                 [
                     "--module graph_trainer.qwen3",
                     "--config graph_trainer_qwen3_debugmodel",
-                    "--compile.disable_passes cuda_graph_pass",
+                    "--training.disable_cuda_graphs",
                     "--parallelism.data_parallel_shard_degree 2",
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.context_parallel_degree 2",

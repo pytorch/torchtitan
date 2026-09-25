@@ -114,7 +114,7 @@ def eliminate_dead_code_pass(
     nodes (in-place mutations, ``copy_``, collectives -- anything for which
     ``node.is_impure()`` is True), so only genuinely unused pure computation is
     dropped. Running it first shrinks the graph for every downstream pass (memory
-    policy, bucketing, CUDA graph partitioning), and removes orphaned subtrees left
+    policy, bucketing, scheduling), and removes orphaned subtrees left
     by tracing so they don't get scheduled or counted.
 
     Dead ``aten._assert_async`` runtime asserts are dropped too, via the custom
@@ -210,7 +210,7 @@ def remove_identity_view_pass(
 
     In a traced graph these ops are no-ops when the output shape equals
     the input shape.  Removing them simplifies the graph for downstream
-    passes (bucketing, scheduling, CUDA graph).
+    passes (bucketing and scheduling).
 
     Args:
         gm: The traced graph module.

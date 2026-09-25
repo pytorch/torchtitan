@@ -12,7 +12,6 @@ from typing import Any
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
@@ -227,8 +226,6 @@ class GraphTrainingEngine(TrainingEngine):
             self._pinned_pool_ctx = None
 
         super().close()
-
-        cuda_graph_teardown()
 
 
 class GraphTrainer(Trainer):

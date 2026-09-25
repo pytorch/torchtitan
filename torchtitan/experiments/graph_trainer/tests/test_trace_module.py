@@ -1263,7 +1263,6 @@ class TestTraceDTensor(unittest.TestCase):
         torch.testing.assert_close(actual, expected)
 
     def test_full_inductor_pass_migrates_cpu_attrs(self):
-        from torchtitan.experiments.graph_trainer.cuda_graph import cuda_graph_pass
         from torchtitan.experiments.graph_trainer.inductor_passes import (
             full_inductor_compilation_pass,
         )
@@ -1296,14 +1295,12 @@ class TestTraceDTensor(unittest.TestCase):
                 f"{name} should have been migrated to CUDA",
             )
 
-        gm = cuda_graph_pass(gm, traced.example_inputs)
         real_x = torch.zeros(4, dtype=torch.float32, device=self.DEVICE)
         expected = f({}, real_x.clone())
-        for _ in range(3):
-            actual = gm(real_x.clone())
-            if isinstance(actual, (list, tuple)):
-                actual = actual[0]
-            torch.testing.assert_close(actual, expected)
+        actual = gm(real_x.clone())
+        if isinstance(actual, (list, tuple)):
+            actual = actual[0]
+        torch.testing.assert_close(actual, expected)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")

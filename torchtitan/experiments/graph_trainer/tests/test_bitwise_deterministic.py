@@ -264,7 +264,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         from torchtitan.experiments.graph_trainer.passes import (
             apply_graph_passes,
             compile_time_passes,
-            construct_default_graph_passes,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             flatten_runtime_inputs,
@@ -324,21 +323,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                 storage,
                 expected_fingerprint="",
                 example_inputs=example_inputs,
-            )
-
-        # Step 4: Apply load-time passes (CUDA graph)
-        if enable_passes:
-            load_config = SimpleNamespace(
-                model=self.model_config,
-                compile=GraphTrainerCompileConfig(
-                    precompile_artifact_dir="precompiled",
-                ),
-            )
-            passes = construct_default_graph_passes(loaded_result, load_config)
-            loaded_result.gm = apply_graph_passes(
-                loaded_result.gm,
-                loaded_result.example_inputs,
-                passes,
             )
 
         # Step 4: Run training steps using the loaded artifact
@@ -419,9 +403,6 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
         self._assert_runs_match(run_eager, run_traced, "eager vs aot_fx_trace: ")
 
-    @unittest.skip(
-        "Precompiled artifacts do not provide example inputs for CUDA graph setup"
-    )
     def test_precompile_vs_trace(self):
         """Precompiled aot_fx_trace (save/load roundtrip) matches direct trace."""
         if self.attn_backend == "flex":

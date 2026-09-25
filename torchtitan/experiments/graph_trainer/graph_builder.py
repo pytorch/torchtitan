@@ -22,7 +22,6 @@ Flat calling convention and wrapping contract:
 import dataclasses
 import functools
 import logging
-import warnings
 from collections.abc import Callable
 from typing import Any, cast, TYPE_CHECKING
 
@@ -1068,7 +1067,6 @@ def _compile_graph_pp_module(
         example_inputs,
         final_inductor_compile_passes(
             compile_config,
-            use_cuda_graph=False,
             boxed_codegen=True,
         ),
         compile_config=compile_config,
@@ -1224,7 +1222,6 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
             parallelism=parallelism,
             model=model_config,
         ),
-        use_cuda_graph=False,
         include_inductor=False,
         include_mandatory_normalization=False,
     )
@@ -1302,16 +1299,9 @@ def construct_joint_train_step_passes(
     trainer_config: "GraphTrainer.Config",
     *,
     parallel_dims: ParallelDims,
-    use_graph_trainer_cuda_graph: bool,
 ) -> list[Callable]:
     """Construct passes using the full config available to the PP=1 caller."""
     if trainer_config.compile.precompile_artifact_dir:
-        if trainer_config.compile.enable_passes and use_graph_trainer_cuda_graph:
-            return construct_default_graph_passes(
-                traced,
-                trainer_config,
-                parallel_dims=parallel_dims,
-            )
         return []
     if not trainer_config.compile.enable_passes:
         return construct_mandatory_graph_passes()
@@ -1320,14 +1310,7 @@ def construct_joint_train_step_passes(
     if pipeline_fn is not None:
         return pipeline_fn(traced, trainer_config, parallel_dims=parallel_dims)
 
-    if use_graph_trainer_cuda_graph:
-        return construct_default_graph_passes(
-            traced,
-            trainer_config,
-            parallel_dims=parallel_dims,
-        )
-
-    return compile_time_passes(
+    return construct_default_graph_passes(
         traced,
         trainer_config,
         parallel_dims=parallel_dims,
@@ -1435,7 +1418,6 @@ def _build_joint_stage_graph(
             traced,
             trainer_config,
             parallel_dims=parallel_dims,
-            use_graph_trainer_cuda_graph=trainer_config.training.disable_cuda_graphs,
         )
         traced.gm = apply_graph_passes(
             traced.gm,
@@ -1974,27 +1956,10 @@ class GraphTrainerStageGraphProvider:
     fuse_wgrad_accumulation: bool = False
     trainer_config: "GraphTrainer.Config | None" = None
     parallel_dims: ParallelDims | None = None
-    _warned_cuda_graph: bool = False
     # Calling convention:
     # key = (forward_stage_index, backward_stage_index); the graph is reused
     # across microbatches for that stage pair.
     _overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] | None = None
-
-    def _warn_if_cuda_graph_pass_requested(self) -> None:
-        if self._warned_cuda_graph:
-            return
-        if not self.compile_config.enable_passes:
-            return
-        if "cuda_graph_pass" in self.compile_config.disable_passes:
-            return
-        warnings.warn(
-            "GraphPP compiles extracted stage graphs with use_cuda_graph=False "
-            "even though cuda_graph_pass is enabled. CUDA graph capture needs "
-            "a separate GraphPP runtime integration. Pass "
-            "--compile.disable_passes cuda_graph_pass to silence this warning.",
-            stacklevel=3,
-        )
-        self._warned_cuda_graph = True
 
     def prepare_graphs(
         self,

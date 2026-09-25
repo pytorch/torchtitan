@@ -120,7 +120,6 @@ def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():
         compile=GraphTrainerCompileConfig(
             enable_autoparallel=True,
             enable_async_tensor_parallel=False,
-            disable_passes=["cuda_graph_pass"],
         ),
         model=SimpleNamespace(layers=[object()]),
         parallelism=SimpleNamespace(
