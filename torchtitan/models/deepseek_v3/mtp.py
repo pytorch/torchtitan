@@ -15,14 +15,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
-from torchtitan.config import (
-    CompileConfig,
-    FSDPSymmMemScope,
-    ParallelismConfig,
-    TORCH_DTYPE_MAP,
-    TrainingConfig,
-)
-from torchtitan.distributed.context_parallel import ContextParallelPartitioner
+from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -303,7 +297,7 @@ class MTPDecoder(Decoder):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
@@ -317,11 +311,10 @@ class MTPDecoder(Decoder):
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
         del kwargs
-        batch: dict[str, Any] = dict(input_dict)
-        tokens = batch["input"]
-        labels = batch["labels"]
-        positions = batch.get("positions")
-        padding_mask = batch.get("padding_mask")
+        tokens = input_dict["input"]
+        labels = input_dict["labels"]
+        positions = input_dict.get("positions")
+        padding_mask = input_dict.get("padding_mask")
         if self.mtp_layers is not None and positions is None:
             raise ValueError("MTP input preprocessing requires positions.")
 
@@ -330,7 +323,7 @@ class MTPDecoder(Decoder):
             if self.mtp_layers is not None
             else range(0)
         )
-        input_sharding = decoder_input_sharding()
+        input_shardings = decoder_input_sharding()
         for depth in depths:
             mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
                 tokens,
@@ -348,19 +341,19 @@ class MTPDecoder(Decoder):
                 fill_value=IGNORE_INDEX,
                 return_valid_mask=False,
             )
-            batch[f"mtp_input_tokens_{depth}"] = mtp_input_tokens
-            batch[f"mtp_labels_{depth}"] = mtp_labels
-            batch[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask
-            input_sharding[f"mtp_input_tokens_{depth}"] = input_sharding["input"]
-            input_sharding[f"mtp_labels_{depth}"] = input_sharding["labels"]
-            input_sharding[f"mtp_input_valid_mask_{depth}"] = input_sharding["input"]
+            input_dict[f"mtp_input_tokens_{depth}"] = mtp_input_tokens
+            input_dict[f"mtp_labels_{depth}"] = mtp_labels
+            input_dict[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask
+            input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
+            input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
+            input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
 
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                batch["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
@@ -368,33 +361,33 @@ class MTPDecoder(Decoder):
                 )
 
         if parallel_dims.cp_enabled:
-            partitioner = ContextParallelPartitioner(
-                input_dict=batch,
-                input_shardings=input_sharding,
-                cp_mesh=parallel_dims.get_mesh("cp"),
-                load_balancer_config=parallelism.context_parallel_load_balancer,
+            input_dict = self._cp_shard(
+                input_dict,
+                input_shardings=input_shardings,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
             )
-            batch = partitioner.shard_inputs(batch)
-            batch = self._prepare_context_parallel_metadata(batch, partitioner)
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        input_dict = annotate_input_spmd_types(
+            parallel_dims, input_dict, input_shardings
+        )
 
-        main_tokens = batch.pop("input")
-        main_labels = batch.pop("labels")
+        main_tokens = input_dict.pop("input")
+        main_labels = input_dict.pop("labels")
         if self.mtp_layers is None:
-            return main_tokens, main_labels, batch
+            return main_tokens, main_labels, input_dict
 
         input_tokens = (
             main_tokens,
-            *(batch.pop(f"mtp_input_tokens_{depth}") for depth in depths),
+            *(input_dict.pop(f"mtp_input_tokens_{depth}") for depth in depths),
         )
         loss_labels = (
             main_labels,
-            *(batch.pop(f"mtp_labels_{depth}") for depth in depths),
+            *(input_dict.pop(f"mtp_labels_{depth}") for depth in depths),
         )
-        batch["mtp_input_valid_masks"] = tuple(
-            batch.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
+        input_dict["mtp_input_valid_masks"] = tuple(
+            input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
         )
-        return input_tokens, loss_labels, batch
+        return input_tokens, loss_labels, input_dict
 
     def forward(
         self,

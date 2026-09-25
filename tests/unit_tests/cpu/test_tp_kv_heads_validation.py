@@ -24,7 +24,7 @@ try:
         sys.modules["triton"] = MagicMock()
         sys.modules["triton.language"] = MagicMock()
 
-    from torchtitan.config import ParallelismConfig
+    from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.models.common import (
         ComplexRoPE,
         compute_ffn_hidden_dim,

@@ -10,14 +10,10 @@ from typing import Any, cast, Self
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
-from torchtitan.config import (
-    CompileConfig,
-    ParallelismConfig,
-    TORCH_DTYPE_MAP,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.context_parallel import ContextParallelPartitioner
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
@@ -275,7 +271,7 @@ class FluxModel(BaseModel):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
@@ -289,20 +285,19 @@ class FluxModel(BaseModel):
         clip_encoder = cast(FluxEmbedder, kwargs["clip_encoder"])
         t5_encoder = cast(FluxEmbedder, kwargs["t5_encoder"])
         dtype = cast(torch.dtype, kwargs["dtype"])
-        batch = dict(input_dict)
-        batch["image"] = batch.pop("labels")
-        batch = preprocess_data(
-            device=batch["image"].device,
+        input_dict["image"] = input_dict.pop("labels")
+        input_dict = preprocess_data(
+            device=input_dict["image"].device,
             dtype=dtype,
             autoencoder=autoencoder,
             clip_encoder=clip_encoder,
             t5_encoder=t5_encoder,
-            batch=batch,
+            batch=input_dict,
         )
 
-        image_encodings = batch["img_encodings"]
-        clip_encodings = batch["clip_encodings"]
-        t5_encodings = batch["t5_encodings"]
+        image_encodings = input_dict["img_encodings"]
+        clip_encodings = input_dict["clip_encodings"]
+        t5_encodings = input_dict["t5_encodings"]
         batch_size = image_encodings.shape[0]
 
         with torch.no_grad(), torch.device(image_encodings.device):
@@ -328,13 +323,28 @@ class FluxModel(BaseModel):
                 "txt_ids": text_pos_enc,
                 "target": target,
             }
-            partitioner = ContextParallelPartitioner(
-                input_dict=cp_inputs,
-                input_shardings=flux_input_sharding(),
-                cp_mesh=parallel_dims.get_mesh("cp"),
-                load_balancer_config=parallelism.context_parallel_load_balancer,
+            input_sharding = flux_input_sharding()
+            load_balancer_config = parallelism.context_parallel_load_balancer
+            load_balancer = (
+                load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        cp_inputs, input_shardings=input_sharding
+                    ),
+                    attention_metadata=None,
+                )
+                if load_balancer_config is not None
+                else None
             )
-            cp_inputs = partitioner.shard_inputs(cp_inputs)
+            permutation = (
+                load_balancer.generate_permutation()
+                if load_balancer is not None
+                else None
+            )
+            cp_inputs = context_parallel.shard_tensors(
+                cp_inputs,
+                input_shardings=input_sharding,
+                permutation=permutation,
+            )
             latents = cp_inputs["img"]
             latent_pos_enc = cp_inputs["img_ids"]
             t5_encodings = cp_inputs["txt"]

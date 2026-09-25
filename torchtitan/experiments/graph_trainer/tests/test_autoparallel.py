@@ -11,7 +11,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
 

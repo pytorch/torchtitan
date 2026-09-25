@@ -10,7 +10,7 @@ from torchtitan.components.data import GrainDataLoader
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.context_parallel import (
     ContextParallelLoadBalancer,
-    HeadTailLoadBalancer,
+    HeadTailCPLoadBalancer,
 )
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
@@ -53,7 +53,7 @@ def muse_glimmer_30b_allgather_cp8() -> Trainer.Config:
     return _muse_glimmer_30b_cp(
         inner_attention=KVAllGatherCPFlexInnerAttention,
         cp_degree=8,
-        load_balancer=HeadTailLoadBalancer.Config(),
+        load_balancer=HeadTailCPLoadBalancer.Config(),
     )
 
 

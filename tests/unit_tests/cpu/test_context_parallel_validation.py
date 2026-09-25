@@ -10,7 +10,6 @@ import unittest
 from dataclasses import dataclass
 from unittest import mock
 
-from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 from torchtitan.protocols.module import Module
@@ -105,20 +104,14 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         config.training.max_context_length = 512
         return config
 
-    def test_rejects_the_default_headtail_load_balancer(self):
-        default = ParallelismConfig().context_parallel_load_balancer
-        config = self._config(load_balancer=default)
-        with self.assertRaisesRegex(ValueError, "must be None"):
-            config.__post_init__()
-
     def test_allows_none_for_contiguous_sharding(self):
         config = self._config(load_balancer=None)
         config.__post_init__()
 
     def test_rejects_reordering_load_balancer(self):
-        from torchtitan.distributed.context_parallel import HeadTailLoadBalancer
+        from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 
-        config = self._config(load_balancer=HeadTailLoadBalancer.Config())
+        config = self._config(load_balancer=HeadTailCPLoadBalancer.Config())
         with self.assertRaisesRegex(ValueError, "must be None"):
             config.__post_init__()
 

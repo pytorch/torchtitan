@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import TYPE_CHECKING
-
 import torch
 
 TORCH_DTYPE_MAP = {
@@ -14,13 +12,7 @@ TORCH_DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
-from .configs import (
-    CommConfig,
-    CompileConfig,
-    DebugConfig,
-    FSDPSymmMemScope,
-    TrainingConfig,
-)
+from .configs import CommConfig, CompileConfig, DebugConfig, TrainingConfig
 from .configurable import Configurable
 from .function import Function
 from .manager import ConfigManager
@@ -33,18 +25,6 @@ from .override import (
     OverrideConfig,
 )
 
-if TYPE_CHECKING:
-    from .parallelism import ParallelismConfig
-
-
-def __getattr__(name: str) -> object:
-    if name == "ParallelismConfig":
-        from .parallelism import ParallelismConfig
-
-        return ParallelismConfig
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 __all__ = [
     "ConfigManager",
     "Configurable",
@@ -52,11 +32,9 @@ __all__ = [
     "TORCH_DTYPE_MAP",
     # Config dataclasses
     "CompileConfig",
-    "ParallelismConfig",
     "CommConfig",
     "TrainingConfig",
     "DebugConfig",
-    "FSDPSymmMemScope",
     # Override mechanism
     "OverrideConfig",
     "Override",

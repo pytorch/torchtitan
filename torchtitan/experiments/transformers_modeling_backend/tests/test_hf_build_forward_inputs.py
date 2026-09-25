@@ -6,15 +6,17 @@
 
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import ANY, Mock, patch
+from unittest.mock import Mock, patch
 
 import spmd_types as spmd
 import torch
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.experiments.transformers_modeling_backend.model import (
     HFTransformerModel,
 )
+from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 
 
 def _run(
@@ -76,23 +78,29 @@ def test_hf_no_mask_when_get_attention_masks_returns_none(monkeypatch):
 
 def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     calls = []
+    expected_permutation = object()
 
-    class Partitioner:
-        def shard_inputs(self, input_dict):
-            calls.append("cp_input")
-            return input_dict
+    class TestLoadBalancer(ContextParallelLoadBalancer):
+        def generate_permutation(self):
+            calls.append("permutation")
+            return expected_permutation
 
-    partitioner = Partitioner()
+    load_balancer = TestLoadBalancer()
+    load_balancer_config = Mock()
+    load_balancer_config.build.return_value = load_balancer
 
-    create_partitioner = Mock(return_value=partitioner)
+    def shard_tensors(input_dict, **kwargs):
+        assert kwargs["permutation"] is expected_permutation
+        calls.append("cp_input")
+        return input_dict
 
-    def shard_metadata(batch, received_partitioner):
-        assert received_partitioner is partitioner
+    def prepare_cp_metadata(attention_metadata, *, permutation):
+        assert permutation is expected_permutation
         calls.append("cp_metadata")
-        return batch
+        return attention_metadata
 
     def annotate(_parallel_dims, batch, input_sharding):
-        assert calls == ["cp_input", "cp_metadata"]
+        assert calls == ["permutation", "cp_metadata", "cp_input"]
         assert set(batch) == {"input", "labels", "positions"}
         assert input_sharding["input"].local_type[MeshAxisName.TP] is spmd.R
         assert input_sharding["labels"].local_type[MeshAxisName.TP] is spmd.I
@@ -101,13 +109,13 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         return batch
 
     monkeypatch.setattr(
-        "torchtitan.distributed.context_parallel.ContextParallelPartitioner",
-        create_partitioner,
+        "torchtitan.distributed.context_parallel.shard_tensors",
+        shard_tensors,
     )
     monkeypatch.setattr(
-        "torchtitan.models.common.cp_attention."
-        "KVAllGatherCPFlexInnerAttention.cp_shard_metadata",
-        shard_metadata,
+        KVAllGatherCPFlexInnerAttention,
+        "prepare_cp_metadata",
+        staticmethod(prepare_cp_metadata),
     )
     monkeypatch.setattr(
         "torchtitan.distributed.spmd_types.annotate_input_spmd_types", annotate
@@ -126,20 +134,21 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     }
     parallel_dims = cast(
         ParallelDims,
-        SimpleNamespace(cp_enabled=True, get_mesh=lambda _name: "cp_mesh"),
+        SimpleNamespace(cp_enabled=True),
     )
 
     _, _, extra_kwargs = model.preprocess_inputs(
         batch,
         parallel_dims=parallel_dims,
-        parallelism=ParallelismConfig(context_parallel_load_balancer=None),
+        parallelism=ParallelismConfig(
+            context_parallel_load_balancer=load_balancer_config
+        ),
     )
 
-    create_partitioner.assert_called_once_with(
-        input_dict=ANY,
-        input_shardings=None,
-        cp_mesh="cp_mesh",
-        load_balancer_config=None,
-    )
-    assert calls == ["cp_input", "cp_metadata", "spmd"]
+    load_balancer_config.build.assert_called_once()
+    build_kwargs = load_balancer_config.build.call_args.kwargs
+    assert build_kwargs["seq_len"] == 2
+    assert build_kwargs["attention_metadata"] is dense_attention_mask
+    assert "cp_mesh" not in build_kwargs
+    assert calls == ["permutation", "cp_metadata", "cp_input", "spmd"]
     assert extra_kwargs["attention_masks"] is dense_attention_mask

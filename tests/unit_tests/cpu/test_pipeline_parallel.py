@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.pipeline_parallel import (
     _build_decoder_stage_io,

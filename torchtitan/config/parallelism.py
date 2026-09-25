@@ -6,18 +6,17 @@
 
 """Parallelism configuration."""
 
-from dataclasses import dataclass, field
-from typing import Annotated, Literal
+from dataclasses import dataclass
+from typing import Annotated, get_args, Literal, TypeAlias
 
 import torch
 import tyro
 
-from torchtitan.distributed.context_parallel import (
-    ContextParallelLoadBalancer,
-    HeadTailLoadBalancer,
-)
+from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 
-from .configs import _FSDP_SYMM_MEM_SCOPES, FSDPSymmMemScope
+
+FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
+_FSDP_SYMM_MEM_SCOPES = get_args(FSDPSymmMemScope)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -156,11 +155,22 @@ class ParallelismConfig:
 
     context_parallel_load_balancer: Annotated[
         ContextParallelLoadBalancer.Config | None, tyro.conf.Suppress
-    ] = field(default_factory=HeadTailLoadBalancer.Config)
+    ] = None
     """
-    Per-batch load-balancer configuration for context parallelism. Defaults to
-    head-tail load balancing. Set to None to disable load balancing and use
-    contiguous sharding. Ulysses requires None.
+    Optional per-batch load balancer for context parallelism. Defaults to None,
+    which uses contiguous input sharding. Ulysses does not use a load balancer
+    or shard attention metadata.
+    """
+
+    expert_parallel_degree: int = 1
+    """
+    Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
+    For MoE models, this must be at least tensor_parallel_degree.
+
+    Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
+    (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.
+    EP borrows ranks from FSDP and TP: efsdp = dp_shard * cp * tp / ep.
+    pp and dp_replicate are outer dimensions unaffected by this constraint.
     """
 
     def __post_init__(self):
@@ -227,14 +237,3 @@ class ParallelismConfig:
                 "Invalid parallelism.pipeline_parallel_schedule "
                 f"{self.pipeline_parallel_schedule!r}: {e}"
             ) from e
-
-    expert_parallel_degree: int = 1
-    """
-    Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
-    For MoE models, this must be at least tensor_parallel_degree.
-
-    Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
-    (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.
-    EP borrows ranks from FSDP and TP: efsdp = dp_shard * cp * tp / ep.
-    pp and dp_replicate are outer dimensions unaffected by this constraint.
-    """

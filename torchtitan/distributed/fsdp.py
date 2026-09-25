@@ -19,7 +19,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
-from torchtitan.config import FSDPSymmMemScope
+from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.linear import GroupedLinear
 
