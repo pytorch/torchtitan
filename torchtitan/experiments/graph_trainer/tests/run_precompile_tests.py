@@ -66,16 +66,16 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 " --config graph_trainer_llama3_debugmodel_sdpa"
                 " --compile.mode aot_fx_trace"
                 f" --compile.precompile_artifact_dir {fx_trace_precompile_dir}"
-                " --parallelism.data_parallel_shard_degree 4"
-                " --parallelism.tensor_parallel_degree 2"
+                " --parallelism.data_parallel_shard_degree 2"
+                " --parallelism.tensor_parallel_degree 4"
             ),
             override_args=[
                 "--module graph_trainer.llama3",
                 "--config graph_trainer_llama3_debugmodel_sdpa",
                 "--compile.mode aot_fx_trace",
                 f"--compile.precompile_artifact_dir {fx_trace_precompile_dir}",
-                "--parallelism.data_parallel_shard_degree 4",
-                "--parallelism.tensor_parallel_degree 2",
+                "--parallelism.data_parallel_shard_degree 2",
+                "--parallelism.tensor_parallel_degree 4",
             ],
             test_descr="aot_fx_trace llama3 precompile FSDP+TP",
             test_name="aot_fx_trace_llama3_precompile_fsdp_tp",
