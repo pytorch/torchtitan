@@ -51,6 +51,7 @@ from torchtitan.rl.model.vllm_worker import (
 )
 from torchtitan.rl.observability import metrics as m
 from vllm import SamplingParams
+from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
 
 
@@ -78,9 +79,13 @@ class _FakeEngine:
 
 
 def _sample(*, token_ids=(10, 11), finish_reason="stop"):
+    # What vLLM returns with flat_logprobs=True and logprobs=0: one logprob (-0.1) per generated token.
+    logprobs = FlatLogprobs()
+    for tok in token_ids:
+        logprobs.append({tok: Logprob(logprob=-0.1)})
     return SimpleNamespace(
         token_ids=list(token_ids),
-        logprobs=[{tok: SimpleNamespace(logprob=-0.1)} for tok in token_ids],
+        logprobs=logprobs,
         finish_reason=finish_reason,
     )
 
@@ -227,6 +232,7 @@ def test_build_sampling_params_matches_contract():
     assert params.max_tokens == 64
     assert params.n == 1
     assert params.logprobs == 0
+    assert params.flat_logprobs and not params.detokenize
     assert params.output_kind == RequestOutputKind.FINAL_ONLY
     assert params.stop_token_ids == [99]
     assert params.seed == 44
