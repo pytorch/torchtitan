@@ -214,27 +214,12 @@ class TestConfigManager(unittest.TestCase):
 
         assert config.parallelism.pipeline_parallel_schedule == "1F1B"
 
-    def test_cuda_graphs_allow_looped_pipeline_schedule(self):
-        with cuda_graphs_supported(True):
-            config_manager = ConfigManager()
-            config = config_manager.parse_args(
-                [
-                    "--module",
-                    "llama3",
-                    "--config",
-                    "llama3_debugmodel",
-                    "--training.disable_cuda_graphs",
-                    "--parallelism.pipeline_parallel_degree",
-                    "2",
-                    "--parallelism.pipeline_parallel_schedule",
-                    "Interleaved1F1B",
-                ]
-            )
-            config.training.disable_cuda_graphs = False
-            config.__post_init__()
-
-    def test_cuda_graphs_reject_split_backward_pipeline_schedules(self):
-        for schedule in ("InterleavedZeroBubble", "ZBVZeroBubble"):
+    def test_cuda_graphs_allow_looped_pipeline_schedules(self):
+        for schedule in (
+            "Interleaved1F1B",
+            "InterleavedZeroBubble",
+            "ZBVZeroBubble",
+        ):
             with self.subTest(schedule=schedule), cuda_graphs_supported(True):
                 config = ConfigManager().parse_args(
                     [
@@ -250,10 +235,7 @@ class TestConfigManager(unittest.TestCase):
                     ]
                 )
                 config.training.disable_cuda_graphs = False
-                with pytest.raises(
-                    ValueError, match="split-backward pipeline schedules"
-                ):
-                    config.__post_init__()
+                config.__post_init__()
 
     def test_cuda_graphs_reject_pipeline_validation(self):
         with cuda_graphs_supported(True):
