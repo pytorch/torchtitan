@@ -22,7 +22,7 @@ jobs:
   set-matrix-1gpu:
     uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner-cuda: mt-l-x86aavx2-29-113-a10g
+      runner-cuda: mt-l-x86aavx2-11-41-a10g
       gpu-arch: cuda
 
   gpu-unit-tests:
