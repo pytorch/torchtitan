@@ -788,6 +788,8 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return out_TD
+        # This reduction needs a standalone region: routed token combine and
+        # shared/routed branch addition separate it from either w2 computation.
         out_TD = remat.region(
             spmd.redistribute,
             self.remat_region_name("tp_output_reduction"),
