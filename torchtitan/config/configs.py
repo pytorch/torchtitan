@@ -81,7 +81,7 @@ class TrainingConfig:
 
     disable_cuda_graphs: bool = False
     """
-    Disable CUDA graph capture and replay for the forward+backward step. CUDA
+    Disable all CUDA graph capture and replay. CUDA
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
@@ -335,6 +335,28 @@ class CompileConfig:
             )
         if self.enable_async_tensor_parallel and "model" not in self.components:
             raise ValueError("Async TP requires 'model' in --compile.components.")
+
+
+@dataclass(kw_only=True, slots=True)
+class CUDAGraphConfig:
+    components: Annotated[list[str], tyro.conf.Suppress] = field(
+        default_factory=lambda: ["forward_backward"]
+    )
+    """Which training components to capture in separate CUDA graphs.
+
+    ``training.disable_cuda_graphs`` disables every component.
+    """
+
+    def __post_init__(self) -> None:
+        allowed = frozenset({"forward_backward", "optimizer_step"})
+        unknown = [
+            component for component in self.components if component not in allowed
+        ]
+        if unknown:
+            raise ValueError(
+                f"Unknown cuda_graph.components entries {unknown}; "
+                f"allowed values are {sorted(allowed)}"
+            )
 
 
 @dataclass(kw_only=True, slots=True)

@@ -15,6 +15,7 @@ from torchtitan.models.common.attention import BaseAttention
 if TYPE_CHECKING:
     from torchtitan.config import (
         CompileConfig,
+        CUDAGraphConfig,
         DebugConfig,
         ParallelismConfig,
         TrainingConfig,
@@ -32,6 +33,7 @@ def validate_model_training_config(
     *,
     parallelism: ParallelismConfig,
     training: TrainingConfig,
+    cuda_graph: CUDAGraphConfig,
     debug: DebugConfig,
     activation_checkpoint: ActivationCheckpointingConfig,
     compile_config: CompileConfig | None,
@@ -49,14 +51,20 @@ def validate_model_training_config(
         LocalTokenDispatcher,
     )
 
-    if not training.disable_cuda_graphs and cuda_graphs_supported():
+    if (
+        not training.disable_cuda_graphs
+        and "forward_backward" in cuda_graph.components
+        and cuda_graphs_supported()
+    ):
         if max_num_documents is None:
             for fqn, _, _, _ in model.traverse(VarlenInnerAttention.Config):
                 raise ValueError(
                     "CUDA graphs require fixed-shape varlen document "
                     f"metadata for {fqn}, but max_num_documents is unset. "
                     "Configure an upper bound on documents per local token "
-                    "microbatch, or set --training.disable_cuda_graphs."
+                    "microbatch, remove forward_backward from "
+                    "--cuda-graph.components, or set "
+                    "--training.disable_cuda_graphs."
                 )
 
         if parallelism.expert_parallel_degree > 1:
@@ -72,7 +80,8 @@ def validate_model_training_config(
                 raise ValueError(
                     "CUDA graphs support only expert parallel token dispatcher "
                     "configurations without CPU synchronization. "
-                    "Set HybridEP non_blocking_capacity_factor, or set "
+                    "Set HybridEP non_blocking_capacity_factor, remove "
+                    "forward_backward from --cuda-graph.components, or set "
                     "--training.disable_cuda_graphs. Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )

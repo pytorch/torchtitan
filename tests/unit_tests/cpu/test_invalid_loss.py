@@ -43,6 +43,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config = MagicMock()
         trainer.config.training.max_norm = 1.0
         trainer.config.training.disable_cuda_graphs = True
+        trainer.config.cuda_graph.components = ["forward_backward"]
         trainer.sdc_replayer = None
         trainer.ema = None
         trainer.device = torch.device("cpu")
@@ -69,6 +70,9 @@ class TestInvalidLoss(unittest.TestCase):
 
         trainer._run_forward_backward = MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(loss_value), [{}])
+        )
+        trainer._run_optimizer_step = lambda *, loss_is_finite: (
+            TrainingEngine._optimizer_step_body(trainer, loss_is_finite=loss_is_finite)
         )
 
         return loop

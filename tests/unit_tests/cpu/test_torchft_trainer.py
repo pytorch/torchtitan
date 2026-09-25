@@ -127,6 +127,26 @@ def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None
         ft.FaultTolerantTrainer(config)
 
 
+def test_ft_training_engine_rejects_optimizer_cuda_graph() -> None:
+    config = SimpleNamespace(
+        cuda_graph=SimpleNamespace(components=["forward_backward", "optimizer_step"]),
+    )
+
+    with (
+        patch.object(TrainingEngine, "__init__") as init,
+        pytest.raises(ValueError, match="not supported with TorchFT"),
+    ):
+        ft.FaultTolerantTrainingEngine(
+            config,
+            model_config=MagicMock(),
+            max_num_documents=None,
+            output_dir="",
+            fault_tolerance=MagicMock(),
+        )
+
+    init.assert_not_called()
+
+
 def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     engine = Mock(
         spec=ft.FaultTolerantTrainingEngine,

@@ -96,6 +96,7 @@ class Trainer(Configurable):
             model_config,
             parallelism=config.parallelism,
             training=config.training,
+            cuda_graph=config.cuda_graph,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
             compile_config=compile_config,
