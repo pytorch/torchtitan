@@ -27,6 +27,70 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 
+# --- Fused Mamba-2 scan (optional) ------------------------------------------
+# mamba-ssm's Mamba-2 chunked scan is pure Triton, so it runs on both CUDA and
+# ROCm (verified on MI355X / gfx950). It is dramatically cheaper than the
+# PyTorch reference below -- the reference materializes the full
+# (B, H, n_chunks, chunk, chunk) segment-sum matrices in fp32, which costs
+# ~67 GiB and ~174 ms fwd+bwd for one 31B mamba layer at T=8192, versus
+# ~1.1 GiB and ~3.3 ms for the kernel.
+#
+# The import is guarded because mamba-ssm is an optional dependency and its
+# top-level __init__ eagerly imports `selective_scan_cuda`, the compiled
+# Mamba-*1* extension, which is absent when the package is installed with
+# MAMBA_SKIP_CUDA_BUILD=TRUE. We only need the Mamba-2 Triton path, so we
+# stub that module out. The stub raises on attribute access rather than
+# returning something usable, so if any Mamba-1 code path is ever reached it
+# fails loudly instead of silently computing the wrong thing.
+def _load_fused_mamba_scan():
+    import os
+    import sys
+    import types
+
+    # Escape hatch: forces the PyTorch reference path. Useful for A/B timing
+    # and for bisecting a suspected kernel numerics problem.
+    if os.environ.get("NEMOTRON_DISABLE_FUSED_MAMBA", "") not in ("", "0"):
+        return None
+
+    if "selective_scan_cuda" not in sys.modules:
+        stub = types.ModuleType("selective_scan_cuda")
+
+        # Dunder lookups must raise AttributeError, not RuntimeError: torch and
+        # inspect walk sys.modules probing things like `__file__`, and a stub
+        # that explodes on those breaks unrelated machinery (torch.library's
+        # fake-kernel registration, specifically).
+        stub.__file__ = "<nemotron3 selective_scan_cuda stub>"
+
+        def _missing(name):
+            if name.startswith("__") and name.endswith("__"):
+                raise AttributeError(name)
+            raise RuntimeError(
+                "selective_scan_cuda (the Mamba-1 CUDA extension) is not built; "
+                f"attribute {name!r} was requested. Nemotron-3 only uses the "
+                "Mamba-2 Triton path, so reaching this is a bug."
+            )
+
+        stub.__getattr__ = _missing
+        sys.modules["selective_scan_cuda"] = stub
+        _installed_stub = True
+    else:
+        _installed_stub = False
+
+    try:
+        from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
+
+        return mamba_chunk_scan_combined
+    except Exception:
+        # Roll the stub back so we do not mask a real mamba-ssm install later.
+        if _installed_stub:
+            sys.modules.pop("selective_scan_cuda", None)
+        return None
+
+
+_fused_mamba_chunk_scan = _load_fused_mamba_scan()
+FUSED_MAMBA_SCAN_AVAILABLE = _fused_mamba_chunk_scan is not None
+
+
 # --- Mamba-2 Pure PyTorch Chunk Scan Helpers ---
 
 def pad_tensor_by_size(input_tensor: torch.Tensor, pad_size: int):
@@ -125,6 +189,40 @@ def mamba2_chunk_scan(
         Y = Y[:, :-pad_size, :, :]
 
     return Y
+
+
+def mamba2_scan(
+    hidden_states: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    chunk_size: int,
+    D: torch.Tensor | None = None,
+):
+    """Mamba-2 chunked scan: fused Triton kernel when possible, else PyTorch.
+
+    Both paths take the same arguments and return the same [B, T, H, P] tensor.
+    ``dt`` must already have its bias, softplus, and clamp applied by the
+    caller, which is why the kernel is invoked with ``dt_softplus=False`` and
+    no ``dt_bias``/``dt_limit`` -- passing those here would apply them twice.
+
+    The Triton kernel consumes the ``G`` group dimension of B/C natively, so
+    the fused path skips the ``repeat_interleave`` group expansion that the
+    PyTorch reference has to do.
+    """
+    if _fused_mamba_chunk_scan is not None and hidden_states.is_cuda:
+        return _fused_mamba_chunk_scan(
+            hidden_states,
+            dt,
+            A,
+            B,
+            C,
+            chunk_size=chunk_size,
+            D=D,
+            dt_softplus=False,
+        )
+    return mamba2_chunk_scan(hidden_states, dt, A, B, C, chunk_size, D=D)
 
 
 class NoRoPE(RoPE):
@@ -384,8 +482,8 @@ class NemotronTransformerBlock(TransformerBlock):
 
             x_mamba_reshaped = x_mamba.reshape(B, L, self.mamba_num_heads, self.mamba_head_dim)
 
-            # 6. Mamba-2 chunked scan
-            y = mamba2_chunk_scan(
+            # 6. Mamba-2 chunked scan (fused Triton kernel when available)
+            y = mamba2_scan(
                 x_mamba_reshaped,
                 dt,
                 A,
