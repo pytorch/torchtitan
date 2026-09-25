@@ -47,9 +47,7 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
-    CUDAGraphGradientState,
-    run_eager_on_cuda_graph_stream,
-    wrap_with_cuda_graph,
+    wrap_fwd_bwd_with_cuda_graph,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability import structured_logger as sl
@@ -246,7 +244,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_accumulation_steps = 1
         self.num_completed_steps = 0
         self.ntokens_seen = 0
-        self._num_optimizer_steps_since_cuda_graph_init = 0
         self.sdc_replayer = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
@@ -451,7 +448,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 device=self.device,
             )
 
-        self._num_optimizer_steps_since_cuda_graph_init = 0
         if self.parallel_dims.pp_enabled:
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
                 (1,), -1.0, device=self.device
@@ -467,17 +463,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
             return
 
-        gradient_state = CUDAGraphGradientState(
-            parameter
-            for model_part in self.model_parts
-            for parameter in model_part.parameters()
-        )
-        cuda_graph_forward_backward_fn = wrap_with_cuda_graph(
-            eager_forward_backward_fn,
-            gradient_state=gradient_state,
-        )
-
-        def run_with_cuda_graph(
+        def forward_backward_for_cuda_graph(
             microbatch_groups: list[tuple[Any, ...]],
             global_valid_tokens: torch.Tensor,
         ) -> ForwardBackwardResult:
@@ -489,21 +475,20 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     "CUDA graph gradient accumulation requires "
                     "parallelism.fsdp_defer_gradient_reduction=True."
                 )
-            if (
-                self._num_optimizer_steps_since_cuda_graph_init
-                < _NUM_CUDA_GRAPH_WARMUP_STEPS
-            ):
-                return run_eager_on_cuda_graph_stream(
-                    eager_forward_backward_fn,
-                    microbatch_groups,
-                    global_valid_tokens,
-                )
-            return cuda_graph_forward_backward_fn(
+            return eager_forward_backward_fn(
                 microbatch_groups,
                 global_valid_tokens,
             )
 
-        self._run_forward_backward = run_with_cuda_graph
+        self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
+            forward_backward_for_cuda_graph,
+            parameters=(
+                parameter
+                for model_part in self.model_parts
+                for parameter in model_part.parameters()
+            ),
+            num_warmup_iterations=_NUM_CUDA_GRAPH_WARMUP_STEPS,
+        )
 
     @sl.log_trace_span("forward_backward")
     def forward_backward(
@@ -779,7 +764,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             # schedule's start_step/update_every_n_steps are defined against.
             self.ema.step(current_step)
         self.num_completed_steps = current_step
-        self._num_optimizer_steps_since_cuda_graph_init += 1
         return grad_norm
 
     def state_dict(self) -> dict[str, Any]:
