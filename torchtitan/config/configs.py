@@ -348,7 +348,7 @@ class CUDAGraphConfig:
     """
 
     def __post_init__(self) -> None:
-        allowed = frozenset({"forward_backward", "optimizer"})
+        allowed = frozenset({"forward_backward", "optimizer_step"})
         unknown = [
             component for component in self.components if component not in allowed
         ]

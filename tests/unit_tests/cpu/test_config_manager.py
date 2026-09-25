@@ -283,7 +283,7 @@ class TestConfigManager(unittest.TestCase):
         config = ConfigManager().parse_args(
             ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
-        config.cuda_graph.components = ["optimizer"]
+        config.cuda_graph.components = ["optimizer_step"]
 
         with pytest.raises(ValueError, match="requires the forward_backward component"):
             config.__post_init__()
@@ -292,7 +292,7 @@ class TestConfigManager(unittest.TestCase):
         config = ConfigManager().parse_args(
             ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
-        config.cuda_graph.components.append("optimizer")
+        config.cuda_graph.components.append("optimizer_step")
         config.training.disable_cuda_graphs = True
 
         with pytest.raises(ValueError, match="requires CUDA graphs"):
@@ -302,7 +302,7 @@ class TestConfigManager(unittest.TestCase):
         config = ConfigManager().parse_args(
             ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
-        config.cuda_graph.components.append("optimizer")
+        config.cuda_graph.components.append("optimizer_step")
         config.optimizer.implementation = "foreach"
 
         with pytest.raises(ValueError, match="fused implementation"):

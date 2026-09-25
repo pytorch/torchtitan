@@ -316,13 +316,13 @@ def muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.C
 
 def muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
-    config.cuda_graph.components.append("optimizer")
+    config.cuda_graph.components.append("optimizer_step")
     return config
 
 
 def muse_glimmer_debugmodel_fsdp2_optimizer_cuda_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction()
-    config.cuda_graph.components.append("optimizer")
+    config.cuda_graph.components.append("optimizer_step")
     return config
 
 

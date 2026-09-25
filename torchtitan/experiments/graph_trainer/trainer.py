@@ -28,7 +28,7 @@ from torchtitan.experiments.graph_trainer.registry import (
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import TrainingEngine
+from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 logger = logging.getLogger(__name__)
@@ -74,7 +74,7 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
-        if "optimizer" in config.cuda_graph.components:
+        if "optimizer_step" in config.cuda_graph.components:
             raise ValueError(
                 "Optimizer CUDA graphs are not supported with GraphTrainer."
             )
@@ -137,7 +137,6 @@ class GraphTrainingEngine(TrainingEngine):
                 device=self.device,
             )
 
-        self._num_optimizer_steps_since_cuda_graph_init = 0
         if self.parallel_dims.pp_enabled:
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
                 (1,), -1.0, device=self.device
@@ -159,36 +158,22 @@ class GraphTrainingEngine(TrainingEngine):
         else:
             self._pinned_pool_ctx = None
 
-    def forward_backward_microbatch(
+    def _preprocess_microbatch_groups(
         self,
-        *,
-        microbatch_group: list[TrainingMicrobatch],
-        global_valid_tokens: torch.Tensor,
-        accumulation_index: int = 0,
-    ) -> torch.Tensor:
+        microbatch_groups: list[list[TrainingMicrobatch]],
+    ) -> list[tuple[Any, ...]]:
+        """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
         if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
-            return super().forward_backward_microbatch(
-                microbatch_group=microbatch_group,
-                global_valid_tokens=global_valid_tokens,
-                accumulation_index=accumulation_index,
-            )
+            return super()._preprocess_microbatch_groups(microbatch_groups)
 
-        if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
-            raise ValueError(
-                "Per-microbatch loss arguments are not supported with GraphRuntime yet."
-            )
+        preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
+        for microbatch_group in microbatch_groups:
+            if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
+                raise ValueError(
+                    "Per-microbatch loss arguments are not supported with "
+                    "GraphRuntime yet."
+                )
 
-        if accumulation_index == 0:
-            self.loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
-
-        if self.parallel_dims.dp_replicate_enabled and (
-            self.num_accumulation_steps == 1 or self.config.training.disable_cuda_graphs
-        ):
-            is_last = accumulation_index == self.num_accumulation_steps - 1
-            for part in self.model_parts:
-                part.set_requires_all_reduce(is_last)  # pyrefly: ignore[not-callable]
-
-        def forward_backward() -> torch.Tensor:
             # Calling convention:
             # The runtime receives one positional tuple, keyword dictionary,
             # and target per schedule microbatch.
@@ -217,46 +202,51 @@ class GraphTrainingEngine(TrainingEngine):
                 arg_mbs.append((inputs_mb,))
                 kwarg_mbs.append(extra_kwargs_mb)
                 target_mbs.append(labels_mb)
+            preprocessed_microbatch_groups.append((arg_mbs, kwarg_mbs, target_mbs))
 
-            return self.forward_backward_body_fn(
-                inputs=arg_mbs,
-                model_kwargs=kwarg_mbs,
-                labels=target_mbs,
-                loss_kwargs={"global_valid_tokens": global_valid_tokens},
-            )
+        return preprocessed_microbatch_groups
 
-        if self.sdc_replayer is not None and accumulation_index == 0:
-            loss = self.sdc_replayer.run_fwd_bwd(
-                forward_backward, step=self.num_completed_steps + 1
-            )
-        else:
-            loss = forward_backward()
-        detached_loss = loss.detach()
-        self.loss_is_finite.logical_and_(torch.isfinite(detached_loss).all())
-        return detached_loss
-
-    def _non_pp_forward_backward_body(
+    def _forward_backward_body(
         self,
+        microbatch_groups: list[tuple[Any, ...]],
+        global_valid_tokens: torch.Tensor,
         *,
-        inputs: Any,
-        labels: Any,
-        model_kwargs: Any,
-        loss_kwargs: dict[str, Any],
-    ) -> torch.Tensor:
-        """Route AOT PP=1 through the runtime body used by pipeline parallelism."""
-        if self.config.compile.mode == "aot_fx_trace":
-            return self._pp_forward_backward_body(
-                inputs=inputs,
-                labels=labels,
-                model_kwargs=model_kwargs,
-                loss_kwargs=loss_kwargs,
+        defer_fsdp_gradient_reduction: bool,
+    ) -> ForwardBackwardResult:
+        """Run AOT single-stage groups through GraphRuntime."""
+        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
+            return super()._forward_backward_body(
+                microbatch_groups,
+                global_valid_tokens,
+                defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
             )
-        return super()._non_pp_forward_backward_body(
-            inputs=inputs,
-            labels=labels,
-            model_kwargs=model_kwargs,
-            loss_kwargs=loss_kwargs,
-        )
+
+        assert not defer_fsdp_gradient_reduction
+        accumulated_loss: torch.Tensor | None = None
+        loss_metrics: list[dict[str, torch.Tensor]] = []
+        for inputs, model_kwargs, labels in microbatch_groups:
+            self.loss_metrics = {}
+            loss = self._pp_forward_backward_microbatch_group(
+                inputs=inputs,
+                model_kwargs=model_kwargs,
+                labels=labels,
+                loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                finalize_gradients=True,
+            )
+            detached_loss = loss.detach()
+            if accumulated_loss is None:
+                accumulated_loss = detached_loss.clone()
+            else:
+                accumulated_loss.add_(detached_loss)
+            loss_metrics.append(
+                {
+                    key: value.detach().clone()
+                    for key, value in self.loss_metrics.items()
+                }
+            )
+
+        assert accumulated_loss is not None
+        return ForwardBackwardResult(accumulated_loss, loss_metrics)
 
     def close(self) -> None:
         if self._pinned_pool_ctx is not None:
