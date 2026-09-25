@@ -25,6 +25,7 @@ from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -35,7 +36,11 @@ from torchtitan.distributed.spmd_types import (
     plain_tensor_to_dtensor_state_dict,
 )
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    InnerAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
@@ -630,6 +635,35 @@ class RequestDispatcher:
             self._rank0_drain_task = None
 
 
+def _vllm_attention_backend(
+    attention_backend: InnerAttention.Config,
+) -> AttentionBackendEnum | None:
+    """Pick the vLLM backend serving the model spec's full-attention layers.
+
+    ``None`` leaves the choice to vLLM, which is the answer on ROCm because
+    CUSTOM cannot run there at all. CUSTOM is rl/model's varlen backend, and
+    although it is modelled on vLLM's ``FlashAttentionImpl`` it computes with
+    ``torch.nn.attention.varlen.varlen_attn_out``. Two limits of torch's ROCm
+    varlen kernel rule it out: it rejects ``num_splits`` -- the same limit
+    ``Controller`` cites when it refuses batch-invariant mode on ROCm -- and it
+    rejects a paged KV cache (``mha_varlen_fwd: block_table_ must be nullopt``).
+    The inherited ``vllm_flash_attn_version`` assert fires before either, but it
+    is a symptom: removing it only surfaces the two real limits.
+
+    Deferring to vLLM rather than naming a ROCm backend here keeps this out of
+    vLLM's dispatch, which already gates AITER FlashAttention on CDNA3+ and on
+    the head sizes it supports and falls back when either does not hold. The
+    consequence is that a ROCm generator attends with a different kernel from
+    its trainer, so trainer/generator log-prob parity is a property to measure
+    rather than one the shared model definition supplies.
+    """
+    if isinstance(attention_backend, FlexInnerAttention.Config):
+        return AttentionBackendEnum.FLEX_ATTENTION
+    if current_platform.is_rocm():
+        return None
+    return AttentionBackendEnum.CUSTOM
+
+
 class VLLMGenerator(Configurable):
     """vLLM engine to drive concurrent `generate` calls through one SPMD engine loop.
 
@@ -898,11 +932,7 @@ class VLLMGenerator(Configurable):
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=config.cuda_graph.mode == "NONE",
             attention_config=AttentionConfig(
-                backend=(
-                    AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(attention_backend, FlexInnerAttention.Config)
-                    else AttentionBackendEnum.CUSTOM
-                ),
+                backend=_vllm_attention_backend(attention_backend),
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,

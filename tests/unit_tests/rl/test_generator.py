@@ -31,12 +31,14 @@ import torch.distributed as dist
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrategy
 from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
+    _vllm_attention_backend,
     GenerationFuture,
     RequestDispatcher,
     SamplingConfig,
@@ -51,6 +53,7 @@ from torchtitan.rl.model.vllm_worker import (
 from torchtitan.rl.observability import metrics as m
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 class _FakeRenderer:
@@ -541,6 +544,42 @@ def test_inference_parallelism_disables_dense_sequence_parallelism():
     parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
 
     assert not parallelism.to_training().enable_sequence_parallel
+
+
+def _pin_platform(monkeypatch, *, rocm: bool):
+    monkeypatch.setattr(
+        "torchtitan.rl.generator.current_platform",
+        SimpleNamespace(is_rocm=lambda: rocm),
+    )
+
+
+@pytest.mark.parametrize("rocm", [False, True])
+def test_flex_attention_backend_is_platform_independent(monkeypatch, rocm):
+    _pin_platform(monkeypatch, rocm=rocm)
+
+    assert (
+        _vllm_attention_backend(FlexInnerAttention.Config())
+        is AttentionBackendEnum.FLEX_ATTENTION
+    )
+
+
+def test_varlen_attention_backend_is_custom_off_rocm(monkeypatch):
+    _pin_platform(monkeypatch, rocm=False)
+
+    assert (
+        _vllm_attention_backend(VarlenInnerAttention.Config())
+        is AttentionBackendEnum.CUSTOM
+    )
+
+
+def test_varlen_attention_backend_defers_to_vllm_on_rocm(monkeypatch):
+    # None is AttentionConfig's "select automatically". Naming a ROCm backend
+    # here would bypass vLLM's own gating (AITER FlashAttention needs CDNA3+ and
+    # one of its supported head sizes) and fail where vLLM would have fallen
+    # back.
+    _pin_platform(monkeypatch, rocm=True)
+
+    assert _vllm_attention_backend(VarlenInnerAttention.Config()) is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
