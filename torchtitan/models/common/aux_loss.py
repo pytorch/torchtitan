@@ -94,6 +94,8 @@ class AuxLoss(Module):
     region is inert and the metric over-counts; see the module docstring.
     """
 
+    _always_saved_remat_regions = frozenset({"aux_loss"})
+
     # Metric groups are populated during model build, before PP splitting, so
     # every pipeline stage participates with its own (zero) accumulators and
     # every rank holds the same count.  That count is also the divisor in
@@ -190,7 +192,7 @@ class AuxLoss(Module):
             )
         out = remat.region(
             self._accumulate_and_inject,
-            self.remat_region_name("aux_loss"),
+            self.always_saved_remat_region_name("aux_loss"),
             recompute=False,
         )(raw_sum, carrier=carrier)
         remat.recompute_needs_tensor(out)

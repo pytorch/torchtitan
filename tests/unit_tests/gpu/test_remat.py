@@ -9,6 +9,7 @@ import unittest
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import fields, MISSING
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -17,22 +18,38 @@ import torch_remat as remat
 
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
-from torchtitan.models.common.activation import Sigmoid
+from torchtitan.models.common.activation import BinaryActivationFn, Sigmoid, SwiGLU
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    GroupedLinear,
     Linear,
     RouterGateLinear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
 )
-from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    MoE,
+    QuantileBalancedTopKRouter,
+    RoutedExperts,
+    TokenChoiceTopKRouter,
+)
+from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.overrides.fused_swiglu import fused_swiglu
+from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear, GptOssSwiGLU
+from torchtitan.models.kimi_k3.kda import KDA
+from torchtitan.models.kimi_k3.model import KimiMLAAttention
+from torchtitan.models.kimi_k3.moe import KimiLatentMoE
+from torchtitan.models.muse_glimmer.model import Attention as MuseGlimmerAttention
+from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
+from torchtitan.models.qwen3_5.model import Qwen35Attention
+from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -89,6 +106,172 @@ class _CountingGQAttention(GQAttention):
         self.scaling = None
 
 
+class _CountingModelSpecificAttention:
+    projection_forwards: int
+    inner_compute: _CountingOp
+    output_projection: _CountingOp
+
+    def region_counts(self) -> tuple[int, int, int]:
+        return (
+            self.projection_forwards,
+            self.inner_compute.num_forwards,
+            self.output_projection.num_forwards,
+        )
+
+
+class _CountingDeepSeekV3Attention(
+    DeepSeekV3Attention, _CountingModelSpecificAttention
+):
+    def __init__(self):
+        Module.__init__(self)
+        self.projection_forwards = 0
+        self.softmax_scale = 1.0
+        self.inner_compute = _CountingOp(_inner_attention)
+        self.inner_attention = self.inner_compute
+        self.output_projection = _CountingOp(
+            Linear(Linear.Config(in_features=4, out_features=4))
+        )
+        self.wo = self.output_projection
+
+    def _project_qkv(self, x_TD, positions):
+        del positions
+        self.projection_forwards += 1
+        x_T1D = x_TD.unsqueeze(1)
+        return x_T1D, x_T1D, x_T1D
+
+
+class _CountingQwen35Attention(Qwen35Attention, _CountingModelSpecificAttention):
+    def __init__(self):
+        Module.__init__(self)
+        self.projection_forwards = 0
+        self.head_dim = 4
+        self.rotary_dim = 2
+        self.scaling = 1.0
+        self.enable_gqa = False
+        self.q_norm = torch.nn.Identity()
+        self.k_norm = torch.nn.Identity()
+        self.rope = _CountingOp(_identity_rope)
+        self.inner_compute = _CountingOp(_inner_attention)
+        self.inner_attention = self.inner_compute
+        self.output_projection = _CountingOp(
+            Linear(Linear.Config(in_features=4, out_features=4))
+        )
+        self.wo = self.output_projection
+
+    def _project_qkv(self, x_TD):
+        self.projection_forwards += 1
+        x_T1D = x_TD.unsqueeze(1)
+        return x_T1D, x_T1D, x_T1D, x_T1D
+
+
+class _CountingKimiMLAAttention(KimiMLAAttention, _CountingModelSpecificAttention):
+    def __init__(self):
+        Module.__init__(self)
+        self.projection_forwards = 0
+        self.scale = 1.0
+        self.inner_compute = _CountingOp(_inner_attention)
+        self.inner_attention = self.inner_compute
+        self.output_projection = _CountingOp(
+            Linear(Linear.Config(in_features=4, out_features=4))
+        )
+        self.wo = self.output_projection
+
+    def _project_qkv(self, x_TD):
+        self.projection_forwards += 1
+        projected_TD = x_TD * 1.0
+        projected_T1D = projected_TD.unsqueeze(1)
+        return projected_T1D, projected_T1D, projected_T1D, projected_TD
+
+
+class _CountingMuseGlimmerAttention(
+    MuseGlimmerAttention, _CountingModelSpecificAttention
+):
+    def __init__(self):
+        Module.__init__(self)
+        self.projection_forwards = 0
+        self.q_norm = None
+        self.k_norm = None
+        self.rope = None
+        self.window_size = None
+        self.scaling = 1.0
+        self.enable_gqa = False
+        self.inner_compute = _CountingOp(_inner_attention)
+        self.inner_attention = self.inner_compute
+        self.output_projection = _CountingOp(
+            Linear(Linear.Config(in_features=4, out_features=4))
+        )
+        self.wo = self.output_projection
+
+    def _project_qkv(self, x_TD):
+        self.projection_forwards += 1
+        projected_TD = x_TD * 1.0
+        projected_T1D = projected_TD.unsqueeze(1)
+        return projected_T1D, projected_T1D, projected_T1D, None
+
+
+def _recurrent_inner(query_TC, key_TC, value_TC, *_args, **_kwargs):
+    return (query_TC + key_TC + value_TC).unsqueeze(1)
+
+
+def _gated_norm(x_T1D: torch.Tensor, gate_T1D: torch.Tensor) -> torch.Tensor:
+    return x_T1D * torch.sigmoid(gate_T1D)
+
+
+class _CountingGatedDeltaNet(GatedDeltaNet, _CountingModelSpecificAttention):
+    def __init__(self):
+        Module.__init__(self)
+        self.projection_forwards = 0
+        self.key_head_dim = 4
+        self.value_head_dim = 4
+        self.inner_compute = _CountingOp(_recurrent_inner)
+        self.inner_gated_delta_net = self.inner_compute
+        self.norm = _CountingOp(_gated_norm)
+        self.output_projection = _CountingOp(
+            Linear(Linear.Config(in_features=4, out_features=4))
+        )
+        self.out_proj = self.output_projection
+        self.conv_q = SimpleNamespace(weight=torch.empty(0))
+        self.conv_k = SimpleNamespace(weight=torch.empty(0))
+        self.conv_v = SimpleNamespace(weight=torch.empty(0))
+        self.A_log = torch.empty(0)
+        self.dt_bias = torch.empty(0)
+
+    def _project_inputs(self, x_TD):
+        self.projection_forwards += 1
+        projected_TD = x_TD * 1.0
+        return (projected_TD,) * 6
+
+
+class _CountingKDA(KDA, _CountingModelSpecificAttention):
+    def __init__(self):
+        Module.__init__(self)
+        self.projection_forwards = 0
+        self.inner_compute = _CountingOp(_recurrent_inner)
+        self.inner_kda = self.inner_compute
+        self.output_norm = _CountingOp(_gated_norm)
+        self.output_projection = _CountingOp(
+            Linear(Linear.Config(in_features=4, out_features=4))
+        )
+        self.output_proj = self.output_projection
+        self.q_conv = SimpleNamespace(weight=torch.empty(0))
+        self.k_conv = SimpleNamespace(weight=torch.empty(0))
+        self.v_conv = SimpleNamespace(weight=torch.empty(0))
+        self.A_log = torch.empty(0)
+        self.dt_bias = torch.empty(0)
+
+    def _project_inputs(self, x_TD):
+        self.projection_forwards += 1
+        projected_TD = x_TD * 1.0
+        return (
+            projected_TD,
+            projected_TD,
+            projected_TD,
+            projected_TD,
+            projected_TD,
+            projected_TD.unsqueeze(1),
+        )
+
+
 class _AttentionBlock(Module):
     def __init__(self):
         super().__init__()
@@ -98,6 +281,71 @@ class _AttentionBlock(Module):
         return self.attention(x_TD, attention_masks=None).sum()
 
 
+class _ModelSpecificAttentionBlock(Module):
+    def __init__(self, attention: Module):
+        super().__init__()
+        self.attention = attention
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.attention(x_TD, None).sum()
+
+
+class _IdentityRouter(Module):
+    def forward(self, x_TD, expert_bias_E, **kwargs):
+        del expert_bias_E, kwargs
+        num_tokens = x_TD.shape[0]
+        weights_T1 = torch.ones(num_tokens, 1, device=x_TD.device)
+        expert_ids_T1 = torch.zeros(num_tokens, 1, device=x_TD.device, dtype=torch.long)
+        routing_map_T1 = torch.ones(num_tokens, 1, device=x_TD.device, dtype=torch.bool)
+        return weights_T1, expert_ids_T1, routing_map_T1
+
+
+class _IdentityRoutedExperts(Module):
+    def forward(
+        self,
+        x_TD,
+        weights_TK,
+        expert_ids_TK,
+        num_tokens_per_expert_E,
+    ):
+        del weights_TK, expert_ids_TK, num_tokens_per_expert_E
+        return x_TD
+
+
+class _CountingKimiLatentMoE(KimiLatentMoE):
+    def __init__(self):
+        Module.__init__(self)
+        self.router = _IdentityRouter()
+        self.expert_bias_E = torch.empty(1)
+        self.routed_down = _CountingOp(
+            Linear(Linear.Config(in_features=4, out_features=4))
+        )
+        self.routed_norm = torch.nn.Identity()
+        self.routed_experts = _IdentityRoutedExperts()
+        self.routed_up = _CountingOp(
+            Linear(Linear.Config(in_features=4, out_features=4))
+        )
+        self.shared_experts = None
+
+    def _maybe_shard_routed_branch_inputs_across_tp(self, x_TD, padding_mask_T):
+        return x_TD, padding_mask_T
+
+    def _maybe_zero_fill_routed_output_to_tp_partial(self, out_TD):
+        return out_TD
+
+    def _maybe_all_reduce_moe_output_across_tp(self, out_TD):
+        return out_TD
+
+
+class _KimiLatentMoEBlock(Module):
+    def __init__(self):
+        super().__init__()
+        self.moe = _CountingKimiLatentMoE()
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.moe(x_TD).sum()
+
+
 class _FeedForwardBlock(Module):
     def __init__(self, feed_forward: Module):
         super().__init__()
@@ -105,6 +353,81 @@ class _FeedForwardBlock(Module):
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         return self.feed_forward(x_TD).sum()
+
+
+class _RoutedExpertsBlock(Module):
+    def __init__(self, routed_experts: RoutedExperts):
+        super().__init__()
+        self.routed_experts = routed_experts
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        num_tokens = x_TD.shape[0]
+        topk_scores_T1 = torch.ones(num_tokens, 1, device=x_TD.device)
+        topk_expert_ids_T1 = torch.zeros(
+            num_tokens, 1, device=x_TD.device, dtype=torch.long
+        )
+        num_tokens_per_expert_1 = torch.tensor([num_tokens], device=x_TD.device)
+        return self.routed_experts(
+            x_TD,
+            topk_scores_T1,
+            topk_expert_ids_T1,
+            num_tokens_per_expert_1,
+        ).sum()
+
+
+class _MoEOutputReductionBlock(Module):
+    def __init__(self):
+        super().__init__()
+        self.moe = MoE.__new__(MoE)
+        Module.__init__(self.moe)
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        out_TD = self.moe._maybe_all_reduce_moe_output_across_tp(x_TD)
+        return out_TD.square().sum()
+
+
+class _CountingGroupedLinear(GroupedLinear):
+    """GroupedLinear with CPU reference compute and a forward counter."""
+
+    def __init__(self, config: GroupedLinear.Config):
+        super().__init__(config)
+        self.num_forwards = 0
+
+    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
+        self.num_forwards += 1
+        return super().forward(input_RI, offsets_E)
+
+    def _grouped_mm(
+        self,
+        *,
+        input_RI: torch.Tensor,
+        weight_EOI: torch.Tensor,
+        offsets_E: torch.Tensor,
+    ) -> torch.Tensor:
+        del offsets_E
+        return input_RI.float() @ weight_EOI[0].float().T
+
+
+def _routed_experts_config(
+    *,
+    grouped_linear_cls: type[GroupedLinear] = GroupedLinear,
+    activation_fn: BinaryActivationFn.Config | None = None,
+) -> RoutedExperts.Config:
+    return RoutedExperts.Config(
+        w13=grouped_linear_cls.Config(
+            group_size=1,
+            in_features=4,
+            out_features=8,
+            num_linears=2,
+        ),
+        w2=grouped_linear_cls.Config(
+            group_size=1,
+            in_features=8,
+            out_features=4,
+        ),
+        token_dispatcher=LocalTokenDispatcher.Config(num_experts=1, top_k=1),
+        activation_fn=activation_fn or SwiGLU.Config(),
+    )
 
 
 def _vision_inner_attention(
@@ -176,6 +499,27 @@ class _RematModel(Module):
         return self.layers["0"](x_BD)
 
 
+class _PolicyReportBlock(Module):
+    _always_saved_remat_regions = frozenset({"state_update"})
+
+    def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
+        saved_BD = remat.region(
+            torch.sin,
+            self.remat_region_name("attention.qkv"),
+            recompute=self.remat_should_recompute("attention.qkv"),
+        )(x_BD)
+        recomputed_BD = remat.region(
+            torch.cos,
+            self.remat_region_name("feed_forward.w13"),
+            recompute=self.remat_should_recompute("feed_forward.w13"),
+        )(saved_BD)
+        return remat.region(
+            torch.neg,
+            self.always_saved_remat_region_name("state_update"),
+            recompute=False,
+        )(recomputed_BD)
+
+
 def _run_forward_backward(
     model: Module, x_BD: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
@@ -229,6 +573,25 @@ class TestRematRegions(unittest.TestCase):
             ):
                 config_factory()
 
+    def test_effective_policy_report_logs_first_forward_once(self):
+        model = _RematModel(_PolicyReportBlock())
+        RegionAC.Config(
+            save_regions=["attention.*"],
+            report_effective_policy=True,
+        ).build().apply(model)
+
+        with self.assertLogs(
+            "torchtitan.distributed.activation_checkpoint", level="INFO"
+        ) as logs:
+            model(torch.randn(3, 4))
+            model(torch.randn(3, 4))
+
+        reports = [message for message in logs.output if "Effective" in message]
+        self.assertEqual(len(reports), 1)
+        self.assertIn("ALWAYS_SAVE: state_update", reports[0])
+        self.assertIn("SAVE: attention.qkv", reports[0])
+        self.assertIn("RECOMPUTE: feed_forward.w13", reports[0])
+
     def test_llama_attention_policy_applies_without_changing_state_dict(self):
         from torchtitan.models.llama3 import model_registry
 
@@ -272,6 +635,109 @@ class TestRematRegions(unittest.TestCase):
                         block.attention.qkv_linear.num_forwards,
                         block.attention.inner_attention.num_forwards,
                         block.attention.wo.num_forwards,
+                    ),
+                    expected_counts,
+                )
+
+    def test_model_specific_attention_regions_control_recomputation(self):
+        attention_cases = (
+            (
+                _CountingDeepSeekV3Attention,
+                ("qkv", "inner_attention", "wo"),
+            ),
+            (
+                _CountingQwen35Attention,
+                ("qkv", "inner_attention", "wo"),
+            ),
+            (
+                _CountingKimiMLAAttention,
+                ("qkv", "inner_attention", "wo"),
+            ),
+            (
+                _CountingMuseGlimmerAttention,
+                ("qkv", "inner_attention", "wo"),
+            ),
+            (
+                _CountingGatedDeltaNet,
+                ("input_projections", "inner_compute", "output_projection"),
+            ),
+            (
+                _CountingKDA,
+                ("input_projections", "inner_compute", "output_projection"),
+            ),
+        )
+        for attention_factory, region_names in attention_cases:
+            policies = [
+                ([], (2, 2, 2)),
+                *[
+                    (
+                        [f"attention.{region_name}"],
+                        tuple(1 if index == saved_index else 2 for index in range(3)),
+                    )
+                    for saved_index, region_name in enumerate(region_names)
+                ],
+            ]
+            for save_regions, expected_counts in policies:
+                with self.subTest(
+                    attention=attention_factory.__name__,
+                    save_regions=save_regions,
+                ):
+                    torch.manual_seed(42)
+                    baseline = _RematModel(
+                        _ModelSpecificAttentionBlock(attention_factory())
+                    )
+                    remat_model = deepcopy(baseline)
+                    RegionAC.Config(save_regions=save_regions).build().apply(
+                        remat_model
+                    )
+
+                    x_TD = torch.randn(3, 4)
+                    expected = _run_forward_backward(baseline, x_TD)
+                    actual = _run_forward_backward(remat_model, x_TD)
+
+                    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                    for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                        torch.testing.assert_close(
+                            actual_grad, expected_grad, rtol=0, atol=0
+                        )
+
+                    block = remat_model.layers["0"]
+                    assert isinstance(block, _ModelSpecificAttentionBlock)
+                    attention = block.attention
+                    assert isinstance(attention, _CountingModelSpecificAttention)
+                    self.assertEqual(attention.region_counts(), expected_counts)
+
+    def test_kimi_latent_moe_regions_control_recomputation(self):
+        for save_regions, expected_counts in (
+            ([], (2, 2)),
+            (["moe.routed_down"], (1, 2)),
+            (["moe.routed_up"], (2, 1)),
+            (["moe.routed_*"], (1, 1)),
+        ):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                baseline = _RematModel(_KimiLatentMoEBlock())
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+
+                x_TD = torch.randn(3, 4)
+                expected = _run_forward_backward(baseline, x_TD)
+                actual = _run_forward_backward(remat_model, x_TD)
+
+                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad, expected_grad, rtol=0, atol=0
+                    )
+
+                block = remat_model.layers["0"]
+                assert isinstance(block, _KimiLatentMoEBlock)
+                self.assertEqual(
+                    (
+                        block.moe.routed_down.num_forwards,
+                        block.moe.routed_up.num_forwards,
                     ),
                     expected_counts,
                 )
@@ -348,6 +814,189 @@ class TestRematRegions(unittest.TestCase):
                         [f"feed_forward.{name}" for name in expected_names],
                     )
 
+    def test_grouped_linear_save_regions_control_recomputation(self):
+        for save_regions, expected_counts in (
+            ([], (2, 2)),
+            (["routed_experts.*"], (1, 1)),
+            (["routed_experts.w13"], (1, 2)),
+            (["routed_experts.w2"], (2, 1)),
+        ):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                config = _routed_experts_config()
+                routed_experts = config.build()
+                routed_experts.w13 = _CountingGroupedLinear(config.w13)
+                routed_experts.w2 = _CountingGroupedLinear(config.w2)
+                for parameter in routed_experts.parameters():
+                    torch.nn.init.normal_(parameter)
+                baseline = _RematModel(_RoutedExpertsBlock(routed_experts))
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+
+                x_TD = torch.randn(3, 4)
+                expected = _run_forward_backward(baseline, x_TD)
+                actual = _run_forward_backward(remat_model, x_TD)
+
+                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad, expected_grad, rtol=0, atol=0
+                    )
+
+                block = remat_model.layers["0"]
+                assert isinstance(block, _RoutedExpertsBlock)
+                w13 = block.routed_experts.w13
+                w2 = block.routed_experts.w2
+                assert isinstance(w13, _CountingGroupedLinear)
+                assert isinstance(w2, _CountingGroupedLinear)
+                self.assertEqual(
+                    (w13.num_forwards, w2.num_forwards),
+                    expected_counts,
+                )
+
+    def test_moe_tp_output_reduction_region_controls_recomputation(self):
+        for save_regions, expected_reductions in (
+            ([], 2),
+            (["moe.tp_output_reduction"], 1),
+        ):
+            with self.subTest(save_regions=save_regions):
+                model = _RematModel(_MoEOutputReductionBlock())
+                RegionAC.Config(save_regions=save_regions).build().apply(model)
+                num_reductions = 0
+
+                def counted_redistribute(tensor, *_args, **_kwargs):
+                    nonlocal num_reductions
+                    num_reductions += 1
+                    return tensor * 2
+
+                with (
+                    patch(
+                        "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                        return_value=False,
+                    ),
+                    patch(
+                        "torchtitan.models.common.moe.spmd_mesh_group",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "torchtitan.models.common.moe.spmd.redistribute",
+                        new=counted_redistribute,
+                    ),
+                ):
+                    x_TD = torch.randn(3, 4, requires_grad=True)
+                    model(x_TD).backward()
+
+                self.assertEqual(num_reductions, expected_reductions)
+                self.assertIsNotNone(x_TD.grad)
+
+    def test_shared_w2_region_controls_reduce_scatter_recomputation(self):
+        for save_regions, expected_reductions in (
+            ([], 2),
+            (["feed_forward.w2"], 1),
+        ):
+            with self.subTest(save_regions=save_regions):
+                shared_expert = FeedForward.Config(
+                    w13=Linear.Config(
+                        in_features=4,
+                        out_features=8,
+                        num_linears=2,
+                    ),
+                    w2=SharedExpertRowParallelLinear.Config(
+                        in_features=8,
+                        out_features=4,
+                    ),
+                ).build()
+                model = _RematModel(_FeedForwardBlock(shared_expert))
+                RegionAC.Config(save_regions=save_regions).build().apply(model)
+                num_reductions = 0
+
+                def counted_redistribute(tensor, *_args, **_kwargs):
+                    nonlocal num_reductions
+                    num_reductions += 1
+                    return tensor * 2
+
+                with (
+                    patch(
+                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        return_value=True,
+                    ),
+                    patch(
+                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "torchtitan.models.common.linear.spmd.redistribute",
+                        new=counted_redistribute,
+                    ),
+                ):
+                    x_TD = torch.randn(3, 4, requires_grad=True)
+                    model(x_TD).backward()
+
+                self.assertEqual(num_reductions, expected_reductions)
+                self.assertIsNotNone(x_TD.grad)
+
+    def test_grouped_linear_variants_use_expected_region_boundaries(self):
+        configs = (
+            _routed_experts_config(),
+            _routed_experts_config(
+                grouped_linear_cls=GptOssGroupedLinear,
+                activation_fn=GptOssSwiGLU.Config(),
+            ),
+            _routed_experts_config(activation_fn=FusedSwiGLU.Config()),
+        )
+
+        def grouped_mm(
+            *,
+            input_RI: torch.Tensor,
+            weight_EOI: torch.Tensor,
+            offsets_E: torch.Tensor,
+        ) -> torch.Tensor:
+            del offsets_E
+            return input_RI.float() @ weight_EOI[0].float().T
+
+        def silu_and_mul(
+            gate_RF: torch.Tensor,
+            up_RF: torch.Tensor,
+            offsets_E: torch.Tensor,
+        ) -> torch.Tensor:
+            del offsets_E
+            return torch.nn.functional.silu(gate_RF) * up_RF
+
+        for config in configs:
+            routed_experts = config.build()
+            with self.subTest(
+                grouped_linear=type(routed_experts.w13).__name__,
+                activation=type(routed_experts.activation_fn).__name__,
+            ):
+                for parameter in routed_experts.parameters():
+                    torch.nn.init.normal_(parameter)
+                model = _RematModel(_RoutedExpertsBlock(routed_experts))
+                RegionAC.Config(save_regions=[]).build().apply(model)
+
+                with (
+                    patch.object(
+                        routed_experts.w13, "_grouped_mm", side_effect=grouped_mm
+                    ),
+                    patch.object(
+                        routed_experts.w2, "_grouped_mm", side_effect=grouped_mm
+                    ),
+                    patch(
+                        "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
+                        side_effect=silu_and_mul,
+                    ),
+                ):
+                    x_TD = torch.randn(3, 4, requires_grad=True)
+                    with remat.collect_trace() as trace:
+                        output = model(x_TD)
+                    output.backward()
+
+                self.assertEqual(
+                    [entry.name for entry in trace.entries],
+                    ["routed_experts.w13", "routed_experts.w2"],
+                )
+                self.assertIsNotNone(x_TD.grad)
+
     def test_vision_save_regions_control_recomputation(self):
         for save_regions, expected_counts in (
             ([], (2, 2, 2, 2, 2, 2, 2)),
@@ -414,6 +1063,61 @@ class TestRematRegions(unittest.TestCase):
             output.backward()
 
         self.assertEqual(select_experts.call_count, 1)
+        self.assertEqual(router.tokens_per_expert_E.sum().item(), 3)
+
+    def test_quantile_router_statistics_are_recorded_once(self):
+        router = QuantileBalancedTopKRouter.Config(
+            num_experts=4,
+            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            score_func=Sigmoid.Config(),
+            top_k=1,
+            num_bins=8,
+        ).build()
+        router.train()
+        expert_bias_E = torch.zeros(4)
+
+        def forward(x_TD: torch.Tensor) -> torch.Tensor:
+            topk_scores_TK, _, _ = router(x_TD, expert_bias_E)
+            return topk_scores_TK.sum()
+
+        checkpointed_forward = remat.checkpoint(
+            region_name="transformer_block", preserve_rng_state=False
+        )(forward)
+        x_TD = torch.randn(3, 4, requires_grad=True)
+        checkpointed_forward(x_TD).backward()
+
+        self.assertEqual(router.tokens_per_expert_E.sum().item(), 3)
+        self.assertEqual(
+            router.quantile_balancer.required_bias_histogram_EB.sum().item(),
+            12,
+        )
+        self.assertIsNotNone(x_TD.grad)
+
+    def test_forced_router_statistics_are_recorded_once(self):
+        router = TokenChoiceTopKRouter.Config(
+            num_experts=4,
+            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            score_func=Sigmoid.Config(),
+            top_k=1,
+            _debug_force_load_balance=True,
+        ).build()
+        router.train()
+
+        def forward(x_TD: torch.Tensor) -> torch.Tensor:
+            topk_scores_TK, _, _ = router(x_TD)
+            return topk_scores_TK.sum()
+
+        checkpointed_forward = remat.checkpoint(
+            region_name="transformer_block", preserve_rng_state=False
+        )(forward)
+        x_TD = torch.randn(3, 4, requires_grad=True)
+        checkpointed_forward(x_TD).backward()
+
+        torch.testing.assert_close(
+            router.tokens_per_expert_E,
+            torch.tensor([1.0, 1.0, 1.0, 0.0]),
+        )
+        self.assertIsNotNone(x_TD.grad)
 
 
 if __name__ == "__main__":

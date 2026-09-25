@@ -40,6 +40,27 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
+Set `report_effective_policy=True` to log the unique regions exercised by the
+first model forward. The report classifies each region as `SAVE`, `RECOMPUTE`,
+or `ALWAYS_SAVE`; the last category identifies correctness regions whose
+retention is independent of `save_regions`. Reported configurable names are
+the logical policy keys accepted by `save_regions`, so a grouped implementation
+may report one policy region even when it contains several physical regions.
+
+The main attention region families are:
+
+| Transformer block | Input projections | Inner compute | Output projection |
+| --- | --- | --- | --- |
+| Common, DeepSeek V3, Muse Glimmer | `attention.qkv` | `attention.inner_attention` | `attention.wo` |
+| Qwen3.5 full attention | `attn.qkv` | `attn.inner_attention` | `attn.wo` |
+| Qwen3.5 DeltaNet | `attn.input_projections` | `attn.inner_compute` | `attn.output_projection` |
+| Kimi K3 MLA | `attention.qkv` | `attention.inner_attention` | `attention.wo` |
+| Kimi K3 KDA | `delta_attention.input_projections` | `delta_attention.inner_compute` | `delta_attention.output_projection` |
+
+Qwen3.6 and Qwen3.8 reuse the Qwen3.5 implementations. Kimi K2.7 reuses
+DeepSeek V3 attention. Kimi K3 latent MoE additionally exposes
+`moe.routed_down` and `moe.routed_up`.
+
 ## Adding regions to model code
 
 Model code defines a region at the operation being controlled:
@@ -104,3 +125,48 @@ boundary permits.
 `RegionAC` requires `preserve_rng_state=False`. Random state that can advance
 inside a saved region must instead be managed with an explicit
 `torch_remat.RecomputeStateHook`.
+
+## Forward side effects
+
+State accumulated for logging or optimizer-step updates must advance only on
+the original forward. The MoE `routing_decision` region therefore owns expert
+selection, token-count accumulation, and quantile-histogram observation. It is
+always retained and stores only the selected expert IDs, not the full router
+scores or routing map. Auxiliary-loss accumulation uses its own always-retained
+region. Kimi K2.7 QK-clipping statistics explicitly ignore checkpoint replay.
+
+The currently supported RegionAC transformer blocks do not advance RNG state
+inside their forwards, so they do not require a `RecomputeStateHook`. Any future
+dropout, stochastic rounding counter, or other external RNG state must add a
+hook before it can be used safely with RegionAC.
+
+## Saving expensive MoE work
+
+Avoiding replay of expensive MoE work requires retaining both its compute and
+communication regions:
+
+- Routed-expert `w13` and `w2` grouped projections.
+- Token-dispatcher `ep_communication`, which controls the token-count exchange,
+  dispatch, and combine collectives together.
+- Shared-expert projection regions. The shared `w2` region includes its
+  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled.
+- `tp_output_reduction`, which controls the final TP all-reduce when sequence
+  parallelism is disabled.
+
+For a common MoE module named `moe`, the corresponding policy is:
+
+```python
+RegionAC.Config(
+    save_regions=[
+        "moe.routed_experts.w13",
+        "moe.routed_experts.w2",
+        "moe.routed_experts.token_dispatcher.ep_communication",
+        "moe.shared_experts.*",
+        "moe.tp_output_reduction",
+    ]
+)
+```
+
+Operations outside these regions, including local permutation, token-shard
+zero-fill, and branch addition, are recomputed. Routing decisions are retained
+separately to keep expert selection identical during replay.
