@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import inspect
+from dataclasses import dataclass
 
 import pytest
 import spmd_types as spmd
@@ -27,14 +28,44 @@ from torchtitan.config.transform import (
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
-from torchtitan.models.common.decoder_sharding import colwise_config, rowwise_config
+from torchtitan.models.common.decoder_sharding import (
+    colwise_config,
+    dense_sequence_parallel_placement,
+    rowwise_config,
+)
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import GroupedLinear, Linear
+from torchtitan.models.common.linear import (
+    CastLinear,
+    ColumnParallelLinear,
+    GroupedLinear,
+    Linear,
+    RouterGateLinear,
+    RowParallelLinear,
+)
+from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.quantization import Float8Linear, MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.float8 import _get_float8_grouped_linear_cls
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
-from torchtitan.quantization.utils import has_quantization
+from torchtitan.quantization.utils import get_quantized_linear, has_quantization
+
+
+class _ScaledLinear(Linear):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        scale: float = 2.0
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.scale = config.scale
+
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return self.scale * super()._linear(input, weight, bias)
 
 
 def test_no_float8_by_default():
@@ -59,6 +90,48 @@ def _router_config_for_quantization(dim: int):
     )
 
 
+def test_quantization_preserves_invariant_row_parallel_linear():
+    config_cls = get_quantized_linear(_ScaledLinear, InvariantRowParallelLinear).Config
+    converted = config_cls(in_features=16, out_features=16, bias=True, scale=3.0)
+
+    assert converted._owner is not None
+    assert issubclass(converted._owner, InvariantRowParallelLinear)
+    assert issubclass(converted._owner, _ScaledLinear)
+
+    linear = converted.build()
+    input = torch.randn(2, 16)
+    expected = 3.0 * torch.nn.functional.linear(input, linear.weight, linear.bias)
+    torch.testing.assert_close(linear(input), expected)
+
+
+@pytest.mark.parametrize("config_cls", [CastLinear.Config, RouterGateLinear.Config])
+def test_quantization_rejects_unsupported_linear_wrapper(config_cls):
+    config = config_cls(in_features=16, out_features=16)
+
+    with pytest.raises(ValueError, match=f"does not support {config._owner.__name__}"):
+        quantization_transform._validate_quantizable_linear(config, "projection")
+
+
+@pytest.mark.parametrize("parallel_cls", [ColumnParallelLinear, RowParallelLinear])
+def test_get_quantized_linear_preserves_compute_and_tp_role(parallel_cls):
+    quantized_cls = get_quantized_linear(_ScaledLinear, parallel_cls)
+    config = quantized_cls.Config(
+        in_features=4, out_features=2, num_linears=2, scale=3.0
+    )
+    linear = config.build()
+
+    assert quantized_cls is get_quantized_linear(_ScaledLinear, parallel_cls)
+    assert issubclass(quantized_cls, parallel_cls)
+    assert issubclass(quantized_cls, _ScaledLinear)
+    assert issubclass(quantized_cls.Config, _ScaledLinear.Config)
+
+    input = torch.randn(3, 4)
+    expected = 3.0 * torch.nn.functional.linear(
+        input, linear.weight.flatten(0, -2), linear.bias
+    ).unflatten(-1, linear.weight.shape[:-1])
+    torch.testing.assert_close(linear(input), expected)
+
+
 def test_float8_converter_rejects_router_gate():
     pytest.importorskip("torchao")
     if Float8Linear is None:
@@ -66,7 +139,7 @@ def test_float8_converter_rejects_router_gate():
     converter = Float8LinearConverter(
         Float8LinearConverter.Config(emulate=True, model_compile_enabled=False)
     )
-    with pytest.raises(ValueError, match="does not support router gate"):
+    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
         converter.convert(_router_config_for_quantization(16))
 
 
@@ -107,14 +180,58 @@ def test_float8_auto_filter_uses_config_dimensions(monkeypatch):
     assert type(small) is Linear.Config
 
 
+@pytest.mark.parametrize(
+    ("config_cls", "parallel_cls"),
+    [
+        (ColumnParallelLinear.Config, ColumnParallelLinear),
+        (RowParallelLinear.Config, RowParallelLinear),
+    ],
+)
+def test_float8_converter_preserves_tensor_parallel_role(config_cls, parallel_cls):
+    pytest.importorskip("torchao")
+    if Float8Linear is None:
+        pytest.skip("torchao Float8Linear is unavailable")
+    converter = Float8LinearConverter(
+        Float8LinearConverter.Config(emulate=True, model_compile_enabled=False)
+    )
+    converted = converter.convert(config_cls(in_features=16, out_features=16))
+
+    assert converted._owner is not None
+    assert issubclass(converted._owner, Float8Linear)
+    assert issubclass(converted._owner, parallel_cls)
+
+
 def test_mxfp8_converter_rejects_router_gate(monkeypatch):
     pytest.importorskip("torchao")
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(MXFP8LinearConverter.Config())
-    with pytest.raises(ValueError, match="does not support router gates"):
+    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
         converter.convert(_router_config_for_quantization(128))
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "parallel_cls"),
+    [
+        (ColumnParallelLinear.Config, ColumnParallelLinear),
+        (RowParallelLinear.Config, RowParallelLinear),
+    ],
+)
+def test_mxfp8_converter_preserves_tensor_parallel_role(
+    monkeypatch, config_cls, parallel_cls
+):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    converter = MXFP8LinearConverter(
+        MXFP8LinearConverter.Config(model_compile_enabled=True)
+    )
+    converted = converter.convert(config_cls(in_features=128, out_features=128))
+
+    assert converted._owner is not None
+    assert issubclass(converted._owner, MXFP8Linear)
+    assert issubclass(converted._owner, parallel_cls)
 
 
 def test_nvfp4_converter_rejects_router_gate(monkeypatch):
@@ -123,8 +240,31 @@ def test_nvfp4_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao NVFP4 training prototype not available")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = NVFP4LinearConverter(NVFP4LinearConverter.Config())
-    with pytest.raises(ValueError, match="does not support router gate"):
+    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
         converter.convert(_router_config_for_quantization(128))
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "parallel_cls"),
+    [
+        (ColumnParallelLinear.Config, ColumnParallelLinear),
+        (RowParallelLinear.Config, RowParallelLinear),
+    ],
+)
+def test_nvfp4_converter_preserves_tensor_parallel_role(
+    monkeypatch, config_cls, parallel_cls
+):
+    if NVFP4Linear is None:
+        pytest.skip("torchao NVFP4Linear is unavailable")
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    converter = NVFP4LinearConverter(
+        NVFP4LinearConverter.Config(model_compile_enabled=True)
+    )
+    converted = converter.convert(config_cls(in_features=128, out_features=128))
+
+    assert converted._owner is not None
+    assert issubclass(converted._owner, NVFP4Linear)
+    assert issubclass(converted._owner, parallel_cls)
 
 
 def test_float8_applied_by_model_registry():
@@ -279,9 +419,13 @@ def test_nvfp4_config_rejects_non_128_dims(in_features, out_features):
 @pytest.mark.parametrize(
     "sharding_config_factory, input_tp",
     [
-        pytest.param(lambda: colwise_config(), spmd.R, id="colwise"),
         pytest.param(
-            lambda: rowwise_config(output_sp=True),
+            lambda: colwise_config(input_layout=dense_sequence_parallel_placement()),
+            spmd.R,
+            id="colwise",
+        ),
+        pytest.param(
+            lambda: rowwise_config(output_layout=dense_sequence_parallel_placement()),
             spmd.S(-1),
             id="rowwise",
         ),
@@ -313,6 +457,34 @@ def test_nvfp4_build_configures_local_spmd_sharding(sharding_config_factory, inp
             MeshAxisName.TP: spmd.V,
         }
     )
+
+
+@pytest.mark.parametrize("parallel_cls", [ColumnParallelLinear, RowParallelLinear])
+def test_nvfp4_parallel_build_preserves_collective_boundary(parallel_cls):
+    if NVFP4Linear is None:
+        pytest.skip("torchao NVFP4 training prototype not available")
+
+    boundary_layout = dense_sequence_parallel_placement()
+    linear_cls = get_quantized_linear(NVFP4Linear, parallel_cls)
+    sharding_config = (
+        colwise_config(input_layout=boundary_layout)
+        if parallel_cls is ColumnParallelLinear
+        else rowwise_config(output_layout=boundary_layout)
+    )
+    module = linear_cls.Config(
+        in_features=512,
+        out_features=1024,
+        sharding_config=sharding_config,
+    ).build()
+
+    assert not module._sharding_config.local_spmd
+    assert module._sharding_config.in_src_shardings == (
+        sharding_config.in_src_shardings
+    )
+    assert module._sharding_config.out_src_shardings == (
+        sharding_config.out_src_shardings
+    )
+    assert "_sr_seed" in module._sharding_config.state_shardings
 
 
 @pytest.mark.parametrize(
@@ -610,7 +782,10 @@ def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
     with pytest.raises(ValueError, match="local matrix out_features divisible by 32"):
         local_stacked_weight._build_operands(local_stacked_weight._tensor)
 
-    for sharding_config in (colwise_config(), rowwise_config()):
+    for sharding_config in (
+        colwise_config(input_layout=dense_sequence_parallel_placement()),
+        rowwise_config(output_layout=dense_sequence_parallel_placement()),
+    ):
         linear = MXFP8Linear.Config(
             in_features=128,
             out_features=128,
