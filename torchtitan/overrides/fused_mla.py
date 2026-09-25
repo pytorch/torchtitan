@@ -67,7 +67,6 @@ import triton
 import triton.language as tl
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -776,27 +775,26 @@ class FusedMLAAttention(Attention):
                 f"{type(self.rope).__name__}."
             )
 
-    def forward(
+    def _project_qkv(
         self,
-        x: torch.Tensor,
-        attention_masks: AttentionMasksType,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if not x.is_cuda:
-            return super().forward(x, attention_masks, positions)
+        x_TD: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not x_TD.is_cuda:
+            return super()._project_qkv(x_TD, positions)
 
-        x = self._gather_tp_input(x)
-        num_tokens = x.shape[0]
+        x_TD = self._gather_tp_input(x_TD)
+        num_tokens = x_TD.shape[0]
         if self.q_lora_rank == 0:
-            q = self.wq(x)
+            q_THK = self.wq(x_TD)
         else:
-            q = self.wq_b(self.q_norm(self.wq_a(x)))
+            q_THK = self.wq_b(self.q_norm(self.wq_a(x_TD)))
 
         with spmd.local():
-            q = q.view(num_tokens, -1, self.qk_head_dim)
+            q_THK = q_THK.view(num_tokens, -1, self.qk_head_dim)
             if spmd.is_type_checking():
                 spmd.assert_type(
-                    q,
+                    q_THK,
                     spmd.V,
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
                 )
@@ -806,48 +804,42 @@ class FusedMLAAttention(Attention):
                 positions,
                 max_valid_pos=self.rope.cache.shape[0] - 1,
             )
-        q = fused_mla_q(
-            q.unsqueeze(0),
+        q_THK = fused_mla_q(
+            q_THK.unsqueeze(0),
             self.rope.cache,
             positions,
             self.qk_nope_head_dim,
         ).squeeze(0)
 
-        kv_down = self.wkv_a(x)
-        kv_latent, k_pe = torch.split(
-            kv_down,
+        compressed_kv_TC = self.wkv_a(x_TD)
+        kv_latent_TC, k_pe_TK = torch.split(
+            compressed_kv_TC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
 
-        kv = self.wkv_b(self.kv_norm(kv_latent))
+        kv_THC = self.wkv_b(self.kv_norm(kv_latent_TC))
         with spmd.local():
-            kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
-            k, v = fused_mla_kv(
-                kv.unsqueeze(0),
-                k_pe.unsqueeze(0),
+            kv_THC = kv_THC.view(
+                num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim
+            )
+            k_THK, v_THV = fused_mla_kv(
+                kv_THC.unsqueeze(0),
+                k_pe_TK.unsqueeze(0),
                 self.rope.cache,
                 positions,
                 self.qk_nope_head_dim,
             )
-            k, v = k.squeeze(0), v.squeeze(0)
+            k_THK, v_THV = k_THK.squeeze(0), v_THV.squeeze(0)
             if spmd.is_type_checking() and not torch.compiler.is_compiling():
-                for tensor in (k, v):
+                for tensor in (k_THK, v_THV):
                     spmd.assert_type(
                         tensor,
                         spmd.V,
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
 
-        output = self.inner_attention(
-            q,
-            k,
-            v,
-            attention_masks=attention_masks,
-            scale=self.softmax_scale,
-        ).contiguous()
-        output = output.view(num_tokens, -1)
-        return self.wo(output)
+        return q_THK, k_THK, v_THV
 
 
 @override(
