@@ -27,7 +27,6 @@ from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
     make_gqa_config,
-    TpGemmBackend,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 
@@ -72,7 +71,6 @@ def _build_llama3_layers(
     rope: RoPE.Config,
     n_kv_heads: int | None = None,
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
     inner_attention = get_attention_config(attn_backend)
@@ -92,14 +90,12 @@ def _build_llama3_layers(
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
                     rope=rope,
-                    tp_gemm_backend=tp_gemm_backend,
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
                     w1_param_init=_LINEAR_INIT,
                     w2w3_param_init=_depth_init(layer_id),
-                    tp_gemm_backend=tp_gemm_backend,
                 ),
             )
         )
@@ -108,7 +104,6 @@ def _build_llama3_layers(
 
 def _debugmodel(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
     n_heads: int = 16,
@@ -138,14 +133,12 @@ def _debugmodel(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _1b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -185,14 +178,12 @@ def _1b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _3b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -232,14 +223,12 @@ def _3b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _8b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -276,14 +265,12 @@ def _8b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _70b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -320,14 +307,12 @@ def _70b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _405b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -364,7 +349,6 @@ def _405b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
@@ -387,7 +371,6 @@ def model_registry(
     *,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Llama3Model.Config:
     get_config, max_context_len = llama3_configs[flavor]
@@ -399,7 +382,6 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
-        tp_gemm_backend=tp_gemm_backend,
         seq_len=context_len,
     )
     if converters is not None:

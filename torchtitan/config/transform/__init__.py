@@ -7,6 +7,7 @@
 """Model config transforms. See README.md for what belongs here."""
 
 from .apply import apply_transforms, transform_model_config_
+from .async_tensor_parallel import AsyncTensorParallelTransform
 from .base import convert_config_type, ModelConfigTransform
 from .batch_invariance import BatchInvariantFlexConverter
 from .cast_linear import LMHeadCastConverter
@@ -25,6 +26,7 @@ from .quantization import (
 __all__ = [
     "ModelConfigTransform",
     "ModelConfigConverter",
+    "AsyncTensorParallelTransform",
     "apply_transforms",
     "transform_model_config_",
     "convert_config_type",
