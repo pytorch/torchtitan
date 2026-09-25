@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
 from torch import nn
 
@@ -405,11 +406,16 @@ class GatedDeltaNet(Module):
         self.out_proj = config.out_proj.build()
         self.inner_gated_delta_net = config.inner_gated_delta_net.build()
 
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        attention_masks: VarlenMetadata | None = None,
-    ) -> torch.Tensor:
+    def _project_inputs(
+        self, x_TD: torch.Tensor
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
             # All six input projections consume x, so gather it once before
@@ -422,7 +428,25 @@ class GatedDeltaNet(Module):
                 backward_options={"op_dtype": x_TD.dtype},
             )
 
-        num_tokens = x_TD.shape[0]
+        query_TC = self.in_proj_q(x_TD)
+        key_TC = self.in_proj_k(x_TD)
+        value_TC = self.in_proj_v(x_TD)
+        gate_TC = self.in_proj_z(x_TD)
+        a_TH = self.in_proj_a(x_TD)
+        b_TH = self.in_proj_b(x_TD)
+        return query_TC, key_TC, value_TC, gate_TC, a_TH, b_TH
+
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        attention_masks: VarlenMetadata | None = None,
+    ) -> torch.Tensor:
+        query_TC, key_TC, value_TC, gate_TC, a_TH, b_TH = remat.region(
+            self._project_inputs,
+            self.remat_region_name("input_projections"),
+            recompute=self.remat_should_recompute("input_projections"),
+        )(x_TD)
+        num_tokens = query_TC.shape[0]
         if attention_masks is not None:
             cu_seqlens = attention_masks.cu_seq_q
         else:
@@ -434,14 +458,11 @@ class GatedDeltaNet(Module):
                 device=x_TD.device,
             )
 
-        query_TC = self.in_proj_q(x_TD)
-        key_TC = self.in_proj_k(x_TD)
-        value_TC = self.in_proj_v(x_TD)
-        gate_TC = self.in_proj_z(x_TD)
-        a_TH = self.in_proj_a(x_TD)
-        b_TH = self.in_proj_b(x_TD)
-
-        output_THV = self.inner_gated_delta_net(
+        output_THV = remat.region(
+            self.inner_gated_delta_net,
+            self.remat_region_name("inner_compute"),
+            recompute=self.remat_should_recompute("inner_compute"),
+        )(
             query_TC,
             key_TC,
             value_TC,
@@ -457,6 +478,13 @@ class GatedDeltaNet(Module):
             value_head_dim=self.value_head_dim,
         )
         gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
+        remat.recompute_needs_tensor(output_THV, gate_THV)
         output_THV = self.norm(output_THV, gate_THV)
         out_TD = output_THV.reshape(num_tokens, -1)
-        return self.out_proj(out_TD)
+        out_TD = remat.region(
+            self.out_proj,
+            self.remat_region_name("output_projection"),
+            recompute=self.remat_should_recompute("output_projection"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD

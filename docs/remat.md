@@ -40,6 +40,20 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
+The main attention region families are:
+
+| Transformer block | Input projections | Inner compute | Output projection |
+| --- | --- | --- | --- |
+| Common, DeepSeek V3, Muse Glimmer | `attention.qkv` | `attention.inner_attention` | `attention.wo` |
+| Qwen3.5 full attention | `attn.qkv` | `attn.inner_attention` | `attn.wo` |
+| Qwen3.5 DeltaNet | `attn.input_projections` | `attn.inner_compute` | `attn.output_projection` |
+| Kimi K3 MLA | `attention.qkv` | `attention.inner_attention` | `attention.wo` |
+| Kimi K3 KDA | `delta_attention.input_projections` | `delta_attention.inner_compute` | `delta_attention.output_projection` |
+
+Qwen3.6 and Qwen3.8 reuse the Qwen3.5 implementations. Kimi K2.7 reuses
+DeepSeek V3 attention. Kimi K3 latent MoE additionally exposes
+`moe.routed_down` and `moe.routed_up`.
+
 ## Adding regions to model code
 
 Model code defines a region at the operation being controlled:
