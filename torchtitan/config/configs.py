@@ -87,7 +87,7 @@ class TrainingConfig:
     when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
     with the host during dispatch. For pipeline parallelism, TorchTitan
     configures the schedule-derived directed-edge process groups required by
-    looped-schedule replay. CUDA graphs are independent of
+    looped and split-backward schedule replay. CUDA graphs are independent of
     ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
     capture.
     """

@@ -14,11 +14,6 @@ import torch
 import torch.distributed.checkpoint.stateful
 import torch.distributed.config as dist_config
 import tyro
-from torch.distributed.pipelining.schedules import (
-    get_schedule_class,
-    ScheduleInterleavedZeroBubble,
-    ScheduleZBVZeroBubble,
-)
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
@@ -120,19 +115,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             if self.parallelism.num_pp_microbatches <= 0:
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
-                )
-            if (
-                not self.training.disable_cuda_graphs
-                and cuda_graphs_supported()
-                and self.parallelism.pipeline_parallel_degree > 1
-                and not self.parallelism.pipeline_parallel_schedule_csv
-                and get_schedule_class(self.parallelism.pipeline_parallel_schedule)
-                in (ScheduleInterleavedZeroBubble, ScheduleZBVZeroBubble)
-            ):
-                raise ValueError(
-                    "CUDA graphs do not support split-backward pipeline schedules. "
-                    "BACKWARD_INPUT creates Python-owned weight-backward state "
-                    "that CUDA-graph replay cannot reproduce."
                 )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
