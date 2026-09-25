@@ -26,7 +26,7 @@ from torchtitan.protocols.model import BaseModel
 
 from .cache import PPRankLocalCache
 from .layout import infer_block_layout_tables, layer_to_stage_from_split
-from .stage import AttnResPipelineStage
+from .stage import _grad_send_wait_points, _GradSendWaits, AttnResPipelineStage
 
 __all__ = ["pipeline_kimi_k3"]
 
@@ -120,8 +120,20 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
     store = PPRankLocalCache()
     # The action-list runtime issues each send as its own action, never fused with a receive.
     wait_sends_at_backward = isinstance(pp_schedule, _PipelineScheduleRuntime)
+    grad_send_waits = None
+    if wait_sends_at_backward:
+        grad_send_waits = _GradSendWaits(
+            _grad_send_wait_points(
+                pp_schedule.pipeline_order, stage_to_rank, stages[0].group_rank
+            )
+        )
     for stage in stages:
-        stage.set_routing(layout, store, wait_sends_at_backward=wait_sends_at_backward)
+        stage.set_routing(
+            layout,
+            store,
+            wait_sends_at_backward=wait_sends_at_backward,
+            grad_send_waits=grad_send_waits,
+        )
     logger.info(
         "Kimi K3 pipeline: %d stage(s) on this rank %s, block transport %s",
         len(stages),

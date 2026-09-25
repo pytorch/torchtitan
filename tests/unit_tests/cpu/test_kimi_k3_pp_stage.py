@@ -165,3 +165,35 @@ class TestStageSwap(DTensorTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGradSendWaitPoints(unittest.TestCase):
+    def test_a_wait_point_follows_the_send_and_the_receivers_use(self):
+        from torch.distributed.pipelining.schedules import _ComputationType
+
+        from torchtitan.models.kimi_k3.pipeline_parallel.stage import _grad_send_wait_points
+
+        pp, vp, m = 4, 2, 8
+        schedule = ScheduleInterleaved1F1B.__new__(ScheduleInterleaved1F1B)
+        schedule.pp_group_size, schedule.n_local_stages, schedule._n_microbatches = pp, vp, m
+        schedule.number_of_rounds = max(1, m // pp)
+        schedule.microbatches_per_round = m // schedule.number_of_rounds
+        order = {r: schedule._calculate_single_rank_operations(r) for r in range(pp)}
+        stage_to_rank = {s: s % pp for s in range(pp * vp)}
+
+        def index(r, kind, s, mb):
+            return next(
+                i for i, a in enumerate(order[r])
+                if a is not None and (a.computation_type, a.stage_index, a.microbatch_index) == (kind, s, mb)
+            )
+
+        F, B = _ComputationType.FORWARD, _ComputationType.FULL_BACKWARD
+        covered = 0
+        for rank in range(pp):
+            for (s, mb), (fed, mb2) in _grad_send_wait_points(order, stage_to_rank, rank).items():
+                receiver = stage_to_rank[s - 1]
+                self.assertEqual(stage_to_rank[fed], rank)
+                self.assertGreater(index(rank, F, fed, mb2), index(rank, B, s, mb))
+                self.assertGreater(index(receiver, F, fed - 1, mb2), index(receiver, B, s - 1, mb))
+                covered += 1
+        self.assertGreater(covered, 0)

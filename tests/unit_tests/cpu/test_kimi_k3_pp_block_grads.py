@@ -19,6 +19,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
+from torchtitan.models.kimi_k3.pipeline_parallel.stage import (
+    _grad_send_wait_points,
+    _GradSendWaits,
+)
 
 from torchtitan.models.kimi_k3.pipeline_parallel.layout import infer_block_layout_tables
 from torchtitan.models.kimi_k3.pipeline_parallel.stage import AttnResPipelineStage
@@ -190,11 +194,18 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
             cache=cache,
         )
         store = PPRankLocalCache()
+        waits = _GradSendWaits(
+            _grad_send_wait_points(
+                schedule.pipeline_order, dict(stages[0].stage_index_to_group_rank), self.rank
+            )
+        )
         for stage in stages:
+            runtime = isinstance(schedule, _PipelineScheduleRuntime)
             stage.set_routing(
                 layout,
                 store,
-                wait_sends_at_backward=isinstance(schedule, _PipelineScheduleRuntime),
+                wait_sends_at_backward=runtime,
+                grad_send_waits=waits if runtime else None,
             )
 
         def step(inputs, targets):

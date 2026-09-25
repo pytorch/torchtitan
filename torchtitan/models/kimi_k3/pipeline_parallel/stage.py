@@ -17,7 +17,7 @@ from typing import Any
 import torch
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining._utils import flatten_args
-from torch.distributed.pipelining.schedules import _batch_p2p
+from torch.distributed.pipelining.schedules import _batch_p2p, _ComputationType
 from torch.distributed.pipelining.stage import _make_tensor_from_meta
 
 from .cache import PPRankLocalCache
@@ -98,6 +98,64 @@ class _PayloadFromStore(torch.autograd.Function):
         return grad_KTD, None
 
 
+def _grad_send_wait_points(
+    order: dict[int, list[Any]], stage_to_rank: dict[int, int], rank: int
+) -> dict[tuple[int, int], tuple[int, int]]:
+    """Map each input-gradient send of ``rank`` to the first later forward on ``rank`` whose input the
+    receiving rank produced after the backward that consumed the gradient."""
+    backward = {_ComputationType.FULL_BACKWARD, _ComputationType.BACKWARD_INPUT}
+    pos = {
+        r: {
+            (a.computation_type, a.stage_index, a.microbatch_index): i
+            for i, a in enumerate(actions)
+            if a is not None
+        }
+        for r, actions in order.items()
+    }
+    points: dict[tuple[int, int], tuple[int, int]] = {}
+    for i, a in enumerate(order[rank]):
+        if a is None or a.computation_type not in backward or a.stage_index == 0:
+            continue
+        s, mb = a.stage_index, a.microbatch_index
+        receiver = stage_to_rank[s - 1]
+        consumed = next(
+            (pos[receiver][(kind, s - 1, mb)] for kind in backward if (kind, s - 1, mb) in pos[receiver]),
+            None,
+        )
+        if consumed is None:
+            continue
+        for b in order[receiver][consumed + 1 :]:
+            if b is None or b.computation_type != _ComputationType.FORWARD:
+                continue
+            fed = b.stage_index + 1
+            if stage_to_rank.get(fed) != rank:
+                continue
+            at = pos[rank].get((_ComputationType.FORWARD, fed, b.microbatch_index))
+            if at is not None and at > i:
+                points[(s, mb)] = (fed, b.microbatch_index)
+                break
+    return points
+
+
+class _GradSendWaits:
+    """Input-gradient sends a rank issues itself and the forwards that wait them, shared by its stages."""
+
+    def __init__(self, points: dict[tuple[int, int], tuple[int, int]]) -> None:
+        self.points = points
+        self.pinned: dict[tuple[int, int], list] = {}
+
+    def issue(self, stage: int, mb: int, ops: list) -> bool:
+        point = self.points.get((stage, mb))
+        if point is None or not ops:
+            return False
+        self.pinned.setdefault(point, []).extend(_batch_p2p(ops))
+        return True
+
+    def wait(self, stage: int, mb: int) -> None:
+        for work in self.pinned.pop((stage, mb), []):
+            work.wait()
+
+
 class AttnResPipelineStage(PipelineStage):
     """``PipelineStage`` whose hops carry the block residual's delta."""
 
@@ -107,6 +165,7 @@ class AttnResPipelineStage(PipelineStage):
         self._store: PPRankLocalCache | None = None
         self._rows_needed = 0
         self._wait_sends_at_backward = False
+        self._grad_send_waits: _GradSendWaits | None = None
         # per micro-batch: the stack's block order and the blocks the delta carried in
         self._order: dict[int, list[int]] = {}
         self._delta_in: dict[int, list[int]] = {}
@@ -118,10 +177,12 @@ class AttnResPipelineStage(PipelineStage):
         store: PPRankLocalCache,
         *,
         wait_sends_at_backward: bool = False,
+        grad_send_waits: _GradSendWaits | None = None,
     ) -> None:
         self._layout = layout
         self._store = store
         self._wait_sends_at_backward = wait_sends_at_backward
+        self._grad_send_waits = grad_send_waits
         mine = [s for s, r in layout.stage_to_rank.items() if r == self.group_rank]
         self._rows_needed = max(
             len(layout.cache_at_entry(s))
@@ -213,6 +274,15 @@ class AttnResPipelineStage(PipelineStage):
                 op.tensor = op.tensor.clone()
         return ops
 
+    def get_bwd_send_ops(self, bwd_chunk_id: int):
+        ops = super().get_bwd_send_ops(bwd_chunk_id)
+        # Pinned until waited: a forward that consumes what the receiver made afterwards proves it arrived.
+        if self._grad_send_waits is not None and self._grad_send_waits.issue(
+            self.stage_index, bwd_chunk_id, ops
+        ):
+            return []
+        return ops
+
     def get_bwd_recv_ops(self, bwd_chunk_id: int):
         if self.has_backward and not self.is_last:
             for info in self.grad_recv_info[bwd_chunk_id]:
@@ -274,6 +344,8 @@ class AttnResPipelineStage(PipelineStage):
         save_forward_output: bool = True,
     ):
         store = self.store()
+        if self._grad_send_waits is not None:
+            self._grad_send_waits.wait(self.stage_index, fwd_chunk_id)
         if self.is_first:
             composite_args: tuple[Any, ...] = args
             order_in: list[int] = []
