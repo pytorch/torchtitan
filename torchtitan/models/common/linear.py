@@ -178,6 +178,44 @@ class ColumnParallelLinear(Linear):
         return super().forward(input)
 
 
+class PartialRowParallelLinear(Linear):
+    """Apply a row-parallel Linear and leave its output TP-partial.
+
+    The caller owns the output reduction so it can combine multiple partial
+    branches before communicating.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        weight, bias = self._flatten_weight_and_bias()
+        if bias is not None and tp_group is not None:
+            bias = spmd.convert(
+                bias,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.P,
+                expert_mode=True,
+            )
+            # The selected local compute may be native, LoRA, or quantized.
+            # Its row-sharded operands and bias jointly produce a partial output.
+            # TODO: Remove this suppression once spmd_types recognizes the
+            # rowwise F.linear type combination [V, V, P] -> P.
+            with spmd.no_typecheck():
+                output = self._unflatten_output(self._linear(input, weight, bias))
+            if spmd.is_type_checking():
+                spmd.assert_local_type_like(
+                    output,
+                    input,
+                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
+                )
+            return output
+        return self._unflatten_output(self._linear(input, weight, bias))
+
+
 class RowParallelLinear(Linear):
     """Reduce the partial output of an independently configured Linear.
 
