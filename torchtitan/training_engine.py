@@ -14,6 +14,11 @@ import torch
 import torch.distributed.checkpoint.stateful
 import torch.distributed.config as dist_config
 import tyro
+from torch.distributed.pipelining.schedules import (
+    get_schedule_class,
+    ScheduleInterleavedZeroBubble,
+    ScheduleZBVZeroBubble,
+)
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
@@ -116,6 +121,19 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
+            if (
+                not self.training.disable_cuda_graphs
+                and cuda_graphs_supported()
+                and self.parallelism.pipeline_parallel_degree > 1
+                and not self.parallelism.pipeline_parallel_schedule_csv
+                and get_schedule_class(self.parallelism.pipeline_parallel_schedule)
+                in (ScheduleInterleavedZeroBubble, ScheduleZBVZeroBubble)
+            ):
+                raise ValueError(
+                    "CUDA graphs do not support split-backward pipeline schedules. "
+                    "BACKWARD_INPUT creates Python-owned weight-backward state "
+                    "that CUDA-graph replay cannot reproduce."
+                )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
                 self.parallelism.tensor_parallel_degree
@@ -208,7 +226,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
         config = self.config
-        dist_config.pipeline_per_direction_p2p = (
+        dist_config.pipeline_per_edge_p2p = (
             config.parallelism.pipeline_parallel_degree > 1
         )
         dist_utils.set_batch_invariance(config.debug.batch_invariant)
