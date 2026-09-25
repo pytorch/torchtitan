@@ -37,6 +37,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
+    add_zero_vision_dependency,
+    build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
@@ -620,13 +622,27 @@ class Qwen35Model(MultimodalModel):
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
+        if self.vision_encoder is None:
+            return inputs_embeds
 
-        if pixel_values is not None and grid_thw is not None:
+        # TODO: Configure the job-wide modality set from the dataset so
+        # single-modality jobs can avoid the second encoder call.
+        image_is_dummy = pixel_values is None or grid_thw is None
+        if image_is_dummy:
+            grid_size = self.vision_encoder.spatial_merge_size
+            pixel_values, grid_thw = build_dummy_vision_inputs(
+                patch_dim=self.vision_encoder.patch_embed.in_features,
+                grid_thw=(1, grid_size, grid_size),
+                device=inputs_embeds.device,
+            )
+        vision_embeds, num_tokens = self._get_vision_embeds(
+            pixel_values, grid_thw=grid_thw
+        )
+        if image_is_dummy:
+            inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
+        else:
             if special_tokens is None:
                 raise ValueError("special_tokens is required for image inputs")
-            vision_embeds, num_tokens = self._get_vision_embeds(
-                pixel_values, grid_thw=grid_thw
-            )
             image_positions = get_vision_positions(
                 tokens, num_tokens, special_tokens["image_id"]
             )
@@ -637,12 +653,22 @@ class Qwen35Model(MultimodalModel):
                     vision_positions=image_positions,
                 )
 
-        if pixel_values_videos is not None and grid_thw_videos is not None:
+        video_is_dummy = pixel_values_videos is None or grid_thw_videos is None
+        if video_is_dummy:
+            grid_size = self.vision_encoder.spatial_merge_size
+            pixel_values_videos, grid_thw_videos = build_dummy_vision_inputs(
+                patch_dim=self.vision_encoder.patch_embed.in_features,
+                grid_thw=(1, grid_size, grid_size),
+                device=inputs_embeds.device,
+            )
+        vision_embeds, num_tokens = self._get_vision_embeds(
+            pixel_values_videos, grid_thw=grid_thw_videos
+        )
+        if video_is_dummy:
+            inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
+        else:
             if special_tokens is None:
                 raise ValueError("special_tokens is required for video inputs")
-            vision_embeds, num_tokens = self._get_vision_embeds(
-                pixel_values_videos, grid_thw=grid_thw_videos
-            )
             video_positions = get_vision_positions(
                 tokens, num_tokens, special_tokens["video_id"]
             )
