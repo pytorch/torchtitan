@@ -142,6 +142,21 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
 
+@torch.library.custom_op(
+    "torchtitan_graph_trainer_test::ordered_identity", mutates_args=()
+)
+def _ordered_identity(x: torch.Tensor) -> torch.Tensor:
+    return x.clone()
+
+
+@_ordered_identity.register_fake
+def _ordered_identity_fake(x: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+_ordered_identity.register_effect(torch.library.EffectType.ORDERED)
+
+
 class TestDefaultTransformerBlockBuckets(TestCase):
     def test_compile_time_passes_enable_chunked_loss_bucket_only_when_needed(self):
         from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -579,7 +594,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.moe.router",
                     "layers.1.moe.shared_experts",
                 ],
-                "layers.1.moe.routed_experts.inner_experts",
+                [
+                    "layers.1.moe.routed_experts.w13",
+                    "layers.1.moe.routed_experts.w2",
+                ],
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -654,7 +672,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
             )
             for plan_fqn in (
                 "layers.1.attention",
-                "layers.1.moe.routed_experts.inner_experts",
+                "layers.1.moe.routed_experts.w13",
             )
         ]
         fwd_dense1 = self._tag_fsdp_schedule_node(
@@ -679,7 +697,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
             )
             for plan_fqn in (
                 "layers.0.attention",
-                "layers.0.moe.routed_experts.inner_experts",
+                "layers.0.moe.routed_experts.w13",
             )
         ]
         bwd_dense0 = self._tag_fsdp_schedule_node(
@@ -779,14 +797,14 @@ class TestFsdpDenseSchedulerPass(TestCase):
             shared_prep,
             [
                 "layers.1.attention",
-                "layers.1.moe.routed_experts.inner_experts",
+                "layers.1.moe.routed_experts.w13",
             ],
             "fwd",
         )
         buckets = []
         for plan_fqn in (
             "layers.1.attention",
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts.w13",
         ):
             bucket = graph.call_function(
                 torch.ops.bucketing._pre_bucket_all_gather.default,
@@ -1705,12 +1723,12 @@ class TestFsdpDenseSchedulerPass(TestCase):
                 c10d.all_to_all_single.default,
                 args=(ffn_norm, [], [], "ep_pg"),
             ),
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts",
             backward=True,
         )
         moe_dispatch_wait = self._tag_fsdp_schedule_node(
             graph.call_function(c10d.wait_tensor.default, args=(moe_dispatch,)),
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts",
             backward=True,
         )
         dense1_attention = self._tag_fsdp_schedule_node(
@@ -2009,6 +2027,29 @@ class TestApplySACPass(TestCase):
         self.assertEqual(
             tags[torch.ops.aten.relu.default], CheckpointPolicy.MUST_RECOMPUTE
         )
+
+    def test_effectful_ops_are_saved_and_not_rematerialized(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        ordered_identity = (
+            torch.ops.torchtitan_graph_trainer_test.ordered_identity.default
+        )
+        effect = graph.call_function(ordered_identity, args=(x,))
+        backward = graph.call_function(torch.ops.aten.mul.Tensor, args=(effect, 2))
+        backward.meta["autograd_backward"] = True
+        graph.output(backward)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        self.assertEqual(effect.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+        selective_activation_remat_pass(gm)
+        effect_nodes = [
+            node
+            for node in gm.graph.nodes
+            if node.op == "call_function" and node.target is ordered_identity
+        ]
+        self.assertEqual(effect_nodes, [effect])
 
     def test_getitem_propagates_parent_tags(self):
         """operator.getitem nodes should inherit the parent's recompute tag."""
@@ -4430,7 +4471,13 @@ class TestChunkPasses(TestCase):
             ],
             buckets,
         )
-        self.assertIn("layers.1.moe.routed_experts.inner_experts", buckets)
+        self.assertIn(
+            [
+                "layers.1.moe.routed_experts.w13",
+                "layers.1.moe.routed_experts.w2",
+            ],
+            buckets,
+        )
         self.assertNotIn("layers.1", buckets)
 
     def test_prepare_ep_overlap_trace_inputs_marks_batch_dims(self):

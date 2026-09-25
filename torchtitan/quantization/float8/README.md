@@ -32,10 +32,10 @@ model_spec = model_registry(
     * **Auto-filter**: add `"auto_filter_small_kn"` as one of the `filter_fqns` to enable automatic module filtering, which will automatically not convert linear layers that are not large enough to benefit from float8 training, since the GEMM has to be big enough that the speedup from using FP8 tensorcores is greater than the overhead of creating dynamically quantized inputs. The thresholds for conversion are based on microbenchmarks measured on NVIDIA H100 GPUs, where (K,N) represents the linear layer weight shape. For best performance, you should still manually filter out layers that are too small to benefit from float8 training.
 * `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model (required for competitive performance). `torch.compile` fuses the float8 scaling/casting kernels.
 
-For float8 MoE expert quantization (grouped GEMMs), use `Float8GroupedExpertsConverter`:
+For float8 MoE expert quantization (grouped GEMMs), use `Float8GroupedLinearConverter`:
 ```python
 from torchtitan.config.transform import (
-    Float8GroupedExpertsConverter,
+    Float8GroupedLinearConverter,
     Float8LinearConverter,
 )
 
@@ -46,12 +46,16 @@ model_spec = model_registry(
             filter_fqns=["output", "router.gate"],
             model_compile_enabled=True,
         ),
-        Float8GroupedExpertsConverter.Config(
+        Float8GroupedLinearConverter.Config(
             model_compile_enabled=True,
         ),
     ],
 )
 ```
+
+Fused gate/up grouped linears use `num_linears=2`, retaining `[E, 2, F, D]`
+parameter storage while presenting a zero-copy `[E, 2F, D]` operand to the
+quantized grouped GEMM.
 
 For parallelisms, for float8 with rowwise scaling, all distributed communication is done in high precision.
 
