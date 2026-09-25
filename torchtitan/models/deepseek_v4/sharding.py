@@ -114,12 +114,10 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
 
+    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     attention.sharding_config = ShardingConfig(
         in_src_shardings={
             "x": attn_x_layout,
-        },
-        in_dst_shardings={
-            "x": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
         },
     )
 
@@ -129,13 +127,17 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
     # can set sharding_config directly (same pattern as deepseek_v3).
     attention.wq_a.sharding_config = _replicate_weight
     attention.q_norm.sharding_config = _replicate_weight
-    attention.wq_b.sharding_config = colwise_config()
+    attention.wq_b.sharding_config = colwise_config(
+        input_layout=replicated_input_layout
+    )
     attention.wkv.sharding_config = _replicate_weight
     attention.kv_norm.sharding_config = _replicate_weight
     # wo_a is a Linear holding a grouped LoRA-A weight used via einsum (not a
     # standard matmul). Colwise sharding distributes the weight along dim-0.
-    attention.wo_a.sharding_config = colwise_config()
-    attention.wo_b.sharding_config = rowwise_config(output_sp=enable_sp)
+    attention.wo_a.sharding_config = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))}
+    )
+    attention.wo_b.sharding_config = rowwise_config(output_layout=attn_x_layout)
     # attn_sink is a Linear holding a (n_heads, 1) weight used as a head-wise
     # vector in sparse attention, so shard it on the head dimension under TP.
     attention.attn_sink.sharding_config = ShardingConfig(

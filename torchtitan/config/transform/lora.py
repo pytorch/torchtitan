@@ -9,7 +9,7 @@ from dataclasses import dataclass, fields
 from typing import Any, cast, ClassVar, Protocol
 
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.lora import specialize_lora_linear
+from torchtitan.models.common.lora import get_lora_linear
 from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform
@@ -76,7 +76,7 @@ class LinearLoRAHandler:
         alpha: float,
     ) -> Module.Config:
         assert cfg._owner is not None
-        lora_cls = specialize_lora_linear(cast(type[Module], cfg._owner))
+        lora_cls = get_lora_linear(cast(type[Module], cfg._owner))
         lora_config_cls = cast(Any, lora_cls.Config)
         return lora_config_cls(
             **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
@@ -103,6 +103,8 @@ class LoRATransform(ModelConfigTransform):
     and adapter configuration depend on their order.
     """
 
+    # TODO: Add quantization transforms here after they migrate from
+    # ModelConfigConverter so LoRA always wraps an already quantized linear.
     run_after: ClassVar[tuple[type[ModelConfigTransform], ...]] = (
         ContextParallelTransform,
     )
