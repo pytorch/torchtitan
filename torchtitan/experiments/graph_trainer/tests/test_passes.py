@@ -146,13 +146,11 @@ from torchtitan.protocols.module import Module, ModuleList
     "torchtitan_graph_trainer_test::ordered_identity", mutates_args=()
 )
 def _ordered_identity(x: torch.Tensor) -> torch.Tensor:
-    """Return a distinct tensor while representing an ordered effect."""
     return x.clone()
 
 
 @_ordered_identity.register_fake
 def _ordered_identity_fake(x: torch.Tensor) -> torch.Tensor:
-    """Describe the ordered identity output during fake execution."""
     return torch.empty_like(x)
 
 
@@ -2031,7 +2029,6 @@ class TestApplySACPass(TestCase):
         )
 
     def test_effectful_ops_are_saved_and_not_rematerialized(self):
-        """An ordered operation must not be copied into the backward graph."""
         graph = torch.fx.Graph()
         x = graph.placeholder("x")
         ordered_identity = (

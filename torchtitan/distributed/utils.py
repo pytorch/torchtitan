@@ -25,7 +25,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.parallel_dims import DistributedTopology, MeshAxisName
+from torchtitan.distributed.parallel_dims import DistributedTopology
 from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 logger = logging.getLogger(__name__)
@@ -419,28 +419,17 @@ def _env_int(name: str, *, default: int | None = None) -> int:
 
 
 def _fake_logical_rank(logical_world_size: int, pp_degree: int) -> int:
-    """Resolve a logical fake rank from explicit PP and SPMD coordinates."""
+    """Resolve a pure-fake logical rank with SPMD coordinate zero."""
     if logical_world_size % pp_degree != 0:
         raise ValueError(
             f"Logical world size {logical_world_size} must be divisible by PP "
             f"degree {pp_degree}"
         )
-    if pp_degree == 1 and not {
-        "FAKE_PP_RANK",
-        "FAKE_SPMD_RANK",
-    }.intersection(os.environ):
-        return _env_int("RANK", default=0)
-
-    pp_rank = _env_int("FAKE_PP_RANK")
-    spmd_rank = _env_int("FAKE_SPMD_RANK")
+    pp_rank = _env_int("FAKE_PP_RANK", default=0 if pp_degree == 1 else None)
     spmd_world_size = logical_world_size // pp_degree
     if not 0 <= pp_rank < pp_degree:
         raise ValueError(f"FAKE_PP_RANK must be in [0, {pp_degree}), got {pp_rank}")
-    if not 0 <= spmd_rank < spmd_world_size:
-        raise ValueError(
-            f"FAKE_SPMD_RANK must be in [0, {spmd_world_size}), got {spmd_rank}"
-        )
-    return pp_rank * spmd_world_size + spmd_rank
+    return pp_rank * spmd_world_size
 
 
 def _init_real_pp_fake_spmd(
@@ -466,16 +455,14 @@ def _init_real_pp_fake_spmd(
             f"degree {pp_degree}"
         )
 
-    spmd_world_size = logical_world_size // pp_degree
-    spmd_rank = _env_int("FAKE_SPMD_RANK")
-    if not 0 <= spmd_rank < spmd_world_size:
+    if "FAKE_PP_RANK" in os.environ:
         raise ValueError(
-            f"FAKE_SPMD_RANK must be in [0, {spmd_world_size}), got {spmd_rank}"
+            "FAKE_PP_RANK is invalid with the real_pp_fake_spmd backend; "
+            "physical RANK selects the PP coordinate"
         )
-    logical_rank = physical_rank * spmd_world_size + spmd_rank
-    logical_pp_ranks = [
-        pp_rank * spmd_world_size + spmd_rank for pp_rank in range(pp_degree)
-    ]
+    spmd_world_size = logical_world_size // pp_degree
+    logical_rank = physical_rank * spmd_world_size
+    logical_pp_ranks = [pp_rank * spmd_world_size for pp_rank in range(pp_degree)]
     init_fake_mode(logical_world_size, rank=logical_rank)
 
     rendezvous = dist.rendezvous(
@@ -512,7 +499,7 @@ def _init_real_pp_fake_spmd(
     }
     return DistributedTopology(
         world_size=logical_world_size,
-        real_axis_groups=((MeshAxisName.PP, pp_group),),
+        real_pp_group=pp_group,
     )
 
 
@@ -540,9 +527,9 @@ def init_distributed(
     # cannot access PGs, e.g. current_spmd_mesh().get_group("tp") to perform the collectives they need.
     torch.autograd.set_multithreading_enabled(False)
 
-    if comm_config.mode in {"fake_backend", "real_pp_fake_spmd_backend"}:
+    if comm_config.backend in {"fake", "real_pp_fake_spmd"}:
         logical_world_size = _env_int("NGPU")
-        if comm_config.mode == "real_pp_fake_spmd_backend":
+        if comm_config.backend == "real_pp_fake_spmd":
             return _init_real_pp_fake_spmd(
                 logical_world_size,
                 pipeline_parallel_degree,

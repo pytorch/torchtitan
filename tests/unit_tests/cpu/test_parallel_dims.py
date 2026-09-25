@@ -522,11 +522,11 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
             dist.destroy_process_group()
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
-    def test_real_axis_group_is_used_during_mesh_construction(self):
+    def test_real_pp_group_is_used_during_mesh_construction(self):
         group = dist.distributed_c10d._get_default_group()
         topology = DistributedTopology(
             world_size=1,
-            real_axis_groups=((MeshAxisName.PP, group),),
+            real_pp_group=group,
         )
         parallel_dims = ParallelDims.from_config(ParallelismConfig(), topology)
 
