@@ -44,15 +44,35 @@ The main attention region families are:
 
 | Transformer block | Input projections | Inner compute | Output projection |
 | --- | --- | --- | --- |
-| Common, DeepSeek V3, Muse Glimmer | `attention.qkv` | `attention.inner_attention` | `attention.wo` |
+| Common, Muse Glimmer | `attention.qkv` | `attention.inner_attention` | `attention.wo` |
+| DeepSeek V3 | `attention.latent_projections` | `attention.inner_attention` | `attention.wo` |
 | Qwen3.5 full attention | `attn.qkv` | `attn.inner_attention` | `attn.wo` |
-| Qwen3.5 DeltaNet | `attn.input_projections` | `attn.inner_compute` | `attn.output_projection` |
-| Kimi K3 MLA | `attention.qkv` | `attention.inner_attention` | `attention.wo` |
-| Kimi K3 KDA | `delta_attention.input_projections` | `delta_attention.inner_compute` | `delta_attention.output_projection` |
+| Qwen3.5 DeltaNet | `attn.qkv` | `attn.inner_attention` | `attn.wo` |
+| Kimi K3 MLA | `attention.latent_projections` | `attention.inner_attention` | `attention.wo` |
+| Kimi K3 KDA | `delta_attention.qkv` | `delta_attention.inner_attention` | `delta_attention.wo` |
 
-Qwen3.6 and Qwen3.8 reuse the Qwen3.5 implementations. Kimi K2.7 reuses
-DeepSeek V3 attention. Kimi K3 latent MoE additionally exposes
-`moe.routed_down` and `moe.routed_up`.
+DeepSeek V3 also exposes `attention.input_redistribution` when TP gathers its
+shared MLA input. Its QKV up-projections are intentionally outside a region and
+are therefore recomputed. Qwen3.6 and Qwen3.8 reuse the Qwen3.5
+implementations. Kimi K2.7 reuses DeepSeek V3 attention. Kimi K3 latent MoE
+additionally exposes `moe.routed_down` and `moe.routed_up`.
+
+Kimi K3 MLA additionally exposes `attention.input_redistribution` and
+`attention.gate`. Like DeepSeek V3, its QKV up-projections are intentionally
+outside a region.
+
+Kimi K3 KDA additionally exposes `delta_attention.input_redistribution` and
+`delta_attention.gate`.
+
+Qwen3.5 DeltaNet additionally exposes `attn.input_redistribution` and
+`attn.gate`.
+
+Qwen3.5 full attention additionally exposes `attn.input_redistribution`. Its
+output gate is fused into the query projection and is therefore covered by
+`attn.qkv`.
+
+Muse Glimmer attention additionally exposes `attention.input_redistribution`
+and `attention.gate` when its output gate is configured.
 
 ## Adding regions to model code
 
@@ -122,11 +142,9 @@ inside a saved region must instead be managed with an explicit
 ## Forward side effects
 
 State accumulated for logging or optimizer-step updates must advance only on
-the original forward. The MoE `routing_decision` region therefore owns expert
-selection, token-count accumulation, and quantile-histogram observation. It is
-always retained and stores only the selected expert IDs, not the full router
-scores or routing map. Auxiliary-loss accumulation uses its own always-retained
-region. Kimi K2.7 QK-clipping statistics explicitly ignore checkpoint replay.
+the original forward. MoE token-count accumulation, quantile-histogram
+observation, and Kimi K2.7 QK-clipping statistics therefore explicitly ignore
+checkpoint replay. Auxiliary-loss accumulation uses an always-retained region.
 
 The currently supported RegionAC transformer blocks do not advance RNG state
 inside their forwards, so they do not require a `RecomputeStateHook`. Any future

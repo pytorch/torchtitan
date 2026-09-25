@@ -101,32 +101,47 @@ class Attention(BaseAttention):
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
-    def _gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
+    def _maybe_gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
         """Gather the shared MLA input before its projection branches."""
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return x_TD
-        return spmd.redistribute(
+
+        x_TD = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("input_redistribution"),
+            recompute=self.remat_should_recompute("input_redistribution"),
+        )(
             x_TD,
             tp_group,
             src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
             dst=spmd.R,
             backward_options={"op_dtype": x_TD.dtype},
         )
+        remat.recompute_needs_tensor(x_TD)
+        return x_TD
+
+    def _project_latents(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        q_latent_TC = None if self.q_lora_rank == 0 else self.wq_a(x_TD)
+        compressed_kv_TC = self.wkv_a(x_TD)
+        return q_latent_TC, compressed_kv_TC
 
     def _project_qkv(
         self,
         x_TD: torch.Tensor,
+        q_latent_TC: torch.Tensor | None,
+        compressed_kv_TC: torch.Tensor,
         positions: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        x_TD = self._gather_tp_input(x_TD)
         num_tokens = x_TD.shape[0]
 
         if self.q_lora_rank == 0:
             q_THK = self.wq(x_TD)
         else:
-            q_TC = self.wq_a(x_TD)
-            q_THK = self.wq_b(self.q_norm(q_TC))
+            assert q_latent_TC is not None
+            q_THK = self.wq_b(self.q_norm(q_latent_TC))
 
         # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
         with spmd.local():
@@ -144,7 +159,6 @@ class Attention(BaseAttention):
             dim=-1,
         )
 
-        compressed_kv_TC = self.wkv_a(x_TD)
         kv_latent_TC, k_pe_TK = torch.split(
             compressed_kv_TC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
@@ -187,11 +201,21 @@ class Attention(BaseAttention):
         attention_masks: AttentionMasksType,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        q_THK, k_THK, v_THV = remat.region(
-            self._project_qkv,
-            self.remat_region_name("qkv"),
-            recompute=self.remat_should_recompute("qkv"),
-        )(x_TD, positions)
+        x_TD = self._maybe_gather_tp_input(x_TD)
+        q_latent_TC, compressed_kv_TC = remat.region(
+            self._project_latents,
+            self.remat_region_name("latent_projections"),
+            recompute=self.remat_should_recompute("latent_projections"),
+        )(x_TD)
+        if q_latent_TC is not None:
+            remat.recompute_needs_tensor(q_latent_TC)
+        remat.recompute_needs_tensor(compressed_kv_TC)
+        q_THK, k_THK, v_THV = self._project_qkv(
+            x_TD,
+            q_latent_TC,
+            compressed_kv_TC,
+            positions,
+        )
         out_THV = remat.region(
             self.inner_attention,
             self.remat_region_name("inner_attention"),
