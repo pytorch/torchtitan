@@ -7,6 +7,8 @@
 # Nemotron-3 Nano / Nemotron-H State Dict Adapter
 
 import dataclasses
+import json
+import os
 import re
 from typing import Any
 
@@ -211,9 +213,19 @@ class NemotronStateDictAdapter(MoEStateDictAdapter):
         *,
         emit_fused_qkv: bool = False,
     ):
-        super().__init__(model_config, hf_assets_path)
+        # The base class builds ``fqn_to_index_mapping`` by regex-matching a
+        # shard NUMBER out of each weight_map filename, which assumes the
+        # sharded naming ``model-00001-of-00014.safetensors``. A SINGLE-FILE
+        # release -- the Nemotron-3 4B is one -- has an index whose every entry
+        # is plain ``model.safetensors``, with no digit to match, and the base
+        # then raises ``AttributeError`` on ``None.group(0)``.
+        #
+        # Pass ``hf_assets_path=None`` so the base skips that parse, then build
+        # the mapping here where the single-file case is handled explicitly.
+        super().__init__(model_config, None)
         self.model_config = model_config
         self.hf_assets_path = hf_assets_path
+        self.fqn_to_index_mapping = self._build_fqn_to_index_mapping(hf_assets_path)
         self.emit_fused_qkv = emit_fused_qkv
 
         # Partial Q/K/V sets, keyed by layer id. Persisted on the instance so a
@@ -227,6 +239,42 @@ class NemotronStateDictAdapter(MoEStateDictAdapter):
         # parsed out of the key -- never by arrival order -- is what makes the
         # result independent of shard/dict iteration order.
         self._expert_buffer: dict[int, dict[str, dict[int, Any]]] = {}
+
+    @staticmethod
+    def _build_fqn_to_index_mapping(hf_assets_path: str | None) -> dict[str, int] | None:
+        """Map each HF tensor name to the 1-based safetensors shard holding it.
+
+        Handles both layouts a release can ship:
+
+        * sharded -- ``model-00003-of-00014.safetensors`` -> 3
+        * single-file -- ``model.safetensors`` -> 1 (no digit to parse)
+
+        Returns ``None`` when there is no index, which is the base class's
+        signal to save as a single safetensors file.
+        """
+        if not hf_assets_path:
+            return None
+
+        index_path = os.path.join(hf_assets_path, "model.safetensors.index.json")
+        try:
+            with open(index_path, "r") as f:
+                index = json.load(f)
+        except FileNotFoundError:
+            logger.warning(
+                f"model.safetensors.index.json not found at {index_path}. "
+                "Defaulting to a single safetensors file if saving in HF format."
+            )
+            return None
+
+        weight_map = index.get("weight_map") if index else None
+        if not weight_map:
+            return None
+
+        mapping: dict[str, int] = {}
+        for hf_key, filename in weight_map.items():
+            match = re.search(r"\d+", filename)
+            mapping[hf_key] = int(match.group(0)) if match else 1
+        return mapping
 
     # -- layer introspection -------------------------------------------------
 
