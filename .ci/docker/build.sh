@@ -26,7 +26,7 @@ case "${IMAGE_NAME}" in
     CLANG_VERSION=12
     BASE_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu${OS_VERSION}
     ;;
-  torchtitan-rl-ubuntu-22.04-clang12)
+  torchtitan-ubuntu-22.04-clang12:rl)
     OS_VERSION=22.04
     CLANG_VERSION=12
     BASE_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu${OS_VERSION}
