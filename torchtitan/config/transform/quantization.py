@@ -20,6 +20,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
+    PartialRowParallelLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 _QUANTIZABLE_LINEAR_CLASSES = (
     Linear,
     ColumnParallelLinear,
+    PartialRowParallelLinear,
     RowParallelLinear,
     InvariantRowParallelLinear,
 )
