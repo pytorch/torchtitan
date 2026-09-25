@@ -23,7 +23,8 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
-from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
@@ -1222,12 +1223,15 @@ class HFTransformerModel(BaseModel):
         """Build the attention mask (when positions are present), CP-shard, return."""
         del max_num_documents, max_context_length
         # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel import ContextParallelPartitioner
+        from torchtitan.distributed import context_parallel
+        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
         from torchtitan.models.common.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
+        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
         batch: dict[str, Any] = dict(input_dict)
+        input_shardings = decoder_input_sharding()
         batch.pop("padding_mask", None)
         if "attention_masks" not in batch:
             positions = batch.get("positions")
@@ -1237,27 +1241,41 @@ class HFTransformerModel(BaseModel):
                     batch["attention_masks"] = masks
 
         if parallel_dims.cp_enabled:
-            cp_mesh = parallel_dims.get_mesh("cp")
-            partitioner = ContextParallelPartitioner(
-                input_dict=batch,
-                input_shardings=None,
-                cp_mesh=cp_mesh,
-                load_balancer_config=parallelism.context_parallel_load_balancer,
+            load_balancer_config = parallelism.context_parallel_load_balancer
+            load_balancer = (
+                load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        batch, input_shardings=input_shardings
+                    ),
+                    attention_metadata=batch.get("attention_masks"),
+                )
+                if load_balancer_config is not None
+                else None
             )
-            batch = partitioner.shard_inputs(batch)
-            batch = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(
-                batch, partitioner
+            permutation = (
+                load_balancer.generate_permutation()
+                if load_balancer is not None
+                else None
             )
-        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+            if "attention_masks" in batch:
+                batch[
+                    "attention_masks"
+                ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+                    batch["attention_masks"],
+                    permutation=permutation,
+                )
+            batch = context_parallel.shard_tensors(
+                batch,
+                input_shardings=input_shardings,
+                permutation=permutation,
+            )
 
-        input_sharding = decoder_input_sharding()
         # DSA attention masks are dense tensors but are not decoder inputs;
         # preserve the old trainer behavior by annotating only declared names.
         annotated = annotate_input_spmd_types(
             parallel_dims,
-            {name: batch[name] for name in input_sharding if name in batch},
-            input_sharding,
+            {name: batch[name] for name in input_shardings if name in batch},
+            input_shardings,
         )
         batch.update(annotated)
         inputs = batch.pop("input")

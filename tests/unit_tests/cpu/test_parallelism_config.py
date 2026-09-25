@@ -6,23 +6,29 @@
 
 import pytest
 
-from torchtitan.config import FSDPSymmMemScope, ParallelismConfig
-from torchtitan.distributed.context_parallel import HeadTailLoadBalancer, PTRRLoadBalancer
+from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
+from torchtitan.distributed.context_parallel import (
+    HeadTailCPLoadBalancer,
+    PTRRFlexAttentionCPLoadBalancer,
+)
 
 
 def test_parallelism_config_default_load_balancer() -> None:
     assert isinstance(
         ParallelismConfig().context_parallel_load_balancer,
-        HeadTailLoadBalancer.Config,
+        HeadTailCPLoadBalancer.Config,
     )
 
 
 def test_parallelism_config_accepts_ptrr_when_cp_disabled() -> None:
     config = ParallelismConfig(
         context_parallel_degree=1,
-        context_parallel_load_balancer=PTRRLoadBalancer.Config(),
+        context_parallel_load_balancer=(PTRRFlexAttentionCPLoadBalancer.Config()),
     )
-    assert isinstance(config.context_parallel_load_balancer, PTRRLoadBalancer.Config)
+    assert isinstance(
+        config.context_parallel_load_balancer,
+        PTRRFlexAttentionCPLoadBalancer.Config,
+    )
 
 
 def test_parallelism_config_default_schedule() -> None:

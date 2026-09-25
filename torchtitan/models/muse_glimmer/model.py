@@ -15,10 +15,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
-from torchtitan.distributed.context_parallel import ContextParallelPartitioner
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_dense_sp_enabled,
@@ -479,22 +479,20 @@ class MuseGlimmerModel(MultimodalModel):
                     max_context_length=max_context_length,
                 )
 
-        input_sharding = {
+        input_shardings = {
             **decoder_input_sharding(),
             **multimodal_input_sharding(include_cp_axis=True),
         }
-        input_sharding["vision_bank_indices_T"] = vision_bank_indices_placement(
+        input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel
         )
         if parallel_dims.cp_enabled:
-            partitioner = ContextParallelPartitioner(
-                input_dict=batch,
-                input_shardings=input_sharding,
-                cp_mesh=parallel_dims.get_mesh("cp"),
-                load_balancer_config=parallelism.context_parallel_load_balancer,
+            batch = self._cp_shard(
+                batch,
+                input_shardings=input_shardings,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
             )
-            batch = partitioner.shard_inputs(batch)
-            batch = self._prepare_context_parallel_metadata(batch, partitioner)
         if (
             parallelism.enable_sequence_parallel
             and parallel_dims.tp_enabled
@@ -506,7 +504,7 @@ class MuseGlimmerModel(MultimodalModel):
                 src=spmd.I,
                 dst=spmd.S(0),
             )
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_shardings)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")

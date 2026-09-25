@@ -10,14 +10,10 @@ from typing import Any, cast, Self
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
-from torchtitan.config import (
-    CompileConfig,
-    ParallelismConfig,
-    TORCH_DTYPE_MAP,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.context_parallel import ContextParallelPartitioner
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
@@ -328,13 +324,28 @@ class FluxModel(BaseModel):
                 "txt_ids": text_pos_enc,
                 "target": target,
             }
-            partitioner = ContextParallelPartitioner(
-                input_dict=cp_inputs,
-                input_shardings=flux_input_sharding(),
-                cp_mesh=parallel_dims.get_mesh("cp"),
-                load_balancer_config=parallelism.context_parallel_load_balancer,
+            input_sharding = flux_input_sharding()
+            load_balancer_config = parallelism.context_parallel_load_balancer
+            load_balancer = (
+                load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        cp_inputs, input_shardings=input_sharding
+                    ),
+                    attention_metadata=None,
+                )
+                if load_balancer_config is not None
+                else None
             )
-            cp_inputs = partitioner.shard_inputs(cp_inputs)
+            permutation = (
+                load_balancer.generate_permutation()
+                if load_balancer is not None
+                else None
+            )
+            cp_inputs = context_parallel.shard_tensors(
+                cp_inputs,
+                input_shardings=input_sharding,
+                permutation=permutation,
+            )
             latents = cp_inputs["img"]
             latent_pos_enc = cp_inputs["img_ids"]
             t5_encodings = cp_inputs["txt"]

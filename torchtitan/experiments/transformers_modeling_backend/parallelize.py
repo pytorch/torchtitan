@@ -18,12 +18,8 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
-from torchtitan.config import (
-    CompileConfig,
-    FSDPSymmMemScope,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.compile import apply_compile

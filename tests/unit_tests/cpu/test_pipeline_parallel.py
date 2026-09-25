@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch.nn as nn
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.pipeline_parallel import (
     _generate_llm_fqn_per_model_part,

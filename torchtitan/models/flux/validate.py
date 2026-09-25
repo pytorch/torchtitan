@@ -15,9 +15,8 @@ from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import iterate_and_close_dataloader, Validator
-from torchtitan.config import ParallelismConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.context_parallel import ContextParallelPartitioner
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import context_parallel, ParallelDims, utils as dist_utils
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model import BaseModel
 
@@ -278,15 +277,31 @@ class FluxValidator(Validator):
                     "txt_ids": text_pos_enc,
                     "target": target,
                 }
-                partitioner = ContextParallelPartitioner(
-                    input_dict=cp_inputs,
-                    input_shardings=flux_input_sharding(),
-                    cp_mesh=parallel_dims.get_mesh("cp"),
-                    load_balancer_config=(
+                input_sharding = flux_input_sharding()
+                with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
+                    load_balancer_config = (
                         self.parallelism.context_parallel_load_balancer
-                    ),
-                )
-                cp_inputs = partitioner.shard_inputs(cp_inputs)
+                    )
+                    load_balancer = (
+                        load_balancer_config.build(
+                            seq_len=context_parallel.get_cp_input_seq_len(
+                                cp_inputs, input_shardings=input_sharding
+                            ),
+                            attention_metadata=None,
+                        )
+                        if load_balancer_config is not None
+                        else None
+                    )
+                    permutation = (
+                        load_balancer.generate_permutation()
+                        if load_balancer is not None
+                        else None
+                    )
+                    cp_inputs = context_parallel.shard_tensors(
+                        cp_inputs,
+                        input_shardings=input_sharding,
+                        permutation=permutation,
+                    )
                 latents = cp_inputs["img"]
                 latent_pos_enc = cp_inputs["img_ids"]
                 t5_encodings = cp_inputs["txt"]

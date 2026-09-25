@@ -27,10 +27,7 @@ The command-line surface is frozen either way, so annotate a new field with
 """
 
 from dataclasses import dataclass, field
-from typing import get_args, Literal, TypeAlias
-
-FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
-_FSDP_SYMM_MEM_SCOPES = get_args(FSDPSymmMemScope)
+from typing import Literal
 
 
 @dataclass(kw_only=True, slots=True)

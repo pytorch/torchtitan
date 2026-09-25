@@ -15,14 +15,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
-from torchtitan.config import (
-    CompileConfig,
-    FSDPSymmMemScope,
-    ParallelismConfig,
-    TORCH_DTYPE_MAP,
-    TrainingConfig,
-)
-from torchtitan.distributed.context_parallel import ContextParallelPartitioner
+from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -304,7 +298,7 @@ class MTPDecoder(Decoder):
             if self.mtp_layers is not None
             else range(0)
         )
-        input_sharding = decoder_input_sharding()
+        input_shardings = decoder_input_sharding()
         for depth in depths:
             mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
                 tokens,
@@ -325,9 +319,9 @@ class MTPDecoder(Decoder):
             batch[f"mtp_input_tokens_{depth}"] = mtp_input_tokens
             batch[f"mtp_labels_{depth}"] = mtp_labels
             batch[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask
-            input_sharding[f"mtp_input_tokens_{depth}"] = input_sharding["input"]
-            input_sharding[f"mtp_labels_{depth}"] = input_sharding["labels"]
-            input_sharding[f"mtp_input_valid_mask_{depth}"] = input_sharding["input"]
+            input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
+            input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
+            input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
 
         if positions is not None:
             inner = self.config.first_full_attention_backend
@@ -342,15 +336,13 @@ class MTPDecoder(Decoder):
                 )
 
         if parallel_dims.cp_enabled:
-            partitioner = ContextParallelPartitioner(
-                input_dict=batch,
-                input_shardings=input_sharding,
-                cp_mesh=parallel_dims.get_mesh("cp"),
-                load_balancer_config=parallelism.context_parallel_load_balancer,
+            batch = self._cp_shard(
+                batch,
+                input_shardings=input_shardings,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
             )
-            batch = partitioner.shard_inputs(batch)
-            batch = self._prepare_context_parallel_metadata(batch, partitioner)
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_shardings)
 
         main_tokens = batch.pop("input")
         main_labels = batch.pop("labels")

@@ -22,7 +22,8 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy

@@ -17,9 +17,9 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.context_parallel import ContextParallelPartitioner
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -180,17 +180,18 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
                     max_context_length=max_context_length,
                 )
 
-        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
+        input_shardings = {
+            **decoder_input_sharding(),
+            **multimodal_input_sharding(),
+        }
         if parallel_dims.cp_enabled:
-            partitioner = ContextParallelPartitioner(
-                input_dict=batch,
-                input_shardings=input_sharding,
-                cp_mesh=parallel_dims.get_mesh("cp"),
-                load_balancer_config=parallelism.context_parallel_load_balancer,
+            batch = self._cp_shard(
+                batch,
+                input_shardings=input_shardings,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
             )
-            batch = partitioner.shard_inputs(batch)
-            batch = self._prepare_context_parallel_metadata(batch, partitioner)
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        batch = annotate_input_spmd_types(parallel_dims, batch, input_shardings)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")

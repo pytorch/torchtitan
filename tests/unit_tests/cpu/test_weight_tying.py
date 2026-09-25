@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import torch.nn as nn
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model

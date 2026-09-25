@@ -14,7 +14,8 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LMHeadCastConverter
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import model_registry

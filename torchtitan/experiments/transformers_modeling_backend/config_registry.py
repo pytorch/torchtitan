@@ -16,12 +16,8 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import (
-    CompileConfig,
-    DebugConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, DebugConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN

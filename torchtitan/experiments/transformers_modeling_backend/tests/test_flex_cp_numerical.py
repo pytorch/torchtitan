@@ -24,11 +24,10 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.config import CompileConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import context_parallel, ParallelDims, utils as dist_utils
 from torchtitan.distributed.context_parallel import (
-    ContextParallelPartitioner,
-    HeadTailLoadBalancer,
-    PTRRLoadBalancer,
+    HeadTailCPLoadBalancer,
+    PTRRFlexAttentionCPLoadBalancer,
 )
 from torchtitan.experiments.transformers_modeling_backend.config_registry import (
     transformers_modeling_backend_debugmodel,
@@ -54,8 +53,8 @@ def main():
     args = parser.parse_args()
     load_balancer_configs = {
         "none": None,
-        "headtail": HeadTailLoadBalancer.Config(),
-        "ptrr": PTRRLoadBalancer.Config(),
+        "headtail": HeadTailCPLoadBalancer.Config(),
+        "ptrr": PTRRFlexAttentionCPLoadBalancer.Config(),
     }
 
     world = int(os.environ["WORLD_SIZE"])
@@ -149,7 +148,6 @@ def main():
     # Shard input / positions / mask on the sequence axis (trainer's role).
     # A global-index tensor rides along so we can undo any load-balancer
     # permutation when reconstructing full logits for the comparison.
-    cp_mesh = parallel_dims.get_mesh("cp")
     full_mask_cp = cp_model.get_attention_masks(positions)
     gidx = torch.arange(num_tokens, device=device)
     input_shardings = {
@@ -162,14 +160,24 @@ def main():
         "global_indices": gidx,
         "attention_masks": full_mask_cp,
     }
-    partitioner = ContextParallelPartitioner(
-        input_dict=batch,
-        input_shardings=input_shardings,
-        cp_mesh=cp_mesh,
-        load_balancer_config=load_balancer_configs[args.balancer],
-    )
-    batch = partitioner.shard_inputs(batch)
-    batch = KVAllGatherCPFlexInnerAttention.cp_shard_metadata(batch, partitioner)
+    with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+        load_balancer = load_balancer_configs[args.balancer].build(
+            seq_len=context_parallel.get_cp_input_seq_len(
+                batch, input_shardings=input_shardings
+            ),
+            attention_metadata=batch["attention_masks"],
+        )
+        assert isinstance(load_balancer, context_parallel.ContextParallelLoadBalancer)
+        permutation = load_balancer.generate_permutation()
+        batch["attention_masks"] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+            batch["attention_masks"],
+            permutation=permutation,
+        )
+        batch = context_parallel.shard_tensors(
+            batch,
+            input_shardings=input_shardings,
+            permutation=permutation,
+        )
     loc_input = batch["input"]
     loc_pos = batch["positions"]
     loc_gidx = batch["global_indices"]

@@ -80,11 +80,15 @@ class VarlenMetadata(NamedTuple):
     max_k: int
 
 
-# Mapping (not dict) lets covariant value types accept both BlockMask-only
-# dictionaries and mixed dictionaries. A None value marks an unused mask.
-AttentionMasksType = (
-    Mapping[str, BlockMask | VarlenMetadata | None] | BlockMask | VarlenMetadata
-)
+# Mapping (not dict) lets covariant value types accept dictionaries containing
+# one or more BlockMasks. A None value marks an unused mask.
+# TODO(acisseJZhong): Map each attention backend to its metadata type.
+FlexAttentionMetadata = Mapping[str, BlockMask] | BlockMask
+VarlenAttentionMetadata = VarlenMetadata
+
+# Hybrid models may carry metadata for more than one attention implementation.
+HybridAttentionMetadata = Mapping[str, BlockMask | VarlenMetadata | None]
+AttentionMasksType = HybridAttentionMetadata | BlockMask | VarlenMetadata
 
 
 @spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))

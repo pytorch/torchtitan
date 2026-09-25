@@ -36,7 +36,7 @@ from torch.distributed.pipelining.schedules import (
     _PipelineScheduleRuntime,
 )
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_parameter_gradient,
