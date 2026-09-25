@@ -12,6 +12,7 @@ from typing import Any, cast
 import spmd_types as spmd
 import torch
 from torch import nn
+from torch.autograd.function import once_differentiable
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
@@ -172,6 +173,108 @@ class KimiMLAAttention(BaseAttention):
         return self.wo(out_TD)
 
 
+@spmd.register_local_autograd_function
+class _AttentionResidualAggregation(torch.autograd.Function):
+    """Depth softmax over the block stack, saving only per-token statistics.
+
+    The saved statistics carry no hidden-size factor, so backward recomputes
+    the FP32 upcasts instead of retaining them.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx,
+        score_weight_D: torch.Tensor,
+        norm_weight_D: torch.Tensor,
+        eps: float,
+        block_residual_TND: torch.Tensor,
+        prefix_sum_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        query_D = score_weight_D.float() * norm_weight_D.float()
+        values_TD = [*block_residual_TND.unbind(dim=1), prefix_sum_TD]
+
+        scores, inverse_rms = [], []
+        for value_TD in values_TD:
+            value_float = value_TD.float()
+            inverse_rms.append(torch.rsqrt(value_float.pow(2).mean(dim=-1) + eps))
+            scores.append(torch.matmul(value_float, query_D))
+        scores_NT = torch.stack(scores)
+        inverse_rms_NT = torch.stack(inverse_rms)
+        probs_NT = torch.softmax(scores_NT * inverse_rms_NT, dim=0)
+
+        output_TD = None
+        for index, value_TD in enumerate(values_TD):
+            term_TD = probs_NT[index].unsqueeze(-1) * value_TD.float()
+            output_TD = term_TD if output_TD is None else output_TD + term_TD
+
+        ctx.save_for_backward(
+            score_weight_D,
+            norm_weight_D,
+            probs_NT,
+            scores_NT,
+            inverse_rms_NT,
+            block_residual_TND,
+            prefix_sum_TD,
+        )
+        return output_TD.to(block_residual_TND.dtype)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_output_TD: torch.Tensor):  # pyrefly: ignore[bad-override]
+        (
+            score_weight_D,
+            norm_weight_D,
+            probs_NT,
+            scores_NT,
+            inverse_rms_NT,
+            block_residual_TND,
+            prefix_sum_TD,
+        ) = ctx.saved_tensors
+        query_D = score_weight_D.float() * norm_weight_D.float()
+        grad_float_TD = grad_output_TD.float()
+        dim = block_residual_TND.shape[-1]
+        values_TD = [*block_residual_TND.unbind(dim=1), prefix_sum_TD]
+
+        pairing_NT = torch.stack(
+            [(grad_float_TD * v.float()).sum(dim=-1) for v in values_TD]
+        )
+        grad_logits_NT = probs_NT * (
+            pairing_NT - (probs_NT * pairing_NT).sum(dim=0, keepdim=True)
+        )
+        grad_scores_NT = grad_logits_NT * inverse_rms_NT
+        grad_variance_NT = grad_logits_NT * scores_NT * (-0.5) * inverse_rms_NT.pow(3)
+
+        grad_query_D = torch.zeros_like(query_D)
+        grad_values_TD = []
+        for index, value_TD in enumerate(values_TD):
+            value_float = value_TD.float()
+            grad_value_TD = (
+                probs_NT[index].unsqueeze(-1) * grad_float_TD
+                + grad_scores_NT[index].unsqueeze(-1) * query_D
+                + (grad_variance_NT[index] * (2.0 / dim)).unsqueeze(-1) * value_float
+            )
+            grad_values_TD.append(grad_value_TD.to(value_TD.dtype))
+            # Accumulated as a GEMV per source so the reduction order is fixed.
+            grad_query_D = grad_query_D + torch.matmul(
+                value_float.reshape(-1, dim).transpose(0, 1),
+                grad_scores_NT[index].reshape(-1),
+            )
+
+        grad_prefix_sum_TD = grad_values_TD.pop()
+        grad_stack_TND = torch.stack(grad_values_TD, dim=1)
+        return (
+            (grad_query_D * norm_weight_D.float()).to(score_weight_D.dtype)
+            if ctx.needs_input_grad[0]
+            else None,
+            (grad_query_D * score_weight_D.float()).to(norm_weight_D.dtype)
+            if ctx.needs_input_grad[1]
+            else None,
+            None,
+            grad_stack_TND,
+            grad_prefix_sum_TD,
+        )
+
+
 def _apply_attention_residual(
     prefix_sum_TD: torch.Tensor,
     block_residual_TND: torch.Tensor,
@@ -180,16 +283,13 @@ def _apply_attention_residual(
 ) -> torch.Tensor:
     """Apply Kimi's block-level attention residual in FP32."""
     assert norm.eps is not None
-
-    values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
-    values_float = values_TND.float()
-    variance = values_float.pow(2).mean(dim=-1, keepdim=True)
-    keys_TND = values_float * torch.rsqrt(variance + norm.eps)
-    score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
-    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
-    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
-    output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
-    return output_TD.to(values_TND.dtype)
+    return _AttentionResidualAggregation.apply(
+        projection.weight.squeeze(0),
+        norm.weight,
+        norm.eps,
+        block_residual_TND,
+        prefix_sum_TD,
+    )
 
 
 class KimiK3TransformerBlock(Module):
