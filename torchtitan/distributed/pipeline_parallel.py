@@ -159,13 +159,9 @@ def get_module_fqns_per_model_part(
     Each present module from ``first_stage_module_fqns`` is prepended to the first
     part and each from ``last_stage_module_fqns`` appended to the last.
     """
-    if (
-        parallelism.pipeline_parallel_layers_per_stage is not None
-        or parallelism.pipeline_parallel_module_fqns_per_model_part is not None
-    ):
+    if parallelism.pipeline_parallel_module_fqns_per_model_part is not None:
         raise ValueError(
             "get_module_fqns_per_model_part derives the split, so "
-            "pipeline_parallel_layers_per_stage and "
             "pipeline_parallel_module_fqns_per_model_part must be unset."
         )
     (

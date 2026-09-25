@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ from torchtitan.distributed.pipeline_parallel import (
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
 )
+from torchtitan.training_engine import TrainingEngine
 
 
 def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):
@@ -306,3 +308,48 @@ def test_get_module_fqns_per_model_part_is_the_split_the_pipeline_uses(monkeypat
             ),
             **common,
         )
+
+
+def test_layers_per_stage_sizes_the_derived_split(monkeypatch):
+    model = nn.Module()
+    model.vision_encoder = nn.Linear(2, 2)
+    captured = {}
+
+    def capture_pipeline_llm(model, **kwargs):
+        captured["parallelism"] = kwargs["parallelism"]
+        return object()
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
+    parallel_dims = SimpleNamespace(pp=2)
+    model_config = SimpleNamespace(layers=[None] * 10)
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_layers_per_stage=2,
+    )
+    pipeline_parallel.pipeline_with_first_last_stage_modules(
+        model,
+        first_stage_module_fqns=("vision_encoder",),
+        parallel_dims=parallel_dims,
+        parallelism=parallelism,
+        model_config=model_config,
+    )
+
+    handed = captured["parallelism"]
+    split = handed.pipeline_parallel_module_fqns_per_model_part
+    assert handed.pipeline_parallel_layers_per_stage == 2
+    assert parallelism.pipeline_parallel_module_fqns_per_model_part is None
+    assert split[0][0] == "vision_encoder"
+    num_stages = _get_pipeline_metadata(parallel_dims, handed, model_config)[0]
+    unsized = dataclasses.replace(parallelism, pipeline_parallel_layers_per_stage=None)
+    assert len(split) == num_stages
+    assert num_stages != _get_pipeline_metadata(parallel_dims, unsized, model_config)[0]
+
+
+def test_engine_config_refuses_a_split_with_layers_per_stage():
+    both = ParallelismConfig(
+        pipeline_parallel_layers_per_stage=2,
+        pipeline_parallel_module_fqns_per_model_part=[["tok_embeddings"], ["norm"]],
+    )
+    with pytest.raises(ValueError, match="set only one of them"):
+        TrainingEngine.Config(parallelism=both)
