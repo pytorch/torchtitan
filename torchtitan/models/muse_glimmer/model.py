@@ -118,24 +118,29 @@ class Attention(GQAttention):
         if config.o_gate is not None:
             self.o_gate = config.o_gate.build()
 
+    def _maybe_gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x_TD
+
+        x_TD = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("input_redistribution"),
+            recompute=self.remat_should_recompute("input_redistribution"),
+        )(
+            x_TD,
+            tp_group,
+            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            dst=spmd.R,
+            backward_options={"op_dtype": x_TD.dtype},
+        )
+        remat.recompute_needs_tensor(x_TD)
+        return x_TD
+
     def _project_qkv(
         self, x_TD: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None,]:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # qkv and the output gate both consume x, so gather once at their
-            # common attention boundary.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
-
-        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
-        output_gate_TD = self.o_gate(x_TD) if self.o_gate is not None else None
-        return xq_THK, xk_THK, xv_THV, output_gate_TD
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.qkv_linear(x_TD)
 
     def forward(
         self,
@@ -143,11 +148,19 @@ class Attention(GQAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        xq_THK, xk_THK, xv_THV, output_gate_TD = remat.region(
+        x_TD = self._maybe_gather_tp_input(x_TD)
+        xq_THK, xk_THK, xv_THV = remat.region(
             self._project_qkv,
             self.remat_region_name("qkv"),
             recompute=self.remat_should_recompute("qkv"),
         )(x_TD)
+        output_gate_TD = None
+        if self.o_gate is not None:
+            output_gate_TD = remat.region(
+                self.o_gate,
+                self.remat_region_name("gate"),
+                recompute=self.remat_should_recompute("gate"),
+            )(x_TD)
 
         # QK normalization before RoPE. Query is additionally scaled by a
         # tuned constant (k is only normalized).
