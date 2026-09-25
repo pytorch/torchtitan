@@ -32,6 +32,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
+    add_zero_vision_dependency,
+    build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
@@ -205,7 +207,7 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         grid_thw: torch.Tensor | None,
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        special_tokens: dict[str, int],
+        special_tokens: dict[str, int] | None,
     ) -> torch.Tensor:
         """Embed tokens, run the vision encoder, scatter features into text.
 
@@ -223,8 +225,18 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         if pixel_values_videos is not None and grid_thw_videos is not None:
             modalities.append((pixel_values_videos, grid_thw_videos))
 
-        if not modalities:
-            return inputs_embeds
+        is_dummy = not modalities
+        if is_dummy:
+            if self.vision_encoder is None:
+                return inputs_embeds
+            kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
+            modalities.append(
+                build_dummy_vision_inputs(
+                    patch_dim=self.vision_encoder.patch_embed.in_features,
+                    grid_thw=(1, kernel_h, kernel_w),
+                    device=inputs_embeds.device,
+                )
+            )
         # TODO: support mixed image+video batches. Upstream fix: when
         # image_id == video_id, emit one document-ordered vision stream so the
         # runs stay modality-agnostic and this branch goes away.
@@ -234,12 +246,16 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         # encoder is present (text-only configs never populate pixels).
         assert self.vision_encoder is not None
 
-        placeholder_id = special_tokens["image_id"]
-        assert placeholder_id == special_tokens["video_id"]
-
         # Patches arrive float32; match the encoder's compute dtype for the matmul.
         pixels = pixels.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixels, grid_thw=grid)
+        if is_dummy:
+            return add_zero_vision_dependency(inputs_embeds, vision_embeds)
+
+        if special_tokens is None:
+            raise ValueError("special_tokens are required for multimodal inputs.")
+        placeholder_id = special_tokens["image_id"]
+        assert placeholder_id == special_tokens["video_id"]
         # MoonViT collapses time (temporal pooling) and merges 2x2 spatially, so
         # the token count is (h/kh)*(w/kw), independent of t.
         kh, kw = self.vision_encoder.merge_kernel_size
@@ -296,7 +312,7 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
                     grid_thw=grid_thw,
                     pixel_values_videos=pixel_values_videos,
                     grid_thw_videos=grid_thw_videos,
-                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                    special_tokens=special_tokens,
                 )
             else:
                 x = tokens
