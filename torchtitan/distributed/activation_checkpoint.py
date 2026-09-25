@@ -10,8 +10,7 @@
 import logging
 import os
 from dataclasses import dataclass, field
-from functools import wraps
-from typing import Annotated, Any, cast
+from typing import Annotated, cast
 
 import torch
 import torch._functorch.config
@@ -32,31 +31,6 @@ from torchtitan.protocols.module import Module
 
 
 logger = logging.getLogger(__name__)
-
-
-def _format_effective_region_policy(
-    region_policies: dict[str, str],
-    *,
-    model_name: str,
-) -> str:
-    """Format the unique region decisions observed during one model forward."""
-    regions_by_policy = {
-        "ALWAYS_SAVE": set(),
-        "SAVE": set(),
-        "RECOMPUTE": set(),
-    }
-    for name, policy in region_policies.items():
-        regions_by_policy[policy].add(name)
-
-    num_regions = sum(len(names) for names in regions_by_policy.values())
-    lines = [
-        f"Effective RegionAC policy for {model_name} "
-        f"({num_regions} exercised regions):"
-    ]
-    for policy, names in regions_by_policy.items():
-        rendered_names = ", ".join(sorted(names)) if names else "none"
-        lines.append(f"  {policy}: {rendered_names}")
-    return "\n".join(lines)
 
 
 def _get_default_save_ops() -> set:
@@ -348,9 +322,6 @@ class RegionAC(ActivationCheckpointing):
         not currently supported.
         """
 
-        report_effective_policy: bool = False
-        """Report region decisions exercised by the first model forward."""
-
         preserve_rng_state: bool = False
         """
         Must remain false. torch_remat requires explicit RecomputeStateHooks for
@@ -382,39 +353,6 @@ class RegionAC(ActivationCheckpointing):
         module.forward = checkpointed_forward
         return module
 
-    def _report_effective_policy_once(
-        self,
-        model: nn.Module,
-        region_policies: dict[str, str],
-    ) -> None:
-        original_forward = model.forward
-        reported = False
-
-        @wraps(original_forward)
-        def forward_with_policy_report(*args: Any, **kwargs: Any) -> Any:
-            nonlocal reported
-            if reported:
-                return original_forward(*args, **kwargs)
-
-            output = original_forward(*args, **kwargs)
-            if region_policies:
-                logger.info(
-                    "%s",
-                    _format_effective_region_policy(
-                        region_policies,
-                        model_name=type(model).__name__,
-                    ),
-                )
-            else:
-                logger.warning(
-                    "RegionAC effective-policy reporting observed no regions in %s.",
-                    type(model).__name__,
-                )
-            reported = True
-            return output
-
-        model.forward = forward_with_policy_report
-
     def apply(self, model: nn.Module) -> None:
         config = cast("RegionAC.Config", self.config)
         layers = model.get_submodule("layers")
@@ -423,18 +361,12 @@ class RegionAC(ActivationCheckpointing):
             logger.info("RegionAC found no transformer blocks in this model part")
             return
 
-        policy_report = {} if config.report_effective_policy else None
         # TODO: Validate unmatched patterns once validation can account for save
         # regions across all pipeline stages instead of only this model part.
         for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            transformer_block.configure_remat_regions(
-                config.save_regions,
-                policy_report=policy_report,
-            )
+            transformer_block.configure_remat_regions(config.save_regions)
             self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
-        if policy_report is not None:
-            self._report_effective_policy_once(model, policy_report)
         logger.info(
             "Applied RegionAC to %d transformer blocks. Save patterns: %s",
             len(transformer_blocks),
