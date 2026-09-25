@@ -225,43 +225,6 @@ class TokenChoiceTopKRouter(Module):
             scores_for_choice_TE, k=self.top_k, dim=-1, sorted=False
         ).indices
 
-    def _select_and_record_experts(
-        self,
-        scores_TE: torch.Tensor,
-        expert_bias_E: torch.Tensor | None = None,
-        *,
-        padding_mask_T: torch.Tensor | None = None,
-        **router_kwargs,
-    ) -> torch.Tensor:
-        """Choose experts and record forward-only routing statistics."""
-        if self._debug_force_load_balance:
-            topk_expert_ids_TK, _ = self._debug_force_load_balance_routing(scores_TE)
-        else:
-            topk_expert_ids_TK = self._select_experts(
-                scores_TE,
-                expert_bias_E,
-                padding_mask_T=padding_mask_T,
-                **router_kwargs,
-            )
-
-        if self.training:
-            with spmd.no_typecheck(), torch.no_grad():
-                valid_routes_TK = torch.ones_like(
-                    topk_expert_ids_TK,
-                    dtype=self.tokens_per_expert_E.dtype,
-                )
-                if padding_mask_T is not None:
-                    valid_routes_TK.masked_fill_(padding_mask_T.unsqueeze(-1), 0)
-                tokens_per_expert_E = torch.zeros_like(self.tokens_per_expert_E)
-                tokens_per_expert_E.scatter_add_(
-                    0,
-                    topk_expert_ids_TK.flatten(),
-                    valid_routes_TK.flatten(),
-                )
-                self.tokens_per_expert_E.add_(tokens_per_expert_E)
-
-        return topk_expert_ids_TK
-
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -297,24 +260,18 @@ class TokenChoiceTopKRouter(Module):
                     f"{tuple(scores_TE.shape)}."
                 )
 
-        # Routing choices and their forward-only statistics must remain
-        # identical between forward and replay. Quantile-balanced routers also
-        # update their histogram inside _select_experts, so this region owns all
-        # routing side effects while retaining only the selected expert IDs.
-        topk_expert_ids_TK = remat.region(
-            self._select_and_record_experts,
-            "routing_decision",
-            recompute=False,
-        )(
-            scores_TE,
-            expert_bias_E,
-            padding_mask_T=padding_mask_T,
-            **router_kwargs,
-        )
+        if self._debug_force_load_balance:
+            topk_expert_ids_TK, _ = self._debug_force_load_balance_routing(scores_TE)
+        else:
+            topk_expert_ids_TK = self._select_experts(
+                scores_TE,
+                expert_bias_E,
+                padding_mask_T=padding_mask_T,
+                **router_kwargs,
+            )
 
         # The expert bias is only used for routing. The gating value is still
         # derived from the original scores.
-        remat.recompute_needs_tensor(topk_expert_ids_TK)
         topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
@@ -342,6 +299,9 @@ class TokenChoiceTopKRouter(Module):
                 if padding_mask_T is None
                 else routing_map_TE & ~padding_mask_T.unsqueeze(-1)
             )
+            if not remat.is_recomputing():
+                with spmd.no_typecheck(), torch.no_grad():
+                    self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
             if self.aux_loss is not None:
                 topk_scores_TK = self.aux_loss(
                     scores_TE,
@@ -400,12 +360,13 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             dim=-1,
             sorted=True,
         )
-        self.quantile_balancer.observe(
-            scores_TE,
-            topk_plus_one_scores[:, self.top_k :],
-            expert_bias_E,
-            padding_mask_T,
-        )
+        if not remat.is_recomputing():
+            self.quantile_balancer.observe(
+                scores_TE,
+                topk_plus_one_scores[:, self.top_k :],
+                expert_bias_E,
+                padding_mask_T,
+            )
         return topk_plus_one_expert_ids[:, : self.top_k].contiguous()
 
 
