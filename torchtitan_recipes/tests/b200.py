@@ -10,6 +10,7 @@ from torchtitan.components.optimizer import default_adamw
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests import _set_spmd_typechecking
+from torchtitan_recipes.tests.multimodal import set_rank_conditional_image_presence
 
 
 def kimi_k3_debugmodel_mm() -> Trainer.Config:
@@ -24,6 +25,7 @@ def kimi_k3_debugmodel_mm() -> Trainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.enable_sequence_parallel = True
     config.parallelism.expert_parallel_degree = 2
+    set_rank_conditional_image_presence(config)
     return config
 
 

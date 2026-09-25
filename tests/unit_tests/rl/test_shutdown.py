@@ -95,69 +95,32 @@ class _FakeConfigManager:
 
 
 def test_async_loop_config_derives_window_and_max_offpolicy_steps() -> None:
-    default_loop = AsyncLoopConfig(
-        num_prompts_per_train_step=3,
-        target_offpolicy_steps=2,
-    )
-    assert default_loop.window_fraction == 0.3
-    assert default_loop.window_size == 2
-    assert default_loop.max_offpolicy_steps == 3
+    default_loop = AsyncLoopConfig()
+    assert default_loop.target_offpolicy_steps == 3
+    assert default_loop.windowed_fifo_batches is None
 
-    strict_loop = AsyncLoopConfig(
-        num_prompts_per_train_step=3,
-        target_offpolicy_steps=2,
-        window_fraction=None,
+    # P=8, S=3: windowed_fifo_batches=1 -> 8 ids, cap 4; 3 -> 24 ids, cap 6; None -> no window, no cap
+    one_batch = AsyncLoopConfig(num_prompts_per_train_step=8, windowed_fifo_batches=1)
+    assert (one_batch.window_size, one_batch.max_offpolicy_steps) == (8, 4)
+    three_batches = AsyncLoopConfig(
+        num_prompts_per_train_step=8, windowed_fifo_batches=3
     )
-    assert strict_loop.window_size == 1
-    assert strict_loop.max_offpolicy_steps == 2
+    assert (three_batches.window_size, three_batches.max_offpolicy_steps) == (24, 6)
+    uncapped = AsyncLoopConfig(num_prompts_per_train_step=8, windowed_fifo_batches=None)
+    assert (uncapped.window_size, uncapped.max_offpolicy_steps) == (None, None)
 
-    async_loop = AsyncLoopConfig(
-        num_prompts_per_train_step=3,
-        target_offpolicy_steps=2,
-        window_fraction=4 / 9,
+    # a window larger than the buffer is allowed: P=8, S=1 (16 slots), 5 batches -> 40 ids, cap 6
+    wide = AsyncLoopConfig(
+        num_prompts_per_train_step=8, target_offpolicy_steps=1, windowed_fifo_batches=5
     )
-    assert async_loop.max_active_rollout_groups == 9
-    assert async_loop.window_size == 4
-    assert async_loop.max_offpolicy_steps == 3
-
-    assert (
-        AsyncLoopConfig(
-            num_prompts_per_train_step=3,
-            target_offpolicy_steps=2,
-            window_fraction=1 / 9,
-        ).window_size
-        == 1
-    )
-    assert (
-        AsyncLoopConfig(
-            num_prompts_per_train_step=3,
-            target_offpolicy_steps=2,
-            window_fraction=1.0,
-        ).window_size
-        == 9
-    )
-    assert (
-        AsyncLoopConfig(
-            num_prompts_per_train_step=8,
-            target_offpolicy_steps=3,
-            window_fraction=1.0,
-        ).window_size
-        == 32
-    )
+    assert (wide.window_size, wide.max_offpolicy_steps) == (40, 6)
 
 
-def test_async_loop_config_handles_window_fraction_bounds() -> None:
-    with pytest.raises(ValueError, match="window_fraction"):
-        AsyncLoopConfig(window_fraction=0)
-    with pytest.raises(ValueError, match="window_fraction"):
-        AsyncLoopConfig(window_fraction=1.1)
-    with pytest.warns(UserWarning, match="forcing window_size=1"):
-        async_loop = AsyncLoopConfig(
-            num_prompts_per_train_step=8,
-            target_offpolicy_steps=0,
-            window_fraction=0.01,
-        )
-    assert async_loop.window_size == 1
+def test_async_loop_config_rejects_bad_windowed_fifo_batches() -> None:
+    with pytest.raises(ValueError, match="windowed_fifo_batches"):
+        AsyncLoopConfig(windowed_fifo_batches=0)
+    with pytest.raises(TypeError, match="window_fraction"):
+        AsyncLoopConfig(window_fraction=0.3)  # type: ignore[call-arg]
 
 
 def _make_stub_rl_trainer():
