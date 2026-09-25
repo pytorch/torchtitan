@@ -40,40 +40,6 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
-The main attention region families are:
-
-| Transformer block | Input projections | Inner compute | Output projection |
-| --- | --- | --- | --- |
-| Common, Muse Glimmer | `attention.qkv` | `attention.inner_attention` | `attention.wo` |
-| DeepSeek V3 | `attention.latent_projections` | `attention.inner_attention` | `attention.wo` |
-| Qwen3.5 full attention | `attn.qkv` | `attn.inner_attention` | `attn.wo` |
-| Qwen3.5 DeltaNet | `attn.qkv` | `attn.inner_attention` | `attn.wo` |
-| Kimi K3 MLA | `attention.latent_projections` | `attention.inner_attention` | `attention.wo` |
-| Kimi K3 KDA | `delta_attention.qkv` | `delta_attention.inner_attention` | `delta_attention.wo` |
-
-DeepSeek V3 also exposes `attention.input_redistribution` when TP gathers its
-shared MLA input. Its QKV up-projections are intentionally outside a region and
-are therefore recomputed. Qwen3.6 and Qwen3.8 reuse the Qwen3.5
-implementations. Kimi K2.7 reuses DeepSeek V3 attention. Kimi K3 latent MoE
-additionally exposes `moe.routed_down` and `moe.routed_up`.
-
-Kimi K3 MLA additionally exposes `attention.input_redistribution` and
-`attention.gate`. Like DeepSeek V3, its QKV up-projections are intentionally
-outside a region.
-
-Kimi K3 KDA additionally exposes `delta_attention.input_redistribution` and
-`delta_attention.gate`.
-
-Qwen3.5 DeltaNet additionally exposes `attn.input_redistribution` and
-`attn.gate`.
-
-Qwen3.5 full attention additionally exposes `attn.input_redistribution`. Its
-output gate is fused into the query projection and is therefore covered by
-`attn.qkv`.
-
-Muse Glimmer attention additionally exposes `attention.input_redistribution`
-and `attention.gate` when its output gate is configured.
-
 ## Adding regions to model code
 
 Model code defines a region at the operation being controlled:
