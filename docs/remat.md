@@ -119,6 +119,20 @@ boundary permits.
 inside a saved region must instead be managed with an explicit
 `torch_remat.RecomputeStateHook`.
 
+## Forward side effects
+
+State accumulated for logging or optimizer-step updates must advance only on
+the original forward. The MoE `routing_decision` region therefore owns expert
+selection, token-count accumulation, and quantile-histogram observation. It is
+always retained and stores only the selected expert IDs, not the full router
+scores or routing map. Auxiliary-loss accumulation uses its own always-retained
+region. Kimi K2.7 QK-clipping statistics explicitly ignore checkpoint replay.
+
+The currently supported RegionAC transformer blocks do not advance RNG state
+inside their forwards, so they do not require a `RecomputeStateHook`. Any future
+dropout, stochastic rounding counter, or other external RNG state must add a
+hook before it can be used safely with RegionAC.
+
 ## Saving expensive MoE work
 
 Avoiding replay of expensive MoE work requires retaining both its compute and
