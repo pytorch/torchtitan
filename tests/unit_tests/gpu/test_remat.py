@@ -546,27 +546,6 @@ class _RematModel(Module):
         return self.layers["0"](x_BD)
 
 
-class _PolicyReportBlock(Module):
-    _always_saved_remat_regions = frozenset({"state_update"})
-
-    def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
-        saved_BD = remat.region(
-            torch.sin,
-            self.remat_region_name("attention.qkv"),
-            recompute=self.remat_should_recompute("attention.qkv"),
-        )(x_BD)
-        recomputed_BD = remat.region(
-            torch.cos,
-            self.remat_region_name("feed_forward.w13"),
-            recompute=self.remat_should_recompute("feed_forward.w13"),
-        )(saved_BD)
-        return remat.region(
-            torch.neg,
-            self.always_saved_remat_region_name("state_update"),
-            recompute=False,
-        )(recomputed_BD)
-
-
 def _run_forward_backward(
     model: Module, x_BD: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
@@ -619,25 +598,6 @@ class TestRematRegions(unittest.TestCase):
                 ValueError, message
             ):
                 config_factory()
-
-    def test_effective_policy_report_logs_first_forward_once(self):
-        model = _RematModel(_PolicyReportBlock())
-        RegionAC.Config(
-            save_regions=["attention.*"],
-            report_effective_policy=True,
-        ).build().apply(model)
-
-        with self.assertLogs(
-            "torchtitan.distributed.activation_checkpoint", level="INFO"
-        ) as logs:
-            model(torch.randn(3, 4))
-            model(torch.randn(3, 4))
-
-        reports = [message for message in logs.output if "Effective" in message]
-        self.assertEqual(len(reports), 1)
-        self.assertIn("ALWAYS_SAVE: state_update", reports[0])
-        self.assertIn("SAVE: attention.qkv", reports[0])
-        self.assertIn("RECOMPUTE: feed_forward.w13", reports[0])
 
     def test_llama_attention_policy_applies_without_changing_state_dict(self):
         from torchtitan.models.llama3 import model_registry

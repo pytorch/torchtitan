@@ -153,8 +153,6 @@ class TokenChoiceTopKRouter(Module):
     routed to top K experts based on the router scores.
     """
 
-    _always_saved_remat_regions = frozenset({"routing_decision"})
-
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
@@ -265,14 +263,14 @@ class TokenChoiceTopKRouter(Module):
         if self._debug_force_load_balance:
             topk_expert_ids_TK, topk_scores_TK = remat.region(
                 self._debug_force_load_balance_routing,
-                self.always_saved_remat_region_name("routing_decision"),
+                self.remat_region_name("routing_decision"),
                 recompute=False,
             )(scores_TE)
             remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
         else:
             topk_expert_ids_TK = remat.region(
                 self._select_experts,
-                self.always_saved_remat_region_name("routing_decision"),
+                self.remat_region_name("routing_decision"),
                 recompute=False,
             )(
                 scores_TE,
