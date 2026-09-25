@@ -29,7 +29,7 @@ jobs:
       gpu-arch: rocm
 
   integration-real-pg:
-    name: 8 GPU Integration (Real PG - full suite - ${{ matrix.test_suite }})
+    name: ROCm 8 GPU Integration (Real PG - full suite - ${{ matrix.test_suite }})
     needs: set-matrix
     if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
