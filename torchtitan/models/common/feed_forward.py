@@ -59,6 +59,9 @@ class FeedForward(Module):
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
 
+    def _compute_output_projection(self, hidden_TF: torch.Tensor) -> torch.Tensor:
+        return self.w2(hidden_TF)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up_T2F = remat.region(
             self.w13,
@@ -68,7 +71,7 @@ class FeedForward(Module):
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
         remat.recompute_needs_tensor(gate_TF, up_TF)
         out_TD = remat.region(
-            self.w2,
+            self._compute_output_projection,
             self.remat_region_name("w2"),
             recompute=self.remat_should_recompute("w2"),
         )(self.activation_fn(gate_TF, up_TF))

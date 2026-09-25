@@ -311,7 +311,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         ).transform(config)
 
         self.assertIs(type(transformed.w13), AsyncColumnParallelLinear.Config)
-        self.assertIs(type(transformed.w2), Linear.Config)
+        self.assertIs(type(transformed.w2), PartialRowParallelLinear.Config)
 
     def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
         from torchtitan.models.muse_glimmer import muse_glimmer_configs

@@ -41,7 +41,7 @@ from .linear import (
     RouterGateLinear,
     RowParallelLinear,
 )
-from .moe import MicrobatchWiseLoadBalanceLoss, MoE
+from .moe import MicrobatchWiseLoadBalanceLoss, MoE, SharedExpertFeedForward
 from .multimodal import MultimodalModel
 from .nn_modules import (
     Conv1d,
@@ -91,6 +91,7 @@ __all__ = [
     "RowParallelLinear",
     "RouterGateLinear",
     "ScaledDotProductInnerAttention",
+    "SharedExpertFeedForward",
     "Sigmoid",
     "SiLU",
     "BinaryActivationFn",

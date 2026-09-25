@@ -232,15 +232,12 @@ def set_sigmoid_gated_feed_forward_sharding_config(
     )
     shared_experts.sharding_config = ShardingConfig(
         in_src_shardings={"x": input_layout},
-        in_dst_shardings={"x": replicated_input_layout},
         out_src_shardings=output_layout,
     )
     shared_experts.w13.sharding_config = stacked_colwise_config(
         input_layout=replicated_input_layout
     )
-    shared_experts.w2.sharding_config = shared_expert_rowwise_config(
-        output_layout=output_layout
-    )
+    shared_experts.w2.sharding_config = shared_expert_rowwise_config()
     shared_experts.gate.sharding_config = ShardingConfig(
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),
@@ -248,11 +245,6 @@ def set_sigmoid_gated_feed_forward_sharding_config(
         },
         in_src_shardings={"input": replicated_input_layout},
         out_src_shardings=replicated_input_layout,
-        out_dst_shardings=(
-            dense_sequence_parallel_placement()
-            if enable_ep and enable_sp
-            else replicated_input_layout
-        ),
     )
 
 
