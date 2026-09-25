@@ -18,8 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.config import CompileConfig, Configurable
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 # PyTorch's default ignore index for cross-entropy loss
 logger = logging.getLogger(__name__)

@@ -19,9 +19,9 @@ import torch.nn.functional as F
 from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
 from torch import nn
 
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.protocols.module import Module

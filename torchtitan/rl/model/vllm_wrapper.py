@@ -32,13 +32,13 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
 )
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import resolve_placements
@@ -60,7 +60,10 @@ def _replace_vllm_layer_configs(model_config):
     # Defer imports until vLLM constructs the model, after the generator has set
     # that environment. Import the GDN adapter only for hybrid models so other
     # models do not acquire its vLLM-specific dependencies.
-    from torchtitan.rl.model.attention import VLLMAttentionWrapper
+    from torchtitan.rl.model.attention import (
+        get_attention_dimensions,
+        VLLMAttentionWrapper,
+    )
 
     new_layers = []
     for layer_idx, layer_cfg in enumerate(model_config.layers):
@@ -68,18 +71,18 @@ def _replace_vllm_layer_configs(model_config):
 
         attention_cfg = getattr(layer_cfg, "attention", None)
         if attention_cfg is not None:
-            num_heads = attention_cfg.n_heads
-            num_kv_heads = attention_cfg.n_kv_heads or num_heads
-            head_dim = (
-                attention_cfg.head_dim
-                if attention_cfg.head_dim is not None
-                else model_config.dim // num_heads
-            )
+            (
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                value_head_dim,
+            ) = get_attention_dimensions(attention_cfg, model_config.dim)
             vllm_attention_cfg = VLLMAttentionWrapper.Config(
                 hidden_size=model_config.dim,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
+                value_head_dim=value_head_dim,
                 sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
             )
             new_layer_cfg = dataclasses.replace(
@@ -111,6 +114,25 @@ def _replace_vllm_layer_configs(model_config):
                 delta_net=dataclasses.replace(
                     delta_net_cfg,
                     inner_gated_delta_net=vllm_inner_gdn_cfg,
+                ),
+            )
+
+        kda_cfg = getattr(layer_cfg, "delta_attention", None)
+        if kda_cfg is not None:
+            from torchtitan.rl.model.kda import VLLMInnerKDA
+
+            vllm_inner_kda_cfg = VLLMInnerKDA.Config(
+                num_heads=kda_cfg.num_heads,
+                head_dim=kda_cfg.head_dim,
+                conv_kernel_size=kda_cfg.conv_kernel_size,
+                lower_bound=kda_cfg.inner_kda.kernel.lower_bound,
+                layer_index=layer_idx,
+            )
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                delta_attention=dataclasses.replace(
+                    kda_cfg,
+                    inner_kda=vllm_inner_kda_cfg,
                 ),
             )
 
@@ -368,6 +390,7 @@ class VLLMModelWrapper(Module):
         # Build model on meta device to avoid allocating full model on every GPU
         with torch.device("meta"):
             self.model = self.config.build()
+        self.model._skip_lm_head = True
 
         self.model = self.model.parallelize(
             parallel_dims=self.parallel_dims,
@@ -468,14 +491,7 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
-            # Get embeddings
-            h = self.model.tok_embeddings(input_ids)
-
-            # Pass through transformer layers
-            for layer in self.model.layers.values():
-                h = layer(h, attention_masks=None, positions=positions)
-
-            h = self.model.norm(h)
+            h = self.model(input_ids, attention_masks=None, positions=positions)
         # Inference disables sequence parallelism, so final hidden states should
         # already be replicated before returning to vLLM.
         if isinstance(h, DTensor):

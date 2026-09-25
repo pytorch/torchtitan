@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from torchtitan.rl.model import gdn
-from torchtitan.rl.model.gdn_backend import (
+from torchtitan.rl.model.linear_attention_backend import (
     GDNExecutionPath,
     TorchTitanGDNAttentionMetadata,
     TorchTitanGDNAttentionMetadataBuilder,
