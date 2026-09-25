@@ -16,6 +16,7 @@ from .configs import (
     CommConfig,
     CompileConfig,
     DebugConfig,
+    Fp32MatmulPrecision,
     FSDPSymmMemScope,
     ParallelismConfig,
     TrainingConfig,
@@ -43,6 +44,7 @@ __all__ = [
     "CommConfig",
     "TrainingConfig",
     "DebugConfig",
+    "Fp32MatmulPrecision",
     "FSDPSymmMemScope",
     # Override mechanism
     "OverrideConfig",
