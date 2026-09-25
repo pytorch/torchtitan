@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import os
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -74,16 +73,15 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             global_ranks = list(range(first_rank, last_rank + 1))
 
         config = self.config
-        dist_utils.init_distributed(
+        topology = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=self.output_dir,
             ranks=global_ranks,
+            pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
         self.ft_manager = self.fault_tolerance.build()
-        self.parallel_dims = ParallelDims.from_config(
-            config.parallelism, int(os.environ["WORLD_SIZE"])
-        )
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, topology)
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq,
             debug=config.training.gc_debug,
