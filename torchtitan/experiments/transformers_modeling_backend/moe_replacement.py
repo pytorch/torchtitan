@@ -156,20 +156,10 @@ def build_and_swap_native_moe(
             if enable_sp
             else _hf_activation_placement(tp=spmd.I)
         )
-        desired_input_layout = (
-            hf_sp_layout if enable_ep else _hf_activation_placement(tp=spmd.R)
-        )
-        output_layout = (
-            _hf_sequence_parallel_placement()
-            if enable_sp
-            else _hf_activation_placement(tp=spmd.P)
-        )
         moe_config.sharding_config = replace(
             root_sharding,
             in_src_shardings={"hidden_states": hf_sp_layout},
-            in_dst_shardings={"hidden_states": desired_input_layout},
-            out_src_shardings=output_layout,
-            out_dst_shardings=hf_sp_layout,
+            out_src_shardings=hf_sp_layout,
         )
 
         with torch.device("meta"):
