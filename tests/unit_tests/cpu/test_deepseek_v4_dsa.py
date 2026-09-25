@@ -183,6 +183,15 @@ class TestDSVPackedDocuments(unittest.TestCase):
         positions = torch.arange(128)
         self.assertIsNone(DeepSeekV4Model.get_attention_masks(None, positions))
 
+    def test_get_attention_masks_ignores_padding_position_resets(self):
+        positions = torch.tensor([0, 1, 2, 3, 0, 1])
+        padding_mask = torch.tensor([False, False, False, False, True, True])
+        self.assertIsNone(
+            DeepSeekV4Model.get_attention_masks(
+                None, positions, padding_mask=padding_mask
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
