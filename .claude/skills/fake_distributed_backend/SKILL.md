@@ -7,9 +7,9 @@ description: Run TorchTitan with fully fake communication or real pipeline commu
 
 TorchTitan provides two distinct test modes:
 
-- `fake_backend` makes every distributed axis fake. Use it for configuration,
+- `fake` makes every distributed axis fake. Use it for configuration,
   shape, ownership, and rank-local allocation analysis without real transport.
-- `real_pp_fake_spmd_backend` uses one physical process per pipeline rank. PP
+- `real_pp_fake_spmd` uses one physical process per pipeline rank. PP
   traffic is real; data, tensor, context, and expert parallel axes are fake.
   Use it when pipeline communication and buffer lifetimes must be exercised.
 
@@ -20,37 +20,34 @@ examples and environment-variable semantics, is in
 
 ## Logical Rank Coordinates
 
-Set `NGPU` to the logical world size. For fake PP, also set:
+Set `NGPU` to the logical world size. For pure fake PP, also set:
 
 ```bash
 export FAKE_PP_RANK=<logical PP coordinate>
-export FAKE_SPMD_RANK=<flattened coordinate within the non-PP mesh>
 ```
 
 For PP degree `P`, the non-PP logical world size is `NGPU / P` and the global
 logical rank is:
 
 ```text
-FAKE_PP_RANK * (NGPU / P) + FAKE_SPMD_RANK
+FAKE_PP_RANK * (NGPU / P)
 ```
 
-Pure fake runs without PP retain the ordinary `RANK` interface. In hybrid mode,
-the physical `RANK` is the PP coordinate, `WORLD_SIZE` must equal the PP degree,
-and `FAKE_SPMD_RANK` selects which logical SPMD coordinate each physical PP
-rank represents.
+Both modes represent SPMD coordinate zero. Pure fake defaults to PP coordinate
+zero when PP is disabled. In hybrid mode, physical `RANK` is the PP coordinate
+and `WORLD_SIZE` must equal the PP degree; setting `FAKE_PP_RANK` is invalid.
 
-`COMM_MODE=fake_backend` is a convenience understood by `run_train.sh` for a
+`COMM_BACKEND=fake` is a convenience understood by `run_train.sh` for a
 single-process pure-fake run. Launch hybrid mode with `torchrun`, set `NGPU` to
 the logical world size, and pass
-`--comm.mode real_pp_fake_spmd_backend`; `torchrun` supplies the physical
+`--comm.backend real_pp_fake_spmd`; `torchrun` supplies the physical
 `RANK`, `WORLD_SIZE`, `LOCAL_RANK`, and rendezvous variables.
 
 ## Memory Debugging Workflow
 
 1. Use the production model, recipe, dtype, parallel degrees, microbatch count,
    FSDP policy, activation checkpointing policy, and CUDA-graph setting.
-2. Choose a logical rank whose pipeline stage and SPMD ownership match the real
-   rank being investigated.
+2. Choose the PP coordinate whose SPMD-zero ownership is being investigated.
 3. Capture allocator state after initialization, after complete optimizer
    warmup, during steady-state forward/backward, and after optimizer completion.
 4. Compare the same logical rank and capture point between configurations.
@@ -78,5 +75,5 @@ throughput.
   transport, send/receive ownership, or communicator initialization.
 - A hybrid success followed by a real-run failure usually isolates an SPMD
   collective, real communication memory, or scale-dependent scheduling issue.
-- Do not compare different PP or SPMD coordinates as evidence of a memory
-  regression; their model and activation ownership can differ intentionally.
+- Do not compare different PP coordinates as evidence of a memory regression;
+  their model and activation ownership can differ intentionally.
