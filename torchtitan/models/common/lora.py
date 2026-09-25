@@ -31,19 +31,25 @@ __all__ = ["get_lora_grouped_linear", "get_lora_linear"]
 # TODO: Support checkpoint interoperability for LoRA adapter state. Native DCP
 # base checkpoints cannot initialize LoRA models because lora_a/lora_b keys are
 # absent, and Hugging Face state-dict adapters omit those keys during export.
-class _LoRALinearMixin:
-    """Add a LoRA update to a Linear's local computation."""
-
+class _LoRAMixin:
     _lora_scaling: float
-    num_linears: int
-    lora_a: Linear
-    lora_b: Linear
 
     def __init__(self, config) -> None:
         super().__init__(config)  # type: ignore[misc]
         for param in nn.Module.parameters(self):  # type: ignore[arg-type]
             param.requires_grad_(False)
         self._lora_scaling = config.alpha / config.rank
+
+
+class _LoRALinearMixin(_LoRAMixin):
+    """Add a LoRA update to a Linear's local computation."""
+
+    num_linears: int
+    lora_a: Linear
+    lora_b: Linear
+
+    def __init__(self, config) -> None:
+        super().__init__(config)
         if config.num_linears > 1:
             # A stacked base projection shares one A matrix across its logical
             # linears and stacks their B matrices along the same output axis as
@@ -123,19 +129,15 @@ class _LoRALinearMixin:
         return lora_a_sharding, replicated_weight
 
 
-class _LoRAGroupedLinearMixin:
+class _LoRAGroupedLinearMixin(_LoRAMixin):
     """Add an expert-specific LoRA update to a GroupedLinear."""
 
-    _lora_scaling: float
     num_linears: int
     lora_a: GroupedLinear
     lora_b: GroupedLinear
 
     def __init__(self, config) -> None:
-        super().__init__(config)  # type: ignore[misc]
-        for param in nn.Module.parameters(self):  # type: ignore[arg-type]
-            param.requires_grad_(False)
-        self._lora_scaling = config.alpha / config.rank
+        super().__init__(config)
         lora_a_sharding, lora_b_sharding = self._adapter_sharding(
             config.sharding_config
         )
@@ -199,35 +201,30 @@ class _LoRAGroupedLinearMixin:
         )
 
 
-@functools.cache
-def get_lora_linear(parent_cls: type[Module]) -> type[Module]:
-    """Get a cached LoRA version of a linear module class."""
+def _create_lora_class(
+    parent_cls: type[Module],
+    mixin_cls: type[_LoRAMixin],
+) -> type[Module]:
     parent_config_cls = parent_cls.Config
 
-    class LoRALinear(_LoRALinearMixin, parent_cls):  # type: ignore[misc, valid-type]
+    class LoRAProjection(mixin_cls, parent_cls):  # type: ignore[misc, valid-type]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             rank: int
             alpha: float
 
-    LoRALinear.__name__ = f"LoRA{parent_cls.__name__}"
-    LoRALinear.__qualname__ = f"LoRA{parent_cls.__name__}"
-    return LoRALinear
+    LoRAProjection.__name__ = f"LoRA{parent_cls.__name__}"
+    LoRAProjection.__qualname__ = f"LoRA{parent_cls.__name__}"
+    return LoRAProjection
+
+
+@functools.cache
+def get_lora_linear(parent_cls: type[Module]) -> type[Module]:
+    """Get a cached LoRA version of a linear module class."""
+    return _create_lora_class(parent_cls, _LoRALinearMixin)
 
 
 @functools.cache
 def get_lora_grouped_linear(parent_cls: type[Module]) -> type[Module]:
     """Get a cached LoRA version of a grouped-linear module class."""
-    parent_config_cls = parent_cls.Config
-
-    class LoRAGroupedLinear(  # type: ignore[misc, valid-type]
-        _LoRAGroupedLinearMixin, parent_cls
-    ):
-        @dataclass(kw_only=True, slots=True)
-        class Config(parent_config_cls):  # type: ignore[misc]
-            rank: int
-            alpha: float
-
-    LoRAGroupedLinear.__name__ = f"LoRA{parent_cls.__name__}"
-    LoRAGroupedLinear.__qualname__ = f"LoRA{parent_cls.__name__}"
-    return LoRAGroupedLinear
+    return _create_lora_class(parent_cls, _LoRAGroupedLinearMixin)
