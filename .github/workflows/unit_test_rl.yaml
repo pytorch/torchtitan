@@ -54,7 +54,8 @@ jobs:
         # Upgrade torch and its ABI-sensitive vLLM/xformers companions together.
         uv pip install --upgrade torch torchvision vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
-          --index-strategy unsafe-best-match
+          --index-strategy unsafe-best-match \
+          --constraint .ci/docker/requirements-rl.txt
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
         pytest tests/rl/unit_tests --strict-markers --durations=20 -vv

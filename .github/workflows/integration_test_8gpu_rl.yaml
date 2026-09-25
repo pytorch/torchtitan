@@ -69,7 +69,8 @@ jobs:
         # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
         uv pip install --upgrade torch torchvision vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
-          --index-strategy unsafe-best-match
+          --index-strategy unsafe-best-match \
+          --constraint .ci/docker/requirements-rl.txt
 
         # 3. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
