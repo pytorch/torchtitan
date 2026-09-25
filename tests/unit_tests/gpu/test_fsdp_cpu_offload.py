@@ -7,6 +7,7 @@
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import CPUOffloadPolicy
 from torch.distributed.fsdp._fully_shard._fsdp_state import _get_module_fsdp_state
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -16,6 +17,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_multimodal_encoder,
+)
+from torchtitan.models.muse_glimmer import (
+    muse_glimmer_vision_encoder_config,
+    MuseGlimmerVisionEncoder,
 )
 
 
@@ -83,6 +88,35 @@ def _offload_policy(module: nn.Module) -> object | None:
     return group.offload_policy
 
 
+def _vision_inputs(
+    encoder: MuseGlimmerVisionEncoder,
+    *,
+    has_image: bool,
+    device_type: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    grid_size = encoder.downsample_factor
+    pixel_values = (
+        torch.randn(
+            grid_size**2,
+            encoder.conv1_linear.in_features,
+            device=device_type,
+            dtype=torch.bfloat16,
+        )
+        if has_image
+        else torch.zeros(
+            grid_size**2,
+            encoder.conv1_linear.in_features,
+            device=device_type,
+        )
+    )
+    grid_thw = torch.tensor(
+        [[1, grid_size, grid_size]],
+        device=device_type,
+        dtype=torch.int64,
+    )
+    return pixel_values, grid_thw
+
+
 class TestVisionEncoderCPUOffload(DTensorTestBase):
     @property
     def world_size(self) -> int:
@@ -145,3 +179,119 @@ class TestVisionEncoderCPUOffload(DTensorTestBase):
         model = self._build(cpu_offload=False)
         assert not isinstance(_offload_policy(model.vision_encoder), CPUOffloadPolicy)
         assert not isinstance(_offload_policy(model.tok_embeddings), CPUOffloadPolicy)
+
+
+class TestConditionalVisionFSDP(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    def _run_mixed_rank_image_presence(self, *, cpu_offload: bool) -> None:
+        mesh = self.build_device_mesh()
+        with torch.device("meta"):
+            encoder = muse_glimmer_vision_encoder_config(
+                latent_dim=8,
+                num_layers=0,
+                num_heads=2,
+                mlp_ratio=2.0,
+                patch_size=2,
+                patch_temporal=1,
+                downsample_factor=2,
+                sparse_attention_factor=1,
+                pos_emb_grid_h=2,
+                pos_emb_grid_w=2,
+            ).build()
+        apply_fsdp_to_multimodal_encoder(
+            encoder,
+            mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            reshard_after_forward_policy="always",
+            cpu_offload=cpu_offload,
+        )
+        encoder.to_empty(device="cpu" if cpu_offload else self.device_type)
+        with torch.no_grad():
+            for parameter in encoder.parameters():
+                nn.init.normal_(parameter, std=0.02)
+            encoder.rope_freq.init_states(
+                buffer_device=torch.device(self.device_type) if cpu_offload else None
+            )
+
+        has_image = self.rank == 0
+        pixel_values, grid_thw = _vision_inputs(
+            encoder,
+            has_image=has_image,
+            device_type=self.device_type,
+        )
+
+        output_TO = encoder(pixel_values, grid_thw=grid_thw)
+        self.assertEqual(output_TO.device.type, self.device_type)
+        (output_TO.sum() * int(has_image)).backward()
+
+        for name, parameter in encoder.named_parameters():
+            self.assertIsNotNone(parameter.grad, name)
+            self.assertEqual(parameter.grad.device, parameter.device)
+
+    @with_comms
+    def test_mixed_rank_image_presence_completes_backward(self) -> None:
+        self._run_mixed_rank_image_presence(cpu_offload=False)
+
+    @with_comms
+    def test_mixed_rank_image_presence_completes_backward_with_cpu_offload(
+        self,
+    ) -> None:
+        self._run_mixed_rank_image_presence(cpu_offload=True)
+
+
+class TestVisionHSDP(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    @with_comms
+    def test_image_then_empty_accumulation(self) -> None:
+        mesh = init_device_mesh(
+            self.device_type,
+            (2, 2),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        with torch.device("meta"):
+            encoder = muse_glimmer_vision_encoder_config(
+                latent_dim=8,
+                num_layers=0,
+                num_heads=2,
+                mlp_ratio=2.0,
+                patch_size=2,
+                patch_temporal=1,
+                downsample_factor=2,
+                sparse_attention_factor=1,
+                pos_emb_grid_h=2,
+                pos_emb_grid_w=2,
+            ).build()
+        apply_fsdp_to_multimodal_encoder(
+            encoder,
+            mesh,
+            param_dtype=torch.bfloat16,
+            reduce_dtype=torch.float32,
+            reshard_after_forward_policy="always",
+        )
+        encoder.to_empty(device=self.device_type)
+        with torch.no_grad():
+            for parameter in encoder.parameters():
+                nn.init.normal_(parameter, std=0.02)
+            encoder.rope_freq.init_states()
+
+        for microbatch_index, image_active in enumerate((True, False)):
+            encoder.set_requires_all_reduce(microbatch_index == 1)
+            has_image = image_active and self.rank == 0
+            pixel_values, grid_thw = _vision_inputs(
+                encoder,
+                has_image=has_image,
+                device_type=self.device_type,
+            )
+            output_TO = encoder(pixel_values, grid_thw=grid_thw)
+            (output_TO.float().sum() * int(has_image)).backward()
+
+        self.assertTrue(
+            all(parameter.grad is not None for parameter in encoder.parameters())
+        )

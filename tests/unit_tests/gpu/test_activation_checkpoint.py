@@ -77,7 +77,7 @@ class TestApplyAC(unittest.TestCase):
         ).build().apply(model_with_force_first)
         flops_with_force_first = get_bw_flops(model_with_force_first)
 
-        # 4. Per-op SAC with force recompute "output"
+        # 4. Per-op SAC early-stop skips the terminal output recomputation.
         model_with_force_last = ToyModule()
         SelectiveAC.Config(
             force_recompute_mm_shapes_by_fqns=["output"],
@@ -92,8 +92,8 @@ class TestApplyAC(unittest.TestCase):
         self.assertEqual(flops_no_ac, 8.0)
         self.assertEqual(flops_selective_ac, 9.0)
         self.assertEqual(flops_with_force_first, 10.0)
-        self.assertEqual(flops_with_force_last, 11.0)
-        self.assertEqual(flops_full_ac, 12.0)
+        self.assertEqual(flops_with_force_last, 9.0)
+        self.assertEqual(flops_full_ac, 10.0)
 
     def test_mem(self):
         if not torch.cuda.is_available():
@@ -262,9 +262,8 @@ class TestApplyAC(unittest.TestCase):
         # force_recompute="moe.router.gate": shape (512,512) also matches wq,
         # so both are force-recomputed; output is 1st in alternation → saved
         self.assertEqual(get_recomputed(["moe.router.gate"]), {"gate", "wq"})
-        # force_recompute="output": shape (512,1024) is unique to output,
-        # gate and wq still alternate (gate saved, wq recomputed)
-        self.assertEqual(get_recomputed(["output"]), {"wq", "output"})
+        # Early-stop skips the terminal output once backward has all its tensors.
+        self.assertEqual(get_recomputed(["output"]), {"wq"})
 
 
 if __name__ == "__main__":
