@@ -227,12 +227,41 @@ def test_get_pipeline_metadata_requires_layers_attribute():
         _get_pipeline_metadata(object(), ParallelismConfig(), object())
 
 
-def test_static_decoder_stage_metadata_is_complete():
-    model_config = model_registry("debugmodel").model
-    parallel_dims = SimpleNamespace(cp=1, tp=1, tp_enabled=False)
+@pytest.mark.parametrize(
+    (
+        "cp",
+        "tp",
+        "tp_enabled",
+        "enable_sequence_parallel",
+        "load_balancer",
+        "expected_decoder_tokens",
+        "expected_hidden_tokens",
+    ),
+    [
+        (1, 1, False, False, None, 128, 128),
+        (2, 1, False, False, None, 64, 64),
+        (2, 1, False, False, "ptrr", 64, 64),
+        (2, 1, False, False, "headtail", 32, 32),
+        (2, 2, True, True, "ptrr", 64, 32),
+    ],
+)
+def test_static_decoder_stage_metadata_is_complete(
+    cp,
+    tp,
+    tp_enabled,
+    enable_sequence_parallel,
+    load_balancer,
+    expected_decoder_tokens,
+    expected_hidden_tokens,
+):
+    model_config = model_registry("debugmodel")
+    parallel_dims = SimpleNamespace(cp=cp, tp=tp, tp_enabled=tp_enabled)
     stage_io = _build_decoder_stage_io(
         parallel_dims=parallel_dims,
-        parallelism=ParallelismConfig(),
+        parallelism=ParallelismConfig(
+            enable_sequence_parallel=enable_sequence_parallel,
+            context_parallel_load_balancer=load_balancer,
+        ),
         training=pipeline_parallel.TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=128
         ),
@@ -244,60 +273,49 @@ def test_static_decoder_stage_metadata_is_complete():
     middle = _static_stage_metadata(stage_io, 1, 3)
     last = _static_stage_metadata(stage_io, 2, 3)
 
-    assert first["input_args"][0].shape == torch.Size([128])
+    assert first["input_args"][0].shape == torch.Size([expected_decoder_tokens])
     assert first["input_args"][0].dtype == torch.int64
     assert first["input_grads"] == (None,)
-    assert middle["input_args"][0].shape == torch.Size([128, model_config.dim])
+    assert middle["input_args"][0].shape == torch.Size(
+        [expected_hidden_tokens, model_config.dim]
+    )
     assert middle["input_args"][0].requires_grad
     assert not middle["input_grads"][0].requires_grad
-    assert last["output_args"][0].shape == torch.Size([128, model_config.dim])
+    assert last["output_args"][0].shape == torch.Size(
+        [expected_decoder_tokens, model_config.dim]
+    )
     assert last["output_grads"] == (None,)
 
 
-def test_static_decoder_metadata_rejects_non_block_boundary():
+def test_static_decoder_stage_metadata_describes_logits_output():
+    model_config = model_registry("debugmodel")
+    stage_io = _build_decoder_stage_io(
+        parallel_dims=SimpleNamespace(cp=1, tp=1, tp_enabled=False),
+        parallelism=ParallelismConfig(),
+        training=pipeline_parallel.TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=128
+        ),
+        model_config=model_config,
+        lm_head_in_loss=False,
+    )
+
+    last = _static_stage_metadata(stage_io, 2, 3)
+    assert last["output_args"][0].shape == torch.Size([128, model_config.vocab_size])
+
+
+def test_static_decoder_metadata_accepts_standard_decoder_boundaries():
     assert (
         _unsupported_static_split(
             [["tok_embeddings"], ["layers.0", "norm"], ["lm_head"]]
         )
-        == "stage 0 does not end at a decoder block"
+        is None
     )
 
 
-@pytest.mark.parametrize(
-    ("configured_limit", "expected_limit"),
-    [(None, 2), (1, 1)],
-)
-def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_limit):
-    class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
-        __slots__ = ("kwargs",)
-
-        def __init__(self, *args, **kwargs):
-            self.kwargs = kwargs
-
-    monkeypatch.setattr(
-        pipeline_parallel, "get_schedule_class", lambda _: CapturingSchedule
+def test_static_decoder_metadata_rejects_custom_boundary():
+    assert (
+        _unsupported_static_split(
+            [["vision_encoder"], ["tok_embeddings", "layers.0", "norm", "lm_head"]]
+        )
+        == "stage 0 does not produce decoder hidden states"
     )
-    parallelism = ParallelismConfig(
-        pipeline_parallel_degree=2,
-        pipeline_parallel_schedule="Interleaved1F1B",
-        pipeline_parallel_max_param_unsharded_stages=configured_limit,
-    )
-
-    schedule = pipeline_parallel._build_pipeline_schedule(
-        parallelism=parallelism,
-        num_microbatches=4,
-        stages=[object(), object()],
-        loss_fn=lambda: None,
-    )
-
-    assert schedule.kwargs["max_active_stages"] == expected_limit
-    assert schedule.kwargs["reuse_recv_buffers"] is True
-
-
-@pytest.mark.parametrize("limit", [0, -1])
-def test_pipeline_param_residency_limit_must_be_positive(limit):
-    with pytest.raises(
-        ValueError,
-        match="pipeline_parallel_max_param_unsharded_stages must be positive",
-    ):
-        ParallelismConfig(pipeline_parallel_max_param_unsharded_stages=limit)

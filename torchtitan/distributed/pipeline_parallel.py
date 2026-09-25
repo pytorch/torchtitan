@@ -350,19 +350,12 @@ def _build_pipeline_schedule(
         return loss
 
     if looped_schedule:
-        schedule_kwargs: dict[str, Any] = {
-            "reuse_recv_buffers": True,
-            "max_active_stages": (
-                parallelism.pipeline_parallel_max_param_unsharded_stages or len(stages)
-            ),
-        }
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
             n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
-            **schedule_kwargs,
         )
     else:
         schedule = schedule_class(
@@ -610,9 +603,9 @@ def _get_pp_rank_to_stage_indices_mapping(
 class _DecoderStageIO:
     """Example tensors describing decoder pipeline boundaries."""
 
-    root_input: torch.Tensor
+    decoder_input: torch.Tensor
     hidden: torch.Tensor
-    final_output: torch.Tensor
+    decoder_output: torch.Tensor
 
 
 def _unsupported_static_split(
@@ -622,10 +615,17 @@ def _unsupported_static_split(
     for stage_idx in range(len(module_names_per_stage) - 1):
         before = module_names_per_stage[stage_idx]
         after = module_names_per_stage[stage_idx + 1]
-        if not before or not before[-1].startswith("layers."):
-            return f"stage {stage_idx} does not end at a decoder block"
-        if not after or not after[0].startswith("layers."):
-            return f"stage {stage_idx + 1} does not start at a decoder block"
+        output_module = before[-1] if before else ""
+        input_module = after[0] if after else ""
+        if not (
+            output_module in {"tok_embeddings", "norm"}
+            or output_module.startswith("layers.")
+        ):
+            return f"stage {stage_idx} does not produce decoder hidden states"
+        if not (
+            input_module in {"norm", "lm_head"} or input_module.startswith("layers.")
+        ):
+            return f"stage {stage_idx + 1} does not consume decoder hidden states"
     return None
 
 
@@ -638,13 +638,19 @@ def _build_decoder_stage_io(
     lm_head_in_loss: bool,
 ) -> _DecoderStageIO:
     """Build static metadata for tensors crossing decoder stage boundaries."""
+    cp_shards = parallel_dims.cp
+    if (
+        parallel_dims.cp > 1
+        and parallelism.context_parallel_load_balancer == "headtail"
+    ):
+        cp_shards *= 2
     num_tokens, cp_remainder = divmod(
-        training.num_tokens_per_microbatch_per_dp_rank, parallel_dims.cp
+        training.num_tokens_per_microbatch_per_dp_rank, cp_shards
     )
     if cp_remainder:
         raise ValueError(
             "Static pipeline metadata requires the microbatch token count to "
-            f"be divisible by CP ({parallel_dims.cp})."
+            f"be divisible by the CP partition count ({cp_shards})."
         )
 
     hidden_tokens = num_tokens
@@ -663,7 +669,7 @@ def _build_decoder_stage_io(
 
     hidden = example(hidden_tokens, model_config.dim).requires_grad_()
     if lm_head_in_loss:
-        final_output = example(num_tokens, model_config.dim)
+        decoder_output = example(num_tokens, model_config.dim)
     else:
         local_vocab_size = model_config.vocab_size
         if parallel_dims.tp_enabled:
@@ -672,12 +678,12 @@ def _build_decoder_stage_io(
                 model_config.vocab_size, parallel_dims.tp
             )
             local_vocab_size += tp_rank < remainder
-        final_output = example(num_tokens, local_vocab_size)
+        decoder_output = example(num_tokens, local_vocab_size)
 
     return _DecoderStageIO(
-        root_input=example(num_tokens, dtype=torch.int64),
+        decoder_input=example(num_tokens, dtype=torch.int64),
         hidden=hidden,
-        final_output=final_output.requires_grad_(),
+        decoder_output=decoder_output.requires_grad_(),
     )
 
 
@@ -691,8 +697,8 @@ def _static_stage_metadata(
     is_last = stage_idx == num_stages - 1
     hidden_grad = stage_io.hidden.detach()
     return {
-        "input_args": (stage_io.root_input if is_first else stage_io.hidden,),
-        "output_args": (stage_io.final_output if is_last else stage_io.hidden,),
+        "input_args": (stage_io.decoder_input if is_first else stage_io.hidden,),
+        "output_args": (stage_io.decoder_output if is_last else stage_io.hidden,),
         # A tuple containing None is explicit no-gradient metadata. Bare None
         # means unknown metadata and would re-enable dynamic inference.
         "input_grads": (None,) if is_first else (hidden_grad,),
