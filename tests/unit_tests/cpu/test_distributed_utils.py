@@ -36,70 +36,66 @@ def test_bf16x9_is_enabled_on_future_nvidia_gpus(
     assert matmul.fp32_precision == "bfx9"
 
 
-def test_fake_pg_uses_requested_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fake_pg_defaults_to_spmd_rank_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NGPU", "8")
-    monkeypatch.setenv("RANK", "6")
     with (
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torchtitan.distributed.utils.init_fake_mode") as init_fake_mode,
     ):
-        topology = init_distributed(CommConfig(mode="fake_backend"))
+        topology = init_distributed(CommConfig(backend="fake"))
     assert topology == DistributedTopology(world_size=8)
-    init_fake_mode.assert_called_once_with(8, rank=6)
+    init_fake_mode.assert_called_once_with(8, rank=0)
 
 
 def test_fake_pg_rejects_out_of_range_rank(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("NGPU", "8")
-    monkeypatch.setenv("RANK", "8")
+    monkeypatch.setenv("FAKE_PP_RANK", "4")
     with (
         patch("torch.distributed.is_initialized", return_value=False),
-        pytest.raises(ValueError, match=r"Fake rank must be in \[0, 8\)"),
+        pytest.raises(ValueError, match=r"FAKE_PP_RANK must be in \[0, 4\)"),
     ):
-        init_distributed(CommConfig(mode="fake_backend"))
+        init_distributed(CommConfig(backend="fake"), pipeline_parallel_degree=4)
 
 
-def test_fake_pp_uses_explicit_pipeline_and_spmd_coordinates(
+def test_fake_pp_uses_explicit_pipeline_coordinate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("NGPU", "16")
     monkeypatch.setenv("FAKE_PP_RANK", "2")
-    monkeypatch.setenv("FAKE_SPMD_RANK", "1")
     with (
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torchtitan.distributed.utils.init_fake_mode") as init_fake_mode,
     ):
         topology = init_distributed(
-            CommConfig(mode="fake_backend"), pipeline_parallel_degree=4
+            CommConfig(backend="fake"), pipeline_parallel_degree=4
         )
 
     assert topology == DistributedTopology(world_size=16)
-    init_fake_mode.assert_called_once_with(16, rank=9)
+    init_fake_mode.assert_called_once_with(16, rank=8)
 
 
-def test_fake_pp_requires_both_logical_coordinates(
+def test_fake_pp_requires_pipeline_coordinate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("NGPU", "16")
-    monkeypatch.setenv("FAKE_PP_RANK", "2")
-    monkeypatch.delenv("FAKE_SPMD_RANK", raising=False)
+    monkeypatch.delenv("FAKE_PP_RANK", raising=False)
 
     with (
         patch("torch.distributed.is_initialized", return_value=False),
-        pytest.raises(ValueError, match="FAKE_SPMD_RANK environment variable"),
+        pytest.raises(ValueError, match="FAKE_PP_RANK environment variable"),
     ):
-        init_distributed(CommConfig(mode="fake_backend"), pipeline_parallel_degree=4)
+        init_distributed(CommConfig(backend="fake"), pipeline_parallel_degree=4)
 
 
-def test_real_pp_fake_spmd_returns_named_real_group(
+def test_real_pp_fake_spmd_returns_real_pp_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("NGPU", "16")
     monkeypatch.setenv("WORLD_SIZE", "4")
     monkeypatch.setenv("RANK", "2")
     monkeypatch.setenv("LOCAL_RANK", "0")
-    monkeypatch.setenv("FAKE_SPMD_RANK", "1")
     process_group = torch.distributed.ProcessGroup(2, 4)
     store = MagicMock()
 
@@ -119,14 +115,14 @@ def test_real_pp_fake_spmd_returns_named_real_group(
         patch.dict(dist_utils.c10d._world.pg_group_ranks, {}, clear=False),
     ):
         topology = init_distributed(
-            CommConfig(mode="real_pp_fake_spmd_backend"),
+            CommConfig(backend="real_pp_fake_spmd"),
             pipeline_parallel_degree=4,
         )
 
-    init_fake_mode.assert_called_once_with(16, rank=9)
+    init_fake_mode.assert_called_once_with(16, rank=8)
     assert topology.world_size == 16
-    assert topology.real_axis_groups == ((dist_utils.MeshAxisName.PP, process_group),)
-    assert new_process_group.call_args.kwargs["global_ranks_in_group"] == [1, 5, 9, 13]
+    assert topology.real_pp_group is process_group
+    assert new_process_group.call_args.kwargs["global_ranks_in_group"] == [0, 4, 8, 12]
 
 
 def test_real_pp_fake_spmd_requires_one_process_per_pp_rank(
@@ -135,14 +131,30 @@ def test_real_pp_fake_spmd_requires_one_process_per_pp_rank(
     monkeypatch.setenv("NGPU", "16")
     monkeypatch.setenv("WORLD_SIZE", "4")
     monkeypatch.setenv("RANK", "2")
-    monkeypatch.setenv("FAKE_SPMD_RANK", "0")
     with (
         patch("torch.distributed.is_initialized", return_value=False),
         pytest.raises(ValueError, match="one physical process per PP rank"),
     ):
         init_distributed(
-            CommConfig(mode="real_pp_fake_spmd_backend"),
+            CommConfig(backend="real_pp_fake_spmd"),
             pipeline_parallel_degree=2,
+        )
+
+
+def test_real_pp_fake_spmd_rejects_fake_pp_rank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NGPU", "16")
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "2")
+    monkeypatch.setenv("FAKE_PP_RANK", "2")
+    with (
+        patch("torch.distributed.is_initialized", return_value=False),
+        pytest.raises(ValueError, match="FAKE_PP_RANK is invalid"),
+    ):
+        init_distributed(
+            CommConfig(backend="real_pp_fake_spmd"),
+            pipeline_parallel_degree=4,
         )
 
 
