@@ -143,21 +143,28 @@ class Qwen35Attention(BaseAttention):
 
         self.inner_attention = config.inner_attention.build()
 
+    def _maybe_gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x_TD
+
+        x_TD = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("input_redistribution"),
+            recompute=self.remat_should_recompute("input_redistribution"),
+        )(
+            x_TD,
+            tp_group,
+            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            dst=spmd.R,
+            backward_options={"op_dtype": x_TD.dtype},
+        )
+        remat.recompute_needs_tensor(x_TD)
+        return x_TD
+
     def _project_qkv(
         self, x_TD: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # The query, key, and value projections all consume x. Gather once
-            # at their common attention boundary.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
-
         num_tokens = x_TD.shape[0]
         xq_gate_THC = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
         xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
@@ -171,6 +178,7 @@ class Qwen35Attention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        x_TD = self._maybe_gather_tp_input(x_TD)
         xq_THK, xk_THK, xv_THV, gate_THV = remat.region(
             self._project_qkv,
             self.remat_region_name("qkv"),
