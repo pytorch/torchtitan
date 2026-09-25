@@ -13,6 +13,9 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components import validate as validate_module
+from torchtitan.components.data.collators import TextCollator
+from torchtitan.components.data.load_balancing.loader import LoadBalancingDataLoader
+from torchtitan.components.data.loader import GrainDataLoader
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.validate import Validator
@@ -317,3 +320,15 @@ def test_validator_rejects_steps_neg1_when_dp_gt_1():
 def test_validator_accepts_finite_pass_or_positive_steps():
     _validator_from_init(steps=-1, dp_world_size=1)
     _validator_from_init(steps=10, dp_world_size=8)
+
+
+def test_validator_rejects_load_balancing_dataloader() -> None:
+    dataloader = LoadBalancingDataLoader.Config(
+        dataloader=GrainDataLoader.Config(
+            dataset=object(),
+            collator=TextCollator.Config(),
+        )
+    )
+
+    with pytest.raises(ValueError, match="validation does not support"):
+        Validator.Config(dataloader=dataloader)

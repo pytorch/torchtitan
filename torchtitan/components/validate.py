@@ -10,7 +10,11 @@ from typing import Any
 
 import torch
 from torch.distributed.pipelining.schedules import _PipelineSchedule
-from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GrainDataLoader,
+    LoadBalancingDataLoader,
+)
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import LossFunction
@@ -94,6 +98,11 @@ class Validator(BaseValidator):
             if not (self.steps > 0 or self.steps == -1):
                 raise ValueError(
                     f"validation steps must be positive or -1, got {self.steps}"
+                )
+            if isinstance(self.dataloader, LoadBalancingDataLoader.Config):
+                raise ValueError(
+                    "validation does not support LoadBalancingDataLoader; "
+                    "configure an ordinary validation dataloader"
                 )
 
     # TODO: improve the constructor signature

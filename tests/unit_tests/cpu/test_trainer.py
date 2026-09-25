@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import (
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
@@ -100,10 +101,11 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
         gradient_accumulation_steps=trainer.gradient_accumulation_steps,
         num_pp_microbatches=trainer.num_pp_microbatches,
         metrics_processor=trainer.metrics_processor,
+        _dataloader_metrics=getattr(trainer, "_dataloader_metrics", {}),
     )
 
 
-def test_microbatch_generator_preserves_labels() -> None:
+def test_microbatch_generator_keeps_latest_dataloader_metrics() -> None:
     labels = torch.ones(1, dtype=torch.long)
     microbatch = TokenizedTrainingMicrobatch(
         input=torch.ones(1),
@@ -117,6 +119,48 @@ def test_microbatch_generator_preserves_labels() -> None:
         SimpleNamespace(
             config=SimpleNamespace(
                 training=SimpleNamespace(
+                    num_tokens_per_microbatch_per_dp_rank=2,
+                )
+            ),
+            metrics_processor=SimpleNamespace(
+                ntokens_since_last_log=0,
+                data_loading_times=[],
+            ),
+            _dataloader_metrics={},
+        ),
+    )
+    drain_metrics = MagicMock(
+        side_effect=[
+            {"data_load/balanced_predicted_cost": 12.0},
+            {"data_load/balanced_predicted_cost": 7.0},
+        ]
+    )
+
+    class Dataloader:
+        def __iter__(self):
+            return iter([microbatch, microbatch])
+
+        def drain_metrics(self):
+            return drain_metrics()
+
+    dataloader = Dataloader()
+
+    iterator = Trainer.microbatch_generator(trainer, cast(BaseDataLoader, dataloader))
+    output = next(iterator)
+    next(iterator)
+
+    assert output.labels is labels
+    assert trainer.metrics_processor.ntokens_since_last_log == 4
+    assert trainer._dataloader_metrics == {"data_load/balanced_predicted_cost": 7.0}
+    assert drain_metrics.call_count == 2
+
+
+def test_microbatch_generator_maps_natural_exhaustion() -> None:
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                training=SimpleNamespace(
                     num_tokens_per_microbatch_per_dp_rank=1,
                 )
             ),
@@ -124,14 +168,23 @@ def test_microbatch_generator_preserves_labels() -> None:
                 ntokens_since_last_log=0,
                 data_loading_times=[],
             ),
+            _dataloader_metrics={},
         ),
     )
 
-    output = next(Trainer.microbatch_generator(trainer, [microbatch]))
+    class EmptyDataloader:
+        def __iter__(self):
+            return iter(())
 
-    assert output is microbatch
-    assert output.labels is labels
-    assert trainer.metrics_processor.ntokens_since_last_log == 1
+        def drain_metrics(self):
+            return {}
+
+    with pytest.raises(DataloaderExhaustedError):
+        next(
+            Trainer.microbatch_generator(
+                trainer, cast(BaseDataLoader, EmptyDataloader())
+            )
+        )
 
 
 def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage(
@@ -666,6 +719,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             model_parts=[],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
+            _dataloader_metrics={"data_load/planner_ms": 3.0},
             num_completed_steps=0,
             ntokens_seen=3,
             gc_handler=SimpleNamespace(run=MagicMock()),
@@ -685,8 +739,9 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         6.0,
         6.0,
         4.0,
-        extra_metrics={"n_tokens_seen": 3},
+        extra_metrics={"n_tokens_seen": 3, "data_load/planner_ms": 3.0},
     )
+    assert trainer._dataloader_metrics == {}
     assert trainer.num_completed_steps == 1
 
     metrics_processor.should_log.return_value = False

@@ -58,6 +58,10 @@ class BaseDataLoader(Stateful, ABC, Configurable):
     def __iter__(self) -> Iterator[TrainingMicrobatch]:
         ...
 
+    def drain_metrics(self) -> dict[str, float]:
+        """Return and reset dataloader metrics accumulated since the last call."""
+        return {}
+
     def close(self) -> None:
         pass
 
