@@ -12,7 +12,10 @@
 #   TEST_SUITE      features | models
 #   EXPORT_RESULTS  true to export numerics instead of comparing with goldens
 #   TEST_NAME       a single test name, or 'all'
-#   TEST_SCOPE      real_pg_required to narrow the suite, or empty for all
+#   TEST_SCOPE      real_pg_required to narrow the suite, or empty for all.
+#                   A ciflow/fake-pg tag runs only the tests that cannot use
+#                   Fake PG; main pushes, ciflow/real-pg tags, schedules and
+#                   manual runs leave it empty and run the full suite.
 
 set -eux
 
