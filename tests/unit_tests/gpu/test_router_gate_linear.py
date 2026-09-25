@@ -7,7 +7,7 @@
 import pytest
 import torch
 
-from torchtitan.distributed.utils import enable_fp32_matmul_emulation_with_bf16x9
+from torchtitan.distributed.utils import set_fp32_matmul_precision
 from torchtitan.models.common.linear import RouterGateLinear
 
 
@@ -47,7 +47,7 @@ def test_router_gate_linear_compiles_with_global_bfx9(input_dtype, weight_dtype)
     )
 
     try:
-        enable_fp32_matmul_emulation_with_bf16x9()
+        set_fp32_matmul_precision("bfx9")
         assert torch.backends.cuda.matmul.fp32_precision == "bfx9"
         output_TE = compiled(input_TD)
         output_TE.sum().backward()

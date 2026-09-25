@@ -79,6 +79,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=self.output_dir,
             ranks=global_ranks,
+            fp32_matmul_precision=config.training.fp32_matmul_precision,
         )
         self.ft_manager = self.fault_tolerance.build()
         self.parallel_dims = ParallelDims.from_config(
