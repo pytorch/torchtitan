@@ -23,8 +23,7 @@ pytestmark = [
     pytest.mark.skipif(
         torch.cuda.is_available()
         and (
-            torch.version.hip is not None
-            or torch.cuda.get_device_capability() < (8, 0)
+            torch.version.hip is not None or torch.cuda.get_device_capability() < (8, 0)
         ),
         reason="TF32 requires NVIDIA compute capability 8.0 or later",
     ),
