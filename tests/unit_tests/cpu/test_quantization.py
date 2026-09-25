@@ -39,6 +39,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
+    PartialRowParallelLinear,
     RouterGateLinear,
     RowParallelLinear,
 )
@@ -90,12 +91,15 @@ def _router_config_for_quantization(dim: int):
     )
 
 
-def test_quantization_preserves_invariant_row_parallel_linear():
-    config_cls = get_quantized_linear(_ScaledLinear, InvariantRowParallelLinear).Config
+@pytest.mark.parametrize(
+    "parallel_cls", [InvariantRowParallelLinear, PartialRowParallelLinear]
+)
+def test_quantization_preserves_specialized_row_parallel_linear(parallel_cls):
+    config_cls = get_quantized_linear(_ScaledLinear, parallel_cls).Config
     converted = config_cls(in_features=16, out_features=16, bias=True, scale=3.0)
 
     assert converted._owner is not None
-    assert issubclass(converted._owner, InvariantRowParallelLinear)
+    assert issubclass(converted._owner, parallel_cls)
     assert issubclass(converted._owner, _ScaledLinear)
 
     linear = converted.build()

@@ -121,10 +121,21 @@ class RoutedExperts(Module):
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         with maybe_set_sparse_mesh():
-            gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
+            gate_up_R2F = remat.region(
+                self.w13,
+                self.remat_region_name("w13"),
+                recompute=self.remat_should_recompute("w13"),
+            )(routed_input_RD.bfloat16(), offsets_E)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
+            remat.recompute_needs_tensor(gate_RF, up_RF)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
-            routed_output_RD = self.w2(hidden_RF, offsets_E).type_as(routed_input_RD)
+            routed_output_RD = remat.region(
+                self.w2,
+                self.remat_region_name("w2"),
+                recompute=self.remat_should_recompute("w2"),
+            )(hidden_RF, offsets_E)
+            remat.recompute_needs_tensor(routed_output_RD)
+            routed_output_RD = routed_output_RD.type_as(routed_input_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
