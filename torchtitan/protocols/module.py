@@ -52,6 +52,8 @@ class Module(nn.Module, Configurable):
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
+    _remat_policy_report: dict[str, str] | None = None
+    _always_saved_remat_regions: ClassVar[frozenset[str]] = frozenset()
     _module_protocol_exempt_children: ClassVar[frozenset[str]] = frozenset()
 
     def remat_region_name(self, local_name: str) -> str:
@@ -63,13 +65,31 @@ class Module(nn.Module, Configurable):
     def remat_should_recompute(self, local_name: str) -> bool:
         """Return whether a region should be recomputed during backward."""
         qualified_name = self.remat_region_name(local_name)
-        return not any(
+        recompute = not any(
             fnmatch(qualified_name, pattern) for pattern in self._remat_save_patterns
         )
+        if self._remat_policy_report is not None:
+            self._remat_policy_report[qualified_name] = (
+                "RECOMPUTE" if recompute else "SAVE"
+            )
+        return recompute
+
+    def always_saved_remat_region_name(self, local_name: str) -> str:
+        """Return the qualified name of a declared correctness region."""
+        assert local_name in self._always_saved_remat_regions, (
+            f"{type(self).__name__} did not declare {local_name!r} as an "
+            "always-saved remat region"
+        )
+        qualified_name = self.remat_region_name(local_name)
+        if self._remat_policy_report is not None:
+            self._remat_policy_report[qualified_name] = "ALWAYS_SAVE"
+        return qualified_name
 
     def configure_remat_regions(
         self,
         save_patterns: list[str],
+        *,
+        policy_report: dict[str, str] | None = None,
     ) -> None:
         """Configure remat region names and save patterns in this module tree.
 
@@ -83,6 +103,7 @@ class Module(nn.Module, Configurable):
                 continue
             module._remat_module_fqn = module_fqn
             module._remat_save_patterns = configured_patterns
+            module._remat_policy_report = policy_report
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):

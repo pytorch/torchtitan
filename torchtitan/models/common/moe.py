@@ -153,6 +153,8 @@ class TokenChoiceTopKRouter(Module):
     routed to top K experts based on the router scores.
     """
 
+    _always_saved_remat_regions = frozenset({"routing_decision"})
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
@@ -303,7 +305,7 @@ class TokenChoiceTopKRouter(Module):
         # routing side effects while retaining only the selected expert IDs.
         topk_expert_ids_TK = remat.region(
             self._select_and_record_experts,
-            "routing_decision",
+            self.always_saved_remat_region_name("routing_decision"),
             recompute=False,
         )(
             scores_TE,

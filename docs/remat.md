@@ -40,6 +40,13 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
+Set `report_effective_policy=True` to log the unique regions exercised by the
+first model forward. The report classifies each region as `SAVE`, `RECOMPUTE`,
+or `ALWAYS_SAVE`; the last category identifies correctness regions whose
+retention is independent of `save_regions`. Reported configurable names are
+the logical policy keys accepted by `save_regions`, so a grouped implementation
+may report one policy region even when it contains several physical regions.
+
 The main attention region families are:
 
 | Transformer block | Input projections | Inner compute | Output projection |
