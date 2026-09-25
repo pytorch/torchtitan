@@ -226,6 +226,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
         config = self.config
+        # Give each directed physical PP edge its own preinitialized
+        # communicator. This keeps NCCL operation ordering deterministic across
+        # ranks during eager execution and whole-step CUDA graph replay.
         dist_config.pipeline_per_edge_p2p = (
             config.parallelism.pipeline_parallel_degree > 1
         )
