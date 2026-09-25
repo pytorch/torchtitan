@@ -51,11 +51,15 @@ jobs:
 
         pip config --user set global.progress_bar off
 
+        # Cover the optional Verifiers example without installing it for all RL jobs.
+        uv pip install -r torchtitan/rl/examples/verifiers/dapo_math/requirements.txt
+
         # Install matching torch, torchvision, and vLLM CUDA nightlies here.
         uv pip install --upgrade torch torchvision vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match \
-          --constraint .ci/docker/requirements-rl.txt
+          --constraint .ci/docker/requirements-rl.txt \
+          --constraint torchtitan/rl/examples/verifiers/dapo_math/requirements.txt
         python -c '
         from importlib.metadata import version
         wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
