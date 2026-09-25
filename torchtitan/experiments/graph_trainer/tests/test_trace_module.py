@@ -157,6 +157,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
 
+        from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
         from torchtitan.training_engine import TrainingEngine
 
@@ -178,10 +179,11 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.device = torch.device("cpu")
         engine.model_config = MagicMock()
         engine.loss_fn = MagicMock()
+        engine.dist_moe_runtime = MagicMock()
         stage = SimpleNamespace(is_first=True, is_last=True)
-        graph_runtime = SimpleNamespace(
-            schedule=SimpleNamespace(_stages=[stage]),
-        )
+        graph_runtime = GraphRuntime.__new__(GraphRuntime)
+        graph_runtime.schedule = SimpleNamespace(_stages=[stage])
+        graph_runtime.register_metadata_inference_state_restorer = MagicMock()
 
         with (
             patch(
@@ -194,6 +196,9 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             engine._initialize_forward_backward()
 
         self.assertIs(engine.pp_schedule, graph_runtime)
+        graph_runtime.register_metadata_inference_state_restorer.assert_called_once_with(
+            engine.dist_moe_runtime.reset
+        )
         base_init.assert_called_once_with()
         make_runtime.assert_called_once_with(
             engine.model_parts[0],

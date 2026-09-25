@@ -30,6 +30,7 @@ dependencies = [
     "pillow",
     "spmd_types==0.2.5",
     "attn-gym[linear]==0.0.13",
+    "dist-moe @ git+https://github.com/meta-pytorch/dist_moe.git",
     # Keep this commit pin in sync with requirements.txt.
     "torch_remat @ git+https://github.com/meta-pytorch/remat.git@d302699b1c58f83fa2c7b03bc2593967e9530335",
 ]
@@ -79,6 +80,7 @@ python-version = "3.11"
 project-excludes = ["torchtitan/experiments", "torchtitan/rl", "**/tests/**"]
 replace-imports-with-any = [
     "torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "helion", "helion.*", "batch_invariant_ops", "torchcomms", # optional dependencies
+    "dist_moe", "dist_moe.*", # dependency without Pyrefly stubs
     # torch_remat is required, but does not publish Pyrefly stubs.
     "torch_remat",
 ]

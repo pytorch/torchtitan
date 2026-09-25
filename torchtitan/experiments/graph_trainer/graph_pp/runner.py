@@ -398,8 +398,10 @@ class GraphRuntime:
         schedule: _PipelineScheduleRuntime,
         *,
         graph_provider: StageGraphsProvider | None = None,
+        activation_liveness_schedule: _PipelineScheduleRuntime | None = None,
     ) -> None:
         self.schedule = schedule
+        self.activation_liveness_schedule = activation_liveness_schedule or schedule
         self.graph_provider = graph_provider
         self.overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
         self.stage_graphs: dict[int, StageGraphs] = {}
@@ -898,6 +900,7 @@ def register_graph_schedule(
     schedule: _PipelineScheduleRuntime,
     *,
     graph_provider: StageGraphsProvider | None = None,
+    activation_liveness_schedule: _PipelineScheduleRuntime | None = None,
 ) -> GraphRuntime:
     """Register graph action handlers on a runtime schedule.
 
@@ -916,6 +919,7 @@ def register_graph_schedule(
     runtime = GraphRuntime(
         schedule,
         graph_provider=graph_provider,
+        activation_liveness_schedule=activation_liveness_schedule,
     )
     # Calling convention:
     # Upstream computation types use PyTorch's validated

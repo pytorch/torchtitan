@@ -71,19 +71,20 @@ We look forward to your contributions!
    - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
 5. `torch.compile` support
 6. [Low-precision training](torchtitan/quantization/README.md) with [Float8](torchtitan/quantization/float8/README.md), [MXFP8](torchtitan/quantization/mxfp8/README.md), and [NVFP4](torchtitan/quantization/nvfp4/README.md)
-7. Supervised Fine-Tuning (SFT) with chat-formatted datasets
-8. DDP and HSDP
-9. [TorchFT](https://github.com/pytorch/torchft) integration
-10. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](torchtitan/components/data/README.md)
-11. Gradient accumulation, derived from `--training.num_tokens_per_train_step`
-12. Flexible learning rate scheduler (warmup-stable-decay)
-13. [BF16 optimizer states](torchtitan/components/optimizer/bf16_optimizer_states.md) for reduced memory usage
-14. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
-15. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
+7. [Distributed MoE](torchtitan/components/dist_moe/README.md) with fused CuTe DSL dispatch, expert compute, and combine on Blackwell GPUs
+8. Supervised Fine-Tuning (SFT) with chat-formatted datasets
+9. DDP and HSDP
+10. [TorchFT](https://github.com/pytorch/torchft) integration
+11. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](torchtitan/components/data/README.md)
+12. Gradient accumulation, derived from `--training.num_tokens_per_train_step`
+13. Flexible learning rate scheduler (warmup-stable-decay)
+14. [BF16 optimizer states](torchtitan/components/optimizer/bf16_optimizer_states.md) for reduced memory usage
+15. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
+16. [Debugging tools](docs/debugging.md) including CPU/GPU profiling, memory profiling, Flight Recorder, etc.
     - [Deterministic SDC replay](torchtitan/observability/silent_data_corruption.md)
-16. All options easily configured in [Python](torchtitan/config/README.md) with `--module` and `--config` CLI flags
-17. Structured logging: per-rank trace of key training phases; (see [`torchtitan/observability/structured_logger/README.md`](torchtitan/observability/structured_logger/README.md))
-18. [Helper scripts](scripts/) to
+17. All options easily configured in [Python](torchtitan/config/README.md) with `--module` and `--config` CLI flags
+18. Structured logging: per-rank trace of key training phases; (see [`torchtitan/observability/structured_logger/README.md`](torchtitan/observability/structured_logger/README.md))
+19. [Helper scripts](scripts/) to
     - download tokenizers and other Hugging Face assets (`scripts/download_hf_assets.py`)
     - convert checkpoints between Hugging Face and DCP formats (`scripts/checkpoint_conversion/`)
     - compare training losses across commits or configs (`scripts/loss_compare.py`)

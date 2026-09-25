@@ -17,6 +17,7 @@ from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConf
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
@@ -119,6 +120,14 @@ class GraphTrainingEngine(TrainingEngine):
             self.pp_has_last_stage = any(stage.is_last for stage in stages)
             assert self.pp_has_first_stage and self.pp_has_last_stage
 
+        if (
+            isinstance(self.pp_schedule, GraphRuntime)
+            and self.dist_moe_runtime is not None
+        ):
+            self.pp_schedule.register_metadata_inference_state_restorer(
+                self.dist_moe_runtime.reset
+            )
+
         super()._initialize_forward_backward()
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
@@ -140,6 +149,8 @@ class GraphTrainingEngine(TrainingEngine):
         accumulation_index: int = 0,
     ) -> torch.Tensor:
         if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
+            if self.parallel_dims.pp_enabled and self.dist_moe_runtime is not None:
+                self.dist_moe_runtime.reset()
             return super().forward_backward_microbatch(
                 microbatch_group=microbatch_group,
                 global_valid_tokens=global_valid_tokens,
