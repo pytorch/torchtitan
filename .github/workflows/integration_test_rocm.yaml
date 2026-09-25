@@ -23,7 +23,8 @@ permissions:
 
 jobs:
   set-matrix:
-    if: github.repository_owner == 'pytorch'
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     uses: ./.github/workflows/set-matrix.yaml
     with:
       gpu-arch: rocm
@@ -55,4 +56,3 @@ jobs:
         TEST_NAME="all" \
         TEST_SCOPE="" \
         bash .github/scripts/integration_test_real_pg.sh
-    secrets: inherit
