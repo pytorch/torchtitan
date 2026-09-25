@@ -11,6 +11,7 @@ schedule actions onto bound stage graph executors.
 """
 
 import logging
+from collections.abc import Callable
 from enum import Enum
 from typing import Any, cast
 
@@ -482,6 +483,20 @@ class GraphRuntime:
     def num_microbatches(self) -> int:
         """Return the number of microbatches owned by this runtime schedule."""
         return self.schedule._n_microbatches
+
+    def register_metadata_inference_state_restorer(
+        self,
+        restore: Callable[[], None],
+    ) -> None:
+        """Register state restoration after upstream metadata inference.
+
+        The schedule finishes metadata inference for every local stage before
+        invoking stage cleanup. Register the runtime-scoped callback on the
+        first local stage so an error while cleaning a later stage cannot skip
+        restoration.
+        """
+        stage = cast(GraphPipelineStage, self.schedule._stages[0])
+        stage.register_metadata_inference_state_restorer(restore)
 
     def ensure_ready(self, ctx: _PipelineContext) -> None:
         """Ensure local stage graphs and runtime state are ready for execution.
