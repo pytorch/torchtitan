@@ -64,7 +64,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"
                 " --module graph_trainer.llama3"
                 " --config graph_trainer_llama3_debugmodel_sdpa"
-                " --compile.mode aot_fx_trace"
                 f" --compile.precompile_artifact_dir {fx_trace_precompile_dir}"
                 " --parallelism.data_parallel_shard_degree 2"
                 " --parallelism.tensor_parallel_degree 4"
@@ -72,7 +71,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             override_args=[
                 "--module graph_trainer.llama3",
                 "--config graph_trainer_llama3_debugmodel_sdpa",
-                "--compile.mode aot_fx_trace",
                 f"--compile.precompile_artifact_dir {fx_trace_precompile_dir}",
                 "--parallelism.data_parallel_shard_degree 2",
                 "--parallelism.tensor_parallel_degree 4",
@@ -90,7 +88,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
                 "python -m torchtitan.experiments.graph_trainer.precompile_main"
                 " --module graph_trainer.deepseek_v3"
                 " --config graph_trainer_deepseek_v3_debugmodel"
-                " --compile.mode aot_fx_trace"
                 f" --compile.precompile_artifact_dir {dsv3_fx_trace_precompile_dir}"
                 " --parallelism.data_parallel_shard_degree 4"
                 " --parallelism.tensor_parallel_degree 2"
@@ -99,7 +96,6 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
             override_args=[
                 "--module graph_trainer.deepseek_v3",
                 "--config graph_trainer_deepseek_v3_debugmodel",
-                "--compile.mode aot_fx_trace",
                 f"--compile.precompile_artifact_dir {dsv3_fx_trace_precompile_dir}",
                 "--parallelism.data_parallel_shard_degree 4",
                 "--parallelism.tensor_parallel_degree 2",
