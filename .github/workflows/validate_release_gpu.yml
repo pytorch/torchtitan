@@ -40,7 +40,6 @@ jobs:
     name: Validate ${{ matrix.validation-suite }} on 8x A10G
     needs:
       - set-standard-matrix
-    if: ${{ needs.set-standard-matrix.outputs.matrix != '' && fromJSON(needs.set-standard-matrix.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
@@ -50,12 +49,13 @@ jobs:
           - graph-trainer
           - torchft
           - transformers-modeling-backend
-        runner_config: ${{ fromJSON(needs.set-standard-matrix.outputs.matrix).include }}
     with:
-      runner: ${{ matrix.runner_config.runner }}
-      gpu-arch-type: ${{ matrix.runner_config['gpu-arch-type'] }}
-      gpu-arch-version: ${{ matrix.runner_config['gpu-arch-version'] }}
-      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.runner_config['docker-image'] }}:${{ needs.set-standard-matrix.outputs.docker-hash }}
+      # Pinned rather than taken from set-matrix's default: release validation
+      # should not follow a change to the default CUDA runner.
+      runner: mt-l-x86aavx2-189-704-a10g-8
+      gpu-arch-type: cuda
+      gpu-arch-version: "13.0"
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:${{ needs.set-standard-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 180
