@@ -6,7 +6,6 @@
 
 from dataclasses import fields
 
-from torchtitan.models.common.config_utils import TpGemmBackend
 from torchtitan.models.llama3 import llama3_configs
 
 from ..common_utils import build_decoder_config_for_backend
@@ -18,7 +17,6 @@ def model_registry(
     *,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    tp_gemm_backend: TpGemmBackend = "default",
 ) -> GraphTrainerLlama3Model.Config:
     get_config, max_context_len = llama3_configs[flavor]
     context_len = seq_len or max_context_len
@@ -28,7 +26,7 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     base = build_decoder_config_for_backend(
-        get_config, attn_backend, seq_len=context_len, tp_gemm_backend=tp_gemm_backend
+        get_config, attn_backend, seq_len=context_len
     )
     config = GraphTrainerLlama3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
