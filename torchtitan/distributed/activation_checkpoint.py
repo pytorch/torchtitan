@@ -33,7 +33,9 @@ from torchtitan.protocols.module import Module
 logger = logging.getLogger(__name__)
 
 
-def _full_ac_policy(_ctx, _op, *_args, **_kwargs) -> CheckpointPolicy:
+def _full_ac_policy(
+    _ctx: object, _op: object, *_args: object, **_kwargs: object
+) -> CheckpointPolicy:
     """Recompute pure operations while PyTorch preserves registered effects."""
     return CheckpointPolicy.PREFER_RECOMPUTE
 

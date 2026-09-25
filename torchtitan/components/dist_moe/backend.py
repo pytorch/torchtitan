@@ -9,15 +9,18 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Literal, TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
-from torch.distributed.pipelining.schedules import (
-    _analyze_pipeline_resource_liveness,
-    PipelineScheduleMulti,
+from torch.distributed.pipelining import (
+    analyze_pipeline_activation_liveness,
+    PipelineStageInfo,
 )
+from torch.distributed.pipelining.schedules import PipelineScheduleMulti
 from torch.utils.hooks import RemovableHandle
 
 from torchtitan.models.common.activation import SwiGLU
@@ -97,7 +100,7 @@ class DistMoeRuntime:
     slots: dict[tuple[int, int], tuple[int, int]] = field(default_factory=dict)
     context: DistMoeContext | None = None
     _selected: tuple[int, int] | None = None
-    _pipeline_hooks: list[RemovableHandle] = field(default_factory=list)
+    _pipeline_context_handles: list[RemovableHandle] = field(default_factory=list)
 
     def initialize(self) -> None:
         """Create the shared context after model parameters and buffers exist.
@@ -120,40 +123,19 @@ class DistMoeRuntime:
                 if self.context is None and prefetch is not None:
                     prefetch.close()
 
-    def select_pipeline_slot(
-        self,
-        module: torch.nn.Module,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-    ) -> tuple[tuple[Any, ...], dict[str, Any]] | None:
-        """Select a precomputed PP activation slot before a stage forward.
+    @contextmanager
+    def pipeline_slot_context(self, info: PipelineStageInfo) -> Iterator[None]:
+        """Select a precomputed activation slot around a pipeline forward.
 
         Args:
-            module: Stage-root module invoking this forward pre-hook. It is not
-                otherwise inspected.
-            args: Positional stage-forward arguments, returned unchanged.
-            kwargs: Stage-forward keyword arguments containing the canonical
-                pipeline stage and microbatch indices.
-
-        Returns:
-            Updated arguments with the pipeline-only metadata removed, or
-            ``None`` when no metadata was supplied.
+            info: Canonical stage and microbatch identity supplied by PyTorch's
+                pipeline runtime for both ordinary forwards and metadata probes.
 
         Raises:
-            RuntimeError: If metadata is incomplete or the context has not been
-                initialized.
+            RuntimeError: If the DistMoE context has not been initialized.
             ValueError: If no immutable slot was planned for the invocation.
         """
-        del module
-        stage_index = kwargs.get("pipeline_stage_index")
-        microbatch_index = kwargs.get("pipeline_microbatch_index")
-        if stage_index is None and microbatch_index is None:
-            return
-        if not isinstance(stage_index, int) or not isinstance(microbatch_index, int):
-            raise RuntimeError(
-                "Dist-MoE pipeline forwards require integer stage and microbatch IDs"
-            )
-        key = (stage_index, microbatch_index)
+        key = (info.stage_index, info.microbatch_index)
         if key != self._selected:
             try:
                 slot, depth = self.slots[key]
@@ -166,16 +148,13 @@ class DistMoeRuntime:
                 raise RuntimeError("Dist-MoE context is not initialized")
             context.select_activation_slot(slot, depth)
             self._selected = key
-        model_kwargs = dict(kwargs)
-        del model_kwargs["pipeline_stage_index"]
-        del model_kwargs["pipeline_microbatch_index"]
-        return args, model_kwargs
+        yield
 
     def close(self) -> None:
         """Idempotently remove PP hooks and release all runtime-owned storage."""
-        for hook in self._pipeline_hooks:
-            hook.remove()
-        self._pipeline_hooks.clear()
+        for handle in self._pipeline_context_handles:
+            handle.remove()
+        self._pipeline_context_handles.clear()
         prefetch = self.prefetch
         self.prefetch = None
         if prefetch is not None:
@@ -291,10 +270,6 @@ class DistMoeRoutedExperts(RoutedExperts):
         self.top_k = config.token_dispatcher.top_k
         self._dist_moe_config = config
         self._runtime: DistMoeRuntime | None = None
-
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
-        """Shard owned parameters without wiring the unused stock dispatcher."""
-        Module.parallelize(self, parallel_dims)
 
     def _dist_moe_weight_operands(
         self,
@@ -495,7 +470,7 @@ def _plan_pipeline_activation_slots(
     schedule: PipelineScheduleMulti,
     *,
     pp_rank: int,
-    model_parts: list[torch.nn.Module],
+    model_parts: Sequence[torch.nn.Module],
     policy: DistMoeRoutedExperts.Config,
 ) -> _PipelineActivationPlan:
     """Choose the smallest configured schedule-derived PP activation plan.
@@ -539,9 +514,9 @@ def _plan_pipeline_activation_slots(
     plans = []
     stage_indices = tuple(stage_modules)
     for granularity in candidates:
-        liveness = _analyze_pipeline_resource_liveness(
+        liveness = analyze_pipeline_activation_liveness(
             schedule,
-            physical_rank=pp_rank,
+            pp_rank=pp_rank,
             stage_indices=stage_indices,
             granularity=granularity,
         )
@@ -575,7 +550,7 @@ def _plan_pipeline_activation_slots(
 def prepare_dist_moe_runtime(
     *,
     config: TrainingEngine.Config,
-    model_parts: list[torch.nn.Module],
+    model_parts: Sequence[torch.nn.Module],
     parallel_dims: ParallelDims,
     device: torch.device,
     pp_schedule: object | None,
@@ -716,15 +691,11 @@ def prepare_dist_moe_runtime(
 
         if pipeline_plan is not None:
             assert isinstance(pp_schedule, PipelineScheduleMulti)
-            for stage, part in zip(pp_schedule._stages, model_parts, strict=True):
+            for stage in pp_schedule._stages:
                 if stage.stage_index not in pipeline_plan.stage_indices:
                     continue
-                stage.pass_pipeline_metadata = True
-                runtime._pipeline_hooks.append(
-                    part.register_forward_pre_hook(
-                        runtime.select_pipeline_slot,
-                        with_kwargs=True,
-                    )
+                runtime._pipeline_context_handles.append(
+                    stage.register_forward_context(runtime.pipeline_slot_context)
                 )
     except Exception:
         if runtime is not None:

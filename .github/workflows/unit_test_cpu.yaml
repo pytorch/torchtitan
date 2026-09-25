@@ -14,13 +14,19 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
+  id-token: write
   contents: read
 
 jobs:
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
+
   build-test:
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    needs: set-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     with:
-      docker-image: torchtitan-ubuntu-22.04-clang12
+      runner: mt-l-x86iavx512-8-64
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:${{ needs.set-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
       script: |
         set -eux
