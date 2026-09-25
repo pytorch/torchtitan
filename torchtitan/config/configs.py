@@ -164,6 +164,11 @@ class ParallelismConfig:
     - "never" will disable `reshard_after_forward` for all forward passes.
     """
 
+    fsdp_defer_gradient_reduction: bool = False
+    """
+    Defer FSDP gradient reduction until the last gradient accumulation step.
+    """
+
     fsdp_symm_mem_scope: Annotated[FSDPSymmMemScope, tyro.conf.Suppress] = None
     """
     Which FSDP modules use symmetric-memory communication. None disables it.

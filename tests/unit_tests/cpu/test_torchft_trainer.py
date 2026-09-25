@@ -18,7 +18,7 @@ from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import model_registry
-from torchtitan.training_engine import TrainingEngine
+from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
@@ -85,6 +85,48 @@ def test_ft_trainer_composes_specialized_training_engine() -> None:
     assert issubclass(ft.FaultTolerantTrainingEngine, TrainingEngine)
 
 
+def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:
+    config = ft.FaultTolerantTrainer.Config(
+        model=model_registry("debugmodel"),
+        tokenizer=None,
+        loss=CrossEntropyLoss.Config(),
+    )
+    config.fault_tolerance.enable = True
+    config.training.disable_cuda_graphs = False
+    config.training.num_tokens_per_train_step = (
+        2 * config.training.num_tokens_per_microbatch_per_dp_rank
+    )
+    engine = SimpleNamespace(
+        parallel_dims=SimpleNamespace(
+            dp_enabled=False,
+            pp_enabled=False,
+            fsdp_enabled=True,
+        ),
+        ft_manager=SimpleNamespace(get_dp_info=lambda degree, rank: (degree, rank)),
+        device_memory_monitor=SimpleNamespace(),
+    )
+
+    monkeypatch.setattr(
+        ft, "FaultTolerantTrainingEngine", lambda *args, **kwargs: engine
+    )
+    monkeypatch.setattr(
+        type(config.dataloader),
+        "build",
+        lambda self, **kwargs: SimpleNamespace(max_num_documents=None),
+    )
+    monkeypatch.setattr(
+        type(config.metrics),
+        "build",
+        lambda self, **kwargs: SimpleNamespace(color=""),
+    )
+    monkeypatch.setattr(ft, "cuda_graphs_supported", lambda: True)
+
+    with pytest.raises(
+        ValueError, match="does not support CUDA-graphed FSDP gradient accumulation"
+    ):
+        ft.FaultTolerantTrainer(config)
+
+
 def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     engine = Mock(
         spec=ft.FaultTolerantTrainingEngine,
@@ -97,8 +139,9 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])]),
         num_completed_steps=1,
         ntokens_seen=4,
-        prepare_step=Mock(return_value=torch.tensor(4)),
-        forward_backward_microbatch=Mock(return_value=torch.tensor(2.0)),
+        forward_backward=Mock(
+            return_value=ForwardBackwardResult(torch.tensor(2.0), [])
+        ),
         optimizer_step=Mock(return_value=torch.tensor(0.0)),
     )
     trainer = Mock(
@@ -113,10 +156,13 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     monkeypatch.setattr(ft.dist_utils, "dist_max", Mock(return_value=2.0))
     monkeypatch.setattr(ft, "collect_aux_loss_metrics", Mock(return_value={}))
 
-    ft.FaultTolerantTrainer.train_step(
-        trainer, iter([SimpleNamespace(num_valid_tokens=4)])
-    )
+    microbatch = SimpleNamespace(num_valid_tokens=4)
+    ft.FaultTolerantTrainer.train_step(trainer, iter([microbatch]))
 
+    engine.forward_backward.assert_called_once()
+    forward_backward_args = engine.forward_backward.call_args.kwargs
+    assert forward_backward_args["microbatch_groups"] == [[microbatch]]
+    assert forward_backward_args["global_valid_tokens"].item() == 4
     trainer.metrics_processor.log.assert_called_once()
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
     assert logged_loss == 2.0
