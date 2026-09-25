@@ -43,6 +43,7 @@ from .linear import (
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
 from .nn_modules import (
+    BatchedLinear,
     Conv1d,
     Conv2d,
     GELU,
@@ -55,6 +56,7 @@ from .nn_modules import (
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "BatchedLinear",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
