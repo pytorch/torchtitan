@@ -397,9 +397,9 @@ class TestMoE(unittest.TestCase):
                 "torchtitan.models.common.moe.remat.recompute_needs_tensor"
             ) as recompute_needs_tensor,
         ):
-            moe._shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
-            moe._zero_fill_routed_output_to_tp_partial(x_TD)
-            moe._all_reduce_moe_output_across_tp(x_TD)
+            moe._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+            moe._maybe_zero_fill_routed_output_to_tp_partial(x_TD)
+            moe._maybe_all_reduce_moe_output_across_tp(x_TD)
             self.assertEqual(
                 redistribute.call_args_list,
                 [
@@ -502,7 +502,7 @@ class TestMoE(unittest.TestCase):
             (
                 actual_x_TD,
                 actual_padding_mask_T,
-            ) = moe._shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+            ) = moe._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
 
         self.assertIs(actual_x_TD, x_TD)
         self.assertIs(actual_padding_mask_T, padding_mask_T)

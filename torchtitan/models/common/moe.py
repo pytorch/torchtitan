@@ -695,7 +695,7 @@ class MoE(Module):
         (
             routed_x_TD,
             routed_padding_mask_T,
-        ) = self._shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
 
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
@@ -713,12 +713,12 @@ class MoE(Module):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        out_TD = self._zero_fill_routed_output_to_tp_partial(out_TD)
+        out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
             out_TD = out_TD + self.shared_experts(x_TD)
-        return self._all_reduce_moe_output_across_tp(out_TD)
+        return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
-    def _shard_routed_branch_inputs_across_tp(
+    def _maybe_shard_routed_branch_inputs_across_tp(
         self,
         x_TD: torch.Tensor,
         padding_mask_T: torch.Tensor | None,
@@ -755,7 +755,7 @@ class MoE(Module):
             )
         return x_TD, padding_mask_T
 
-    def _zero_fill_routed_output_to_tp_partial(
+    def _maybe_zero_fill_routed_output_to_tp_partial(
         self, routed_output_TD: torch.Tensor
     ) -> torch.Tensor:
         """Convert the routed token shard to a TP partial without communication.
@@ -781,7 +781,9 @@ class MoE(Module):
             backward_options={"op_dtype": routed_output_TD.dtype},
         )
 
-    def _all_reduce_moe_output_across_tp(self, out_TD: torch.Tensor) -> torch.Tensor:
+    def _maybe_all_reduce_moe_output_across_tp(
+        self, out_TD: torch.Tensor
+    ) -> torch.Tensor:
         """Reduce the combined partial output when dense SP is disabled."""
         if spmd_dense_sp_enabled():
             return out_TD

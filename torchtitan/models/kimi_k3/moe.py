@@ -64,7 +64,7 @@ class KimiLatentMoE(MoE):
         (
             routed_x_TD,
             routed_padding_mask_T,
-        ) = self._shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
 
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
             routed_x_TD,
@@ -81,7 +81,7 @@ class KimiLatentMoE(MoE):
             num_tokens_per_expert_E,
         )
         out_TD = self.routed_up(self.routed_norm(routed_TD))
-        out_TD = self._zero_fill_routed_output_to_tp_partial(out_TD)
+        out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
             out_TD = out_TD + self.shared_experts(x_TD)
-        return self._all_reduce_moe_output_across_tp(out_TD)
+        return self._maybe_all_reduce_moe_output_across_tp(out_TD)

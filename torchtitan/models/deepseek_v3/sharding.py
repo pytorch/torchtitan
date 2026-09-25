@@ -165,9 +165,6 @@ def _set_deepseek_v3_mtp_sharding(
                 in_src_shardings={
                     "mtp_input_valid_mask": token_id_placement(),
                 },
-                in_dst_shardings={
-                    "mtp_input_valid_mask": token_id_placement(enable_sp=enable_sp),
-                },
             )
         _set_deepseek_v3_layer_sharding(
             mtp_layer_cfg,

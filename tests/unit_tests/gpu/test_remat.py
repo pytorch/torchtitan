@@ -138,7 +138,7 @@ class _MoEOutputReductionBlock(Module):
         Module.__init__(self.moe)
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        out_TD = self.moe._all_reduce_moe_output_across_tp(x_TD)
+        out_TD = self.moe._maybe_all_reduce_moe_output_across_tp(x_TD)
         return out_TD.square().sum()
 
 

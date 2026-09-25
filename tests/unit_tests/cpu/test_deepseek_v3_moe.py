@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import patch
 
+import spmd_types as spmd
 import torch
 
 from torchtitan.config.transform import AsyncTensorParallelTransform
@@ -18,12 +20,59 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
-from torchtitan.models.deepseek_v3 import deepseekv3_configs
+from torchtitan.models.deepseek_v3 import deepseekv3_configs, model_registry
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
+from torchtitan.models.deepseek_v3.mtp import MTPTransformerBlock
 from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
 
 
 class TestDeepSeekV3Router(unittest.TestCase):
+    def test_mtp_valid_mask_is_explicitly_sharded(self):
+        mtp = MTPTransformerBlock.__new__(MTPTransformerBlock)
+        valid_mask_T = torch.ones(4, dtype=torch.bool)
+        tp_group = object()
+
+        with (
+            patch(
+                "torchtitan.models.deepseek_v3.mtp.spmd_dense_sp_enabled",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.models.deepseek_v3.mtp.spmd_mesh_group",
+                return_value=tp_group,
+            ),
+            patch(
+                "torchtitan.models.deepseek_v3.mtp.spmd.redistribute",
+                side_effect=lambda tensor, *_args, **_kwargs: tensor,
+            ) as redistribute,
+        ):
+            actual_valid_mask_T = mtp._maybe_shard_mtp_valid_mask_across_tp(
+                valid_mask_T
+            )
+
+        self.assertIs(actual_valid_mask_T, valid_mask_T)
+        redistribute.assert_called_once_with(
+            valid_mask_T,
+            tp_group,
+            src=spmd.R,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": valid_mask_T.dtype},
+        )
+
+    def test_mtp_mask_remains_replicated_at_block_boundary(self):
+        config = model_registry(
+            "debugmodel",
+            seq_len=128,
+            num_mtp_layers=1,
+        )
+        set_deepseek_v3_sharding_config(config, enable_sp=True, enable_ep=True)
+
+        mtp_config = config.mtp_layers[0].sharding_config
+        assert mtp_config is not None
+        assert mtp_config.in_src_shardings is not None
+        self.assertIn("mtp_input_valid_mask", mtp_config.in_src_shardings)
+        self.assertIsNone(mtp_config.in_dst_shardings)
+
     def test_select_experts_limits_choices_to_selected_groups(self):
         router = DeepSeekV3Router.Config(
             num_experts=4,
