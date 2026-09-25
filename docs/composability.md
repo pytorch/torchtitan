@@ -62,14 +62,6 @@ config.parallelism.pp_num_unshard_lookahead_factor = "auto"
 config.parallelism.pp_num_unshard_lookahead_factor = (4, 4, 4, 4)
 ```
 
-Controlled 16-GPU PP2 and replicated PP4 measurements found no repeatable
-throughput regression from `"auto"`: PP2 was effectively flat, and the two PP4
-pairs changed sign. Traces confirmed that only all-gather issue points moved and
-that collective counts were unchanged. This evidence supports `"auto"` as a
-general TorchTitan policy without claiming that it is a universal performance
-improvement; large models, fabrics, and asymmetric schedules should still be
-profiled before choosing an explicit tuple.
-
 ## On upcasting the final output to fp32
 We intentionally upcast the final output tensor to fp32 inside the loss function rather in the `Transformer.forward()` so that forward and backward casts can be fused with the loss forward and backward respectively when we `torch.compile()` the loss function. This can improve both throughput and memory usage.
 
