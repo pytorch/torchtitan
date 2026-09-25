@@ -27,6 +27,7 @@ from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
 __all__ = [
     "FusedSwiGLU",
     "fused_swiglu",
+    "fused_swiglu_feed_forward",
     "silu_and_mul_backward_kernel",
     "silu_and_mul_forward_kernel",
     "silu_and_mul_op",
@@ -367,4 +368,15 @@ def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     description="Fuse the SwiGLU SiLU and multiply operations with Triton.",
 )
 def fused_swiglu(cfg: SwiGLU.Config) -> FusedSwiGLU.Config:
+    return derive(cfg, FusedSwiGLU.Config)
+
+
+@override(
+    target=SwiGLU.Config,
+    fqns=["*.feed_forward.activation_fn", "*.shared_experts.activation_fn"],
+    exact=True,
+    description="Fuse SwiGLU in dense and shared-expert feed-forwards with Triton.",
+)
+def fused_swiglu_feed_forward(cfg: SwiGLU.Config) -> FusedSwiGLU.Config:
+    """Fuse feed-forward activations without claiming backend-owned experts."""
     return derive(cfg, FusedSwiGLU.Config)

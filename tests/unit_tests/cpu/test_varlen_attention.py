@@ -13,6 +13,8 @@ from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
+import torch.nn.functional as F
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
@@ -21,9 +23,18 @@ from torchtitan.models.common.attention import (
     GQAttention,
     QKVLinear,
     VarlenInnerAttention,
+    VarlenMetadata,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import ComplexRoPE
+
+
+def _build_fixed_rows_attention() -> VarlenInnerAttention:
+    with patch(
+        "torchtitan.tools.utils.get_cuda_flash_attention_impl",
+        return_value=None,
+    ):
+        return VarlenInnerAttention.Config(fixed_length_rows=True).build()
 
 
 class TestPackedVarlenMetadata(unittest.TestCase):
@@ -74,6 +85,20 @@ class TestPackedVarlenMetadata(unittest.TestCase):
         torch.testing.assert_close(
             metadata.cu_seq_q,
             torch.tensor([0, 2, 4, 8, 8], dtype=torch.int32),
+        )
+        self.assertEqual(metadata.max_q, 4)
+
+    def test_fixed_length_rows_have_intrinsically_fixed_metadata(self):
+        metadata = create_varlen_metadata_for_document(
+            torch.arange(4).repeat(2),
+            max_num_documents=8,
+            max_context_length=4,
+            fixed_length_rows=True,
+        )
+
+        torch.testing.assert_close(
+            metadata.cu_seq_q,
+            torch.tensor([0, 4, 8], dtype=torch.int32),
         )
         self.assertEqual(metadata.max_q, 4)
 
@@ -170,6 +195,185 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             )
 
         self.assertEqual(out_THV.shape, q_THK.shape)
+
+    def test_fixed_rows_use_dense_sdpa_with_distinct_value_dimension(self):
+        torch.manual_seed(42)
+        num_sequences, sequence_length = 2, 4
+        q_THK = torch.randn(8, 4, 5, requires_grad=True)
+        k_THK = torch.randn(8, 2, 5, requires_grad=True)
+        v_THV = torch.randn(8, 2, 3, requires_grad=True)
+        positions_T = torch.arange(sequence_length).repeat(num_sequences)
+        metadata = create_varlen_metadata_for_document(
+            positions_T,
+            max_num_documents=num_sequences,
+            max_context_length=sequence_length,
+            fixed_length_rows=True,
+        )
+        inner_attention = _build_fixed_rows_attention()
+
+        out_THV = inner_attention(
+            q_THK,
+            k_THK,
+            v_THV,
+            attention_masks=metadata,
+            scale=0.25,
+            enable_gqa=True,
+        )
+
+        q_ref_THK = q_THK.detach().clone().requires_grad_()
+        k_ref_THK = k_THK.detach().clone().requires_grad_()
+        v_ref_THV = v_THV.detach().clone().requires_grad_()
+        with sdpa_kernel(SDPBackend.MATH):
+            expected_BHLV = F.scaled_dot_product_attention(
+                q_ref_THK.reshape(2, 4, 4, 5).transpose(1, 2).to(torch.bfloat16),
+                k_ref_THK.reshape(2, 4, 2, 5).transpose(1, 2).to(torch.bfloat16),
+                v_ref_THV.reshape(2, 4, 2, 3).transpose(1, 2).to(torch.bfloat16),
+                is_causal=True,
+                scale=0.25,
+                enable_gqa=True,
+            )
+        expected_THV = expected_BHLV.transpose(1, 2).reshape(8, 4, 3).float()
+        torch.testing.assert_close(out_THV, expected_THV)
+
+        out_THV.square().sum().backward()
+        expected_THV.square().sum().backward()
+        for actual, expected in (
+            (q_THK.grad, q_ref_THK.grad),
+            (k_THK.grad, k_ref_THK.grad),
+            (v_THV.grad, v_ref_THV.grad),
+        ):
+            self.assertIsNotNone(actual)
+            torch.testing.assert_close(actual, expected)
+
+    def test_fixed_rows_reject_nonuniform_metadata(self):
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "fixed_length_rows requires positions to reset only at row boundaries",
+        ):
+            create_varlen_metadata_for_document(
+                torch.tensor([0, 1, 0, 1, 2, 3]),
+                max_num_documents=2,
+                max_context_length=3,
+                fixed_length_rows=True,
+            )
+
+    def test_fixed_attention_rejects_unvalidated_metadata(self):
+        metadata = create_varlen_metadata_for_document(
+            torch.arange(3).repeat(2),
+            max_num_documents=2,
+            max_context_length=3,
+        )
+        q_THK = torch.randn(6, 2, 4)
+        inner_attention = _build_fixed_rows_attention()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires metadata constructed for fixed rows",
+        ):
+            inner_attention(
+                q_THK,
+                q_THK,
+                q_THK,
+                attention_masks=metadata,
+            )
+
+    def test_fixed_rows_trace_as_one_full_graph(self):
+        torch.manual_seed(42)
+        q_THK = torch.randn(8, 2, 4, requires_grad=True)
+        k_THK = torch.randn(8, 2, 4, requires_grad=True)
+        v_THV = torch.randn(8, 2, 3, requires_grad=True)
+        metadata = create_varlen_metadata_for_document(
+            torch.arange(4).repeat(2),
+            max_num_documents=2,
+            max_context_length=4,
+            fixed_length_rows=True,
+        )
+        inner_attention = _build_fixed_rows_attention()
+
+        def run_dense(q, k, v):
+            return inner_attention(q, k, v, attention_masks=metadata)
+
+        q_ref_THK = q_THK.detach().clone().requires_grad_()
+        k_ref_THK = k_THK.detach().clone().requires_grad_()
+        v_ref_THV = v_THV.detach().clone().requires_grad_()
+        expected = run_dense(q_ref_THK, k_ref_THK, v_ref_THV)
+        expected.sum().backward()
+
+        compiled = torch.compile(run_dense, backend="aot_eager", fullgraph=True)
+        actual = compiled(q_THK, k_THK, v_THV)
+        actual.sum().backward()
+
+        torch.testing.assert_close(actual, expected)
+        for actual_grad, expected_grad in (
+            (q_THK.grad, q_ref_THK.grad),
+            (k_THK.grad, k_ref_THK.grad),
+            (v_THV.grad, v_ref_THV.grad),
+        ):
+            self.assertIsNotNone(actual_grad)
+            torch.testing.assert_close(actual_grad, expected_grad)
+
+    def test_fixed_rows_with_output_transform_retain_varlen_path(self):
+        num_tokens, num_heads, head_dim = 6, 2, 4
+        q_THK = torch.randn(num_tokens, num_heads, head_dim)
+        metadata = create_varlen_metadata_for_document(
+            torch.arange(3).repeat(2),
+            max_num_documents=2,
+            max_context_length=3,
+            fixed_length_rows=True,
+        )
+        inner_attention = _build_fixed_rows_attention()
+
+        def _varlen_with_lse(q, k, v, *args, **kwargs):
+            return q, torch.randn(num_heads, num_tokens)
+
+        with patch(
+            "torchtitan.models.common.attention._varlen_attn",
+            side_effect=_varlen_with_lse,
+        ) as varlen_mock:
+            out_THV = inner_attention(
+                q_THK,
+                q_THK,
+                q_THK,
+                attention_masks=metadata,
+                out_transform=lambda out, lse: out,
+            )
+
+        self.assertEqual(out_THV.shape, q_THK.shape)
+        varlen_mock.assert_called_once()
+
+    def test_fixed_rows_require_causal_attention(self):
+        with self.assertRaisesRegex(ValueError, "only supports causal"):
+            with patch(
+                "torchtitan.tools.utils.get_cuda_flash_attention_impl",
+                return_value=None,
+            ):
+                VarlenInnerAttention.Config(
+                    fixed_length_rows=True,
+                    window_size=(-1, -1),
+                ).build()
+
+    def test_decoder_infers_fixed_row_length_for_precompile_inputs(self):
+        from torchtitan.models.llama3 import llama3_configs
+
+        build_config, _ = llama3_configs["debugmodel"]
+        model_config = build_config("varlen", seq_len=4)
+        inner_attention = model_config.first_full_attention_backend
+        self.assertIsInstance(inner_attention, VarlenInnerAttention.Config)
+        inner_attention.fixed_length_rows = True
+        with patch(
+            "torchtitan.tools.utils.get_cuda_flash_attention_impl",
+            return_value=None,
+        ):
+            model = model_config.build()
+
+        metadata = model.get_attention_masks(torch.arange(4).repeat(2))
+
+        self.assertIsInstance(metadata, VarlenMetadata)
+        self.assertTrue(metadata.fixed_length_rows)
+        torch.testing.assert_close(
+            metadata.cu_seq_q,
+            torch.tensor([0, 4, 8], dtype=torch.int32),
+        )
 
     def test_llama_decoder_preserves_td_shape(self):
         from torchtitan.models.llama3 import llama3_configs

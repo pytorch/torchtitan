@@ -23,6 +23,12 @@ class ConcatThenSplitPackingConfig:
     """Concatenates documents, chunking them into fixed-length rows."""
 
     dataset: DatasetConfig
+    mask_document_boundaries: bool = True
+    """Reset positions at source-document boundaries within each packed row.
+
+    When false, fill the complete microbatch and reset positions only at fixed
+    context-row boundaries. Labels retain their source-document EOS targets.
+    """
 
     def build(
         self,
@@ -30,11 +36,22 @@ class ConcatThenSplitPackingConfig:
         context: DatasetBuildContext,
         dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.IterDataset:
+        if not self.mask_document_boundaries and context.max_num_documents is not None:
+            num_context_rows = (
+                context.num_tokens_per_microbatch + context.max_context_length - 1
+            ) // context.max_context_length
+            if context.max_num_documents < num_context_rows:
+                raise ValueError(
+                    "max_num_documents must be at least the number of fixed context "
+                    "rows when mask_document_boundaries is false; got "
+                    f"max_num_documents={context.max_num_documents} and "
+                    f"num_context_rows={num_context_rows}"
+                )
         dataset = self.dataset.build(
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,
         )
-        if context.max_num_documents is not None:
+        if context.max_num_documents is not None and self.mask_document_boundaries:
             if isinstance(dataset, grain.MapDataset):
                 dataset = dataset.to_iter_dataset(read_options=context.read_options)
             return _DocumentAwareConcatThenSplitIterDataset(
@@ -65,6 +82,7 @@ class ConcatThenSplitPackingConfig:
             partial(
                 _packing_output_to_text_sequence,
                 max_context_length=context.max_context_length,
+                mask_document_boundaries=self.mask_document_boundaries,
             )
         )
 
@@ -382,6 +400,7 @@ def _packing_output_to_text_sequence(
     packing_output: dict[str, np.ndarray],
     *,
     max_context_length: int,
+    mask_document_boundaries: bool = True,
 ) -> TextSequence:
     """Finalize packed text by masking padding and canonicalizing positions."""
     segment_ids = np.asarray(packing_output["input_ids_segment_ids"])
@@ -390,12 +409,15 @@ def _packing_output_to_text_sequence(
     labels = np.asarray(packing_output["labels"]).copy()
     labels[padding_mask] = IGNORE_INDEX
 
-    # A zero starts a document. For [0, 1, 2, 0, 1], segment_starts is
-    # [0, 0, 0, 3, 3], so subtracting it restores [0, 1, 2, 0, 1].
-    boundaries = np.asarray(packing_output["positions"]) == 0
-    token_indices = np.arange(len(boundaries), dtype=np.int64)
-    segment_starts = np.maximum.accumulate(np.where(boundaries, token_indices, 0))
-    positions = token_indices - segment_starts
+    token_indices = np.arange(len(segment_ids), dtype=np.int64)
+    if mask_document_boundaries:
+        # A zero starts a document. For [0, 1, 2, 0, 1], segment_starts is
+        # [0, 0, 0, 3, 3], so subtracting it restores [0, 1, 2, 0, 1].
+        boundaries = np.asarray(packing_output["positions"]) == 0
+        segment_starts = np.maximum.accumulate(np.where(boundaries, token_indices, 0))
+        positions = token_indices - segment_starts
+    else:
+        positions = token_indices % max_context_length
 
     packing_padding = segment_ids == 0
     if np.any(packing_padding):

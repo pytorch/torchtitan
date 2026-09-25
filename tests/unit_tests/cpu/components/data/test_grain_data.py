@@ -1002,6 +1002,65 @@ def test_document_aware_concat_packing_restores_exactly():
         )
 
 
+def test_concat_packing_can_mask_only_fixed_context_boundaries():
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=tuple({"tokens": [1, 10 + index, 2]} for index in range(6))
+        ),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_microbatch=12,
+        max_num_documents=3,
+    )
+    config = ConcatThenSplitPackingConfig(
+        dataset=documents,
+        mask_document_boundaries=False,
+    )
+
+    row = next(
+        iter(
+            config.build(
+                context=context,
+                dataset_iteration_policy=dataset_iteration_policy(),
+            )
+        )
+    )
+
+    np.testing.assert_array_equal(row.positions, np.tile(np.arange(4), 3))
+    np.testing.assert_array_equal(row.padding_mask, np.zeros(12, dtype=np.bool_))
+    # The labels still close each source document even though positions do not reset.
+    np.testing.assert_array_equal(row.labels[1::2], np.full(6, 2))
+
+
+def test_unmasked_concat_packing_validates_fixed_context_row_capacity():
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(rows=({"tokens": [1, 10, 2]},)),
+        processor=RowToTokens.Config(),
+    )
+    context = replace(
+        CONTEXT,
+        max_context_length=4,
+        num_tokens_per_microbatch=12,
+        max_num_documents=2,
+    )
+    config = ConcatThenSplitPackingConfig(
+        dataset=documents,
+        mask_document_boundaries=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="max_num_documents=2 and num_context_rows=3",
+    ):
+        config.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy(),
+        )
+
+
 @pytest.mark.parametrize(
     "packing_type",
     [ConcatThenSplitPackingConfig, FirstFitPackingConfig],
