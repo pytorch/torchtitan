@@ -266,6 +266,7 @@ class TokenChoiceTopKRouter(Module):
                 "routing_decision",
                 recompute=False,
             )(scores_TE)
+            remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
         else:
             topk_expert_ids_TK = remat.region(
                 self._select_experts,
@@ -277,10 +278,10 @@ class TokenChoiceTopKRouter(Module):
                 padding_mask_T=padding_mask_T,
                 **router_kwargs,
             )
+            remat.recompute_needs_tensor(topk_expert_ids_TK)
             # The expert bias is only used for routing. The gating value is
             # still derived from the original scores.
             topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-        remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
 
         if self.route_norm:
             denominator_T1 = (
