@@ -238,29 +238,22 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
-    pipeline_parallel_max_param_unsharded_stages: int | None = None
+    pp_max_unsharded_active_stages: int | None = None
     """Maximum local pipeline stages whose parameters may remain unsharded.
 
-    By default, all local stages may remain unsharded to maximize communication
-    overlap. Set a smaller value to reduce peak parameter memory at the cost of
-    potentially exposing additional FSDP all-gather communication.
+    ``None`` keeps all stages owned by the local pipeline rank resident. A
+    smaller value reduces peak unsharded-parameter memory, but may expose more
+    FSDP communication because evicted stages must be unsharded again.
     """
 
-    pipeline_parallel_unshard_lookahead: Literal["full", "auto"] | tuple[
-        int, ...
-    ] = "auto"
-    """FSDP all-gather prefetch distance for looped pipeline schedules.
+    pp_num_unshard_lookahead_factor: Literal["auto", "full"] | tuple[int, ...] = "auto"
+    """FSDP unshard issue distance for multi-stage pipeline schedules.
 
-    This is independent of parameter residency:
-    ``pipeline_parallel_max_param_unsharded_stages`` controls which stages stay
-    resident and when they reshard, while this setting controls only how early
-    eligible unshards are issued. ``"full"`` uses that entire residency window
-    on every rank and preserves PyTorch's schedule default. ``"auto"``, the
-    TorchTitan default, resolves rank ``r`` to
-    ``min(r + 2, max_unsharded_stages)``. A tuple provides one positive distance
-    per PP rank for expert tuning; its length must equal the PP degree and no
-    value may exceed the residency bound. See ``docs/composability.md`` for the
-    scheduling contract and measured tradeoffs.
+    This setting does not change parameter residency, collective count, or
+    reshard placement. ``"auto"`` uses ``min(pp_rank + 2,
+    pp_max_unsharded_active_stages)``. ``"full"`` uses the complete residency
+    window. A tuple supplies one positive value per pipeline rank for expert
+    tuning. See ``docs/composability.md`` for the detailed contract.
     """
 
     context_parallel_degree: int = 1
@@ -297,13 +290,11 @@ class ParallelismConfig:
                 f"(got {self.context_parallel_load_balancer!r})"
             )
         if (
-            self.pipeline_parallel_max_param_unsharded_stages is not None
-            and self.pipeline_parallel_max_param_unsharded_stages < 1
+            self.pp_max_unsharded_active_stages is not None
+            and self.pp_max_unsharded_active_stages < 1
         ):
-            raise ValueError(
-                "pipeline_parallel_max_param_unsharded_stages must be positive"
-            )
-        lookahead = self.pipeline_parallel_unshard_lookahead
+            raise ValueError("pp_max_unsharded_active_stages must be positive")
+        lookahead = self.pp_num_unshard_lookahead_factor
         if isinstance(lookahead, str):
             valid_lookahead = lookahead in {"full", "auto"}
         elif isinstance(lookahead, tuple):
@@ -311,18 +302,18 @@ class ParallelismConfig:
                 not isinstance(value, bool) and isinstance(value, int) and value >= 1
                 for value in lookahead
             )
-            max_unsharded = self.pipeline_parallel_max_param_unsharded_stages
-            if valid_lookahead and max_unsharded is not None:
-                valid_lookahead = all(value <= max_unsharded for value in lookahead)
+            if valid_lookahead and self.pp_max_unsharded_active_stages is not None:
+                valid_lookahead = all(
+                    value <= self.pp_max_unsharded_active_stages for value in lookahead
+                )
         else:
             valid_lookahead = False
         if not valid_lookahead:
             raise ValueError(
-                "pipeline_parallel_unshard_lookahead must be 'full', 'auto', "
-                "or a tuple with one positive integer per pipeline rank. "
-                "Tuple values may not exceed "
-                "pipeline_parallel_max_param_unsharded_stages when that limit "
-                f"is set; got {lookahead!r} for pipeline degree "
+                "pp_num_unshard_lookahead_factor must be 'full', 'auto', or "
+                "a tuple with one positive integer per pipeline rank. Tuple "
+                "values may not exceed pp_max_unsharded_active_stages when "
+                f"that limit is set; got {lookahead!r} for pipeline degree "
                 f"{self.pipeline_parallel_degree}"
             )
         if self.fsdp_symm_mem_scope not in _FSDP_SYMM_MEM_SCOPES:
