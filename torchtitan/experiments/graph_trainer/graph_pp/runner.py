@@ -13,6 +13,7 @@ schedule actions onto bound stage graph executors.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from enum import Enum
 from typing import Any, cast, TYPE_CHECKING
 
@@ -33,6 +34,7 @@ from torch.distributed.pipelining.schedules import (
     WAIT_REDUCE_GRAD,
 )
 from torch.distributed.pipelining.stage import _normalize_model_output_as_tuple
+from torch.utils.hooks import RemovableHandle
 
 from torchtitan.experiments.graph_trainer.common_utils import accumulate_param_grads_
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
@@ -443,6 +445,20 @@ class GraphRuntime:
                 microbatch_index=microbatch_index,
             )
         )
+
+    def register_metadata_inference_state_restorer(
+        self,
+        restore: Callable[[], None],
+    ) -> RemovableHandle:
+        """Register state restoration after upstream metadata inference.
+
+        The schedule finishes metadata inference for every local stage before
+        invoking stage cleanup. Register the runtime-scoped callback on the
+        first local stage so an error while cleaning a later stage cannot skip
+        restoration.
+        """
+        stage = cast(GraphPipelineStage, self.schedule._stages[0])
+        return stage.register_metadata_inference_state_restorer(restore)
 
     def ensure_ready(self, ctx: _PipelineContext) -> None:
         """Ensure local stage graphs and runtime state are ready for execution.

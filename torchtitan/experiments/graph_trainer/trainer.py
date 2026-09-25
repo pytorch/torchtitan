@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any
 
 import torch
+from torch.utils.hooks import RemovableHandle
 
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -44,6 +45,8 @@ class GraphTrainingEngine(TrainingEngine):
     such as RL training.
     """
 
+    _metadata_inference_state_handle: RemovableHandle | None
+
     def __init__(
         self,
         config: "GraphTrainer.Config",
@@ -61,6 +64,7 @@ class GraphTrainingEngine(TrainingEngine):
                 f"(got {model_config.local_compile_regions})."
             )
         validate_memory_policy_config(config.compile)
+        self._metadata_inference_state_handle = None
         super().__init__(
             config,
             model_config=model_config,
@@ -142,6 +146,16 @@ class GraphTrainingEngine(TrainingEngine):
             self.pp_has_first_stage = any(stage.is_first for stage in stages)
             self.pp_has_last_stage = any(stage.is_last for stage in stages)
             assert self.pp_has_first_stage and self.pp_has_last_stage
+
+        if (
+            isinstance(self.pp_schedule, GraphRuntime)
+            and self._dist_moe_runtime is not None
+        ):
+            self._metadata_inference_state_handle = (
+                self.pp_schedule.register_metadata_inference_state_restorer(
+                    self._dist_moe_runtime.reset
+                )
+            )
 
         sdc_config = self.config.sdc_replayer
         self.sdc_replayer = None
@@ -277,6 +291,10 @@ class GraphTrainingEngine(TrainingEngine):
         return ForwardBackwardResult(accumulated_loss, loss_metrics)
 
     def close(self) -> None:
+        if self._metadata_inference_state_handle is not None:
+            self._metadata_inference_state_handle.remove()
+            self._metadata_inference_state_handle = None
+
         if self._pinned_pool_ctx is not None:
             self._pinned_pool_ctx.__exit__(None, None, None)
             self._pinned_pool_ctx = None

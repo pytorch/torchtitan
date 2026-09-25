@@ -952,6 +952,23 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(len(stage.state.sharded_param_values), 2)
         self.assertEqual(stage.state.unsharded_param_grads, [])
 
+    def test_runtime_registers_metadata_restorer_on_first_local_stage(self) -> None:
+        first_stage = mock.Mock()
+        last_stage = mock.Mock()
+        handle = mock.Mock()
+        first_stage.register_metadata_inference_state_restorer.return_value = handle
+        runner = GraphRuntime.__new__(GraphRuntime)
+        runner.schedule = types.SimpleNamespace(_stages=[first_stage, last_stage])
+        restore = mock.Mock()
+
+        result = runner.register_metadata_inference_state_restorer(restore)
+
+        self.assertIs(result, handle)
+        first_stage.register_metadata_inference_state_restorer.assert_called_once_with(
+            restore
+        )
+        last_stage.register_metadata_inference_state_restorer.assert_not_called()
+
     def test_last_stage_forward_leaves_losses_to_upstream_update(self) -> None:
         loss = torch.tensor(1.0)
         stage = types.SimpleNamespace(
