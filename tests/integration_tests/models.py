@@ -168,7 +168,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac],
-            test_descr="Qwen3.5 FSDP+TP+VARLEN_ATTN + per op SAC",
+            test_descr="Qwen3.5 FSDP+TP+VARLEN_ATTN + selective AC",
             test_name="qwen3_5_fsdp+tp+varlen_attn+per_op_sac",
             ngpu=4,
             skip_rocm_test=True,
@@ -192,7 +192,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac],
-            test_descr="GPT-OSS PP+FSDP+CP+EP+SACOP",
+            test_descr="GPT-OSS PP+FSDP+CP+EP+selective AC",
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
             golden_numerics_path="tests/assets/losses/real_pg/{gpu_arch}/gpt_oss_pp.txt",
@@ -201,7 +201,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.gpt_oss_debugmodel_fsdp4_pp2_ep4_sac],
-            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenInnerAttention",
+            test_descr="GPT-OSS PP+FSDP+EP+selective AC with VarlenInnerAttention",
             test_name="gpt_oss_pp+fsdp+ep+sacop",
             ngpu=8,
             use_real_pg=True,
