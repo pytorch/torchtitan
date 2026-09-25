@@ -27,6 +27,7 @@ RUN bash ./install_user.sh && rm install_user.sh
 # Install conda and other dependencies
 ARG MINICONDA_VERSION
 ARG PYTHON_VERSION
+ARG INSTALL_RL_DEPS=0
 ENV PYTHON_VERSION=$PYTHON_VERSION
 ENV PATH /opt/conda/envs/py_$PYTHON_VERSION/bin:/opt/conda/bin:$PATH
 COPY requirements-dev.txt /opt/conda/
@@ -34,10 +35,11 @@ COPY requirements.txt /opt/conda/
 COPY requirements-flux.txt /opt/conda/
 COPY requirements-vlm.txt /opt/conda/
 COPY requirements-transformers-modeling-backend.txt /opt/conda/
+COPY requirements-rl.txt /opt/conda/
 COPY conda-env-ci.txt /opt/conda/
 COPY ./common/install_conda.sh install_conda.sh
 COPY ./common/utils.sh utils.sh
-RUN bash ./install_conda.sh && rm install_conda.sh utils.sh /opt/conda/requirements-dev.txt /opt/conda/requirements.txt /opt/conda/requirements-flux.txt /opt/conda/requirements-vlm.txt /opt/conda/conda-env-ci.txt
+RUN bash ./install_conda.sh && rm install_conda.sh utils.sh /opt/conda/requirements-dev.txt /opt/conda/requirements.txt /opt/conda/requirements-flux.txt /opt/conda/requirements-vlm.txt /opt/conda/requirements-transformers-modeling-backend.txt /opt/conda/requirements-rl.txt /opt/conda/conda-env-ci.txt
 
 # Add DeepEP install script for MoE expert parallelism tests (CUDA only).
 COPY ./common/install_deepep.sh install_deepep.sh

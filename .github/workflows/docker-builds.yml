@@ -30,6 +30,8 @@ jobs:
         include:
           - docker-image-name: torchtitan-ubuntu-22.04-clang12
             runner: [self-hosted, linux.2xlarge]
+          - docker-image-name: torchtitan-rl-ubuntu-22.04-clang12
+            runner: [self-hosted, linux.2xlarge]
           - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
             runner: [linux.2xlarge]
     runs-on: ${{ matrix.runner }}
