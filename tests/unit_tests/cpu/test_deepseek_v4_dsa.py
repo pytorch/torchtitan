@@ -176,7 +176,9 @@ class TestDSABlockMask(unittest.TestCase):
 class TestDSVPackedDocuments(unittest.TestCase):
     def test_get_attention_masks_rejects_position_resets(self):
         positions = torch.arange(64).repeat(2)
-        with self.assertRaisesRegex(ValueError, "packed documents.*position resets"):
+        with self.assertRaisesRegex(
+            NotImplementedError, "packed documents.*position resets"
+        ):
             DeepSeekV4Model.get_attention_masks(None, positions)
 
     def test_get_attention_masks_accepts_single_document(self):
