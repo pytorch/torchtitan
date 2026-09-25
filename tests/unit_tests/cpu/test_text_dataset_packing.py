@@ -18,17 +18,29 @@ _TOKENIZER_PATH = os.path.join(
 )
 
 
-def _build_dataloader(max_context_length: int) -> GrainDataLoader:
+def _build_dataloader(
+    max_context_length: int,
+    *,
+    num_tokens_per_microbatch: int | None = None,
+    max_num_documents: int | None = None,
+    mask_document_boundaries: bool = True,
+) -> GrainDataLoader:
+    if num_tokens_per_microbatch is None:
+        num_tokens_per_microbatch = max_context_length
     return GrainDataLoader.Config(
-        dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+        dataset=ConcatThenSplitPackingConfig(
+            dataset=DATASETS["c4_test"],
+            mask_document_boundaries=mask_document_boundaries,
+        ),
         shuffle=False,
         num_prefetch_microbatches=0,
+        max_num_documents=max_num_documents,
     ).build(
         dp_world_size=1,
         dp_rank=0,
         tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
         max_context_length=max_context_length,
-        num_tokens_per_microbatch=max_context_length,
+        num_tokens_per_microbatch=num_tokens_per_microbatch,
     )
 
 
@@ -86,6 +98,36 @@ class TestTextDatasetPacking(unittest.TestCase):
         # Guard against the assertions above passing vacuously.
         self.assertGreater(interior_doc_starts, 0)
 
+    def test_unmasked_document_boundaries_fill_fixed_context_rows(self):
+        dataloader = _build_dataloader(
+            256,
+            num_tokens_per_microbatch=512,
+            max_num_documents=2,
+            mask_document_boundaries=False,
+        )
+        tokenizer = HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH)
+        interior_doc_starts = 0
+        try:
+            iterator = iter(dataloader)
+            for _ in range(100):
+                batch = next(iterator)
+                self.assertEqual(batch.input.numel(), 512)
+                self.assertFalse(bool(torch.any(batch.padding_mask)))
+                self.assertTrue(
+                    torch.equal(batch.positions, torch.arange(256).repeat(2))
+                )
+
+                starts = (batch.input == tokenizer.bos_id).nonzero().flatten()
+                starts = starts[starts > 0]
+                interior_doc_starts += len(starts)
+                self.assertTrue(
+                    bool(torch.all(batch.labels[starts - 1] == tokenizer.eos_id))
+                )
+        finally:
+            dataloader.close()
+
+        self.assertGreater(interior_doc_starts, 0)
+
 
 class TestTextDatasetBufferCheckpointing(unittest.TestCase):
     def test_packing_state_round_trips(self):
@@ -100,6 +142,37 @@ class TestTextDatasetBufferCheckpointing(unittest.TestCase):
             dataloader.close()
 
         resumed = _build_dataloader(256)
+        try:
+            resumed.load_state_dict(state)
+            resumed_iterator = iter(resumed)
+            actual = [next(resumed_iterator) for _ in range(5)]
+        finally:
+            resumed.close()
+
+        for expected_inputs, actual_inputs in zip(expected, actual, strict=True):
+            self.assertTrue(torch.equal(expected_inputs.input, actual_inputs.input))
+            self.assertTrue(
+                torch.equal(expected_inputs.positions, actual_inputs.positions)
+            )
+            self.assertTrue(torch.equal(expected_inputs.labels, actual_inputs.labels))
+
+    def test_unmasked_packing_state_round_trips(self):
+        kwargs = {
+            "num_tokens_per_microbatch": 512,
+            "max_num_documents": 2,
+            "mask_document_boundaries": False,
+        }
+        dataloader = _build_dataloader(256, **kwargs)
+        try:
+            iterator = iter(dataloader)
+            for _ in range(5):
+                next(iterator)
+            state = dataloader.state_dict()
+            expected = [next(iterator) for _ in range(5)]
+        finally:
+            dataloader.close()
+
+        resumed = _build_dataloader(256, **kwargs)
         try:
             resumed.load_state_dict(state)
             resumed_iterator = iter(resumed)

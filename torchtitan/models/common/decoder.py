@@ -417,11 +417,14 @@ class Decoder(BaseModel):
         if isinstance(inner_attn, FlexInnerAttention.Config):
             return self._create_flex_attention_mask_for_document(positions, attn_config)
         elif isinstance(inner_attn, VarlenInnerAttention.Config):
+            if inner_attn.fixed_length_rows and max_context_length is None:
+                max_context_length = self.config.max_context_length
             return create_varlen_metadata_for_document(
                 positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
+                fixed_length_rows=inner_attn.fixed_length_rows,
             )
         else:
             raise TypeError(

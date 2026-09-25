@@ -78,6 +78,7 @@ class VarlenMetadata(NamedTuple):
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+    fixed_length_rows: bool = False
 
     _OFFSETS_SPMD_TYPE = spmd.SpmdType(
         {
@@ -118,6 +119,44 @@ def varlen_attn(*args, **kwargs):
 )
 def varlen_attn_with_lse(*args, **kwargs):
     return _varlen_attn(*args, return_aux=VarlenAuxRequest(lse=True), **kwargs)
+
+
+@spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
+def _dense_causal_attention(
+    q_THK: torch.Tensor,
+    k_THK: torch.Tensor,
+    v_THV: torch.Tensor,
+    *,
+    num_sequences: int,
+    sequence_length: int,
+    scale: float | None,
+    enable_gqa: bool,
+    backends: list[SDPBackend],
+) -> torch.Tensor:
+    """Adapt packed fixed-length rows to dense SDPA and back."""
+    q_BHLK = q_THK.reshape(num_sequences, sequence_length, *q_THK.shape[1:]).transpose(
+        1, 2
+    )
+    k_BHLK = k_THK.reshape(num_sequences, sequence_length, *k_THK.shape[1:]).transpose(
+        1, 2
+    )
+    v_BHLV = v_THV.reshape(num_sequences, sequence_length, *v_THV.shape[1:]).transpose(
+        1, 2
+    )
+    with sdpa_kernel(backends, set_priority=True):
+        out_BHLV = F.scaled_dot_product_attention(
+            q_BHLK.to(torch.bfloat16),
+            k_BHLK.to(torch.bfloat16),
+            v_BHLV.to(torch.bfloat16),
+            is_causal=True,
+            scale=scale,
+            enable_gqa=enable_gqa,
+        )
+    return (
+        out_BHLV.transpose(1, 2)
+        .reshape(q_THK.shape[0], q_THK.shape[1], v_THV.shape[2])
+        .to(q_THK.dtype)
+    )
 
 
 def local_head_split(
@@ -161,9 +200,26 @@ class VarlenInnerAttention(InnerAttention):
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
 
+        max_num_documents: int | None = None
+        """Upper bound on packed documents used for fixed-shape metadata."""
+
+        fixed_length_rows: bool = False
+        """Use dense causal attention when each fixed row is one sequence."""
+
+    dense_sdpa_backends: ClassVar[list[SDPBackend]] = [
+        SDPBackend.CUDNN_ATTENTION,
+        SDPBackend.FLASH_ATTENTION,
+    ]
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.window_size = config.window_size
+        self.fixed_length_rows = config.fixed_length_rows
+        if self.fixed_length_rows and self.window_size != (-1, 0):
+            raise ValueError(
+                "VarlenInnerAttention fixed_length_rows only supports causal "
+                "window_size=(-1, 0)"
+            )
 
         from torchtitan.tools.utils import get_cuda_flash_attention_impl
 
@@ -173,6 +229,57 @@ class VarlenInnerAttention(InnerAttention):
             and current_flash_attention_impl() != flash_attention_impl
         ):
             activate_flash_attention_impl(flash_attention_impl)
+
+    def _validate_dense_inputs(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        attention_masks: VarlenMetadata,
+        *,
+        enable_gqa: bool,
+    ) -> tuple[int, int]:
+        """Validate and return the fixed-row batch and sequence dimensions."""
+        if not attention_masks.fixed_length_rows:
+            raise ValueError(
+                "fixed_length_rows requires metadata constructed for fixed rows"
+            )
+        if q_THK.ndim != 3 or k_THK.ndim != 3 or v_THV.ndim != 3:
+            raise ValueError("fixed-row dense attention requires rank-3 q, k, and v")
+        if q_THK.shape[0] != k_THK.shape[0] or k_THK.shape[0] != v_THV.shape[0]:
+            raise ValueError("fixed-row dense attention requires equal token counts")
+        if q_THK.shape[2] != k_THK.shape[2]:
+            raise ValueError("query and key head dimensions must match")
+        if k_THK.shape[1] != v_THV.shape[1]:
+            raise ValueError("key and value head counts must match")
+        if enable_gqa:
+            if q_THK.shape[1] % k_THK.shape[1] != 0:
+                raise ValueError(
+                    "query head count must be divisible by key/value head count "
+                    "when enable_gqa is true"
+                )
+        elif q_THK.shape[1] != k_THK.shape[1]:
+            raise ValueError(
+                "query and key/value head counts must match when enable_gqa is false"
+            )
+
+        num_sequences = attention_masks.cu_seq_q.numel() - 1
+        if num_sequences <= 0 or q_THK.shape[0] % num_sequences != 0:
+            raise ValueError(
+                "fixed-row metadata must evenly partition the packed token dimension"
+            )
+        sequence_length = q_THK.shape[0] // num_sequences
+        if attention_masks.cu_seq_k.numel() != num_sequences + 1:
+            raise ValueError("query and key metadata must have the same number of rows")
+        if (
+            attention_masks.max_q != sequence_length
+            or attention_masks.max_k != sequence_length
+        ):
+            raise ValueError(
+                "fixed-row metadata maxima must equal the inferred sequence length"
+            )
+
+        return num_sequences, sequence_length
 
     def forward(
         self,
@@ -196,6 +303,35 @@ class VarlenInnerAttention(InnerAttention):
         max_q = attention_masks.max_q
         max_k = attention_masks.max_k
 
+        enable_gqa = bool(kwargs.get("enable_gqa", False))
+        if self.fixed_length_rows:
+            num_sequences, sequence_length = self._validate_dense_inputs(
+                q_THK,
+                k_THK,
+                v_THV,
+                attention_masks,
+                enable_gqa=enable_gqa,
+            )
+            # The public SDPA API does not expose log-sum-exp, so attention
+            # variants with output epilogues retain the variable-length path.
+            if out_transform is None:
+                return _dense_causal_attention(
+                    q_THK,
+                    k_THK,
+                    v_THV,
+                    num_sequences=num_sequences,
+                    sequence_length=sequence_length,
+                    scale=scale,
+                    enable_gqa=enable_gqa,
+                    # A quadratic math fallback is useful for CPU tests but can
+                    # silently OOM long training sequences on accelerators.
+                    backends=(
+                        self.dense_sdpa_backends
+                        if q_THK.device.type == "cuda"
+                        else [SDPBackend.MATH]
+                    ),
+                )
+
         varlen_kwargs: dict[str, Any] = {}
 
         # TODO(pytorch/pytorch#179760): FA2's auto num_splits heuristic
@@ -212,7 +348,7 @@ class VarlenInnerAttention(InnerAttention):
             varlen_kwargs["num_splits"] = 1
 
         # Forward enable_gqa from GQAttention when Q and KV head counts differ
-        if kwargs.get("enable_gqa", False):
+        if enable_gqa:
             varlen_kwargs["enable_gqa"] = True
 
         varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
@@ -613,6 +749,7 @@ def create_varlen_metadata_for_document(
     padding_mask: torch.Tensor | None = None,
     max_num_documents: int | None = None,
     max_context_length: int | None = None,
+    fixed_length_rows: bool = False,
 ) -> VarlenMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
@@ -632,6 +769,9 @@ def create_varlen_metadata_for_document(
         max_context_length: Maximum length of one document segment. Required
             with ``max_num_documents`` so the fixed-shape metadata can avoid a
             device-to-host synchronization.
+        fixed_length_rows: Treat every ``max_context_length`` tokens as one
+            attention sequence. The positions and padding mask are validated
+            once while preprocessing the input.
 
     Returns:
         VarlenMetadata containing cumulative sequence length indices for q, k,
@@ -639,6 +779,56 @@ def create_varlen_metadata_for_document(
     """
     num_tokens = positions.shape[0]
     device = positions.device
+
+    if fixed_length_rows:
+        if max_context_length is None:
+            raise ValueError(
+                "max_context_length is required when fixed_length_rows is true"
+            )
+        if num_tokens % max_context_length != 0:
+            raise ValueError(
+                "fixed_length_rows requires the token count to be divisible by "
+                "max_context_length"
+            )
+        num_rows = num_tokens // max_context_length
+        if max_num_documents is not None and max_num_documents < num_rows:
+            raise ValueError(
+                "max_num_documents must cover every fixed-length row; got "
+                f"max_num_documents={max_num_documents} and num_rows={num_rows}"
+            )
+        expected_positions = (
+            torch.arange(
+                num_tokens,
+                device=device,
+                dtype=positions.dtype,
+            )
+            % max_context_length
+        )
+        torch._assert_async(
+            torch.all(positions == expected_positions),
+            "fixed_length_rows requires positions to reset only at row boundaries",
+        )
+        if padding_mask is not None:
+            torch._assert_async(
+                torch.all(~padding_mask.to(torch.bool)),
+                "fixed_length_rows does not support padded tokens",
+            )
+        packed_cu_seqlens = torch.arange(
+            0,
+            num_tokens + 1,
+            max_context_length,
+            dtype=torch.int32,
+            device=device,
+        )
+        if spmd.is_type_checking():
+            spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
+        return VarlenMetadata(
+            cu_seq_q=packed_cu_seqlens,
+            cu_seq_k=packed_cu_seqlens,
+            max_q=max_context_length,
+            max_k=max_context_length,
+            fixed_length_rows=True,
+        )
 
     real_doc_starts = positions == 0
     padding_doc_starts = None
