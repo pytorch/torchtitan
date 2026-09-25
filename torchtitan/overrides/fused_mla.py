@@ -778,17 +778,24 @@ class FusedMLAAttention(Attention):
     def _project_qkv(
         self,
         x_TD: torch.Tensor,
+        q_latent_TC: torch.Tensor | None,
+        compressed_kv_TC: torch.Tensor,
         positions: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if not x_TD.is_cuda:
-            return super()._project_qkv(x_TD, positions)
+            return super()._project_qkv(
+                x_TD,
+                q_latent_TC,
+                compressed_kv_TC,
+                positions,
+            )
 
-        x_TD = self._gather_tp_input(x_TD)
         num_tokens = x_TD.shape[0]
         if self.q_lora_rank == 0:
             q_THK = self.wq(x_TD)
         else:
-            q_THK = self.wq_b(self.q_norm(self.wq_a(x_TD)))
+            assert q_latent_TC is not None
+            q_THK = self.wq_b(self.q_norm(q_latent_TC))
 
         with spmd.local():
             q_THK = q_THK.view(num_tokens, -1, self.qk_head_dim)
@@ -811,7 +818,6 @@ class FusedMLAAttention(Attention):
             self.qk_nope_head_dim,
         ).squeeze(0)
 
-        compressed_kv_TC = self.wkv_a(x_TD)
         kv_latent_TC, k_pe_TK = torch.split(
             compressed_kv_TC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
