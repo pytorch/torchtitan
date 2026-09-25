@@ -5,8 +5,8 @@ opentelemetry-exporter-otlp-proto-http
 pygtrie
 portpicker
 
-# The RL test image also needs the inference runtime and example dependencies.
-vllm
+# Install vLLM with matching torch/torchvision nightlies in install_conda.sh.
+# The RL test image also needs the inference runtime's other dependencies and examples.
 xformers
 verifiers==0.3.1
 # Verifiers uses mcp.server.fastmcp, which was removed in MCP 2.x.
