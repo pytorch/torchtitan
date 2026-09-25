@@ -229,7 +229,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
         config = self.config
-        dist_config.pipeline_per_direction_p2p = (
+        dist_config.pipeline_per_edge_p2p = (
             config.parallelism.pipeline_parallel_degree > 1
         )
         dist_utils.set_batch_invariance(config.debug.batch_invariant)
