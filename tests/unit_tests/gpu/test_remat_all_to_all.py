@@ -19,6 +19,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
+from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.module import Module, ModuleDict
@@ -26,31 +28,37 @@ from torchtitan.protocols.module import Module, ModuleDict
 
 pytestmark = pytest.mark.multi_gpu
 
-
-class _LocalExpert(Module):
-    def __init__(self):
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.randn(4, 4))
-
-    def forward(
-        self,
-        x_RD: torch.Tensor,
-        num_tokens_per_local_expert_e: torch.Tensor,
-    ) -> torch.Tensor:
-        del num_tokens_per_local_expert_e
-        return x_RD @ self.weight
+_MODEL_DIM = 8  # BF16 grouped-MM rows require a 16-byte stride.
 
 
 class _AllToAllBlock(Module):
     def __init__(self, num_experts: int):
         super().__init__()
+        # RoutedExperts.forward runs after EP has selected this rank's local
+        # expert-weight shard. This test bypasses parallelization, so construct
+        # that local view directly while the dispatcher retains the global E.
+        num_local_experts = num_experts // torch.distributed.get_world_size()
         routed_experts = RoutedExperts.__new__(RoutedExperts)
         Module.__init__(routed_experts)
-        routed_experts.inner_experts = _LocalExpert()
+        routed_experts.w13 = GroupedLinear.Config(
+            group_size=num_local_experts,
+            in_features=_MODEL_DIM,
+            out_features=_MODEL_DIM,
+            num_linears=2,
+        ).build()
+        routed_experts.w2 = GroupedLinear.Config(
+            group_size=num_local_experts,
+            in_features=_MODEL_DIM,
+            out_features=_MODEL_DIM,
+        ).build()
+        routed_experts.activation_fn = SwiGLU.Config().build()
         routed_experts.token_dispatcher = AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=1,
         ).build()
+        with torch.no_grad():
+            for parameter in routed_experts.parameters():
+                parameter.normal_()
         self.routed_experts = routed_experts
         self.num_experts = num_experts
 
@@ -153,7 +161,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     num_collectives += 1
                     return original_all_to_all(*args, **kwargs)
 
-                x_TD = torch.randn(4, 4, device=self.device_type)
+                x_TD = torch.randn(4, _MODEL_DIM, device=self.device_type)
                 with patch.object(spmd, "all_to_all", side_effect=counted_all_to_all):
                     expected = _run_forward_backward(baseline, x_TD)
                     baseline_collectives = num_collectives

@@ -8,8 +8,7 @@ import functools
 from dataclasses import dataclass
 from typing import cast, TypeVar
 
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     HybridEPTokenDispatcher,
@@ -101,9 +100,9 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
 
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
-    from .float8 import _float8_experts_cache, Float8Linear
+    from .float8 import _float8_grouped_linear_cache, Float8Linear
     from .mxfp8 import MXFP8Linear
-    from .mxfp8.experts import _mxfp8_experts_cache
+    from .mxfp8.experts import _mxfp8_grouped_linear_cache
     from .nvfp4 import NVFP4Linear
 
     quant_linear_types: list[type] = []
@@ -118,12 +117,15 @@ def has_quantization(model_config) -> bool:
         isinstance(config, tuple(quant_linear_types))
         for _fqn, config, _parent, _attr in model_config.traverse(Linear.Config)
     )
-    quant_experts_types = tuple(
+    quant_grouped_linear_types = tuple(
         cls.Config  # type: ignore[attr-defined]
-        for cls in (*_float8_experts_cache.values(), *_mxfp8_experts_cache.values())
+        for cls in (
+            *_float8_grouped_linear_cache.values(),
+            *_mxfp8_grouped_linear_cache.values(),
+        )
     )
-    has_quant_moe = bool(quant_experts_types) and any(
-        isinstance(config, quant_experts_types)
-        for _fqn, config, _parent, _attr in model_config.traverse(GroupedExperts.Config)
+    has_quant_moe = bool(quant_grouped_linear_types) and any(
+        isinstance(config, quant_grouped_linear_types)
+        for _fqn, config, _parent, _attr in model_config.traverse(GroupedLinear.Config)
     )
     return has_quant_linear or has_quant_moe

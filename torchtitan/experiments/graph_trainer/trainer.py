@@ -83,10 +83,7 @@ class GraphTrainingEngine(TrainingEngine):
         self._pinned_pool_ctx = None
 
     def _initialize_forward_backward(self) -> None:
-        if (
-            self.config.compile.mode == "aot_fx_trace"
-            and not self.parallel_dims.pp_enabled
-        ):
+        if not self.parallel_dims.pp_enabled:
             num_tokens_per_train_step = self.config.training.num_tokens_per_train_step
             if num_tokens_per_train_step < 0:
                 num_microbatches = 1
@@ -139,7 +136,7 @@ class GraphTrainingEngine(TrainingEngine):
         global_valid_tokens: torch.Tensor,
         accumulation_index: int = 0,
     ) -> torch.Tensor:
-        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
+        if self.parallel_dims.pp_enabled:
             return super().forward_backward_microbatch(
                 microbatch_group=microbatch_group,
                 global_valid_tokens=global_valid_tokens,
@@ -217,14 +214,7 @@ class GraphTrainingEngine(TrainingEngine):
         loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         """Route AOT PP=1 through the runtime body used by pipeline parallelism."""
-        if self.config.compile.mode == "aot_fx_trace":
-            return self._pp_forward_backward_body(
-                inputs=inputs,
-                labels=labels,
-                model_kwargs=model_kwargs,
-                loss_kwargs=loss_kwargs,
-            )
-        return super()._non_pp_forward_backward_body(
+        return self._pp_forward_backward_body(
             inputs=inputs,
             labels=labels,
             model_kwargs=model_kwargs,
@@ -254,8 +244,7 @@ class GraphTrainer(Trainer):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         if (
-            self.config.compile.mode == "aot_fx_trace"
-            and not self.engine.parallel_dims.pp_enabled
+            not self.engine.parallel_dims.pp_enabled
             and self.engine.pp_schedule.num_microbatches > 1
         ):
             self.num_pp_microbatches = self.engine.pp_schedule.num_microbatches

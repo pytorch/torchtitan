@@ -119,6 +119,38 @@ class MultimodalModel(Decoder):
         )
 
 
+def build_dummy_vision_inputs(
+    *,
+    patch_dim: int,
+    grid_thw: tuple[int, int, int],
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build zero patches for one valid packed vision item."""
+    t, h, w = grid_thw
+    pixel_values_TP = torch.zeros(t * h * w, patch_dim, device=device)
+    grid_thw_N3 = torch.tensor([grid_thw], device=device)
+    if spmd.is_type_checking():
+        for tensor in (pixel_values_TP, grid_thw_N3):
+            spmd.mutate_type(tensor, "dp", src=spmd.R, dst=spmd.V)
+            spmd.mutate_type(tensor, "tp", src=spmd.R, dst=spmd.I)
+    return pixel_values_TP, grid_thw_N3
+
+
+def add_zero_vision_dependency(
+    inputs_TD: torch.Tensor,
+    vision_output_VD: torch.Tensor,
+) -> torch.Tensor:
+    """Connect a dummy vision forward to text activations without changing them."""
+    dependency = (vision_output_VD * 0.0).sum()
+    if spmd.is_type_checking():
+        dependency = spmd.mutate_type(dependency, "dp", src=spmd.V, dst=spmd.R)
+    with spmd.local():
+        output_TD = inputs_TD + dependency
+    if spmd.is_type_checking():
+        spmd.assert_type_like(output_TD, inputs_TD)
+    return output_TD
+
+
 def get_vision_positions(
     tokens: torch.Tensor,
     num_vision_tokens_per_item: torch.Tensor,

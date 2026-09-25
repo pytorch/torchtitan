@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.config.transform import MXFP8GroupedExpertsConverter
+from torchtitan.config.transform import MXFP8GroupedLinearConverter
 
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
@@ -41,7 +41,7 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
             deepseek_v3_mxfp8_linear_converter_config(
                 model_compile_enabled=True,
             ),
-            MXFP8GroupedExpertsConverter.Config(
+            MXFP8GroupedLinearConverter.Config(
                 model_compile_enabled=True,
                 pad_multiple=128,
             ),
@@ -62,16 +62,6 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
         seq_len=config.training.max_context_length,
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
-    )
-    return config
-
-
-def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
-    """Test-only FlexInnerAttention baseline that runs through eager pipeline parallelism."""
-    config = graph_trainer_deepseek_v3_debugmodel()
-    config.compile = GraphTrainerCompileConfig(
-        components=["loss"],
-        mode=None,
     )
     return config
 
