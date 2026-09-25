@@ -3,6 +3,8 @@ name: RL Unit Tests
 on:
   push:
     branches: [ main ]
+    tags:
+      - ciflow/rl-unit-tests/*
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
