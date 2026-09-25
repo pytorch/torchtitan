@@ -255,10 +255,10 @@ The standard trainer performs two explicit setup steps:
 
 Starting VMM preparation before model state initialization preserves overlap
 without giving layers independent contexts or ownership. All modes attach the
-same runtime reference to their local DistMoE modules. PP additionally installs
-one pre-hook on each participating stage root to select its immutable
-stage/microbatch activation slot. Recipe authors configure transforms; they do
-not call either runtime setup method.
+same runtime reference to their local DistMoE modules. PP additionally
+registers one forward context on each participating ``PipelineStage`` to select
+its immutable stage/microbatch activation slot. Recipe authors configure
+transforms; they do not call either runtime setup method.
 
 The annex owns four distinct allocations:
 
@@ -291,11 +291,11 @@ deterministic reusable slots. In `auto` mode, DistMoE compares:
 - `stage_microbatch`: each live `(stage, microbatch)` pair uses a shallower
   stack sized for the largest local stage.
 
-The smaller `slots * layer_depth` plan wins. A participating pipeline stage
-requests canonical `pipeline_stage_index` and `pipeline_microbatch_index`
-keyword metadata. A stage-root pre-hook selects the immutable slot and removes
-the reserved metadata before ordinary model forward. This works with eager PP
-and whole-step eager-PP CUDA graphs without a model-specific `PipelineStage`
+The smaller `slots * layer_depth` plan wins. PyTorch invokes each participating
+stage's registered forward context with a `PipelineStageInfo` containing the
+stage and microbatch indices. The context selects the immutable slot before
+ordinary model forward. This works with eager PP and whole-step eager-PP CUDA
+graphs without reserved model kwargs or a model-specific `PipelineStage`
 subclass.
 
 GraphPP does not yet carry schedule-action metadata into reusable stage graphs.

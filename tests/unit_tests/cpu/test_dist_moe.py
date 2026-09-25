@@ -13,6 +13,7 @@ import torch
 
 import torchtitan.config.transform.quantization as quantization_transform
 from dist_moe import DistMoeInputScaledRMSNorm
+from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.dist_moe import (
     DistMoeRoutedExperts,
     DistMoeRuntime,
@@ -102,27 +103,19 @@ def test_runtime_releases_pending_prefetch_after_failure_and_close():
     assert runtime.prefetch is None
 
 
-def test_runtime_consumes_pipeline_metadata_before_model_forward():
+def test_runtime_selects_pipeline_slot_from_forward_context():
     runtime = _runtime()
     runtime.slots[(3, 7)] = (2, 5)
     runtime.context = Mock()
     context = runtime.context
     hook = Mock()
-    runtime._pipeline_hooks.append(hook)
+    runtime._pipeline_context_handles.append(hook)
 
-    args, kwargs = runtime.select_pipeline_slot(
-        Mock(),
-        (torch.empty(1),),
-        {
-            "pipeline_stage_index": 3,
-            "pipeline_microbatch_index": 7,
-            "input_batch": "value",
-        },
-    )
+    with runtime.pipeline_slot_context(
+        PipelineStageInfo(stage_index=3, microbatch_index=7)
+    ):
+        context.select_activation_slot.assert_called_once_with(2, 5)
 
-    context.select_activation_slot.assert_called_once_with(2, 5)
-    assert len(args) == 1
-    assert kwargs == {"input_batch": "value"}
     runtime.close()
     runtime.close()
     hook.remove.assert_called_once_with()
@@ -164,7 +157,7 @@ def test_bf16_transform_preserves_parameters_without_building_dispatcher():
     assert isinstance(config, DistMoeRoutedExperts.Config)
     module = config.build()
     module.load_state_dict(stock.state_dict())
-    module.parallelize(Mock())
+    module._parallelize(Mock())
 
     assert list(dict(module.named_parameters())) == ["w13.weight", "w2.weight"]
     assert not hasattr(module, "token_dispatcher")
