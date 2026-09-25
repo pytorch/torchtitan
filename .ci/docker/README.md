@@ -26,3 +26,6 @@ It also uses the same directory structure as PyTorch.
 
 CI publishes the RL variant to the existing CUDA ECR repository with an
 `rl-<docker-hash>` tag so it does not replace the standard CUDA image.
+The RL image installs torch, torchvision, and vLLM together from the CUDA
+nightly index, as the RL test jobs do. Verifiers retains MCP 1.x, so the
+resolver picks a compatible nightly cohort rather than incompatible newer wheels.
