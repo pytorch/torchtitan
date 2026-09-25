@@ -41,7 +41,7 @@ jobs:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
-      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-rl-ubuntu-22.04-clang12:${{ needs.set-matrix.outputs.docker-hash }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:rl-${{ needs.set-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
       # No upload-artifact: the suites dump a distributed checkpoint per test,
       # which is 31GB and takes 25 minutes to push. linux_job_v2 never collected
