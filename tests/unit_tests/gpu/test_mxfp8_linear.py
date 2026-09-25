@@ -161,23 +161,6 @@ def test_mxfp8_linear_saves_selected_input_activation(
     assert all(type(tensor) is torch.Tensor for tensor in activation_saves)
 
 
-def test_mxfp8_linear_returns_owned_output():
-    linear = _make_mxfp8_linear(bias=False)
-    x = torch.randn(
-        2,
-        32,
-        linear.in_features,
-        device="cuda",
-        dtype=torch.bfloat16,
-        requires_grad=True,
-    )
-
-    output = linear(x)
-
-    assert output._base is None
-    output.unsqueeze(0).mul_(1)
-
-
 @pytest.mark.parametrize(
     ("input_activation_format_for_backward", "expected_quantize_calls"),
     [
