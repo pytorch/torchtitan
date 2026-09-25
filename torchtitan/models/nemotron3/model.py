@@ -288,9 +288,18 @@ class NemotronTransformerBlock(TransformerBlock):
             )
 
             # Mamba-2 uses a per-head dt bias parameter, not a dt projection.
-            self.dt_bias = nn.Parameter(torch.empty(self.mamba_num_heads, dtype=torch.float32))
-            self.A_log = nn.Parameter(torch.empty(self.mamba_num_heads, dtype=torch.float32))
-            self.D = nn.Parameter(torch.empty(self.mamba_num_heads, dtype=torch.float32))
+            #
+            # These follow the model dtype rather than being pinned to float32,
+            # matching both HF's NemotronHMamba2Mixer (which creates them with a
+            # bare torch.empty) and the published checkpoints, where all tensors
+            # are stored BF16. Precision where it matters is preserved at
+            # compute time instead: A = -exp(A_log.float()) below. Pinning them
+            # to float32 also made the parameter dtypes non-uniform, which
+            # fully_shard rejects outright ("FSDP expects uniform original
+            # parameter dtype"), so it blocked --training.dtype bfloat16.
+            self.dt_bias = nn.Parameter(torch.empty(self.mamba_num_heads))
+            self.A_log = nn.Parameter(torch.empty(self.mamba_num_heads))
+            self.D = nn.Parameter(torch.empty(self.mamba_num_heads))
 
             # Gated RMSNorm on the SSM output, grouped like the reference.
             self.mamba_norm = MambaRMSNormGated(
