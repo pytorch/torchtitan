@@ -19,6 +19,9 @@
 
 set -eux
 
+# Running as a script rather than inline means this is not a login shell, so
+# conda is not initialised. Same as .github/scripts/validate_release_gpu.sh.
+eval "$(conda shell.bash hook)"
 CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
 conda activate "${CONDA_ENV}"
 export HF_HOME="$RUNNER_TEMP/hf_home"
