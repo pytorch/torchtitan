@@ -7,7 +7,7 @@
 """Pipeline parallelism for Kimi K3: core's split with the tower and the aggregation
 pinned to its ends, AttnRes stages, and the block routing tables."""
 
-import dataclasses
+import copy
 import logging
 
 from torch.distributed.pipelining.schedules import (
@@ -93,9 +93,9 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
             parallelism=parallelism,
             model_config=kwargs["model_config"],
         )
-        kwargs["parallelism"] = dataclasses.replace(
-            parallelism, pipeline_parallel_module_fqns_per_model_part=split
-        )
+        derived = copy.copy(parallelism)
+        derived.pipeline_parallel_module_fqns_per_model_part = split
+        kwargs["parallelism"] = derived
     pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
         model, **kwargs
     )
