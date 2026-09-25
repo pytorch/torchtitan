@@ -153,6 +153,8 @@ class TokenChoiceTopKRouter(Module):
     routed to top K experts based on the router scores.
     """
 
+    _always_saved_remat_regions = frozenset({"routing_decision"})
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
@@ -261,18 +263,26 @@ class TokenChoiceTopKRouter(Module):
                 )
 
         if self._debug_force_load_balance:
-            topk_expert_ids_TK, _ = self._debug_force_load_balance_routing(scores_TE)
+            topk_expert_ids_TK, topk_scores_TK = remat.region(
+                self._debug_force_load_balance_routing,
+                self.always_saved_remat_region_name("routing_decision"),
+                recompute=False,
+            )(scores_TE)
         else:
-            topk_expert_ids_TK = self._select_experts(
+            topk_expert_ids_TK = remat.region(
+                self._select_experts,
+                self.always_saved_remat_region_name("routing_decision"),
+                recompute=False,
+            )(
                 scores_TE,
                 expert_bias_E,
                 padding_mask_T=padding_mask_T,
                 **router_kwargs,
             )
-
-        # The expert bias is only used for routing. The gating value is still
-        # derived from the original scores.
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
+            # The expert bias is only used for routing. The gating value is
+            # still derived from the original scores.
+            topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
+        remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
 
         if self.route_norm:
             denominator_T1 = (

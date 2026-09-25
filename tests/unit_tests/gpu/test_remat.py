@@ -1089,7 +1089,7 @@ class TestRematRegions(unittest.TestCase):
                     expected_counts,
                 )
 
-    def test_router_statistics_are_recorded_once(self):
+    def test_router_decision_is_always_saved(self):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
@@ -1112,7 +1112,7 @@ class TestRematRegions(unittest.TestCase):
             output = checkpointed_forward(torch.randn(3, 4, requires_grad=True))
             output.backward()
 
-        self.assertEqual(select_experts.call_count, 2)
+        self.assertEqual(select_experts.call_count, 1)
         self.assertEqual(router.tokens_per_expert_E.sum().item(), 3)
 
     def test_quantile_router_statistics_are_recorded_once(self):
