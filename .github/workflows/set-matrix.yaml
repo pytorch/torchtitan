@@ -8,7 +8,7 @@ on:
         required: false
         type: string
       runner-cuda:
-        description: 'Override default (linux.g5.48xlarge.nvidia.gpu) CUDA runner label'
+        description: 'Override default (mt-l-x86aavx2-189-704-a10g-8) CUDA runner label'
         required: false
         type: string
       gpu-arch:
@@ -43,7 +43,7 @@ jobs:
 
       # Default CUDA & ROCm runners
       DEFAULT_ROCM_RUNNER: linux.rocm.gpu.ecosystem.mi350.8
-      DEFAULT_CUDA_RUNNER: linux.g5.48xlarge.nvidia.gpu
+      DEFAULT_CUDA_RUNNER: mt-l-x86aavx2-189-704-a10g-8
 
       # Input CUDA & ROCm runners
       ROCM_RUNNER_INPUT: ${{ inputs.runner-rocm }}
