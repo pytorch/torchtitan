@@ -41,6 +41,7 @@ from torchtitan.quantization._fsdp_tensor import (
 
 _active_parametrization = True
 FSDP_PARAM_FQNS_META = "fsdp_param_fqns"
+FSDP_MESH_AXIS_NAMES_META = "fsdp_mesh_axis_names"
 
 
 @contextmanager
@@ -282,6 +283,7 @@ class ReplicateComputation(Module):
         super().__init__()
         self.param_fqn = param_fqn
         self.device_mesh = device_mesh
+        self.mesh_axis_names = tuple(device_mesh.mesh_dim_names or ())
         self.param_sharding = param_sharding
         self.mode = mode
         self.compute_placements: list[Placement] = [Replicate()] * self.device_mesh.ndim
@@ -372,7 +374,12 @@ class ReplicateComputation(Module):
         return output
 
     def forward(self, x: DTensor) -> torch.Tensor:
-        with annotate({FSDP_PARAM_FQNS_META: (self.param_fqn,)}):
+        with annotate(
+            {
+                FSDP_PARAM_FQNS_META: (self.param_fqn,),
+                FSDP_MESH_AXIS_NAMES_META: self.mesh_axis_names,
+            }
+        ):
             return self._forward(x)
 
     def _forward(self, x: DTensor) -> torch.Tensor:

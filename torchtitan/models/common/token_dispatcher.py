@@ -10,12 +10,13 @@ from typing import Any
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch.distributed._functional_collectives import all_to_all_single
 from torch.distributed.tensor import DeviceMesh
 
-from torchtitan.config import Configurable
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_sparse_mesh
 from torchtitan.ops.scatter_add import deterministic_scatter_add
+from torchtitan.protocols.module import Module
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -36,18 +37,20 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
     output_splits: list[int]
 
 
-class LocalTokenDispatcher(Configurable):
+class LocalTokenDispatcher(Module):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
-    Not an nn.Module — dispatchers have no learnable parameters or buffers.
+    Dispatchers are parameterless modules so they can own remat region names
+    and policy state.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(Module.Config):
         num_experts: int
         top_k: int
 
     def __init__(self, config: Config):
+        super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
 
@@ -141,7 +144,6 @@ class LocalTokenDispatcher(Configurable):
             out_TD: ``(T, D)`` combined output.
         """
         out_TD = torch.zeros_like(x_TD)
-
         routed_output_RD = (
             routed_output_RD.to(torch.float32)
             * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
@@ -413,11 +415,16 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 )
 
             with torch.no_grad():
-                num_global_tokens_per_local_expert_EP_e = self._token_count_exchange(
+                num_global_tokens_per_local_expert_EP_e = remat.region(
+                    self._token_count_exchange,
+                    self.remat_region_name("ep_communication.token_count_exchange"),
+                    recompute=self.remat_should_recompute("ep_communication"),
+                )(
                     num_local_tokens_per_expert_E,
                     pg,
                     ep_size,
                 )
+                remat.recompute_needs_tensor(num_global_tokens_per_local_expert_EP_e)
                 (
                     num_global_tokens_per_local_expert_E,
                     input_splits_list,
@@ -428,7 +435,11 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                     ep_size,
                 )
 
-            routed_input_RD = self._dispatch_token_exchange(
+            routed_input_RD = remat.region(
+                self._dispatch_token_exchange,
+                self.remat_region_name("ep_communication.dispatch"),
+                recompute=self.remat_should_recompute("ep_communication"),
+            )(
                 routed_input_ND,
                 pg,
                 output_splits_list,
@@ -444,6 +455,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             # TODO: Consider using num_global_tokens_per_local_expert_e as the
             # expert_bias_e update buffer, then all-gather on EP ranks. This
             # is blocked by clarification on HybridEP token dropping.
+            remat.recompute_needs_tensor(routed_input_RD)
             (
                 input_shape,
                 routed_input_RD,
@@ -558,13 +570,18 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             )
             # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
             # on the NCCL stream and won't block until the tensor is accessed.
-            routed_output_RD = self._combine_token_exchange(
+            routed_output_RD = remat.region(
+                self._combine_token_exchange,
+                self.remat_region_name("ep_communication.combine"),
+                recompute=self.remat_should_recompute("ep_communication"),
+            )(
                 routed_output_RD,
                 pg,
                 metadata.input_splits,
                 metadata.output_splits,
             )
 
+        remat.recompute_needs_tensor(routed_output_RD)
         if spmd.is_type_checking():  # dense mesh reinterpret
             routed_output_RD = spmd.reinterpret_mesh(
                 routed_output_RD, spmd.current_mesh()
@@ -748,6 +765,9 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     paths into a single ``buffer.dispatch``/``combine``. Compact dispatch is gathered
     from its deduplicated output into expert-major order; expand dispatch already returns
     the static expert-major layout. Combine is synchronized before returning its result.
+
+    Dispatch and combine share one remat policy because combine consumes the handle
+    produced by dispatch. They must both be saved or both be replayed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -824,6 +844,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             num_local_experts,
             self.num_experts,
             num_tokens_per_rank=x_TD.shape[0],
+            remat_region_name=self.remat_region_name("ep_communication.dispatch"),
+            recompute=self.remat_should_recompute("ep_communication"),
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
@@ -841,8 +863,12 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
 
-        # pyrefly: ignore [bad-argument-type]
-        combined_TD = combine_tokens(routed_output_RD, metadata.state)
+        combined_TD = combine_tokens(
+            routed_output_RD,
+            metadata.state,  # pyrefly: ignore [bad-argument-type]
+            remat_region_name=self.remat_region_name("ep_communication.combine"),
+            recompute=self.remat_should_recompute("ep_communication"),
+        )
         sync_combine()
         return combined_TD
 
