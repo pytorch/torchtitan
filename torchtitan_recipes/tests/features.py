@@ -368,25 +368,26 @@ def llama3_debugmodel_pp4_interleaved_1f1b_layers_per_stage() -> Trainer.Config:
 
 
 def llama3_debugmodel_pp4_zero_bubble() -> Trainer.Config:
-    config = llama3_debugmodel_pp4_interleaved_1f1b()
+    config = llama3_debugmodel_varlen_attn(seq_len=2048)
+    config.parallelism.pipeline_parallel_degree = 4
+    config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "InterleavedZeroBubble"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.activation_checkpoint = FullAC.Config()
-    # Split backward stores Python-owned weight-backward state between actions;
-    # whole-step CUDA-graph replay cannot recreate that state.
-    config.training.disable_cuda_graphs = True
+    config.debug.deterministic = True
+    config.debug.seed = 42
     return config
 
 
 def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
+    config = llama3_debugmodel_varlen_attn(seq_len=2048)
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "ZBVZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.activation_checkpoint = FullAC.Config()
-    # Split backward stores Python-owned weight-backward state between actions;
-    # whole-step CUDA-graph replay cannot recreate that state.
-    config.training.disable_cuda_graphs = True
+    config.debug.deterministic = True
+    config.debug.seed = 42
     return config
 
 
