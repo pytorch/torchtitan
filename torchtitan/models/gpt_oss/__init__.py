@@ -15,12 +15,14 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     CosSinRoPE,
     Embedding,
     Linear,
     RMSNorm,
     RoPE,
     RouterGateLinear,
+    RowParallelLinear,
     Softmax,
     TransformerBlock,
 )
@@ -29,7 +31,6 @@ from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_token_dispatcher_config,
 )
-from torchtitan.models.common.linear import PartialBiasRowwiseLinear
 from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from .model import Attention, GptOssModel, GptOssTransformerBlock
@@ -95,7 +96,7 @@ def _make_gptoss_attn_config(
         head_dim=head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
-        wqkv=Linear.Config(
+        wqkv=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=(n_heads + 2 * n_kv_heads) * head_dim,
             bias=True,
@@ -109,7 +110,7 @@ def _make_gptoss_attn_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=PartialBiasRowwiseLinear.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             bias=True,

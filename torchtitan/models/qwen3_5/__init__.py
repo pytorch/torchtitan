@@ -18,11 +18,11 @@ from torchtitan.models.common import (  # noqa: F401
     Conv1d,
     Embedding,
     Linear,
-    PartialBiasRowwiseLinear,
-    SigmoidGatedFeedForward,
+    RowParallelLinear,
     Softmax,
 )
 from torchtitan.models.common.config_utils import (
+    fused_gate_up_param_init,
     get_attention_config,
     make_ffn_config,
     make_moe_config,
@@ -32,6 +32,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
 from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -39,6 +40,7 @@ from torchtitan.models.common.vision_encoder import (
 
 from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet, RMSNormGated
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
+from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
 
 from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
@@ -107,10 +109,10 @@ def _linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _partial_bias_rowwise_linear(
+def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> PartialBiasRowwiseLinear.Config:
-    return PartialBiasRowwiseLinear.Config(
+) -> InvariantRowParallelLinear.Config:
+    return InvariantRowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -126,15 +128,21 @@ def _shared_experts_config(
     *, dim: int, hidden_dim: int, layer_id: int
 ) -> SigmoidGatedFeedForward.Config:
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
-    ffn = make_ffn_config(
-        dim=dim,
-        hidden_dim=hidden_dim,
-        w1_param_init=_LINEAR_INIT,
-        w2w3_param_init=_depth_init(layer_id),
-    )
+    depth_init = _depth_init(layer_id)
     return SigmoidGatedFeedForward.Config(
-        w13=ffn.w13,
-        w2=ffn.w2,
+        # The enclosing MoE gathers once because w13 and the sigmoid gate
+        # consume the same input.
+        w13=Linear.Config(
+            in_features=dim,
+            out_features=hidden_dim,
+            num_linears=2,
+            param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
+        ),
+        w2=Linear.Config(
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init=depth_init,
+        ),
         gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
     )
 
@@ -178,11 +186,11 @@ def _qwen35_vision_encoder_config(
                 wq=_linear(dim, dim),
                 wk=_linear(dim, dim),
                 wv=_linear(dim, dim),
-                proj=_partial_bias_rowwise_linear(dim, dim),
+                proj=_vision_row_parallel_linear(dim, dim),
             ),
             mlp=VisionMLP.Config(
                 fc1=_linear(dim, ffn_dim),
-                fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
+                fc2=_vision_row_parallel_linear(ffn_dim, dim),
             ),
         ),
         rotary_pos_emb=VisionRotaryEmbedding.Config(
@@ -193,7 +201,7 @@ def _qwen35_vision_encoder_config(
             merged_hidden_size=merged_hidden_size,
             norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
             fc1=_linear(merged_hidden_size, merged_hidden_size),
-            fc2=_partial_bias_rowwise_linear(merged_hidden_size, out_hidden_size),
+            fc2=_vision_row_parallel_linear(merged_hidden_size, out_hidden_size),
         ),
         param_init=_POS_EMBED_INIT,
     )
@@ -233,7 +241,7 @@ def _qwen35_attention_config(
             out_features=n_kv_heads * head_dim,
             param_init=_LINEAR_INIT,
         ),
-        wo=Linear.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             param_init=_depth_init(layer_id),
@@ -296,7 +304,11 @@ def _qwen35_deltanet_config(
             eps=1e-6,
             param_init={"weight": nn.init.ones_},
         ),
-        out_proj=_proj(value_dim, dim, _depth_init(layer_id)),
+        out_proj=RowParallelLinear.Config(
+            in_features=value_dim,
+            out_features=dim,
+            param_init=_depth_init(layer_id),
+        ),
         param_init={
             "A_log": _a_log_init,
             "dt_bias": nn.init.ones_,
