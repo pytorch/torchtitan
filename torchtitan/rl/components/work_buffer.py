@@ -32,14 +32,12 @@ class _RolloutGroupWorkState(enum.Enum):
 class RolloutGroupWork:
     """One prompt group's work, tracked through _RolloutGroupWorkState.
 
-    The input loop sets `group_id`, `policy_version_at_start`, and `sample`; the
+    The input loop sets `group_id` and `sample`; the
     buffer owns `state` and `rollout_group` (`init=False`, so the input loop
     can't set them).
     """
 
     group_id: int
-    policy_version_at_start: int
-    """Generator policy version pinned when this rollout group entered the buffer."""
     sample: object
     """Data input produced by `rollouter.get_training_sample()`;
     passed unchanged to the env in `rollouter.run_group_rollouts`."""
@@ -124,7 +122,6 @@ class RolloutGroupWorkBuffer(Configurable):
                 await buffer.add_work(
                     RolloutGroupWork(
                         group_id=group_index,
-                        policy_version_at_start=3,
                         sample=sample,
                     )
                 )

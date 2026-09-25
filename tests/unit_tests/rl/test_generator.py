@@ -248,7 +248,8 @@ def test_build_sampling_params_seed_and_stop_default_to_none():
     assert not params.stop_token_ids  # vLLM normalizes None -> []
 
 
-def test_admit_requests_threads_cache_salt_to_vllm():
+@pytest.mark.parametrize("cache_policy_version", [None, 6])
+def test_admit_requests_uses_local_version_for_new_rollouts(cache_policy_version):
     generator = _generator()
     engine = cast(_FakeEngine, generator._engine)
     request = GenerationRequest(
@@ -256,13 +257,32 @@ def test_admit_requests_threads_cache_salt_to_vllm():
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
         routing_session_id="group=3/rollout=0",
-        cache_salt="7",
+        cache_policy_version=cache_policy_version,
     )
 
     generator._admit_requests([request])
 
     _, kwargs = engine.add_requests[0]
-    assert kwargs["prompt"]["cache_salt"] == "7"
+    assert kwargs["prompt"]["cache_salt"] == (
+        "7" if cache_policy_version is None else "6"
+    )
+
+
+def test_new_request_uses_version_installed_after_queueing():
+    generator = _generator()
+    engine = cast(_FakeEngine, generator._engine)
+    request = GenerationRequest(
+        request_id="r0",
+        prompt_token_ids=[1, 2],
+        sampling=SamplingConfig(),
+        routing_session_id="group=3/rollout=0",
+        cache_policy_version=None,
+    )
+
+    generator.policy_version = 8
+    generator._admit_requests([request])
+
+    assert engine.add_requests[0][1]["prompt"]["cache_salt"] == "8"
 
 
 @pytest.mark.parametrize("reset_kv_cache", [False, True])

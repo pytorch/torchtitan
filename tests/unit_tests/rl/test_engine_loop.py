@@ -76,7 +76,7 @@ def _request(
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
         routing_session_id=routing_session_id or request_id,
-        cache_salt="7",
+        cache_policy_version=7,
     )
 
 

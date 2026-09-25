@@ -54,6 +54,7 @@ class _GeneratorActorEndpoints:
         *,
         request_id: str,
         routing_session_id: str,
+        cache_policy_version: int | None,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
     ) -> Completion:
@@ -61,6 +62,7 @@ class _GeneratorActorEndpoints:
             prompt_token_ids,
             request_id=request_id,
             routing_session_id=routing_session_id,
+            cache_policy_version=cache_policy_version,
             sampling_config=sampling_config,
             metrics_prefix=metrics_prefix,
         )

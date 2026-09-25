@@ -17,7 +17,7 @@ _data_input_loop                                      _rollout_loop[N] (group wo
 +--------------------------------------------------+  +--------------------------------------------------+
 | group_buffer.wait_for_slot()                     |  | work = group_buffer.claim_next()                  |
 | sample = rollouter.get_training_sample()         |  | group = rollouter.run_group_rollouts(work.sample) |
-| work = RolloutGroupWork(group_id, version, sample)| | group_buffer.finalize_work(group)                 |
+| work = RolloutGroupWork(group_id, sample)         | | group_buffer.finalize_work(group)                 |
 | group_buffer.add_work(work)                      |  +-----------------------+--------------------------+
 +-----------------------+--------------------------+                          ^ |
                         |                                                     | |
@@ -461,10 +461,9 @@ class Controller(Configurable):
         """
         return result.get(0)
 
-    def _make_generate_fn(self, metrics_prefix: str, *, cache_salt: str) -> GenerateFn:
+    def _make_generate_fn(self, metrics_prefix: str, *, group_id: int) -> GenerateFn:
         """Build the rollouter's `GenerateFn`: route a completion via the generator router, namespacing
-        generation metrics with `metrics_prefix`, pinning sticky routing on
-        `routing_session_id`, and pinning prefix KV to `cache_salt`."""
+        generation metrics with `metrics_prefix` and identifying its rollout group."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
         # Bind the router handle to a local so the closure captures it instead of
         # `self`. A GenerateFn may be shipped to another process, where an actor
@@ -483,12 +482,33 @@ class Controller(Configurable):
                 prompt_token_ids,
                 request_id=request_id,
                 routing_session_id=routing_session_id,
-                cache_salt=cache_salt,
+                routing_group_id=group_id,
                 sampling_config=sampling_config,
                 metrics_prefix=metrics_prefix,
             )
 
         return generate
+
+    async def _run_group_rollouts(
+        self,
+        *,
+        sample: object,
+        group_id: int,
+        group_size: int,
+        sampling: SamplingConfig,
+        metrics_prefix: str,
+    ) -> RolloutGroup:
+        generate_fn = self._make_generate_fn(metrics_prefix, group_id=group_id)
+        try:
+            return await self._rollouter.run_group_rollouts(
+                generate_fn=generate_fn,
+                sample=sample,
+                group_id=group_id,
+                group_size=group_size,
+                sampling=sampling,
+            )
+        finally:
+            await self.generator_router.finish_group.call_one(group_id)
 
     @sl.log_trace_span("setup_async")
     async def setup_async(
@@ -646,21 +666,18 @@ class Controller(Configurable):
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
-        generate = self._make_generate_fn(
-            metrics_prefix="validation_generator", cache_salt=str(step)
-        )
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         samples = [self._rollouter.get_validation_sample() for _ in range(num_groups)]
         group_results = await asyncio.gather(
             *(
-                self._rollouter.run_group_rollouts(
-                    generate_fn=generate,
+                self._run_group_rollouts(
                     sample=sample,
                     # Negative ids keep validation disjoint from training group ids, so their
                     # request_ids can't collide in the shared engine (e.g. post-validation).
                     group_id=-(i + 1),
                     group_size=1,
                     sampling=sampling,
+                    metrics_prefix="validation_generator",
                 )
                 for i, sample in enumerate(samples)
             ),
@@ -768,7 +785,6 @@ class Controller(Configurable):
             generator_router=self.generator_router,
             group_buffer=self._group_buffer,
             num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
-            initial_policy_version=self.start_step,
         )
 
         # training_sample_builder
@@ -807,7 +823,6 @@ class Controller(Configurable):
         data_input_task = asyncio.create_task(
             self._data_input_loop(
                 self._group_buffer,
-                weight_sync=self._weight_sync,
             ),
             name="data_input",
         )
@@ -887,8 +902,6 @@ class Controller(Configurable):
     async def _data_input_loop(
         self,
         group_buffer: RolloutGroupWorkBuffer,
-        *,
-        weight_sync: WeightSyncManager,
     ) -> None:
         """produces a RolloutGroupWork into group_buffer.
         waits for:    a free active slot (group_buffer.wait_for_slot)
@@ -912,7 +925,6 @@ class Controller(Configurable):
             await group_buffer.add_work(
                 RolloutGroupWork(
                     group_id=group_index,
-                    policy_version_at_start=weight_sync.generator_policy_version,
                     sample=sample,
                 )
             )
@@ -943,16 +955,12 @@ class Controller(Configurable):
                 return
             try:
                 with sl.log_trace_span("rollout_group"):
-                    generate_fn = self._make_generate_fn(
-                        metrics_prefix="generator",
-                        cache_salt=str(work.policy_version_at_start),
-                    )
-                    group = await self._rollouter.run_group_rollouts(
-                        generate_fn=generate_fn,
+                    group = await self._run_group_rollouts(
                         sample=work.sample,
                         group_id=work.group_id,
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
+                        metrics_prefix="generator",
                     )
                 group.metrics = compute_rollout_metrics(
                     prefix="rollout", rollouts=group.rollouts

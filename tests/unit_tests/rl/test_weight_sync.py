@@ -73,14 +73,12 @@ def _manager(
     router,
     buffer,
     num_prompts_per_train_step=8,
-    initial_policy_version=0,
 ):
     return WeightSyncManager(
         trainer=trainer,
         generator_router=router,
         group_buffer=buffer,
         num_prompts_per_train_step=num_prompts_per_train_step,
-        initial_policy_version=initial_policy_version,
     )
 
 
@@ -165,13 +163,10 @@ def test_pull_threads_the_started_version() -> None:
             trainer=_FakeTrainer(_noop),
             router=router,
             buffer=_FakeBuffer(),
-            initial_policy_version=4,
         )
-        assert wsm.generator_policy_version == 4
         wsm.start_async_push_pull(version=42)
         await wsm.wait_prev_pull()
         assert router.pulled_versions == [42]
-        assert wsm.generator_policy_version == 42
 
     asyncio.run(run())
 

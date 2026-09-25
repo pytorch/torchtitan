@@ -756,8 +756,9 @@ class VLLMGenerator(Configurable):
         reset_kv_cache_on_weight_sync: bool = False
         """Reset cached and running-request KV after each weight sync.
 
-        The default preserves in-flight requests and their KV. New rollout groups
-        use the new policy-version cache salt, so they cannot reuse old-policy KV.
+        The default preserves in-flight requests and their KV. Existing rollout
+        groups retain their cache salt across updates; new groups use the version
+        installed when the router first dispatches them.
         Enable this to clear prefix-cache entries and preempt running requests;
         vLLM then recomputes their KV under the new weights when they resume."""
 
@@ -1059,7 +1060,7 @@ class VLLMGenerator(Configurable):
         *,
         request_id: str,
         routing_session_id: str,
-        cache_salt: str,
+        cache_policy_version: int | None,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
     ) -> Completion:
@@ -1074,7 +1075,8 @@ class VLLMGenerator(Configurable):
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
             routing_session_id: Stable session key for in-mesh DP routing.
-            cache_salt: Policy-version salt pinned for the request's rollout group.
+            cache_policy_version: Group cache version, or None after rerouting
+                to choose the destination's local version at engine admission.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
             metrics_prefix: Namespace prepended to every metric key on the returned
@@ -1084,7 +1086,10 @@ class VLLMGenerator(Configurable):
         Example:
 
             completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
-                [1, 2, 3], request_id="step=3/group=0/sample=0/turn=0",
+                [1, 2, 3],
+                request_id="step=3/group=0/sample=0/turn=0",
+                routing_session_id="group=0/rollout=0",
+                cache_policy_version=None,
             )
         """
         self._rank0_check_engine_loop_running("generate")
@@ -1107,7 +1112,7 @@ class VLLMGenerator(Configurable):
                     prompt_token_ids=prompt_token_ids,
                     sampling=sampling,
                     routing_session_id=routing_session_id,
-                    cache_salt=cache_salt,
+                    cache_policy_version=cache_policy_version,
                 )
             )
             # Wakes the engine loop only if it is idle in `_decide_next_action`.
@@ -1279,7 +1284,11 @@ class VLLMGenerator(Configurable):
             [
                 {
                     "prompt_token_ids": request.prompt_token_ids,
-                    "cache_salt": request.cache_salt,
+                    "cache_salt": str(
+                        self.policy_version
+                        if request.cache_policy_version is None
+                        else request.cache_policy_version
+                    ),
                 }
                 for request in requests
             ]
@@ -1432,7 +1441,7 @@ class GenerationRequest:
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
     routing_session_id: str
-    cache_salt: str
+    cache_policy_version: int | None
 
 
 @dataclass(kw_only=True, slots=True)
