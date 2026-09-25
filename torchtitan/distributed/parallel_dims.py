@@ -61,21 +61,16 @@ class MeshAxisName(StrEnum):
 
 @dataclass(frozen=True)
 class DistributedTopology:
-    """Distributed world and real process groups supplied by initialization.
+    """Logical world and optional real PP group supplied by initialization.
 
     Args:
         world_size: Logical world size used to construct model meshes.
-        real_axis_groups: Real process groups for named axes in an otherwise
-            fake logical world.
+        real_pp_group: Real PP process group in an otherwise fake logical
+            world. ``None`` means all mesh axes use the default group backend.
     """
 
     world_size: int
-    real_axis_groups: tuple[tuple[MeshAxisName, dist.ProcessGroup], ...] = ()
-
-    def __post_init__(self) -> None:
-        axes = [axis for axis, _ in self.real_axis_groups]
-        if len(axes) != len(set(axes)):
-            raise ValueError("Distributed topology contains a duplicate real axis")
+    real_pp_group: dist.ProcessGroup | None = None
 
 
 def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
@@ -103,7 +98,7 @@ class ParallelDims:
     ep: int
     world_size: int
     enable_sequence_parallel: bool
-    _real_axis_groups: tuple[tuple[MeshAxisName, dist.ProcessGroup], ...] = ()
+    _real_pp_group: dist.ProcessGroup | None = None
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse the
     # same object instead of re-slicing a submesh on every lookup.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -126,7 +121,7 @@ class ParallelDims:
             ep=parallelism_config.expert_parallel_degree,
             world_size=topology.world_size,
             enable_sequence_parallel=parallelism_config.enable_sequence_parallel,
-            _real_axis_groups=topology.real_axis_groups,
+            _real_pp_group=topology.real_pp_group,
         )
 
     def __post_init__(self):
@@ -277,14 +272,7 @@ class ParallelDims:
                 "dp_replicate", "efsdp", "ep"
             ]
         pp_mesh = full_dense_mesh_for_fwdbwd["pp"]
-        pp_group = next(
-            (
-                group
-                for axis, group in self._real_axis_groups
-                if axis == MeshAxisName.PP
-            ),
-            None,
-        )
+        pp_group = self._real_pp_group
         if pp_group is not None:
             if dist.get_world_size(pp_group) != self.pp:
                 raise ValueError(
