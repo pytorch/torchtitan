@@ -65,8 +65,8 @@ debugging questions. They intentionally do not share a fallback path:
 
 | Mode | Physical processes | Real communication | Use it to validate |
 | --- | --- | --- | --- |
-| `fake_backend` | One | None | Configuration, logical mesh construction, rank-local model ownership, tensor shapes, and PyTorch-managed memory for one selected logical rank. |
-| `real_pp_fake_spmd_backend` | One per PP rank | PP send/receive only | Pipeline scheduling, real PP buffers and transport, CUDA-graph capture, and rank-local memory while DP, TP, CP, and EP remain logically scaled. |
+| `fake` | One | None | Configuration, logical mesh construction, rank-local model ownership, tensor shapes, and PyTorch-managed memory for one selected PP rank at SPMD coordinate zero. |
+| `real_pp_fake_spmd` | Exactly one per PP rank | PP send/receive only | Pipeline scheduling, real PP buffers and transport, CUDA-graph capture, and rank-local memory while DP, TP, CP, and EP remain logically scaled. |
 
 Use pure fake mode first when a full logical model would require more ranks than
 are locally available. Escalate to real-PP/fake-SPMD when the question involves
@@ -77,33 +77,28 @@ required for SPMD communication, numerical, and performance evidence.
 
 `NGPU` is always the logical world size, not necessarily the number of launched
 processes. For a pipeline degree `P`, each pipeline coordinate contains
-`NGPU / P` flattened SPMD coordinates. The selected logical global rank is:
+`NGPU / P` flattened SPMD coordinates. These debugging modes always represent
+SPMD coordinate zero, so the selected logical global rank is:
 
 ```text
-logical_rank = FAKE_PP_RANK * (NGPU / P) + FAKE_SPMD_RANK
+logical_rank = pp_rank * (NGPU / P)
 ```
 
-The logical world size must be divisible by `P`, and both coordinates are
-range-checked. The environment contract is:
+The logical world size must be divisible by `P`. The environment contract is:
 
 | Variable | Pure fake | Real PP / fake SPMD | Meaning |
 | --- | --- | --- | --- |
 | `NGPU` | Required | Required | Complete logical world size used to construct the model mesh. |
-| `FAKE_PP_RANK` | Required when `P > 1` | Unused | Logical PP coordinate represented by the single process. |
-| `FAKE_SPMD_RANK` | Required when `P > 1` | Required | Flattened coordinate within the logical non-PP mesh. |
-| `RANK` | Optional logical rank when `P = 1` | Set by `torchrun` | Physical rank in hybrid mode; it is also the PP coordinate. |
+| `FAKE_PP_RANK` | Required when `P > 1` | Invalid | Logical PP coordinate represented by the single process. |
+| `RANK` | Unused | Set by `torchrun` | Physical rank and PP coordinate in hybrid mode. |
 | `WORLD_SIZE` | Unused | Set by `torchrun` | Physical process count, which must equal `P`. |
 | `LOCAL_RANK` | Set to `0` by `run_train.sh` | Set by `torchrun` | Physical device index for the process. |
 | `MASTER_ADDR`, `MASTER_PORT` | Unused | Set by `torchrun` | Standard rendezvous settings for the real PP group. |
-| `COMM_MODE` | `run_train.sh` convenience variable | Do not use | The shell launcher recognizes `fake_backend`; hybrid mode is selected with `--comm.mode`. |
-
-`FAKE_SPMD_RANK` is one flattened coordinate; it is not an independent rank for
-each SPMD axis. `ParallelDims` maps that coordinate onto the configured DP, TP,
-CP, and EP mesh axes in their normal order.
+| `COMM_BACKEND` | `run_train.sh` convenience variable | Do not use | The shell launcher recognizes `fake`; hybrid mode is selected with `--comm.backend`. |
 
 ### Fully fake example
 
-This command constructs logical rank `1 * 2 + 1 = 3` of a four-rank job with
+This command constructs logical rank `1 * 2 = 2` of a four-rank job with
 PP2 on one physical GPU. It validates that rank's stage, shards, prepared
 weights, pipeline metadata, and memory ownership without creating NCCL process
 groups or transferring peer data.
@@ -111,8 +106,7 @@ groups or transferring peer data.
 ```bash
 NGPU=4 \
 FAKE_PP_RANK=1 \
-FAKE_SPMD_RANK=1 \
-COMM_MODE=fake_backend \
+COMM_BACKEND=fake \
 MODULE=llama3 \
 CONFIG=llama3_debugmodel \
 ./run_train.sh \
@@ -120,22 +114,19 @@ CONFIG=llama3_debugmodel \
   --parallelism.data_parallel_shard_degree 2
 ```
 
-Without PP, omit `FAKE_PP_RANK` and `FAKE_SPMD_RANK` and use `RANK` to select a
-logical rank. `run_train.sh` limits a pure-fake invocation to one training step
-by default so this path remains a diagnostic rather than an accidental
-benchmark.
+Without PP, omit `FAKE_PP_RANK`; the represented rank is logical rank zero.
+`run_train.sh` limits a pure-fake invocation to one training step by default so
+this path remains a diagnostic rather than an accidental benchmark.
 
 ### Real PP / fake SPMD example
 
-This command launches two physical processes for PP2 while each process
-represents SPMD coordinate 1 of a four-rank logical job. `torchrun` assigns
-physical ranks 0 and 1; those ranks are the PP coordinates. TorchTitan
-creates one real NCCL PP group across them and fake process groups for every
-other mesh axis.
+This command launches two physical processes for PP2. Each process represents
+SPMD coordinate zero of its PP rank in a four-rank logical job. `torchrun`
+assigns physical ranks 0 and 1; those ranks are the PP coordinates. TorchTitan
+creates one real NCCL PP group across them and fake groups for every other axis.
 
 ```bash
 NGPU=4 \
-FAKE_SPMD_RANK=1 \
 PYTORCH_ALLOC_CONF=expandable_segments:True \
 torchrun \
   --nproc_per_node=2 \
@@ -146,16 +137,15 @@ torchrun \
   -m torchtitan.train \
   --module llama3 \
   --config llama3_debugmodel \
-  --comm.mode real_pp_fake_spmd_backend \
+  --comm.backend real_pp_fake_spmd \
   --parallelism.pipeline_parallel_degree 2 \
   --parallelism.data_parallel_shard_degree 2 \
   --training.steps 1
 ```
 
-The physical world size must equal the PP degree. Do not set
-`FAKE_PP_RANK`: the physical `RANK` already supplies that coordinate. All
-physical ranks must use the same `FAKE_SPMD_RANK` so that their logical ranks
-form one PP line through the logical mesh.
+The physical world size must equal the PP degree. Do not set `FAKE_PP_RANK`:
+the physical `RANK` already supplies that coordinate. All physical ranks use
+SPMD coordinate zero and therefore form one PP line through the logical mesh.
 
 ### Memory debugging workflow
 
@@ -163,7 +153,7 @@ Keep the model, dtype, batch geometry, parallel degrees, activation
 checkpointing, FSDP policy, and CUDA-graph settings identical to the intended
 real job. Then:
 
-1. Select the exact logical PP and SPMD coordinate whose ownership is under
+1. Select the logical PP coordinate whose SPMD-zero ownership is under
    investigation.
 2. Record allocator summaries or snapshots after initialization, after complete
    optimizer warmup, during steady-state forward/backward, and after optimizer
