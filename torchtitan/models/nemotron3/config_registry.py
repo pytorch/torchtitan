@@ -71,8 +71,8 @@ def nemotron_4b() -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=3e-4),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=4 * 8192,
+            max_context_length=8192,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -106,8 +106,16 @@ def nemotron_31b() -> Trainer.Config:
         model_spec=model_spec,
         optimizer=default_adamw(lr=3e-4),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 128,
-            max_context_length=128,
+            # Measured on 8x MI355X with the fused Triton Mamba-2 scan. MFU
+            # climbs with the microbatch and memory stays low, so the old
+            # 128-token setting was purely launch-overhead bound and told you
+            # nothing about the model:
+            #   8k tokens/rank -> 2.65% MFU, 67 GiB     (128 -> 0.05%, useless)
+            #  16k tokens/rank -> 3.72% MFU, 70 GiB
+            #  32k tokens/rank -> 4.70% MFU, 77 GiB  <- this
+            # 77 GiB of 288 GiB leaves room to push further if needed.
+            num_tokens_per_microbatch_per_dp_rank=4 * 8192,
+            max_context_length=8192,
             steps=1000,
             disable_cuda_graphs=True,
         ),
