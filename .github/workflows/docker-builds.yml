@@ -10,6 +10,8 @@ on:
     branches:
       - main
       - release/*
+    tags:
+      - ciflow/rl-image/*
     paths:
       - .ci/docker/**
       - .github/workflows/docker-builds.yml
@@ -27,13 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - docker-image-name: torchtitan-ubuntu-22.04-clang12
-            runner: [self-hosted, linux.2xlarge]
-          - docker-image-name: torchtitan-rl-ubuntu-22.04-clang12
-            runner: [self-hosted, linux.2xlarge]
-          - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
-            runner: [linux.2xlarge]
+        include: ${{ fromJSON(startsWith(github.ref, 'refs/tags/ciflow/rl-image/') && '[{"docker-image-name":"torchtitan-rl-ubuntu-22.04-clang12","runner":["self-hosted","linux.2xlarge"]}]' || '[{"docker-image-name":"torchtitan-ubuntu-22.04-clang12","runner":["self-hosted","linux.2xlarge"]},{"docker-image-name":"torchtitan-rl-ubuntu-22.04-clang12","runner":["self-hosted","linux.2xlarge"]},{"docker-image-name":"torchtitan-rocm-ubuntu-22.04-clang12","runner":["linux.2xlarge"]}]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     env:
