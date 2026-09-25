@@ -265,7 +265,6 @@ _BFX9_REQUIREMENT = (
     "PyTorch build with CUDA BFX9 matmul support (pytorch/pytorch#195301)"
 )
 _TF32_REQUIREMENT = "NVIDIA compute capability 8.0 or later"
-_PRECISION_REQUIREMENTS = {"bfx9": _BFX9_REQUIREMENT, "tf32": _TF32_REQUIREMENT}
 
 
 def _is_nvidia_cuda() -> bool:
@@ -274,23 +273,6 @@ def _is_nvidia_cuda() -> bool:
         and torch.cuda.is_available()
         and torch.version.hip is None
     )
-
-
-def _set_cuda_fp32_precision(precision: str) -> None:
-    """Assign ``torch.backends.cuda.matmul.fp32_precision``, or explain why not.
-
-    The caller has already checked the device; a failure here means the
-    installed PyTorch does not know this precision.
-    """
-    try:
-        torch.backends.cuda.matmul.fp32_precision = precision
-    except (AttributeError, RuntimeError, ValueError) as exc:
-        requirement = _PRECISION_REQUIREMENTS.get(precision)
-        detail = f" It requires {requirement}." if requirement else ""
-        raise ValueError(
-            f"This PyTorch build does not support FP32 CUDA matmul precision "
-            f"{precision!r}.{detail}"
-        ) from exc
 
 
 def set_fp32_matmul_precision(precision: Fp32MatmulPrecision = "auto") -> None:
@@ -335,23 +317,31 @@ def set_fp32_matmul_precision(precision: Fp32MatmulPrecision = "auto") -> None:
     if precision == "auto":
         # Blackwell and later emulate FP32 matmuls with BF16x9 by default: it
         # keeps near-IEEE accuracy while running on the BF16 tensor cores.
-        if device_capability >= (10, 0):
-            _set_cuda_fp32_precision("bfx9")
-            logger.info("Enabled BF16x9 emulation for FP32 CUDA matmuls")
-        return
-
-    if precision == "bfx9" and device_capability < (10, 0):
+        # Older devices have no such mode, so leave the PyTorch default alone.
+        if device_capability < (10, 0):
+            return
+        precision = "bfx9"
+    elif precision == "bfx9" and device_capability < (10, 0):
         raise ValueError(
             f"fp32_matmul_precision='bfx9' requires {_BFX9_REQUIREMENT}, but "
             f"this device has compute capability {device_capability}."
         )
-    if precision == "tf32" and device_capability < (8, 0):
+    elif precision == "tf32" and device_capability < (8, 0):
         raise ValueError(
             f"fp32_matmul_precision='tf32' requires {_TF32_REQUIREMENT}, but "
             f"this device has compute capability {device_capability}."
         )
 
-    _set_cuda_fp32_precision(precision)
+    try:
+        torch.backends.cuda.matmul.fp32_precision = precision
+    except (AttributeError, RuntimeError, ValueError) as exc:
+        # The device is already vetted, so this is a PyTorch build that does
+        # not know the precision. Only BF16x9 has a build-side requirement.
+        detail = f" It requires {_BFX9_REQUIREMENT}." if precision == "bfx9" else ""
+        raise ValueError(
+            f"This PyTorch build does not support FP32 CUDA matmul precision "
+            f"{precision!r}.{detail}"
+        ) from exc
     logger.info("Set FP32 CUDA matmul precision to %r", precision)
 
 
