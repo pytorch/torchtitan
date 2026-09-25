@@ -256,8 +256,12 @@ def _process_cc12_wd_sample(
     text = sample.get("txt", "")
     image = sample.get("jpg", None)
 
-    texts = [None, text]
-    images = [image, None]
+    if image is None:
+        texts: list[str | None] = [text]
+        images: list[bytes | None] = [None]
+    else:
+        texts = [None, text]
+        images = [image, None]
 
     return _process_mm_sample(
         texts=texts,

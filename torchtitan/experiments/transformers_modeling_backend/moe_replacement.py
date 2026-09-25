@@ -32,22 +32,19 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
 )
 from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
-    make_ffn_config,
+    fused_gate_up_param_init,
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    make_shared_expert_ffn_config,
 )
-from torchtitan.models.common.decoder_sharding import (
-    dense_activation_placement,
-    dense_param_placement,
-    dense_sequence_parallel_placement,
-)
-from torchtitan.models.common.feed_forward import SigmoidGatedFeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.moe_sharding import (
+    set_moe_sharding_config,
+    set_routed_moe_sharding_config,
+)
 from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
-from torchtitan.protocols.sharding import ShardingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -126,11 +123,30 @@ def build_and_swap_native_moe(
         if moe_config is None:
             continue
 
-        set_moe_sharding_config(
-            moe_config,
-            enable_ep=enable_ep,
-            enable_sp=enable_sp,
-        )
+        shared_experts = moe_config.shared_experts
+        if shared_experts is not None and hasattr(shared_experts, "gate"):
+            # Avoid loading Qwen3.5's optional model dependencies for other HF
+            # architectures handled by this generic experiment.
+            from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
+            from torchtitan.models.qwen3_5.sharding import (
+                set_sigmoid_gated_feed_forward_sharding_config,
+            )
+
+            assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
+            set_routed_moe_sharding_config(
+                moe_config,
+                enable_ep=enable_ep,
+                enable_sp=enable_sp,
+            )
+            set_sigmoid_gated_feed_forward_sharding_config(
+                shared_experts, enable_ep=enable_ep, enable_sp=enable_sp
+            )
+        else:
+            set_moe_sharding_config(
+                moe_config,
+                enable_ep=enable_ep,
+                enable_sp=enable_sp,
+            )
         root_sharding = moe_config.sharding_config
         assert root_sharding is not None
         # Only the MoE root sees HF's singleton batch. Its children retain the
@@ -155,24 +171,6 @@ def build_and_swap_native_moe(
             out_src_shardings=output_layout,
             out_dst_shardings=hf_sp_layout,
         )
-
-        # set_moe_sharding_config shards the shared FFN (w13/w2) but
-        # leaves the SigmoidGatedFeedForward gate to model-specific code.
-        shared = moe_config.shared_experts
-        if isinstance(shared, SigmoidGatedFeedForward.Config):
-            gate_output_layout = (
-                dense_sequence_parallel_placement()
-                if enable_sp
-                else dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-            )
-            shared.gate.sharding_config = ShardingConfig(
-                state_shardings={
-                    "weight": dense_param_placement(tp=spmd.R),
-                    "bias": dense_param_placement(tp=spmd.R),
-                },
-                out_src_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-                out_dst_shardings=gate_output_layout,
-            )
 
         with torch.device("meta"):
             native_moe = moe_config.build()
@@ -547,18 +545,26 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
     shared_experts = None
     shared_info = params["shared_expert_info"]
     if shared_info is not None:
-        ffn_config = make_ffn_config(
+        ffn_config = make_shared_expert_ffn_config(
             dim=shared_info["dim"],
             hidden_dim=shared_info["hidden_dim"],
             w1_param_init=_LINEAR_INIT,
             w2w3_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
-            # SigmoidGatedFeedForward is a FeedForward subclass, so w13/w2 stay flat
-            # (no nested ``ffn.`` level) and are directly shardable by
-            # set_moe_sharding_config.
+            # Import only for the Qwen3.5 topology so unrelated HF models do
+            # not load Qwen3.5's optional model dependencies.
+            from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
+
             shared_experts = SigmoidGatedFeedForward.Config(
-                w13=ffn_config.w13,
+                # The enclosing MoE gathers once because w13 and the sigmoid
+                # gate consume the same input.
+                w13=Linear.Config(
+                    in_features=shared_info["dim"],
+                    out_features=shared_info["hidden_dim"],
+                    num_linears=2,
+                    param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
+                ),
                 w2=ffn_config.w2,
                 activation_fn=ffn_config.activation_fn,
                 gate=Linear.Config(
