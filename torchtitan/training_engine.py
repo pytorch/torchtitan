@@ -14,11 +14,6 @@ import torch
 import torch.distributed.checkpoint.stateful
 import torch.distributed.config as dist_config
 import tyro
-from torch.distributed.pipelining.schedules import (
-    _PipelineScheduleRuntime,
-    get_schedule_class,
-    PipelineScheduleMulti,
-)
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
@@ -116,22 +111,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     "Validate the same config without PP "
                     "(--parallelism.pipeline_parallel_degree 1)."
                 )
-
-            if (
-                not self.training.disable_cuda_graphs
-                and cuda_graphs_supported()
-                and self.parallelism.pipeline_parallel_degree > 1
-            ):
-                pp_schedule_class = (
-                    _PipelineScheduleRuntime
-                    if self.parallelism.pipeline_parallel_schedule_csv
-                    else get_schedule_class(self.parallelism.pipeline_parallel_schedule)
-                )
-                if issubclass(pp_schedule_class, PipelineScheduleMulti):
-                    raise ValueError(
-                        "CUDA graphs do not support looped pipeline schedules yet. "
-                        "Use a single-stage pipeline schedule or disable CUDA graphs."
-                    )
 
             if self.parallelism.num_pp_microbatches <= 0:
                 raise ValueError(
