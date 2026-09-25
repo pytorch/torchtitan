@@ -10,6 +10,7 @@ from functools import partial
 from typing import Any
 
 import torch
+from torch.utils.hooks import RemovableHandle
 
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -73,6 +74,7 @@ class GraphTrainingEngine(TrainingEngine):
 
     _outer_cudagraphs_enabled: bool
     _graphtrainer_cudagraphs_enabled: bool
+    _metadata_inference_state_handle: RemovableHandle | None
 
     def __init__(
         self,
@@ -96,6 +98,7 @@ class GraphTrainingEngine(TrainingEngine):
             config.compile,
             outer_cudagraphs_enabled=self._outer_cudagraphs_enabled,
         )
+        self._metadata_inference_state_handle = None
         assert not (
             self._outer_cudagraphs_enabled and self._graphtrainer_cudagraphs_enabled
         ), "Outer and GraphTrainer CUDA graphs cannot both be enabled."
@@ -181,6 +184,16 @@ class GraphTrainingEngine(TrainingEngine):
             self.pp_has_first_stage = any(stage.is_first for stage in stages)
             self.pp_has_last_stage = any(stage.is_last for stage in stages)
             assert self.pp_has_first_stage and self.pp_has_last_stage
+
+        if (
+            isinstance(self.pp_schedule, GraphRuntime)
+            and self._dist_moe_runtime is not None
+        ):
+            self._metadata_inference_state_handle = (
+                self.pp_schedule.register_metadata_inference_state_restorer(
+                    self._dist_moe_runtime.reset
+                )
+            )
 
         sdc_config = self.config.sdc_replayer
         self.sdc_replayer = None
@@ -313,6 +326,10 @@ class GraphTrainingEngine(TrainingEngine):
         return ForwardBackwardResult(accumulated_loss, loss_metrics)
 
     def close(self) -> None:
+        if self._metadata_inference_state_handle is not None:
+            self._metadata_inference_state_handle.remove()
+            self._metadata_inference_state_handle = None
+
         if self._pinned_pool_ctx is not None:
             self._pinned_pool_ctx.__exit__(None, None, None)
             self._pinned_pool_ctx = None

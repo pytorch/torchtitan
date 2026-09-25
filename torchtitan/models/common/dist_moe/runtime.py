@@ -498,6 +498,10 @@ class DistMoeRuntime(Configurable):
             ),
         )
 
+    def reset(self) -> None:
+        """Reset mutable Dist-MoE state after metadata-only graph execution."""
+        self.context.reset()
+
     def close(self) -> None:
         """Remove PP registrations, detach modules, and close Annex state."""
         if self._closed:
