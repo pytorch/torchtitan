@@ -61,16 +61,22 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        # 1. Install batch-invariant ops (RL runtime, vLLM and Monarch are in the image).
+        # 1. Install batch-invariant ops (Monarch and RL extras are in the image).
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 
-        # 2. Upgrade PyTorch nightly together with vLLM and xformers.
+        # 2. Install PyTorch, torchvision, and vLLM CUDA nightlies here.
         # torchvision must be installed from the nightly channel alongside torch
         # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
         uv pip install --upgrade torch torchvision vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match \
           --constraint .ci/docker/requirements-rl.txt
+        python -c '
+        from importlib.metadata import version
+        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
+        print(wheels)
+        assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
+        '
 
         # 3. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"

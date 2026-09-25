@@ -51,11 +51,17 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        # Upgrade torch and its ABI-sensitive vLLM/xformers companions together.
+        # Install matching torch, torchvision, and vLLM CUDA nightlies here.
         uv pip install --upgrade torch torchvision vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match \
           --constraint .ci/docker/requirements-rl.txt
+        python -c '
+        from importlib.metadata import version
+        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
+        print(wheels)
+        assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
+        '
 
         # The shared HF cache is read-only and does not contain this tokenizer.
         # Fetch only tokenizer files into a writable cache (no model weights).
