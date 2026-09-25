@@ -8,11 +8,19 @@ import unittest
 
 import torch
 
+from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.models.common.activation import Sigmoid
 
-from torchtitan.models.common.linear import RouterGateLinear
+from torchtitan.models.common.async_linear import AsyncRowParallelLinear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RouterGateLinear,
+    RowParallelLinear,
+)
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
+from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
 
 
 class TestDeepSeekV3Router(unittest.TestCase):
@@ -45,6 +53,35 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertIsInstance(router_config, DeepSeekV3Router.Config)
         self.assertEqual(router_config.num_expert_groups, 8)
         self.assertEqual(router_config.num_limited_groups, 3)
+
+        shared_experts = config.layers[1].moe.shared_experts
+        self.assertIsNotNone(shared_experts)
+        assert shared_experts is not None
+        self.assertIs(type(shared_experts.w13), ColumnParallelLinear.Config)
+        self.assertIs(type(shared_experts.w2), Linear.Config)
+
+    def test_attention_owns_input_gather_and_wo_owns_output_reduction(self):
+        build_config, _ = deepseekv3_configs["debugmodel"]
+        config = build_config(
+            attn_backend="flex",
+            moe_comm_backend="standard",
+            seq_len=128,
+        )
+
+        set_deepseek_v3_sharding_config(config, enable_sp=True, enable_ep=True)
+        attention_config = config.layers[0].attention
+        self.assertIs(type(attention_config.wo), RowParallelLinear.Config)
+        assert attention_config.sharding_config is not None
+        self.assertIsNotNone(attention_config.sharding_config.in_src_shardings)
+        self.assertIsNone(attention_config.sharding_config.in_dst_shardings)
+        assert attention_config.wo.sharding_config is not None
+        self.assertIsNotNone(attention_config.wo.sharding_config.out_src_shardings)
+        self.assertIsNone(attention_config.wo.sharding_config.out_dst_shardings)
+
+        AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
+            attention_config
+        )
+        self.assertIs(type(attention_config.wo), AsyncRowParallelLinear.Config)
 
 
 if __name__ == "__main__":

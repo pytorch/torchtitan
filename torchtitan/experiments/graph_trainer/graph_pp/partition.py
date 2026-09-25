@@ -446,6 +446,26 @@ def _backward_grad_inputs_from_schedule(
     return backward_grad_inputs, backward_grad_input_indices
 
 
+def _assign_must_be_in_fw_bw_to_effectful_ops(graph: fx.Graph) -> None:
+    """
+    ``_extract_graph_with_inputs_outputs`` uses must_be_in_forward and
+    must_be_in_backward meta annotations to correctly place effectful (e.g. mutations)
+    ops in forward and backward. Without those annotations, ops will be in both graphs.
+
+    Assign correct annotations based on the graph_trainer autograd_backward annotation.
+    """
+
+    for node in graph.nodes:
+        node.meta.pop("partitioner_tag", None)
+        if node.op != "call_function" or not node.is_impure():
+            continue
+        node.meta["partitioner_tag"] = (
+            "must_be_in_backward"
+            if node.meta.get("autograd_backward", False)
+            else "must_be_in_forward"
+        )
+
+
 def partition_joint_graph(
     traced: TracedResult,
     *,
@@ -574,13 +594,13 @@ def partition_joint_graph(
     )
     bw_inputs = saved_values + backward_grad_inputs
 
+    _assign_must_be_in_fw_bw_to_effectful_ops(joint.graph)
     fw_graph = _extract_graph_with_inputs_outputs(
         joint.graph,
         fw_inputs,
         fw_outputs,
         fw_output_descs,
         "forward",
-        ignore_must_be_in_fw_bw=True,
     )
     bw_graph = _extract_graph_with_inputs_outputs(
         joint.graph,
@@ -588,7 +608,6 @@ def partition_joint_graph(
         bwd_outputs,
         bwd_output_descs,
         "backward",
-        ignore_must_be_in_fw_bw=True,
     )
     fw_module = _make_graph_module(joint, fw_graph)
     bw_module = _make_graph_module(joint, bw_graph)
