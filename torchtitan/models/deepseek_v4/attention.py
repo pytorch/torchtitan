@@ -382,11 +382,6 @@ class CompressedSparseAttention(DSV4InnerAttention):
                 ratio=self.compress_ratio,
                 topk=self.index_topk,
             )
-            # Mask compressed blocks that end after the query; -1 marks unused slots.
-            limit_T1 = (
-                torch.arange(1, q.size(0) + 1, device=q.device) // self.compress_ratio
-            ).unsqueeze(1)
-            cmp_topk = torch.where(cmp_topk < limit_T1, cmp_topk, -1)
         return self._gather_attn(q, swa_k, cmp_k, cmp_topk, attn_sink, attention_masks)
 
 

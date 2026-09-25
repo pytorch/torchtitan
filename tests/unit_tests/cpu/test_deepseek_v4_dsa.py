@@ -165,11 +165,13 @@ class TestDSABlockMask(unittest.TestCase):
         _, topk_idxs = scores.topk(min(topk, n_cmp), dim=-1)
         old = torch.where(topk_idxs >= causal_limit, -1, topk_idxs)
 
-        # Valid (non-masked) entries must agree exactly; the new formulation
-        # keeps raw indices and gates causality in the mask instead of -1.
+        # lightning_indexer marks causally unselectable slots -1 itself and
+        # leaves order unspecified, so compare each row as a sorted set.
         self.assertEqual(selected.shape, (seqlen, topk))
-        self.assertTrue((selected >= 0).all())
-        self.assertTrue(torch.equal(selected.masked_fill(old < 0, -1), old))
+        self.assertEqual(selected.dtype, torch.int32)
+        self.assertTrue(
+            torch.equal(selected.long().sort(dim=-1).values, old.sort(dim=-1).values)
+        )
 
 
 if __name__ == "__main__":
