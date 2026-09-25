@@ -37,6 +37,7 @@ jobs:
       matrix:
         docker-image-name:
           - torchtitan-ubuntu-22.04-clang12
+          - torchtitan-rl-ubuntu-22.04-clang12
           - torchtitan-rocm-ubuntu-22.04-clang12
     # BuildKit runs out of cluster on the OSDC BuildKit pool, so this runner only
     # streams the (small) .ci/docker context and waits.
