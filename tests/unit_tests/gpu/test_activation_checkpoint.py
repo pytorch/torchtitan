@@ -19,6 +19,7 @@ _effectful_call_count = 0
 
 @torch.library.custom_op("torchtitan_test::effectful_identity", mutates_args=())
 def _effectful_identity(x: torch.Tensor) -> torch.Tensor:
+    """Return ``x`` through an ordered operation and count its executions."""
     global _effectful_call_count
     _effectful_call_count += 1
     return x.clone()
@@ -26,10 +27,14 @@ def _effectful_identity(x: torch.Tensor) -> torch.Tensor:
 
 @_effectful_identity.register_fake
 def _effectful_identity_fake(x: torch.Tensor) -> torch.Tensor:
+    """Describe the ordered operation's output during fake execution."""
     return torch.empty_like(x)
 
 
-def _effectful_identity_backward(_ctx, grad_output):
+def _effectful_identity_backward(
+    _ctx: object, grad_output: torch.Tensor
+) -> torch.Tensor:
+    """Propagate gradients through the identity operation."""
     return grad_output
 
 
@@ -68,6 +73,8 @@ class TransformerBlock(Module):
 
 class TestApplyAC(unittest.TestCase):
     def test_full_ac_does_not_recompute_registered_effects(self):
+        """FullAC must save, rather than replay, registered ordered effects."""
+
         class EffectfulBlock(Module):
             def forward(self, x):
                 return _effectful_identity(x).sin()
