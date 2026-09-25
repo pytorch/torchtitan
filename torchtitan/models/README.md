@@ -32,7 +32,7 @@ The folder should be organized as follows
 - `model.py`
   - `BaseModel.parallelize()` applies declarative model parallelism, activation checkpointing, `torch.compile`, and FSDP/HSDP in order.
   - Override `parallelize()` only when the model needs a different lifecycle order, and override `_apply_fsdp()` when it has a model-family-specific FSDP structure.
-  - Language-model CP goes through `Decoder.preprocess_inputs` -> `ContextParallelPartitioner.shard_inputs`.
+  - Language-model CP goes through `Decoder.preprocess_inputs` -> `context_parallel.shard_inputs`.
 - `pipeline.py` (optional if model size is small)
   - apply PP
 - `__init__.py`

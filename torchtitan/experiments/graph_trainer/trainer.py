@@ -12,6 +12,7 @@ from typing import Any
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
@@ -167,7 +168,10 @@ class GraphTrainingEngine(TrainingEngine):
             target_mbs: list[torch.Tensor] = []
             for microbatch in microbatch_group:
                 input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
-                with sl.log_trace_span("preprocess_inputs"):
+                with (
+                    sl.log_trace_span("preprocess_inputs"),
+                    dist_utils.get_spmd_context(parallel_dims=self.parallel_dims),
+                ):
                     inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
                         0
                     ].preprocess_inputs(

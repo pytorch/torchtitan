@@ -22,7 +22,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.common.attention import HybridAttentionMetadata, VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -61,14 +61,15 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
     from torchtitan.models.qwen3_5.model import (
         Qwen35Attention,
-        Qwen35AttentionMaskDict,
         Qwen35Model,
         Qwen35TransformerBlock,
     )
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 
-def annotate_deltanet_cu_seqlens(attention_masks: "Qwen35AttentionMaskDict") -> None:
+def annotate_deltanet_cu_seqlens(
+    attention_masks: HybridAttentionMetadata,
+) -> None:
     """Annotate the nested GatedDeltaNet ``cu_seq_q`` offsets as DP-varying.
 
     ``cu_seq_q`` sits inside a ``VarlenMetadata`` inside the attention-mask

@@ -10,7 +10,7 @@ import unittest
 from dataclasses import dataclass
 from unittest import mock
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 from torchtitan.protocols.module import Module
@@ -116,9 +116,9 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         config.__post_init__()
 
     def test_rejects_reordering_load_balancer(self):
-        from torchtitan.distributed.context_parallel import HeadTailLoadBalancer
+        from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 
-        config = self._config(load_balancer=HeadTailLoadBalancer.Config())
+        config = self._config(load_balancer=HeadTailCPLoadBalancer.Config())
         with self.assertRaisesRegex(ValueError, "must be None"):
             config.__post_init__()
 

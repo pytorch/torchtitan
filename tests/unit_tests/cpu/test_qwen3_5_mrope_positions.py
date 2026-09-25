@@ -28,7 +28,7 @@ from torch import nn
 
 def _build_config_modules():
     try:
-        from torchtitan.config import ParallelismConfig
+        from torchtitan.config.parallelism import ParallelismConfig
         from torchtitan.distributed.parallel_dims import ParallelDims
         from torchtitan.models.qwen3_5 import model_registry
     except ModuleNotFoundError as exc:

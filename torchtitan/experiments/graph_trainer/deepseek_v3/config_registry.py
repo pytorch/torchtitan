@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.config.transform import MXFP8GroupedLinearConverter
-from torchtitan.distributed.context_parallel import HeadTailLoadBalancer
+from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -76,7 +76,7 @@ def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
     config = graph_trainer_deepseek_v3_16b()
-    config.parallelism.context_parallel_load_balancer = HeadTailLoadBalancer.Config()
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
     config.model = model_registry(
         "16B",
         seq_len=config.training.max_context_length,

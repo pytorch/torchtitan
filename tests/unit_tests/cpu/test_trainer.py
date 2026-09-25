@@ -273,11 +273,22 @@ def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs(
     assert all(reference() is None for reference in activation_refs)
 
 
-def test_pp_forward_backward_microbatch_prepares_structured_inputs() -> None:
+def test_pp_forward_backward_microbatch_prepares_structured_inputs(
+    monkeypatch,
+) -> None:
     forward_backward_body_fn = MagicMock(return_value=torch.tensor(0.0))
+    spmd_context_active = False
+
+    @contextlib.contextmanager
+    def spmd_context(**kwargs):
+        nonlocal spmd_context_active
+        spmd_context_active = True
+        yield
+        spmd_context_active = False
 
     class _FakeModel:
         def preprocess_inputs(self, input_dict, **kwargs):
+            assert spmd_context_active
             return (
                 input_dict["input"] + 1,
                 input_dict["labels"] + 2,
@@ -312,6 +323,10 @@ def test_pp_forward_backward_microbatch_prepares_structured_inputs() -> None:
         ),
     )
     global_valid_tokens = torch.tensor(2)
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        spmd_context,
+    )
 
     result = TrainingEngine.forward_backward_microbatch(
         trainer,
@@ -375,7 +390,9 @@ def test_pp_forward_backward_microbatch_rejects_batch_loss_kwargs() -> None:
         )
 
 
-def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple():
+def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple(
+    monkeypatch,
+):
     captured: dict[str, Any] = {}
 
     class _FakeModel:
@@ -417,6 +434,10 @@ def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple():
     microbatch = _dict_microbatch(
         {"input": 0, "labels": torch.zeros(1)},
         {"advantages": torch.tensor([0.1]), "reduction": "sum"},
+    )
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        lambda **kwargs: contextlib.nullcontext(),
     )
     detached_loss = TrainingEngine.forward_backward_microbatch(
         fake,  # pyrefly: ignore[bad-argument-type]
@@ -704,7 +725,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     assert trainer.num_completed_steps == 2
 
 
-def test_engine_replay_checks_only_first_forward_backward():
+def test_engine_replay_checks_only_first_forward_backward(monkeypatch):
     forward_backward_body_fn = MagicMock(return_value=torch.tensor(1.0))
     replayer = SimpleNamespace(
         run_fwd_bwd=MagicMock(side_effect=lambda fn, **kwargs: fn()),
@@ -743,6 +764,10 @@ def test_engine_replay_checks_only_first_forward_backward():
             num_completed_steps=0,
             ntokens_seen=0,
         ),
+    )
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        lambda **kwargs: contextlib.nullcontext(),
     )
 
     for accumulation_index in range(2):
@@ -959,13 +984,17 @@ def _run_forward_backward_recording_all_reduce(
             ntokens_seen=0,
         ),
     )
-    for accumulation_index in range(gradient_accumulation_steps):
-        TrainingEngine.forward_backward_microbatch(
-            trainer,
-            microbatch_group=[_batch()],
-            global_valid_tokens=torch.tensor(gradient_accumulation_steps),
-            accumulation_index=accumulation_index,
-        )
+    with patch(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        return_value=contextlib.nullcontext(),
+    ):
+        for accumulation_index in range(gradient_accumulation_steps):
+            TrainingEngine.forward_backward_microbatch(
+                trainer,
+                microbatch_group=[_batch()],
+                global_valid_tokens=torch.tensor(gradient_accumulation_steps),
+                accumulation_index=accumulation_index,
+            )
     return part.requires_all_reduce_calls
 
 

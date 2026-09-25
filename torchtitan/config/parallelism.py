@@ -14,7 +14,7 @@ import tyro
 
 from torchtitan.distributed.context_parallel import (
     ContextParallelLoadBalancer,
-    HeadTailLoadBalancer,
+    HeadTailCPLoadBalancer,
 )
 
 from .configs import _FSDP_SYMM_MEM_SCOPES, FSDPSymmMemScope
@@ -138,7 +138,7 @@ class ParallelismConfig:
 
     context_parallel_load_balancer: Annotated[
         ContextParallelLoadBalancer.Config | None, tyro.conf.Suppress
-    ] = field(default_factory=HeadTailLoadBalancer.Config)
+    ] = field(default_factory=HeadTailCPLoadBalancer.Config)
     """
     Per-batch load-balancer configuration for context parallelism. Defaults to
     head-tail load balancing. Set to None to disable load balancing and use
