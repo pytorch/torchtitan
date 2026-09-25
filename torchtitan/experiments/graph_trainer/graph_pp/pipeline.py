@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from copy import copy
 from dataclasses import dataclass
 from typing import Any, cast, TYPE_CHECKING
 
@@ -342,7 +343,7 @@ def _make_pipeline_parallel_runtime_schedule(
     parallelism: ParallelismConfig,
     loss_fn: LossFunction,
     extract_fsdp_grad_reduction: bool,
-) -> _PipelineScheduleRuntime:
+) -> tuple[_PipelineScheduleRuntime, _PipelineScheduleRuntime]:
     """Build a real-PP schedule through the upstream schedule implementation."""
     schedule = _build_pipeline_schedule(
         parallelism=parallelism,
@@ -352,11 +353,16 @@ def _make_pipeline_parallel_runtime_schedule(
         backward_requires_autograd=False,
     )
     assert isinstance(schedule, _PipelineScheduleRuntime)
+    activation_liveness_schedule = copy(schedule)
+    activation_liveness_schedule.pipeline_order_with_comms = {
+        rank: list(actions)
+        for rank, actions in schedule.pipeline_order_with_comms.items()
+    }
     _set_graph_backward_actions(
         schedule,
         extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
     )
-    return schedule
+    return schedule, activation_liveness_schedule
 
 
 def _validate_graph_pp_config(
@@ -508,7 +514,7 @@ def _make_pipeline_parallel_graph_runtime(
     parallelism_context: ParallelismContext,
 ) -> GraphRuntime:
     """Build graph execution around a real pipeline-parallel schedule."""
-    schedule = _make_pipeline_parallel_runtime_schedule(
+    schedule, activation_liveness_schedule = _make_pipeline_parallel_runtime_schedule(
         stages,
         num_microbatches=num_microbatches,
         parallelism=parallelism,
@@ -519,6 +525,7 @@ def _make_pipeline_parallel_graph_runtime(
     )
     return _register_graph_runtime(
         schedule,
+        activation_liveness_schedule=activation_liveness_schedule,
         is_spmd=False,
         fsdp_policy=fsdp_policy,
         compile_config=compile_config,

@@ -44,6 +44,7 @@ from torchtitan.models.common.moe_sharding import (
     set_moe_sharding_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 class _PassthroughRoutedExperts(nn.Module):

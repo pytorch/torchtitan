@@ -38,6 +38,7 @@ def validate_model_training_config(
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
+    from torchtitan.components.dist_moe import DistMoeRoutedExperts
     from torchtitan.distributed.activation_checkpoint import SelectiveAC
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
     from torchtitan.models.common.attention import (
@@ -136,9 +137,11 @@ def validate_model_training_config(
                 )
 
         if parallelism.expert_parallel_degree > 1:
-            for _, dispatcher_config, _, _ in model.traverse(
+            for _, dispatcher_config, parent, _ in model.traverse(
                 LocalTokenDispatcher.Config
             ):
+                if isinstance(parent, DistMoeRoutedExperts.Config):
+                    continue
                 if (
                     isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
                     and dispatcher_config.non_blocking_capacity_factor is not None

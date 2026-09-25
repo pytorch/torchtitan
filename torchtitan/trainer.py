@@ -20,6 +20,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.dist_moe import DistMoeRoutedExperts
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import apply_overrides, Configurable
@@ -102,6 +103,12 @@ class Trainer(Configurable):
                     local_compile_config=self.compile,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
+                if any(self.model.traverse(DistMoeRoutedExperts.Config)) and (
+                    self.training.mixed_precision_param != "bfloat16"
+                ):
+                    raise ValueError(
+                        "DistMoE requires mixed_precision_param='bfloat16'"
+                    )
 
         def to_dict(self) -> dict[str, Any]:
             d = {}

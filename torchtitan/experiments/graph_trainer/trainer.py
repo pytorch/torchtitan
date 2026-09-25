@@ -18,6 +18,7 @@ from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConf
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
@@ -124,6 +125,14 @@ class GraphTrainingEngine(TrainingEngine):
             self.pp_has_last_stage = any(stage.is_last for stage in stages)
             assert self.pp_has_first_stage and self.pp_has_last_stage
 
+        if (
+            isinstance(self.pp_schedule, GraphRuntime)
+            and self.dist_moe_runtime is not None
+        ):
+            self.pp_schedule.register_metadata_inference_state_restorer(
+                self.dist_moe_runtime.reset
+            )
+
         sdc_config = self.config.sdc_replayer
         self.sdc_replayer = None
         if sdc_config is not None:
@@ -140,7 +149,6 @@ class GraphTrainingEngine(TrainingEngine):
             self._forward_backward_body,
             defer_fsdp_gradient_reduction=False,
         )
-
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
         if self.config.compile.memory_policy == "sac_and_offload":
