@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
@@ -114,14 +115,9 @@ class KimiMLAAttention(BaseAttention):
         self.wo = config.wo.build()
         self.inner_attention = config.inner_attention.build()
 
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        del positions
-
+    def _project_qkv(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
             # The MLA and gate projections all consume x. Gather once at their
@@ -160,16 +156,42 @@ class KimiMLAAttention(BaseAttention):
             if spmd.is_type_checking():
                 spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
 
-        out_THV = self.inner_attention(
+        gate_TD = self.gate(x_TD)
+        return q_THK, k_THK, v_THV, gate_TD
+
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del positions
+        q_THK, k_THK, v_THV, gate_TD = remat.region(
+            self._project_qkv,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x_TD)
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             q_THK,
             k_THK,
             v_THV,
             attention_masks=attention_masks,
             scale=self.scale,
         )
+        remat.recompute_needs_tensor(out_THV, gate_TD)
         out_TD = out_THV.flatten(-2)
-        out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
-        return self.wo(out_TD)
+        out_TD = out_TD * torch.sigmoid(gate_TD)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 def _apply_attention_residual(

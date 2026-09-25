@@ -13,6 +13,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
@@ -117,12 +118,9 @@ class Attention(GQAttention):
         if config.o_gate is not None:
             self.o_gate = config.o_gate.build()
 
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def _project_qkv(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None,]:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
             # qkv and the output gate both consume x, so gather once at their
@@ -135,19 +133,34 @@ class Attention(GQAttention):
                 backward_options={"op_dtype": x_TD.dtype},
             )
 
-        num_tokens = x_TD.shape[0]
-        xq, xk, xv = self.qkv_linear(x_TD)
+        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
+        output_gate_TD = self.o_gate(x_TD) if self.o_gate is not None else None
+        return xq_THK, xk_THK, xv_THV, output_gate_TD
+
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        xq_THK, xk_THK, xv_THV, output_gate_TD = remat.region(
+            self._project_qkv,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x_TD)
 
         # QK normalization before RoPE. Query is additionally scaled by a
         # tuned constant (k is only normalized).
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
-            xq = self.q_norm(xq) * self.scale_query_by
-            xk = self.k_norm(xk)
+            remat.recompute_needs_tensor(xq_THK, xk_THK)
+            xq_THK = self.q_norm(xq_THK) * self.scale_query_by
+            xk_THK = self.k_norm(xk_THK)
 
         # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
         if self.rope is not None:
-            xq, xk = self.rope(xq, xk, positions)
+            remat.recompute_needs_tensor(xq_THK, xk_THK)
+            xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
         # Select this layer's mask by its window ("global" key = full attention).
         # Only flex passes a window-keyed dict of BlockMasks to index into. Varlen
@@ -157,20 +170,32 @@ class Attention(GQAttention):
         if isinstance(attention_masks, dict):
             attention_masks = attention_masks[_window_mask_key(self.window_size)]
 
-        output = self.inner_attention(
-            xq,
-            xk,
-            xv,
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
+            xq_THK,
+            xk_THK,
+            xv_THV,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
-        output = output.view(num_tokens, -1)
+        )
+        remat.recompute_needs_tensor(out_THV)
+        out_TD = out_THV.contiguous().view(out_THV.shape[0], -1)
 
-        if self.o_gate is not None:
-            output = output * torch.sigmoid(self.o_gate(x_TD))
+        if output_gate_TD is not None:
+            remat.recompute_needs_tensor(output_gate_TD)
+            out_TD = out_TD * torch.sigmoid(output_gate_TD)
 
-        return self.wo(output)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):

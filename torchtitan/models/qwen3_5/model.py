@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
@@ -142,12 +143,9 @@ class Qwen35Attention(BaseAttention):
 
         self.inner_attention = config.inner_attention.build()
 
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def _project_qkv(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
             # The query, key, and value projections all consume x. Gather once
@@ -161,14 +159,26 @@ class Qwen35Attention(BaseAttention):
             )
 
         num_tokens = x_TD.shape[0]
-
-        # wq is 2x wider: produces query + gate
         xq_gate_THC = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
         xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
         xk_THK = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
         xv_THV = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
+        return xq_THK, xk_THK, xv_THV, gate_THV
+
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        xq_THK, xk_THK, xv_THV, gate_THV = remat.region(
+            self._project_qkv,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x_TD)
 
         # QK norm (before RoPE)
+        remat.recompute_needs_tensor(xq_THK, xk_THK)
         xq_THK = self.q_norm(xq_THK)
         xk_THK = self.k_norm(xk_THK)
 
@@ -186,19 +196,31 @@ class Qwen35Attention(BaseAttention):
         xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
         xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
 
-        out_THV = self.inner_attention(
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             xq_THK,
             xk_THK,
             xv_THV,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
+        )
 
         # Output gating
+        remat.recompute_needs_tensor(out_THV, gate_THV)
+        out_THV = out_THV.contiguous()
         out_THV = out_THV * torch.sigmoid(gate_THV)
-        out_TD = out_THV.view(num_tokens, -1)
-        return self.wo(out_TD)
+        out_TD = out_THV.view(out_THV.shape[0], -1)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 class Qwen35TransformerBlock(Module):
