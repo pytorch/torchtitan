@@ -11,8 +11,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torchtitan.distributed.cuda_graph import (
+    _ForwardBackwardCUDAGraphWrapper,
     _manager,
-    CUDAGraphGradientState,
     CUDAGraphWrapper,
     get_cuda_graph_annotations,
     run_eager_on_cuda_graph_stream,
@@ -222,7 +222,6 @@ def test_cuda_graph_wrapper_restores_capture_allocated_gradients() -> None:
     parameter = torch.nn.Parameter(torch.ones(2))
     frozen_parameter = torch.nn.Parameter(torch.ones(2), requires_grad=False)
     captured_gradient = torch.full_like(parameter, 3.0)
-    gradient_state = CUDAGraphGradientState((parameter, parameter, frozen_parameter))
     graph = cast(torch.cuda.CUDAGraph, MagicMock())
 
     def forward_backward(value):
@@ -241,11 +240,11 @@ def test_cuda_graph_wrapper_restores_capture_allocated_gradients() -> None:
             return_value={},
         ),
     ):
-        wrapper = CUDAGraphWrapper(
+        wrapper = _ForwardBackwardCUDAGraphWrapper(
             forward_backward,
             (torch.tensor(1.0),),
             num_warmup_iterations=0,
-            gradient_state=gradient_state,
+            parameters=(parameter, parameter, frozen_parameter),
         )
 
         wrapper(torch.tensor(2.0))
@@ -267,7 +266,6 @@ def test_cuda_graph_wrapper_requires_cleared_owned_gradients(
     capture_first: bool,
 ) -> None:
     parameter = torch.nn.Parameter(torch.ones(2))
-    gradient_state = CUDAGraphGradientState((parameter,))
     graph = cast(torch.cuda.CUDAGraph, MagicMock())
 
     def forward_backward(value):
@@ -286,11 +284,11 @@ def test_cuda_graph_wrapper_requires_cleared_owned_gradients(
             return_value={},
         ),
     ):
-        wrapper = CUDAGraphWrapper(
+        wrapper = _ForwardBackwardCUDAGraphWrapper(
             forward_backward,
             (torch.tensor(1.0),),
             num_warmup_iterations=0,
-            gradient_state=gradient_state,
+            parameters=(parameter,),
         )
 
         if capture_first:
