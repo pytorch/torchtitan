@@ -16,6 +16,7 @@ from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -27,6 +28,7 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
+    annotate_varlen_metadata_spmd_types,
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
@@ -502,6 +504,12 @@ class KimiK3Model(MultimodalModel):
 
         input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
         batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        attention_masks = batch.get("attention_masks")
+        if attention_masks is not None:
+            kda_metadata = attention_masks.get("kda")
+            if isinstance(kda_metadata, VarlenMetadata):
+                with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+                    annotate_varlen_metadata_spmd_types(kda_metadata)
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")
