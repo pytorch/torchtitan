@@ -173,7 +173,7 @@ def _dist_muon_optimizer(
         ),
         "w2": owned,
     }
-    expert_projections = ("w1_EFD", "w2_EDF", "w3_EFD")
+    expert_projections = ("w13.weight", "w2.weight")
 
     def compute_shardings_for_layer(layer_id: int) -> dict[str, ComputeLayout]:
         layer = model_config.layers[layer_id]
@@ -205,7 +205,7 @@ def _dist_muon_optimizer(
         else:
             shardings.update(
                 {
-                    f"{prefix}.moe.routed_experts.inner_experts.{projection}": per_expert
+                    f"{prefix}.moe.routed_experts.{projection}": per_expert
                     for projection in expert_projections
                 }
             )
@@ -273,7 +273,7 @@ def _dist_muon_optimizer(
         r"(?:"
         rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
         rf"delta_attention\.(?:{'|'.join(delta_attention_shardings)})\.weight|"
-        rf"routed_experts\.inner_experts\.(?:{'|'.join(expert_projections)})|"
+        r"routed_experts\.w(?:13|2)\.weight|"
         r"feed_forward\.w(?:13|2)\.weight|"
         r"moe\.router\.gate\.weight|"
         r"moe\.shared_experts\.w(?:13|2)\.weight|"

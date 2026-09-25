@@ -28,12 +28,12 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    GroupedLinear,
     Linear,
     RouterGateLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import (
-    GroupedExperts,
     MicrobatchWiseLoadBalanceLoss,
     MoE,
     RoutedExperts,
@@ -191,6 +191,21 @@ def fused_gate_up_param_init(
     if gate_init is None or up_init is None:
         return None
     return {"weight": _make_fused_linear_init(gate_init, up_init)}
+
+
+def fused_grouped_gate_up_param_init(
+    param_init: dict[str, Callable],
+) -> dict[str, Callable]:
+    """Build ``w13.weight`` initialization from logical expert projections."""
+    missing = {"w1_EFD", "w3_EFD"} - param_init.keys()
+    if missing:
+        raise ValueError(f"Missing routed-expert initializers: {sorted(missing)}")
+
+    def init(weight_E2FD: torch.Tensor) -> None:
+        param_init["w1_EFD"](weight_E2FD[:, 0])
+        param_init["w3_EFD"](weight_E2FD[:, 1])
+
+    return {"weight": init}
 
 
 def make_gqa_config(
@@ -425,13 +440,26 @@ def make_routed_experts_config(
     num_max_tokens_per_rank: int | None = None,
     cuda_graph_compatible: bool = False,
 ) -> RoutedExperts.Config:
-    """Build a fully-specified RoutedExperts.Config (inner_experts + token_dispatcher)."""
+    """Build routed experts with structured gate/up and down projections."""
+    missing = {"w1_EFD", "w2_EDF", "w3_EFD"} - param_init.keys()
+    if param_init and missing:
+        raise ValueError(f"Missing routed-expert initializers: {sorted(missing)}")
+
     return RoutedExperts.Config(
-        inner_experts=GroupedExperts.Config(
-            dim=dim,
-            hidden_dim=hidden_dim,
-            num_experts=num_experts,
-            param_init=param_init,
+        w13=GroupedLinear.Config(
+            group_size=num_experts,
+            in_features=dim,
+            out_features=hidden_dim,
+            num_linears=2,
+            param_init=(
+                fused_grouped_gate_up_param_init(param_init) if param_init else None
+            ),
+        ),
+        w2=GroupedLinear.Config(
+            group_size=num_experts,
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init={"weight": param_init["w2_EDF"]} if param_init else None,
         ),
         token_dispatcher=make_token_dispatcher_config(
             num_experts=num_experts,

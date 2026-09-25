@@ -285,14 +285,25 @@ class StateDictAdapter(BaseStateDictAdapter):
                 fused = fused.redistribute(mesh, placements)
             state_dict[fused_key] = fused
 
-    def _native_fused_linears_to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def _native_fused_linears_to_hf(
+        self,
+        state_dict: dict[str, Any],
+        *,
+        split_routed_experts: bool = False,
+    ) -> dict[str, Any]:
         """Convert native fused linear parameters to logical HF-facing keys.
 
         Model-specific adapters subsequently rename the logical keys to their
         corresponding HF keys.
+
+        Args:
+            state_dict: Native model state.
+            split_routed_experts: Split routed W13 weights into logical W1/W3
+                tensors for HF schemas that store experts independently.
         """
         from torchtitan.models.common.attention import QKVLinear
         from torchtitan.models.common.feed_forward import FeedForward
+        from torchtitan.models.common.moe import RoutedExperts
 
         result = dict(state_dict)
         for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
@@ -317,14 +328,39 @@ class StateDictAdapter(BaseStateDictAdapter):
                 heads_per_kv=config.n_heads // config.n_kv_heads,
             )
 
+        if split_routed_experts:
+            for fqn, _config, _parent, _ in self.model_config.traverse(
+                RoutedExperts.Config
+            ):
+                prefix = f"{fqn}." if fqn else ""
+                self._split_stacked_linear(
+                    result,
+                    fused_key=f"{prefix}w13.weight",
+                    logical_keys=(
+                        f"{prefix}w1_EFD",
+                        f"{prefix}w3_EFD",
+                    ),
+                    dim=1,
+                )
+
         return result
 
     def _native_fused_linears_from_hf(
-        self, state_dict: dict[str, Any]
+        self,
+        state_dict: dict[str, Any],
+        *,
+        fuse_routed_experts: bool = False,
     ) -> dict[str, Any]:
-        """Convert logical HF-facing keys to native fused linear parameters."""
+        """Convert logical HF-facing keys to native fused linear parameters.
+
+        Args:
+            state_dict: Logical HF-facing model state.
+            fuse_routed_experts: Fuse logical routed W1/W3 tensors into W13 for
+                HF schemas that store experts independently.
+        """
         from torchtitan.models.common.attention import QKVLinear
         from torchtitan.models.common.feed_forward import FeedForward
+        from torchtitan.models.common.moe import RoutedExperts
 
         result = dict(state_dict)
         for fqn, _config, _parent, _ in self.model_config.traverse(FeedForward.Config):
@@ -348,6 +384,21 @@ class StateDictAdapter(BaseStateDictAdapter):
                 head_dim=config.head_dim,
                 heads_per_kv=config.n_heads // config.n_kv_heads,
             )
+
+        if fuse_routed_experts:
+            for fqn, _config, _parent, _ in self.model_config.traverse(
+                RoutedExperts.Config
+            ):
+                prefix = f"{fqn}." if fqn else ""
+                self._stack_logical_linears(
+                    result,
+                    fused_key=f"{prefix}w13.weight",
+                    logical_keys=(
+                        f"{prefix}w1_EFD",
+                        f"{prefix}w3_EFD",
+                    ),
+                    dim=1,
+                )
 
         return result
 

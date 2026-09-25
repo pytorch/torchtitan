@@ -31,7 +31,7 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer import simple_fsdp
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import GroupedLinear, Linear
 
 
 STEPS = 20
@@ -271,20 +271,17 @@ DSV3_EP_OVERLAP_GRAPH_PARALLELISM = (
     " --parallelism.expert_parallel_degree=2"
 )
 DSV3_EP_OVERLAP_OPTIONS = (
-    "--compile.mode aot_fx_trace"
-    " --compile.ep_overlap.enabled"
+    "--compile.ep_overlap.enabled"
     " --compile.ep_overlap.chunk_dim batch"
     " --compile.ep_overlap.module_fqn layers.*"
 )
 DSV3_EP_OVERLAP_MOE_SEQ_OPTIONS = (
-    "--compile.mode aot_fx_trace"
-    " --compile.ep_overlap.enabled"
+    "--compile.ep_overlap.enabled"
     " --compile.ep_overlap.chunk_dim seq"
     " --compile.ep_overlap.module_fqn layers.*.moe"
 )
 DSV3_EP_OVERLAP_MOE_BATCH_OPTIONS = (
-    "--compile.mode aot_fx_trace"
-    " --compile.ep_overlap.enabled"
+    "--compile.ep_overlap.enabled"
     " --compile.ep_overlap.chunk_dim batch"
     " --compile.ep_overlap.module_fqn layers.*.moe"
 )
@@ -380,9 +377,7 @@ GRAPH_PP_DSV3_PP_OPTIONS = (
 
 
 GRAPH_PP_DSV3_TEST_PARALLELISM = (
-    "--compile.mode aot_fx_trace"
-    " --compile.inductor_compilation regional"
-    f" {GRAPH_PP_DSV3_PP_OPTIONS}"
+    "--compile.inductor_compilation regional" f" {GRAPH_PP_DSV3_PP_OPTIONS}"
 )
 
 
@@ -401,8 +396,8 @@ def _run_graph_pp_deepseek_v3_loss_compare(schedule: str) -> bool:
         " --metrics.save_for_all_ranks"
     )
 
-    baseline_module = "graph_trainer.deepseek_v3"
-    baseline_config = "graph_trainer_deepseek_v3_debugmodel_eager_pp"
+    baseline_module = "deepseek_v3"
+    baseline_config = "deepseek_v3_debugmodel"
     test_module = "graph_trainer.deepseek_v3"
     test_config = "graph_trainer_deepseek_v3_debugmodel"
     baseline_tb_folder = "tb_baseline"
@@ -517,23 +512,19 @@ AUTOPARALLEL_LLAMA3_PARALLELISM = (
 
 
 def _run_autoparallel_llama3_loss_compare() -> bool:
-    """Run loss_compare for eager SDPA llama3 vs graph_trainer AutoParallel.
+    """Run loss_compare for manual SDPA llama3 vs AutoParallel.
 
     AutoParallel is unsupported on the default FlexInnerAttention backend (dynamo
     export flattens the BlockMask), so both sides use the test-only SDPA backend.
-    The eager baseline runs the same SDPA model through GraphTrainer with
-    ``mode=None`` (delegates to the core eager path).
     """
     return run_loss_compare_close(
         baseline_module="graph_trainer.llama3",
-        baseline_config="graph_trainer_llama3_debugmodel_sdpa_eager",
+        baseline_config="graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss",
         test_module="graph_trainer.llama3",
         test_config="graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss",
         baseline_options=AUTOPARALLEL_LLAMA3_PARALLELISM,
         test_options=(
-            f"{AUTOPARALLEL_LLAMA3_PARALLELISM}"
-            " --compile.mode aot_fx_trace"
-            " --compile.enable_autoparallel"
+            f"{AUTOPARALLEL_LLAMA3_PARALLELISM} --compile.enable_autoparallel"
         ),
         baseline_ngpus=4,
         test_ngpus=4,
@@ -555,11 +546,7 @@ def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
         test_module="graph_trainer.deepseek_v3",
         test_config="graph_trainer_deepseek_v3_debugmodel",
         baseline_options=AUTOPARALLEL_DSV3_PARALLELISM,
-        test_options=(
-            f"{AUTOPARALLEL_DSV3_PARALLELISM}"
-            " --compile.mode aot_fx_trace"
-            " --compile.enable_autoparallel"
-        ),
+        test_options=(f"{AUTOPARALLEL_DSV3_PARALLELISM} --compile.enable_autoparallel"),
         baseline_ngpus=4,
         test_ngpus=4,
         rtol=5e-4,
@@ -570,46 +557,7 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     """Test numerics equivalence between graph_trainer and FSDP2 eager."""
 
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
-        self.assertTrue(
-            _run_llama3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_dense_llama3_jit_vs_eager(self):
-        self.assertTrue(
-            _run_llama3_loss_compare(test_options_extra="--compile.mode jit"),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_dense_llama3_auto_bucketing_jit_vs_eager(self):
-        self.assertTrue(
-            _run_llama3_loss_compare(
-                test_options_extra="--compile.mode jit --compile.passes auto_bucketing"
-            ),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_dense_llama3_manual_bucketing_jit_vs_eager(self):
-        self.assertTrue(
-            _run_llama3_loss_compare(
-                test_options_extra="--compile.mode jit --compile.passes transformer_block_bucketing"
-            ),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_moe_dsv3_jit_vs_eager(self):
-        """Test graph_trainer.deepseek_v3 matches deepseek_v3 (JIT)."""
-        self.assertTrue(
-            _run_deepseek_v3_loss_compare(test_options_extra="--compile.mode jit"),
-        )
-
-    @unittest.skip("Disabled: upstream partitioner regression (#2149)")
-    def test_moe_dsv3_manual_bucketing_jit_vs_eager(self):
-        self.assertTrue(
-            _run_deepseek_v3_loss_compare(
-                test_options_extra="--compile.mode jit --compile.passes transformer_block_bucketing"
-            ),
-        )
+        self.assertTrue(_run_llama3_loss_compare())
 
     @unittest.skip(
         "Disabled: flaky single-rank crash in DSv3 MoE EP all-to-all. Losses "
@@ -619,11 +567,7 @@ class TestGraphTrainerNumerics(unittest.TestCase):
         "diagnosed and fixed."
     )
     def test_moe_dsv3_aot_fx_trace_vs_eager(self):
-        self.assertTrue(
-            _run_deepseek_v3_loss_compare(
-                test_options_extra="--compile.mode aot_fx_trace"
-            ),
-        )
+        self.assertTrue(_run_deepseek_v3_loss_compare())
 
     # TODO(#4342): Remove transformer-level chunking. After the model batch
     # dimension was folded into the token dimension, splitting `layers.*` in
@@ -652,16 +596,10 @@ class TestGraphTrainerNumerics(unittest.TestCase):
                 self.assertTrue(_run_graph_pp_deepseek_v3_loss_compare(schedule))
 
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
-        self.assertTrue(
-            _run_qwen3_loss_compare(test_options_extra="--compile.mode aot_fx_trace"),
-        )
+        self.assertTrue(_run_qwen3_loss_compare())
 
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
-        self.assertTrue(
-            _run_qwen3_moe_loss_compare(
-                test_options_extra="--compile.mode aot_fx_trace"
-            ),
-        )
+        self.assertTrue(_run_qwen3_moe_loss_compare())
 
 
 @unittest.skipUnless(
@@ -1014,6 +952,28 @@ class TestSimpleFSDP(FSDPTest):
         self.assertIsInstance(bias, DTensor)
         self.assertEqual(weight.placements, (Shard(1),))
         self.assertEqual(bias.placements, (Shard(1),))
+
+    def test_stacked_grouped_linear_shards_matrix_rows(self):
+        device_type = "cuda" if dist.get_backend() == "nccl" else "cpu"
+        device = (
+            torch.device(device_type, self.rank) if device_type == "cuda" else "cpu"
+        )
+        mesh = init_device_mesh(
+            device_type, (self.world_size,), mesh_dim_names=("fsdp",)
+        )
+        model = GroupedLinear.Config(
+            group_size=4,
+            in_features=8,
+            out_features=8,
+            num_linears=2,
+        ).build()
+        model.to(device)
+
+        data_parallel(model, mesh, "fully_shard")
+
+        weight = model._parameters["weight"]
+        self.assertIsInstance(weight, DTensor)
+        self.assertEqual(weight.placements, (Shard(2),))
 
     def test_frozen_parameter_remains_frozen(self):
         device_type = "cuda" if dist.get_backend() == "nccl" else "cpu"

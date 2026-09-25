@@ -470,7 +470,10 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.moe.router",
                         f"layers.{layer_id}.moe.shared_experts",
                     ],
-                    f"layers.{layer_id}.moe.routed_experts.inner_experts",
+                    [
+                        f"layers.{layer_id}.moe.routed_experts.w13",
+                        f"layers.{layer_id}.moe.routed_experts.w2",
+                    ],
                 ]
             )
         else:
@@ -535,9 +538,8 @@ def apply_simple_fsdp(
 ) -> nn.Module:
     """Wrap the model (and any MoE experts) with graph_trainer's simple_fsdp.
 
-    For MoE-enabled models, the ``moe.routed_experts.inner_experts`` submodules
-    (the routed-expert weights) are separately wrapped on the EDP mesh when expert
-    parallelism is enabled.
+    For MoE-enabled models, routed W13 and W2 projections are separately
+    wrapped on the EDP mesh when expert parallelism is enabled.
     """
     fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
 
@@ -576,19 +578,40 @@ def apply_simple_fsdp(
             moe = getattr(transformer_block, "moe", None)
             if moe is None:
                 continue
-            inner_experts = moe.routed_experts.inner_experts
+            routed_experts = moe.routed_experts
             experts_shard_dim = 0
-            if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
+            if (
+                edp_mesh["efsdp"].size() * parallel_dims.ep
+                > routed_experts.w13.group_size
+            ):
                 experts_shard_dim = 1
 
-            moe.routed_experts.inner_experts = data_parallel(
-                inner_experts,
-                edp_mesh,
-                dp_mode,
-                mp_policy=mp_policy,
-                shard_dim=experts_shard_dim,
-                non_dp_mesh=parallel_dims.get_optional_mesh("ep"),
-            )
+            if experts_shard_dim == 0:
+                data_parallel(
+                    routed_experts,
+                    edp_mesh,
+                    dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=0,
+                    non_dp_mesh=parallel_dims.get_optional_mesh("ep"),
+                )
+            else:
+                data_parallel(
+                    routed_experts.w13,
+                    edp_mesh,
+                    dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=2,
+                    non_dp_mesh=parallel_dims.get_optional_mesh("ep"),
+                )
+                data_parallel(
+                    routed_experts.w2,
+                    edp_mesh,
+                    dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=1,
+                    non_dp_mesh=parallel_dims.get_optional_mesh("ep"),
+                )
 
     model = data_parallel(
         model,

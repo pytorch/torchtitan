@@ -35,6 +35,7 @@ from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import (
     CastLinear,
     ColumnParallelLinear,
+    GroupedLinear,
     Linear,
     RouterGateLinear,
     RowParallelLinear,
@@ -75,6 +76,7 @@ __all__ = [
     "get_sliding_window_mask_mod",
     "GQAttention",
     "GroupNorm",
+    "GroupedLinear",
     "Identity",
     "InnerAttention",
     "LayerNorm",

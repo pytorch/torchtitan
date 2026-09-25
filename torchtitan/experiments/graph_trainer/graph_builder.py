@@ -34,7 +34,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining.schedules import (
     _PipelineContext,
     _PipelineScheduleRuntime,
-    FULL_BACKWARD,
 )
 
 from torchtitan.config import ParallelismConfig
@@ -1382,8 +1381,7 @@ def _build_joint_stage_graph(
             raise ValueError(
                 "Precompiled fx_trace artifact not found at "
                 f"'{compile_config.precompile_artifact_dir}/"
-                f"{_FX_TRACE_ARTIFACT_KEY}.bin'. Run precompile_main with "
-                "--compile.mode aot_fx_trace first."
+                f"{_FX_TRACE_ARTIFACT_KEY}.bin'. Run precompile_main first."
             )
         runtime_meshes = get_spmd_precompile_meshes(parallel_dims)
         traced = precompile_fx_trace_load(
@@ -1985,7 +1983,7 @@ class GraphTrainerStageGraphProvider:
     def _warn_if_cuda_graph_pass_requested(self) -> None:
         if self._warned_cuda_graph:
             return
-        if self.compile_config.mode is None or not self.compile_config.enable_passes:
+        if not self.compile_config.enable_passes:
             return
         if "cuda_graph_pass" in self.compile_config.disable_passes:
             return

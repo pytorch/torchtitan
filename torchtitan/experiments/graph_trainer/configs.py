@@ -63,19 +63,9 @@ class EpOverlapConfig:
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
-    """
-    Compilation mode. Options:
-        aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
-        jit: standard torch.compile() with custom backend (deprecated)
-    """
-
-    backend: str = "aot_eager"
-
     passes: list[str] = field(default_factory=list)
     """
-    Additional compiler pass names to apply.
-    In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
+    Additional compiler pass names to apply or prepare inputs for.
     """
 
     enable_passes: bool = True
@@ -255,17 +245,7 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     enable_autoparallel: bool = False
     """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
-    manual TP/FSDP/EP. Forces the AOT compilation path internally."""
-
-
-def validate_autoparallel_config(
-    compile_config: GraphTrainerCompileConfig,
-) -> None:
-    if compile_config.enable_autoparallel and compile_config.mode != "aot_fx_trace":
-        raise ValueError(
-            "AutoParallel graph_trainer integration only supports "
-            "--compile.mode aot_fx_trace"
-        )
+    manual TP/FSDP/EP."""
 
 
 def validate_ep_overlap_config(
