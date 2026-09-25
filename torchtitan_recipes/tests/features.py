@@ -75,7 +75,7 @@ class SDCReplayMismatchTrainingEngine(TrainingEngine):
         )
         self._num_forward_backward_calls = 0
 
-    def _non_pp_forward_backward_body(
+    def _non_pp_forward_backward_microbatch(
         self,
         *,
         inputs: torch.Tensor | tuple[torch.Tensor, ...],
@@ -83,7 +83,7 @@ class SDCReplayMismatchTrainingEngine(TrainingEngine):
         model_kwargs: dict[str, Any],
         loss_kwargs: dict[str, Any],
     ) -> torch.Tensor:
-        loss = super()._non_pp_forward_backward_body(
+        loss = super()._non_pp_forward_backward_microbatch(
             inputs=inputs,
             labels=labels,
             model_kwargs=model_kwargs,
@@ -297,6 +297,20 @@ def llama3_debugmodel_fsdp2_pp2_1f1b() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule = "1F1B"
     config.parallelism.data_parallel_shard_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    return config
+
+
+def muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.fsdp_defer_gradient_reduction = True
+    config.parallelism.fsdp_reshard_after_forward = "never"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.num_tokens_per_train_step = 65536
     return config
 
 
@@ -545,6 +559,16 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     """Two gradient accumulation steps on 2 GPUs."""
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
+    config.training.disable_cuda_graphs = True
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    config.training.num_tokens_per_train_step = 65536
+    return config
+
+
+def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.fsdp_defer_gradient_reduction = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.training.num_tokens_per_train_step = 65536
     return config

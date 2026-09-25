@@ -153,6 +153,21 @@ class _TraceableWrapper(torch.Tensor):
 
 
 class TestGraphGradientAccumulation(unittest.TestCase):
+    def test_rejects_fsdp2_deferred_gradient_reduction(self):
+        from types import SimpleNamespace
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(
+            parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=True)
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "does not support fsdp_defer_gradient_reduction"
+        ):
+            engine._initialize_forward_backward()
+
     def test_aot_fx_initializes_one_stage_pipeline_runtime(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
@@ -163,7 +178,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
             compile=SimpleNamespace(mode="aot_fx_trace", memory_policy="none"),
-            parallelism=SimpleNamespace(),
+            parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
+            sdc_replayer=None,
             training=SimpleNamespace(
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
@@ -194,7 +210,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             engine._initialize_forward_backward()
 
         self.assertIs(engine.pp_schedule, graph_runtime)
-        base_init.assert_called_once_with()
+        base_init.assert_not_called()
         make_runtime.assert_called_once_with(
             engine.model_parts[0],
             gradient_accumulation_steps=2,
@@ -206,6 +222,66 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             loss_fn=engine.loss_fn,
             trainer_config=engine.config,
         )
+
+    def test_aot_fx_runs_multi_microbatch_group_through_graph_runtime(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        model = MagicMock()
+        model.preprocess_inputs.side_effect = lambda input_dict, **_: (
+            input_dict["input"],
+            input_dict["labels"],
+            {"positions": input_dict["positions"]},
+        )
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(
+            compile=SimpleNamespace(mode="aot_fx_trace"),
+            parallelism="PARALLELISM",
+            training=SimpleNamespace(
+                max_context_length=8,
+                num_tokens_per_microbatch_per_dp_rank=1,
+            ),
+        )
+        engine.parallel_dims = SimpleNamespace(pp_enabled=False, cp=1)
+        engine.model_parts = [model]
+        engine.device = torch.device("cpu")
+        engine.max_num_documents = None
+        engine.preprocess_inputs_kwargs = {}
+        engine.ntokens_seen = 0
+        microbatches = [
+            TokenizedTrainingMicrobatch(
+                input=torch.tensor([index]),
+                labels=torch.tensor([index + 1]),
+                positions=torch.tensor([index + 2]),
+                padding_mask=torch.tensor([False]),
+                num_valid_tokens=1,
+            )
+            for index in range(2)
+        ]
+
+        prepared_groups = engine._preprocess_microbatch_groups([microbatches])
+        engine._pp_forward_backward_microbatch_group = MagicMock(
+            return_value=torch.tensor(3.0)
+        )
+        result = engine._forward_backward_body(
+            prepared_groups,
+            torch.tensor(2),
+            defer_fsdp_gradient_reduction=False,
+        )
+
+        assert engine.ntokens_seen == 2
+        torch.testing.assert_close(result.loss, torch.tensor(3.0))
+        assert result.loss_metrics == [{}]
+        call = engine._pp_forward_backward_microbatch_group.call_args
+        assert len(call.kwargs["inputs"]) == 2
+        assert len(call.kwargs["model_kwargs"]) == 2
+        assert len(call.kwargs["labels"]) == 2
+        torch.testing.assert_close(
+            call.kwargs["loss_kwargs"]["global_valid_tokens"], torch.tensor(2)
+        )
+        assert call.kwargs["finalize_gradients"]
 
     def test_accumulate_param_grads_clones_param_grad_when_requested(self):
         param = nn.Parameter(torch.zeros(2))

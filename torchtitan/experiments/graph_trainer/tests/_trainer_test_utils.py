@@ -6,6 +6,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from types import SimpleNamespace
 
 import torch
@@ -106,7 +107,7 @@ def build_minimal_trainer(
     engine.model_parts = [model]
     engine.loss_fn = CrossEntropyLoss.Config().build()
     engine.parallel_dims = parallel_dims
-    engine.forward_backward_body_fn = engine._non_pp_forward_backward_body
+    engine.forward_backward_body_fn = engine._non_pp_forward_backward_microbatch
     engine.model_config = model_config
     engine.device = torch.device("cuda")
     engine.preprocess_inputs_kwargs = {}
@@ -116,6 +117,9 @@ def build_minimal_trainer(
     engine.ntokens_seen = 0
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
+    engine.gc_handler = SimpleNamespace(run=lambda _step: False)
+    engine.optimizers = SimpleNamespace(zero_grad=model.zero_grad)
+    engine.loss_metrics = {}
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
@@ -148,7 +152,7 @@ def build_minimal_trainer(
             }[activation_checkpoint_mode],
             dataloader=SimpleNamespace(max_num_documents=None),
             debug=DebugConfig(),
-            training=TrainingConfig(),
+            training=TrainingConfig(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(
                 enable_sequence_parallel=False,
                 pipeline_parallel_degree=1,
@@ -245,10 +249,19 @@ def build_minimal_trainer(
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
-            training=TrainingConfig(),
-            parallelism=SimpleNamespace(enable_sequence_parallel=False),
+            debug=DebugConfig(),
+            training=TrainingConfig(disable_cuda_graphs=True),
+            parallelism=SimpleNamespace(
+                enable_sequence_parallel=False,
+                fsdp_defer_gradient_reduction=False,
+                fsdp_reshard_after_forward="default",
+            ),
         )
 
     engine.config = trainer.config
+    engine._run_forward_backward = partial(
+        engine._forward_backward_body,
+        defer_fsdp_gradient_reduction=False,
+    )
 
     return trainer
