@@ -12,7 +12,6 @@ fields set at config creation time.
 
 import dataclasses
 from collections.abc import Callable
-from typing import Literal
 
 import torch
 from torch.distributed.tensor import DTensor
@@ -26,12 +25,14 @@ from torchtitan.models.common.attention import (
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.dist_gemm import (
-    AsyncColumnParallelLinear,
-    AsyncRowParallelLinear,
-)
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import GroupedLinear, Linear, RouterGateLinear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    GroupedLinear,
+    Linear,
+    RouterGateLinear,
+    RowParallelLinear,
+)
 from torchtitan.models.common.moe import (
     MicrobatchWiseLoadBalanceLoss,
     MoE,
@@ -66,15 +67,6 @@ def decoder_vocab_size(model_config: Module.Config) -> int:
     """Assert Decoder.Config type so lint is not annoyed."""
     assert isinstance(model_config, Decoder.Config)
     return model_config.vocab_size
-
-
-# Which implementation runs the TP-parallel linear layers. "default" leaves the
-# collectives to the framework, as separate all-gather / reduce-scatter either side
-# of an ordinary GEMM. "dist_gemm" folds each collective into its adjacent GEMM
-# over symmetric memory, so communication overlaps compute -- the technique
-# Megatron exposes as --tp-comm-overlap. Further implementations (CuTeDSL, Triton)
-# would be additional values here.
-TpGemmBackend = Literal["default", "dist_gemm"]
 
 
 def get_attention_config(
@@ -227,39 +219,24 @@ def make_gqa_config(
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     qk_norm: RMSNorm.Config | None = None,
-    tp_gemm_backend: TpGemmBackend = "default",
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config.
 
     ``rope=None`` builds a NoPE layer (no positional encoding); see
     :class:`GQAttention`.
 
-    ``tp_gemm_backend`` selects which implementation runs the QKV and output
-    projections. ``"default"`` leaves the TP collectives to the framework, either
-    side of an ordinary GEMM. ``"dist_gemm"`` folds each into its adjacent GEMM
-    over symmetric memory.
-
-    ``"dist_gemm"`` folds the input all-gather into the wqkv GEMM. It also needs
-    CUDA and the spmd_types backend; those are rejected by
-    ``validate_dist_gemm_preconditions`` at sharding time, which is the first point
-    that sees the parallelism settings.
+    The projection types make the standard synchronous TP collectives explicit.
+    Without a TP mesh, they execute as ordinary linear modules.
     """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
     rope = dataclasses.replace(rope) if rope is not None else None
 
-    # The backend picks the projection classes; QKVLinear continues to own the
-    # fused output split for both implementations.
-    qkv_projection_cls, wo_cls = Linear, Linear
-    if tp_gemm_backend == "dist_gemm":
-        qkv_projection_cls = AsyncColumnParallelLinear
-        wo_cls = AsyncRowParallelLinear
-
     qkv = QKVLinear.Config(
         head_dim=per_head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv,
-        wqkv=qkv_projection_cls.Config(
+        wqkv=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=(n_heads + 2 * n_kv) * per_head_dim,
             param_init=fused_qkv_param_init(
@@ -277,7 +254,7 @@ def make_gqa_config(
         head_dim=head_dim,
         dim=dim,
         qkv_linear=qkv,
-        wo=wo_cls.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * per_head_dim,
             out_features=dim,
             param_init=wo_param_init,
@@ -294,27 +271,45 @@ def make_ffn_config(
     hidden_dim: int,
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
-    tp_gemm_backend: TpGemmBackend = "default",
 ) -> FeedForward.Config:
-    """Build a fully-specified FeedForward.Config.
-
-    ``tp_gemm_backend="dist_gemm"`` overlaps the TP collectives with the GEMMs by
-    folding them in: one all-gather feeds w13, and w2 reduce-scatters. See
-    make_gqa_config.
-    """
-    w13_cls, w2_cls = Linear, Linear
-    if tp_gemm_backend == "dist_gemm":
-        w13_cls = AsyncColumnParallelLinear
-        w2_cls = AsyncRowParallelLinear
+    """Build a fully-specified FeedForward.Config."""
     return FeedForward.Config(
-        w13=w13_cls.Config(
+        w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
-        w2=w2_cls.Config(
-            in_features=hidden_dim, out_features=dim, param_init=w2w3_param_init
+        w2=RowParallelLinear.Config(
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init=w2w3_param_init,
+        ),
+    )
+
+
+def make_shared_expert_ffn_config(
+    *,
+    dim: int,
+    hidden_dim: int,
+    w1_param_init: dict[str, Callable],
+    w2w3_param_init: dict[str, Callable],
+) -> FeedForward.Config:
+    """Build a shared FFN whose output reduction is owned by its sharding config."""
+    return FeedForward.Config(
+        w13=ColumnParallelLinear.Config(
+            in_features=dim,
+            out_features=hidden_dim,
+            num_linears=2,
+            param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
+        ),
+        # Shared w2 must remain Partial when EP is enabled without SP so the
+        # outer MoE boundary performs the only all-reduce. RowParallelLinear
+        # would reduce P -> I here and reduce the shared output a second time.
+        w2=Linear.Config(
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init=w2w3_param_init,
         ),
     )
 

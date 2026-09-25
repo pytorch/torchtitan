@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
@@ -25,6 +26,8 @@ from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
 from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
 from torchtitan.models.qwen3_6 import config_registry as qwen36_configs
 from torchtitan.models.qwen3_8 import config_registry as qwen38_configs
+from torchtitan_recipes.tests import b200 as b200_recipes, models as integration_recipes
+from torchtitan_recipes.tests.multimodal import DPRankImagePresenceDatasetConfig
 
 
 class _Tokenizer:
@@ -119,6 +122,55 @@ def test_multimodal_processor_forwards_resize_config():
     assert captured["resize_fn"] is resize_to_navit_patch_grid
     assert captured["max_patches"] == 123
     assert captured["max_patches_per_side"] == 45
+
+
+def test_dp_rank_image_presence_dataset_drops_images_on_even_ranks():
+    def process_sample(sample, **kwargs):
+        del kwargs
+        return {
+            "input_ids": torch.tensor([1]),
+            "has_image": sample.get("jpg") is not None,
+        }
+
+    base = SingleDatasetConfig(
+        source=_RowsSourceConfig(rows=({"jpg": b"image"}, {"jpg": b"image"})),
+        processor=MultiModalProcessor.Config(sample_processor=process_sample),
+    )
+    has_image = []
+    for dp_rank in range(2):
+        dataset = DPRankImagePresenceDatasetConfig(dataset=base).build(
+            context=CONTEXT,
+            dataset_iteration_policy=DatasetIterationPolicy(
+                seed=0,
+                shuffle=False,
+                repeat=False,
+                dp_rank=dp_rank,
+                dp_world_size=2,
+                streaming_shuffle_buffer_size=1,
+            ),
+        )
+        has_image.append(dataset[0]["has_image"])
+
+    assert has_image == [False, True]
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        integration_recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4,
+        integration_recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4,
+        integration_recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac,
+        integration_recipes.kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2,
+        integration_recipes.kimi_k2_5_debugmodel_muon_fsdp8_ep8,
+        integration_recipes.muse_glimmer_debugmodel_mm_fsdp2_tp2,
+        b200_recipes.kimi_k3_debugmodel_mm,
+    ],
+)
+def test_multimodal_dp_integration_recipes_use_rank_conditional_images(recipe):
+    config = recipe()
+
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    assert isinstance(config.dataloader.dataset, DPRankImagePresenceDatasetConfig)
 
 
 @pytest.mark.parametrize(

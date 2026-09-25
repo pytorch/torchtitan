@@ -20,7 +20,9 @@ from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
+    spmd_dense_sp_enabled,
     spmd_local_context,
+    spmd_mesh_group,
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
@@ -35,6 +37,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
+    add_zero_vision_dependency,
+    build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
@@ -117,6 +121,18 @@ class KimiMLAAttention(BaseAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
+
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # The MLA and gate projections all consume x. Gather once at their
+            # common attention boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
 
         q_THK = local_head_split(
             self.wq_b(self.q_norm(self.wq_a(x_TD))), self.q_head_dim
@@ -499,16 +515,27 @@ class KimiK3Model(MultimodalModel):
                 "pixel_values and grid_thw must either both be provided or "
                 "both be omitted."
             )
-        if pixel_values is None:
-            return embeddings_TD
+        is_dummy = pixel_values is None
+        if is_dummy:
+            if self.vision_encoder is None:
+                return embeddings_TD
+            kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
+            pixel_values, grid_thw = build_dummy_vision_inputs(
+                patch_dim=self.vision_encoder.patch_embed.in_features,
+                grid_thw=(1, kernel_h, kernel_w),
+                device=embeddings_TD.device,
+            )
         assert grid_thw is not None
         if self.vision_encoder is None:
             raise ValueError("pixel_values were provided without a vision encoder.")
-        if special_tokens is None:
-            raise ValueError("special_tokens are required for multimodal inputs.")
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        if is_dummy:
+            return add_zero_vision_dependency(embeddings_TD, vision_embeds)
+
+        if special_tokens is None:
+            raise ValueError("special_tokens are required for multimodal inputs.")
         # MoonViT collapses time and merges spatially, so the text-side token
         # count per item is (h/kh)*(w/kw), independent of t.
         kernel_h, kernel_w = self.vision_encoder.merge_kernel_size

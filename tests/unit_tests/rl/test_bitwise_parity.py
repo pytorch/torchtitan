@@ -668,12 +668,6 @@ class BitwiseParityTestBase(unittest.TestCase):
                 initial_load_path=config.hf_assets_path,
             )
 
-        # The graph-break decorator reads this env var at import time, and
-        # register_to_vllm below triggers that import, so set it first.
-        gen_cuda_graph = config.generator.cuda_graph
-        if gen_cuda_graph.mode == "FULL_AND_PIECEWISE":
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-
         register_to_vllm(
             config.model,
             parallelism=config.generator.parallelism,
