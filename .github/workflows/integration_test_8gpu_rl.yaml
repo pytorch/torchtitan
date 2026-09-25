@@ -58,23 +58,6 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        # linux_job_v3 points HF_HUB_CACHE at the read-only /mnt/hf_cache mount,
-        # which is right for jobs that only read seeded models. This suite pulls
-        # a dataset with repo_type=dataset, which lands in the hub cache rather
-        # than HF_DATASETS_CACHE, so that mount has to be writable here. Warm it
-        # from the mount so seeded models are still reused, the same shape as
-        # pytorch's _linux-test.yml does for its datasets cache.
-        export HF_HOME="$RUNNER_TEMP/hf_home"
-        export HF_HUB_CACHE="$RUNNER_TEMP/hf_home/hub"
-        export HF_DATASETS_CACHE="$RUNNER_TEMP/hf_home/datasets"
-        mkdir -p "$HF_HUB_CACHE" "$HF_DATASETS_CACHE"
-        if [[ -d /mnt/hf_cache/hub ]]; then
-          cp -a /mnt/hf_cache/hub/. "$HF_HUB_CACHE/" 2>/dev/null || true
-        fi
-        if [[ -d /mnt/hf_cache/datasets ]]; then
-          cp -a /mnt/hf_cache/datasets/. "$HF_DATASETS_CACHE/" 2>/dev/null || true
-        fi
-
         # Install uv for faster dependency resolution
         pip install uv
 
