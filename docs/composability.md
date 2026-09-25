@@ -25,10 +25,10 @@ One issue with seed checkpoints is that we rely on initializing _every_ model st
 Looped pipeline schedules can have several local stages backed by FSDP. Two
 separate policies control their parameter lifetime:
 
-- `pipeline_parallel_max_param_unsharded_stages` bounds how many local stages
+- `pp_max_unsharded_active_stages` bounds how many local stages
   may remain resident. Lowering this value can reduce parameter memory, but it
   can also introduce additional reshard and later unshard cycles.
-- `pipeline_parallel_unshard_lookahead` controls how many upcoming distinct
+- `pp_num_unshard_lookahead_factor` controls how many upcoming distinct
   stages may issue their asynchronous all-gathers. It changes only where
   existing `UNSHARD` actions are issued; it does not change stage residency,
   `RESHARD` placement, collective counts, or the wait immediately before a
@@ -44,7 +44,7 @@ The lookahead policy accepts three forms:
 
 An explicit tuple must contain one positive integer per PP rank. Every value
 must be no larger than the resolved
-`pipeline_parallel_max_param_unsharded_stages`. A lookahead of one issues an
+`pp_max_unsharded_active_stages`. A lookahead of one issues an
 unshard immediately before that stage; a lookahead of two keeps one future
 stage in flight while the current stage computes.
 
@@ -55,11 +55,11 @@ and can select the rank-aware policy without recipe-specific tuning. Use
 explicit tuple when profiling establishes a better rank-specific distance:
 
 ```python
-config.parallelism.pipeline_parallel_max_param_unsharded_stages = 4
-config.parallelism.pipeline_parallel_unshard_lookahead = "auto"
+config.parallelism.pp_max_unsharded_active_stages = 4
+config.parallelism.pp_num_unshard_lookahead_factor = "auto"
 
 # Equivalent to "full" for a four-rank pipeline with a residency bound of four.
-config.parallelism.pipeline_parallel_unshard_lookahead = (4, 4, 4, 4)
+config.parallelism.pp_num_unshard_lookahead_factor = (4, 4, 4, 4)
 ```
 
 Controlled 16-GPU PP2 and replicated PP4 measurements found no repeatable
