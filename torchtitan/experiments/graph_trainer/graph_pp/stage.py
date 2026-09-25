@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
+from contextlib import ExitStack
 from typing import Any, cast, Protocol, TYPE_CHECKING
 
 import torch
@@ -460,6 +461,24 @@ class GraphPipelineStage(PipelineStage):
         self._saved_values_for_backward: dict[int, tuple[Any, ...]] = {}
         self.saved_values_for_backward_weight_cache: dict[int, tuple[Any, ...]] = {}
         self._graph_pp_grads_scaled = False
+        self._metadata_inference_state_restorers: list[Callable[[], None]] = []
+
+    def register_metadata_inference_state_restorer(
+        self,
+        restore: Callable[[], None],
+    ) -> None:
+        """Restore external state after upstream metadata inference."""
+        self._metadata_inference_state_restorers.append(restore)
+
+    def _post_metadata_inference_cleanup(self) -> None:
+        """Restore module buffers and registered external runtime state."""
+        # Run every restorer in registration order even if module cleanup or an
+        # earlier restorer fails. ExitStack preserves the exception chain when
+        # more than one cleanup operation fails.
+        with ExitStack() as restore_stack:
+            for restore in reversed(self._metadata_inference_state_restorers):
+                restore_stack.callback(restore)
+            super()._post_metadata_inference_cleanup()
 
     def _record_graph_forward(
         self,

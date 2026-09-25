@@ -817,6 +817,73 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(len(stage.state.sharded_param_values), 2)
         self.assertEqual(stage.state.unsharded_param_grads, [])
 
+    def test_runtime_registers_metadata_restorer_on_first_local_stage(self) -> None:
+        first_stage = mock.Mock()
+        last_stage = mock.Mock()
+        runner = GraphRuntime.__new__(GraphRuntime)
+        runner.schedule = types.SimpleNamespace(_stages=[first_stage, last_stage])
+        restore = mock.Mock()
+
+        runner.register_metadata_inference_state_restorer(restore)
+
+        first_stage.register_metadata_inference_state_restorer.assert_called_once_with(
+            restore
+        )
+        last_stage.register_metadata_inference_state_restorer.assert_not_called()
+
+    def test_stage_restores_external_state_after_metadata_inference(self) -> None:
+        stage = GraphPipelineStage.__new__(GraphPipelineStage)
+        stage._metadata_inference_state_restorers = []
+        first_restore = mock.Mock()
+        second_restore = mock.Mock()
+        stage.register_metadata_inference_state_restorer(first_restore)
+        stage.register_metadata_inference_state_restorer(second_restore)
+
+        with mock.patch(
+            "torch.distributed.pipelining.stage."
+            "PipelineStage._post_metadata_inference_cleanup"
+        ) as base_cleanup:
+            stage._post_metadata_inference_cleanup()
+
+        base_cleanup.assert_called_once_with()
+        first_restore.assert_called_once_with()
+        second_restore.assert_called_once_with()
+
+    def test_stage_restores_external_state_when_base_cleanup_fails(self) -> None:
+        stage = GraphPipelineStage.__new__(GraphPipelineStage)
+        restore = mock.Mock()
+        stage._metadata_inference_state_restorers = [restore]
+
+        with (
+            mock.patch(
+                "torch.distributed.pipelining.stage."
+                "PipelineStage._post_metadata_inference_cleanup",
+                side_effect=RuntimeError("cleanup failed"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "cleanup failed"),
+        ):
+            stage._post_metadata_inference_cleanup()
+
+        restore.assert_called_once_with()
+
+    def test_stage_runs_later_restorers_when_an_earlier_one_fails(self) -> None:
+        stage = GraphPipelineStage.__new__(GraphPipelineStage)
+        first_restore = mock.Mock(side_effect=RuntimeError("first failed"))
+        second_restore = mock.Mock()
+        stage._metadata_inference_state_restorers = [first_restore, second_restore]
+
+        with (
+            mock.patch(
+                "torch.distributed.pipelining.stage."
+                "PipelineStage._post_metadata_inference_cleanup"
+            ),
+            self.assertRaisesRegex(RuntimeError, "first failed"),
+        ):
+            stage._post_metadata_inference_cleanup()
+
+        first_restore.assert_called_once_with()
+        second_restore.assert_called_once_with()
+
     def test_last_stage_forward_leaves_losses_to_upstream_update(self) -> None:
         loss = torch.tensor(1.0)
         stage = types.SimpleNamespace(
