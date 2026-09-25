@@ -49,16 +49,49 @@ defaults:
 permissions:
   id-token: write
   contents: read
+  pull-requests: read
 
 jobs:
+  # A failing suite normally ends the job, so later suites in the same job never
+  # report. keep-going runs them anyway and fails the job at the end. It is
+  # always on for main and schedules, and opt-in per PR through the keep-going
+  # label or [keep-going] in the PR body.
+  keep-going:
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    outputs:
+      keep-going: ${{ steps.check.outputs.keep-going }}
+    steps:
+      - name: Check for keep-going label
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          keep_going=false
+          if [[ "$GITHUB_REF" == "refs/heads/main" ||
+                "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            keep_going=true
+          elif [[ "$GITHUB_REF" =~ ^refs/tags/ciflow/[^/]+/([0-9]+)$ ]]; then
+            # A CIFlow tag ends in the PR number, which is the only handle on
+            # the PR that a tag push gets.
+            if gh api "repos/${GITHUB_REPOSITORY}/pulls/${BASH_REMATCH[1]}" \
+                 --jq '.labels[].name, .body' \
+               | grep -qE '^keep-going$|\[keep-going\]'; then
+              keep_going=true
+            fi
+          fi
+          echo "keep-going=${keep_going}" | tee -a "$GITHUB_OUTPUT"
+
   # Run Fake PG when CIFlow pushes a ciflow/fake-pg tag for a ready PR.
   # Tag pushes are independent of the PR base, so stacked PRs are covered.
   # Reusable calls also run this job when execution_mode is fake_pg.
+  # A called workflow keeps the caller's event_name, so execution_mode being
+  # unset is what distinguishes a direct event from a reusable call.
   set-matrix-fake-pg:
     if: >-
-      ((github.event_name == 'push' &&
+      ((inputs.execution_mode == '' && github.event_name == 'push' &&
         startsWith(github.ref, 'refs/tags/ciflow/fake-pg/')) ||
-       (github.event_name == 'workflow_call' && inputs.execution_mode == 'fake_pg')) &&
+       inputs.execution_mode == 'fake_pg') &&
       (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
     uses: ./.github/workflows/set-matrix.yaml
     with:
@@ -71,13 +104,14 @@ jobs:
   # reusable calls run the full Real PG suite.
   set-matrix-real-pg:
     if: >-
-      ((github.event_name == 'push' &&
-        (github.ref == 'refs/heads/main' ||
-         startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') ||
-         startsWith(github.ref, 'refs/tags/ciflow/real-pg/'))) ||
-       github.event_name == 'schedule' ||
-       github.event_name == 'workflow_dispatch' ||
-       (github.event_name == 'workflow_call' && inputs.execution_mode == 'real_pg')) &&
+      ((inputs.execution_mode == '' &&
+        ((github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' ||
+           startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') ||
+           startsWith(github.ref, 'refs/tags/ciflow/real-pg/'))) ||
+         github.event_name == 'schedule' ||
+         github.event_name == 'workflow_dispatch')) ||
+       inputs.execution_mode == 'real_pg') &&
       (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
     uses: ./.github/workflows/set-matrix.yaml
     with:
@@ -85,7 +119,7 @@ jobs:
 
   integration-fake-pg:
     name: 1 GPU Integration (Fake PG)
-    needs: set-matrix-fake-pg
+    needs: [set-matrix-fake-pg, keep-going]
     if: ${{ needs.set-matrix-fake-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-fake-pg.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
@@ -143,21 +177,26 @@ jobs:
         if [[ "${{ inputs.test_name || 'all' }}" != "all" ]]; then
           TEST_NAME_ARG="--test_name=${{ inputs.test_name }}"
         fi
+        status=0
         python -m tests.integration_tests.run_tests \
           --gpu_arch_type ${{ matrix.gpu-arch-type }} \
           --gpu_arch "$GPU_ARCH" \
           --test_suite features,models --execution_mode fake_pg --ngpu 1 \
           $EXPORT_ARG $TEST_NAME_ARG \
-          "$RUNNER_ARTIFACT_DIR"
+          "$RUNNER_ARTIFACT_DIR" || status=$?
+        if [[ "$status" -ne 0 && "${{ needs.keep-going.outputs.keep-going }}" != "true" ]]; then
+          exit "$status"
+        fi
         python -m tests.integration_tests.flux \
           --execution_mode fake_pg --ngpu 1 \
           $TEST_NAME_ARG \
-          "$RUNNER_ARTIFACT_DIR/flux"
+          "$RUNNER_ARTIFACT_DIR/flux" || status=$?
+        exit "$status"
 
   integration-real-pg:
     name: 8 GPU Integration (Real PG - ${{ startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') && 'required subset' || 'full suite' }} - ${{ matrix.test_suite }})
-    needs: set-matrix-real-pg
-    if: ${{ (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
+    needs: [set-matrix-real-pg, keep-going]
+    if: ${{ inputs.execution_mode != 'fake_pg' && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
     strategy:
       fail-fast: false
@@ -223,15 +262,20 @@ jobs:
         if [[ "$GITHUB_REF" == refs/tags/ciflow/fake-pg/* ]]; then
           TEST_SCOPE_ARG="--test_scope=real_pg_required"
         fi
+        status=0
         python -m tests.integration_tests.run_tests \
           --gpu_arch_type ${{ matrix.runner_config['gpu-arch-type'] }} \
           --gpu_arch "$GPU_ARCH" \
           --test_suite ${{ matrix.test_suite }} --execution_mode real_pg --ngpu 8 \
           $EXPORT_ARG $TEST_NAME_ARG $TEST_SCOPE_ARG \
-          "$RUNNER_ARTIFACT_DIR"
+          "$RUNNER_ARTIFACT_DIR" || status=$?
+        if [[ "$status" -ne 0 && "${{ needs.keep-going.outputs.keep-going }}" != "true" ]]; then
+          exit "$status"
+        fi
         if [[ "${{ matrix.test_suite }}" == "models" ]]; then
           python -m tests.integration_tests.flux \
             --execution_mode real_pg --ngpu 8 \
             $TEST_NAME_ARG $TEST_SCOPE_ARG \
-            "$RUNNER_ARTIFACT_DIR/flux"
+            "$RUNNER_ARTIFACT_DIR/flux" || status=$?
         fi
+        exit "$status"

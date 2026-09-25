@@ -104,6 +104,8 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
     Override the run_tests function in run_tests.py because FLUX model
     uses different train.py in command to run the model"""
 
+    failed_tests: list[tuple[str, str]] = []
+
     for test_flavor in test_list:
         # Filter by test_name if specified
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
@@ -120,11 +122,23 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
-            run_single_test(
-                test_flavor,
-                args.output_dir,
-                use_fake_pg=use_fake_pg,
-            )
+            try:
+                run_single_test(
+                    test_flavor,
+                    args.output_dir,
+                    use_fake_pg=use_fake_pg,
+                )
+            except Exception as e:
+                logger.error(str(e))
+                failed_tests.append((test_flavor.test_name, str(e)))
+
+    if failed_tests:
+        failure_summary = "\n".join(
+            f"  {name}: {error}" for name, error in failed_tests
+        )
+        raise RuntimeError(
+            f"{len(failed_tests)} Flux integration test(s) failed:\n{failure_summary}"
+        )
 
 
 def main():
