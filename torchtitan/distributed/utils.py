@@ -24,7 +24,7 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import CommConfig, DebugConfig
+from torchtitan.config import CommConfig, DebugConfig, Fp32MatmulPrecision
 from torchtitan.tools.utils import device_module, device_type
 
 logger = logging.getLogger(__name__)
@@ -260,26 +260,89 @@ def is_in_batch_invariant_mode() -> bool:
     return _batch_invariant_enabled
 
 
-def enable_fp32_matmul_emulation_with_bf16x9() -> None:
-    """Enable BF16x9 emulation for FP32 CUDA matmuls where supported."""
-    if (
-        device_type != "cuda"
-        or not torch.cuda.is_available()
-        or torch.version.hip is not None
-        or torch.cuda.get_device_capability() < (10, 0)
-    ):
+_BFX9_REQUIREMENT = (
+    "NVIDIA compute capability 10.0 or later, CUDA 12.9 or later, and a "
+    "PyTorch build with CUDA BFX9 matmul support (pytorch/pytorch#195301)"
+)
+_TF32_REQUIREMENT = "NVIDIA compute capability 8.0 or later"
+
+
+def _is_nvidia_cuda() -> bool:
+    return (
+        device_type == "cuda"
+        and torch.cuda.is_available()
+        and torch.version.hip is None
+    )
+
+
+def set_fp32_matmul_precision(precision: Fp32MatmulPrecision = "auto") -> None:
+    """Select the CUDA backend math mode for FP32 matmuls.
+
+    Under BF16 mixed precision the model's only FP32 GEMM is the MoE router
+    gate (``RouterGateLinear``), whose backward upcasts its BF16 operands, so
+    this knob is in practice the router's precision knob.
+
+    - ``auto``: BF16x9 emulation on NVIDIA GPUs with compute capability 10.0 or
+      later, and the PyTorch default elsewhere. This is torchtitan's historical
+      behavior.
+    - ``ieee``: true IEEE FP32. Most accurate, slowest.
+    - ``tf32``: TF32 tensor cores. 10 mantissa bits, roughly half the BF16
+      tensor-core rate. Requires compute capability 8.0 or later.
+    - ``bfx9``: BF16x9 emulation, near-IEEE accuracy on BF16 tensor cores.
+      Requires compute capability 10.0 or later and CUDA 12.9 or later.
+
+    ``tf32`` contradicts batch-invariant mode, which disables TF32 so that FP32
+    accumulation does not depend on tile decomposition, so requesting both is an
+    error rather than a silent override.
+    """
+    if precision == "tf32" and is_in_batch_invariant_mode():
+        raise ValueError(
+            "fp32_matmul_precision='tf32' conflicts with batch-invariant mode, "
+            "which disables TF32 so that FP32 accumulation is independent of "
+            "batch composition. Choose 'ieee' or 'bfx9', or disable "
+            "debug.batch_invariant."
+        )
+
+    if not _is_nvidia_cuda():
+        if precision != "auto":
+            logger.warning(
+                "fp32_matmul_precision=%r only applies to NVIDIA CUDA devices; "
+                "leaving the FP32 matmul backend at its default.",
+                precision,
+            )
         return
 
-    try:
-        torch.backends.cuda.matmul.fp32_precision = "bfx9"
-    except (AttributeError, RuntimeError, ValueError) as exc:
-        raise ValueError(
-            "TorchTitan on NVIDIA GPUs with compute capability 10.0 or later "
-            "requires PyTorch with CUDA BFX9 matmul support "
-            "(pytorch/pytorch#195301) and CUDA 12.9 or later."
-        ) from exc
+    device_capability = torch.cuda.get_device_capability()
 
-    logger.info("Enabled BF16x9 emulation for FP32 CUDA matmuls")
+    if precision == "auto":
+        # Blackwell and later emulate FP32 matmuls with BF16x9 by default: it
+        # keeps near-IEEE accuracy while running on the BF16 tensor cores.
+        # Older devices have no such mode, so leave the PyTorch default alone.
+        if device_capability < (10, 0):
+            return
+        precision = "bfx9"
+    elif precision == "bfx9" and device_capability < (10, 0):
+        raise ValueError(
+            f"fp32_matmul_precision='bfx9' requires {_BFX9_REQUIREMENT}, but "
+            f"this device has compute capability {device_capability}."
+        )
+    elif precision == "tf32" and device_capability < (8, 0):
+        raise ValueError(
+            f"fp32_matmul_precision='tf32' requires {_TF32_REQUIREMENT}, but "
+            f"this device has compute capability {device_capability}."
+        )
+
+    try:
+        torch.backends.cuda.matmul.fp32_precision = precision
+    except (AttributeError, RuntimeError, ValueError) as exc:
+        # The device is already vetted, so this is a PyTorch build that does
+        # not know the precision. Only BF16x9 has a build-side requirement.
+        detail = f" It requires {_BFX9_REQUIREMENT}." if precision == "bfx9" else ""
+        raise ValueError(
+            f"This PyTorch build does not support FP32 CUDA matmul precision "
+            f"{precision!r}.{detail}"
+        ) from exc
+    logger.info("Set FP32 CUDA matmul precision to %r", precision)
 
 
 def set_batch_invariance(enable: bool) -> None:
@@ -407,8 +470,9 @@ def init_distributed(
     enable_cpu_backend: bool = False,
     base_folder: str = "",
     ranks: list[int] | None = None,
+    fp32_matmul_precision: Fp32MatmulPrecision = "auto",
 ) -> int:
-    enable_fp32_matmul_emulation_with_bf16x9()
+    set_fp32_matmul_precision(fp32_matmul_precision)
 
     # Skip initialization if already initialized
     if torch.distributed.is_initialized():

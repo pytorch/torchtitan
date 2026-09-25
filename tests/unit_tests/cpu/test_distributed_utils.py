@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import logging
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
@@ -14,26 +15,89 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.checkpoint import checkpoint
 
-from torchtitan.config import CommConfig
+from torchtitan.config import CommConfig, Fp32MatmulPrecision
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_enabled
 from torchtitan.distributed.utils import init_distributed
 
 
-def test_bf16x9_is_enabled_on_future_nvidia_gpus(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _fake_nvidia_gpu(
+    monkeypatch: pytest.MonkeyPatch, capability: tuple[int, int]
+) -> SimpleNamespace:
+    """Point the FP32 matmul backend at a stub for the given device capability."""
     matmul = SimpleNamespace(fp32_precision="ieee")
     monkeypatch.setattr(dist_utils, "device_type", "cuda")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (12, 0))
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
     monkeypatch.setattr(torch.version, "hip", None)
     monkeypatch.setattr(torch.backends.cuda, "matmul", matmul)
+    return matmul
 
-    dist_utils.enable_fp32_matmul_emulation_with_bf16x9()
+
+def test_auto_enables_bf16x9_on_future_nvidia_gpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matmul = _fake_nvidia_gpu(monkeypatch, (12, 0))
+
+    dist_utils.set_fp32_matmul_precision()
 
     assert matmul.fp32_precision == "bfx9"
+
+
+def test_auto_leaves_older_nvidia_gpus_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matmul = _fake_nvidia_gpu(monkeypatch, (9, 0))
+
+    dist_utils.set_fp32_matmul_precision("auto")
+
+    assert matmul.fp32_precision == "ieee"
+
+
+@pytest.mark.parametrize("precision", ["ieee", "tf32", "bfx9"])
+def test_explicit_precision_overrides_auto(
+    monkeypatch: pytest.MonkeyPatch, precision: str
+) -> None:
+    matmul = _fake_nvidia_gpu(monkeypatch, (10, 0))
+
+    dist_utils.set_fp32_matmul_precision(cast(Fp32MatmulPrecision, precision))
+
+    assert matmul.fp32_precision == precision
+
+
+@pytest.mark.parametrize(
+    "precision, capability",
+    [("bfx9", (9, 0)), ("tf32", (7, 5))],
+)
+def test_explicit_precision_rejects_unsupported_hardware(
+    monkeypatch: pytest.MonkeyPatch, precision: str, capability: tuple[int, int]
+) -> None:
+    _fake_nvidia_gpu(monkeypatch, capability)
+
+    with pytest.raises(ValueError, match=f"fp32_matmul_precision='{precision}'"):
+        dist_utils.set_fp32_matmul_precision(cast(Fp32MatmulPrecision, precision))
+
+
+def test_tf32_conflicts_with_batch_invariant_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_nvidia_gpu(monkeypatch, (10, 0))
+    monkeypatch.setattr(dist_utils, "_batch_invariant_enabled", True)
+
+    with pytest.raises(ValueError, match="batch-invariant mode"):
+        dist_utils.set_fp32_matmul_precision("tf32")
+
+
+def test_non_cuda_warns_for_explicit_precision(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(dist_utils, "device_type", "cpu")
+
+    with caplog.at_level(logging.WARNING, logger=dist_utils.logger.name):
+        dist_utils.set_fp32_matmul_precision("tf32")
+
+    assert "only applies to NVIDIA CUDA devices" in caplog.text
 
 
 def test_fake_pg_uses_requested_rank(monkeypatch: pytest.MonkeyPatch) -> None:
