@@ -8,7 +8,7 @@
 
 import logging
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -115,6 +115,97 @@ class CUDAGraphInputSpec:
             flat_index = block_mask_end
 
         return pytree.tree_unflatten(outer_leaves, self._tree_spec)
+
+
+class _CUDAGraphGradientState:
+    """Keep capture-created parameter gradients alive across graph replays.
+
+    Why this state can reduce memory use:
+
+    1. ``set_to_none=True`` without this state fails after the
+       first capture.
+       Autograd allocates a gradient during capture and assigns it to
+       ``param.grad``. The next ``zero_grad`` clears that Python reference.
+       CUDA graph replay runs the captured GPU work, but it does not repeat the
+       ``param.grad`` assignment. The optimizer then sees ``param.grad is None``
+       and skips the parameter update.
+
+    2. ``set_to_none=False`` avoids that failure, but eager warmup allocates the
+       gradient before capture, outside the CUDA graph memory pool. Capture only
+       records writes into that existing gradient buffer. Its lifetime overlaps
+       the complete forward-backward graph::
+
+           time           forward             backward          optimizer
+           gradient       [===============================================]
+           forward temp   [==========]
+           backward temp                       [=========]
+
+       The graph allocator cannot reuse the gradient storage for these temporary
+       tensors because their lifetimes overlap.
+
+    3. With this state, ``set_to_none=True`` leaves gradients
+       absent when capture starts. Autograd allocates them from the CUDA graph
+       memory pool during backward, after many forward tensors have expired::
+
+           time           forward             backward          optimizer
+           forward temp   [==========]
+           gradient                            [=========================]
+           shared block   [forward temp]       [gradient                 ]
+
+       During capture, the CUDA graph pool may reuse storage released by forward
+       tensors for later gradients. This state then keeps those gradient tensors
+       alive and restores each ``param.grad`` reference after replay. This makes
+       ``set_to_none=True`` safe.
+
+    Args:
+        parameters: Parameters whose capture-created ``.grad`` tensors are
+            recorded and restored. Parameters that do not require gradients and
+            duplicate parameters are ignored.
+    """
+
+    def __init__(self, parameters: Iterable[torch.nn.Parameter]) -> None:
+        unique_parameters: list[torch.nn.Parameter] = []
+        seen: set[int] = set()
+        for parameter in parameters:
+            if parameter.requires_grad and id(parameter) not in seen:
+                seen.add(id(parameter))
+                unique_parameters.append(parameter)
+        self._parameters = tuple(unique_parameters)
+        self._captured_parameter_gradients: tuple[
+            tuple[torch.nn.Parameter, torch.Tensor], ...
+        ] | None = None
+
+    def require_cleared(self) -> None:
+        if any(parameter.grad is not None for parameter in self._parameters):
+            raise RuntimeError(
+                "All parameter gradients must be None before CUDA graph capture "
+                "and replay."
+            )
+
+    def record(self) -> None:
+        assert (
+            self._captured_parameter_gradients is None
+        ), "CUDA graph gradients were already recorded"
+        self._captured_parameter_gradients = tuple(
+            (parameter, gradient)
+            for parameter in self._parameters
+            if (gradient := parameter.grad) is not None
+        )
+
+    def restore(self) -> None:
+        assert (
+            self._captured_parameter_gradients is not None
+        ), "CUDA graph gradients were not recorded"
+        for parameter, gradient in self._captured_parameter_gradients:
+            parameter.grad = gradient
+
+    def teardown(self) -> None:
+        if self._captured_parameter_gradients is None:
+            return
+        for parameter, gradient in self._captured_parameter_gradients:
+            if parameter.grad is gradient:
+                parameter.grad = None
+        self._captured_parameter_gradients = None
 
 
 class _CUDAGraphManager:
@@ -358,6 +449,41 @@ class CUDAGraphWrapper:
         self._non_tensor_inputs.clear()
 
 
+class _ForwardBackwardCUDAGraphWrapper(CUDAGraphWrapper):
+    """Preserve capture-created parameter gradients across graph replays."""
+
+    def __init__(
+        self,
+        fn: Callable,
+        example_inputs: Sequence[Any],
+        *,
+        parameters: Iterable[torch.nn.Parameter],
+        num_warmup_iterations: int,
+    ) -> None:
+        self._gradient_state = _CUDAGraphGradientState(parameters)
+        super().__init__(
+            fn,
+            example_inputs,
+            num_warmup_iterations=num_warmup_iterations,
+        )
+
+    def __call__(self, *args: Any) -> Any:
+        if self._warmup_remaining > 0:
+            return super().__call__(*args)
+
+        self._gradient_state.require_cleared()
+        should_record_gradients = self._graph is None
+        output = super().__call__(*args)
+        if should_record_gradients:
+            self._gradient_state.record()
+        self._gradient_state.restore()
+        return output
+
+    def teardown(self) -> None:
+        self._gradient_state.teardown()
+        super().teardown()
+
+
 def cuda_graphs_supported() -> bool:
     """Whether CUDA graph capture can actually run on this build/device.
 
@@ -372,18 +498,13 @@ def cuda_graphs_supported() -> bool:
 
 
 # TODO: Unify PP and non-PP callable signatures to restore strict input typing.
-def wrap_with_cuda_graph(
+def _wrap_with_cuda_graph(
     fn: Callable[..., Any],
+    *,
+    num_warmup_iterations: int,
+    gradient_parameters: tuple[torch.nn.Parameter, ...] | None,
 ) -> Callable[..., Any]:
-    """Decorate a structured callable with CUDA graph capture and replay.
-
-    The positional and keyword inputs must keep the same pytree structure and
-    tensor metadata across calls. After capture, tensor outputs alias
-    graph-owned storage that is overwritten by the next replay.
-
-    Args:
-        fn: Callable to capture.
-    """
+    """Implement structured CUDA graph wrapping."""
 
     if not cuda_graphs_supported():
         logger.warning(
@@ -409,11 +530,19 @@ def wrap_with_cuda_graph(
                 return fn(*step_args, **step_kwargs)
 
             flat_inputs = input_spec.flatten((args, kwargs))
-            graph_wrapper = CUDAGraphWrapper(
-                flat_fn,
-                flat_inputs,
-                num_warmup_iterations=0,
-            )
+            if gradient_parameters is None:
+                graph_wrapper = CUDAGraphWrapper(
+                    flat_fn,
+                    flat_inputs,
+                    num_warmup_iterations=num_warmup_iterations,
+                )
+            else:
+                graph_wrapper = _ForwardBackwardCUDAGraphWrapper(
+                    flat_fn,
+                    flat_inputs,
+                    parameters=gradient_parameters,
+                    num_warmup_iterations=num_warmup_iterations,
+                )
         else:
             assert input_spec is not None
             flat_inputs = input_spec.flatten((args, kwargs))
@@ -421,3 +550,47 @@ def wrap_with_cuda_graph(
         return graph_wrapper(*flat_inputs)
 
     return run
+
+
+def wrap_with_cuda_graph(
+    fn: Callable[..., Any],
+    *,
+    num_warmup_iterations: int = 0,
+) -> Callable[..., Any]:
+    """Decorate a structured callable with CUDA graph capture and replay.
+
+    The positional and keyword inputs must keep the same pytree structure and
+    tensor metadata across calls. After capture, tensor outputs alias
+    graph-owned storage that is overwritten by the next replay.
+
+    Args:
+        fn: Callable to capture.
+        num_warmup_iterations: Number of eager invocations before capture.
+    """
+
+    return _wrap_with_cuda_graph(
+        fn,
+        num_warmup_iterations=num_warmup_iterations,
+        gradient_parameters=None,
+    )
+
+
+def wrap_fwd_bwd_with_cuda_graph(
+    fn: Callable[..., Any],
+    *,
+    parameters: Iterable[torch.nn.Parameter],
+    num_warmup_iterations: int = 0,
+) -> Callable[..., Any]:
+    """Wrap forward-backward and preserve gradients allocated during capture.
+
+    Args:
+        fn: Forward-backward callable to capture.
+        parameters: Parameters whose capture-created gradients must remain alive.
+        num_warmup_iterations: Number of eager invocations before capture.
+    """
+
+    return _wrap_with_cuda_graph(
+        fn,
+        num_warmup_iterations=num_warmup_iterations,
+        gradient_parameters=tuple(parameters),
+    )
