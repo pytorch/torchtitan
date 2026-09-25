@@ -1,17 +1,15 @@
-# Keep RL runtime dependencies in sync with torchtitan/rl/requirements.txt.
+# Shared RL dependencies for local installs and CI images.
 torchmonarch
+# The opt-in vLLM metrics logger uses the SDK for JSONL and the HTTP exporter
+# for OTLP; both are included so enabling that logger needs no extra install.
 opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-http
 pygtrie
 portpicker
 
 # Test workflows install nightly torch, torchvision, and vLLM together.
-# The RL test image also needs the inference runtime's other dependencies and examples.
+# The RL test image also needs the inference runtime's other dependencies.
 xformers
-verifiers==0.3.1
-# Verifiers uses mcp.server.fastmcp, which was removed in MCP 2.x.
-mcp>=1.24.0,<2
-math-verify==0.9.0
-# Match torchtitan's dataset bound when resolving Verifiers and vLLM together.
+# Match torchtitan's dataset bound when resolving CUDA nightlies.
 datasets>=3.6.0,<4.8.0
 uv

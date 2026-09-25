@@ -1,5 +1,1 @@
-torchmonarch
-opentelemetry-sdk
-opentelemetry-exporter-otlp-proto-http
-pygtrie
-portpicker
+-r ../../.ci/docker/requirements-rl.txt
