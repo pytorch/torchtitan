@@ -39,7 +39,6 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import (
-    set_moe_block_padding_mask_sharding,
     set_routed_moe_sharding_config,
     shared_expert_rowwise_config,
 )
@@ -194,7 +193,6 @@ def _set_qwen35_layer_sharding(
     if layer_cfg.moe is not None:
         moe_cfg = layer_cfg.moe
         assert isinstance(moe_cfg, MoE.Config)
-        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         shared_experts = moe_cfg.shared_experts
         set_routed_moe_sharding_config(
             moe_cfg,

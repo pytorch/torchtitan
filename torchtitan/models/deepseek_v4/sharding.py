@@ -21,10 +21,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import (
-    set_moe_block_padding_mask_sharding,
-    set_moe_sharding_config,
-)
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 
 _dense_param_rep = dense_param_placement(tp=spmd.R)
@@ -254,7 +251,6 @@ def set_deepseek_v4_layer_sharding(
 
     # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
-        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,

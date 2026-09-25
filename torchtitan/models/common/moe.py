@@ -723,21 +723,28 @@ class MoE(Module):
         x_TD: torch.Tensor,
         padding_mask_T: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Shard router and routed-expert inputs once when dense SP is disabled."""
-        if spmd_sparse_mesh() is None or spmd_dense_sp_enabled():
+        """Prepare the router and routed-expert inputs for TP token sharding.
+
+        With EP, the routed branch consumes ``Shard(0)`` tokens across TP. Dense
+        SP already provides that layout for ``x_TD``; otherwise this boundary
+        explicitly shards it. The padding mask enters the MoE replicated in
+        either case and is explicitly sharded here to follow the routed tokens.
+        """
+        if spmd_sparse_mesh() is None:
             return x_TD, padding_mask_T
 
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return x_TD, padding_mask_T
 
-        x_TD = spmd.redistribute(
-            x_TD,
-            tp_group,
-            src=spmd.I,
-            dst=spmd.S(0),
-            backward_options={"op_dtype": x_TD.dtype},
-        )
+        if not spmd_dense_sp_enabled():
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": x_TD.dtype},
+            )
         if padding_mask_T is not None:
             padding_mask_T = spmd.redistribute(
                 padding_mask_T,
@@ -751,7 +758,15 @@ class MoE(Module):
     def _zero_fill_routed_output_to_tp_partial(
         self, routed_output_TD: torch.Tensor
     ) -> torch.Tensor:
-        """Zero-fill the routed token shard before combining TP partials."""
+        """Convert the routed token shard to a TP partial without communication.
+
+        With EP enabled and dense SP disabled, each TP rank computes only its
+        ``Shard(0)`` of routed tokens, while the shared expert produces a
+        ``Partial`` contribution over all tokens. Zero-filling positions owned
+        by other TP ranks converts the routed output to the same ``Partial``
+        representation. The two branches can then be added locally and kept
+        partial until one final all-reduce materializes the complete MoE output.
+        """
         if spmd_sparse_mesh() is None or spmd_dense_sp_enabled():
             return routed_output_TD
 

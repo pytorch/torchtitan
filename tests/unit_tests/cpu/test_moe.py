@@ -39,10 +39,8 @@ from torchtitan.models.common.moe_sharding import (
     _routed_experts_sharding_configs,
     _router_sharding_config,
     _shared_experts_sharding_configs,
-    set_moe_block_padding_mask_sharding,
     set_moe_sharding_config,
 )
-from torchtitan.protocols.sharding import ShardingConfig
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -300,7 +298,7 @@ class TestMoE(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "routing-map token axis"):
             router(x_TD, padding_mask_T=torch.zeros(3, dtype=torch.bool))
 
-    def test_padding_mask_sharding_follows_input_token_layout(self):
+    def test_padding_mask_enters_moe_replicated_and_router_sharded(self):
         for enable_ep, enable_sp in ((False, False), (True, False), (True, True)):
             with self.subTest(enable_ep=enable_ep, enable_sp=enable_sp):
                 moe_config = _moe_sharding_config(
@@ -311,7 +309,7 @@ class TestMoE(unittest.TestCase):
                 self.assertIsNone(moe_config.in_dst_shardings)
                 self.assertEqual(
                     _per_axis_types(moe_config.in_src_shardings["padding_mask_T"]),
-                    _per_axis_types(token_id_placement(enable_sp=enable_sp)),
+                    _per_axis_types(token_id_placement()),
                 )
 
                 router_config = _router_sharding_config(
@@ -477,30 +475,43 @@ class TestMoE(unittest.TestCase):
                 )
                 self.assertIsNone(routed.out_dst_shardings)
 
-    def test_moe_block_sequence_shards_padding_mask(self):
-        x_src = token_id_placement()
-        x_dst = token_id_placement(enable_sp=True)
-        block_cfg = SimpleNamespace(
-            sharding_config=ShardingConfig(
-                in_src_shardings={"x": x_src},
-                in_dst_shardings={"x": x_dst},
-            )
-        )
+    def test_explicit_padding_mask_sharding_with_sp(self):
+        moe = MoE.__new__(MoE)
+        x_TD = torch.randn(4, 8)
+        padding_mask_T = torch.zeros(4, dtype=torch.bool)
+        tp_group = object()
 
-        set_moe_block_padding_mask_sharding(block_cfg, enable_sp=True)
+        with (
+            patch(
+                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                return_value=object(),
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_mesh_group",
+                return_value=tp_group,
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd.redistribute",
+                side_effect=lambda tensor, *_args, **_kwargs: tensor,
+            ) as redistribute,
+        ):
+            (
+                actual_x_TD,
+                actual_padding_mask_T,
+            ) = moe._shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
 
-        config = block_cfg.sharding_config
-        assert config.in_src_shardings is not None
-        assert config.in_dst_shardings is not None
-        self.assertIs(config.in_src_shardings["x"], x_src)
-        self.assertIs(config.in_dst_shardings["x"], x_dst)
-        self.assertEqual(
-            _per_axis_types(config.in_src_shardings["padding_mask"]),
-            _per_axis_types(token_id_placement()),
-        )
-        self.assertEqual(
-            _per_axis_types(config.in_dst_shardings["padding_mask"]),
-            _per_axis_types(token_id_placement(enable_sp=True)),
+        self.assertIs(actual_x_TD, x_TD)
+        self.assertIs(actual_padding_mask_T, padding_mask_T)
+        redistribute.assert_called_once_with(
+            padding_mask_T,
+            tp_group,
+            src=spmd.R,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": padding_mask_T.dtype},
         )
 
     def test_moe_without_ep_leaves_routed_weights_unsharded(self):

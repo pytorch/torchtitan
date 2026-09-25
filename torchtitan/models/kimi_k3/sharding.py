@@ -30,10 +30,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_spmd,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import (
-    set_moe_block_padding_mask_sharding,
-    set_moe_sharding_config,
-)
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.kimi_k2_7.sharding import set_moonvit_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -123,7 +120,6 @@ def _set_kimi_k3_layer_sharding(
         )
     else:
         assert layer_cfg.moe is not None
-        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         _set_latent_moe_sharding(
             layer_cfg.moe, enable_sp=enable_sp, enable_ep=enable_ep
         )

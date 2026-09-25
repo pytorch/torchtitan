@@ -199,14 +199,13 @@ def _moe_sharding_config(
         if enable_sp
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
-    padding_mask_src_layout = token_id_placement(enable_sp=enable_sp)
     return ShardingConfig(
         state_shardings={
             "expert_bias_E": dense_param_placement(tp=spmd.R),
         },
         in_src_shardings={
             "x_TD": sp_layout,
-            "padding_mask_T": padding_mask_src_layout,
+            "padding_mask_T": token_id_placement(),
         },
         out_src_shardings=sp_layout,
     )
@@ -289,21 +288,3 @@ def set_moe_sharding_config(
     shared = moe_cfg.shared_experts
     if shared is not None:
         set_shared_moe_sharding_config(shared, enable_ep=enable_ep, enable_sp=enable_sp)
-
-
-def set_moe_block_padding_mask_sharding(block_cfg, *, enable_sp: bool) -> None:
-    """Configure a MoE block's padding-mask input sharding.
-
-    The mask enters TP-replicated and follows the block activation's token
-    layout when sequence parallelism is enabled.
-    """
-    sharding_config = block_cfg.sharding_config or ShardingConfig()
-    sharding_config.in_src_shardings = {
-        **(sharding_config.in_src_shardings or {}),
-        "padding_mask": token_id_placement(),
-    }
-    sharding_config.in_dst_shardings = {
-        **(sharding_config.in_dst_shardings or {}),
-        "padding_mask": token_id_placement(enable_sp=enable_sp),
-    }
-    block_cfg.sharding_config = sharding_config
