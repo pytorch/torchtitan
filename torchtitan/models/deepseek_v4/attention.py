@@ -8,11 +8,16 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+from attn_gym.sparse.gather_attn import gather_attn
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
-from torchtitan.models.common.attention import BaseAttention, FlexInnerAttention
+from torchtitan.models.common.attention import (
+    BaseAttention,
+    FlexInnerAttention,
+    InnerAttention,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -29,7 +34,7 @@ def _assert_spmd_attention_type(tensor, *, tp):
 
 
 class DSV4FlexInnerAttention(FlexInnerAttention):
-    """DeepSeek sparse attention core for DeepSeek-V4.
+    """DeepSeek sparse attention core for DeepSeek-V4 (sliding window and HCA).
 
     The core attends over the concatenated KV sequence ``[0, L + n_cmp + 1)``,
     where the first ``L`` positions are the uncompressed sliding-window KV
@@ -39,10 +44,11 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
     - sliding window: fixed pattern over ``swa_k``, expressed as a
       ``mask_mod`` predicate (no indices);
     - compressed blocks: for HCA (``compress_ratio=128``) all causal blocks
-      are attendable, also a fixed ``mask_mod`` pattern; for CSA
-      (``compress_ratio=4``) each query attends only its top-k selected
-      compressed positions, which is the only dynamic (index-based) part;
+      are attendable, also a fixed ``mask_mod`` pattern;
     - attention sink: always attendable via ``score_mod``.
+
+    CSA (``compress_ratio=4``) runs on ``DSV4InnerAttention`` instead; see
+    ``CompressedSparseAttention``.
 
     The ``mask_mod`` is evaluated at token granularity inside flex_attention;
     the per-query-block KV block listing (``BlockMask.from_kv_blocks``) only
@@ -198,9 +204,6 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
         attn_sink,
         *,
         cmp_k=None,
-        idx_q=None,
-        idx_k=None,
-        idx_w=None,
         attention_masks=None,
     ) -> torch.Tensor:
         """Run DSV4 sparse attention over a folded token stream."""
@@ -227,29 +230,7 @@ class DSV4FlexInnerAttention(FlexInnerAttention):
             selected_indices = [
                 self.get_window_topk_idxs(bsz=1, seqlen=seqlen, device=q.device)
             ]
-            if self.compress_ratio == 4:
-                if idx_q is None or idx_k is None or idx_w is None:
-                    raise ValueError(
-                        "DSV4FlexInnerAttention requires idx_q, idx_k, "
-                        "and idx_w when compress_ratio=4"
-                    )
-                cmp_topk = Indexer.select(
-                    idx_q,
-                    idx_k,
-                    idx_w,
-                    seqlen=seqlen,
-                    ratio=self.compress_ratio,
-                    topk=self.index_topk,
-                ).unsqueeze(0)
-                causal_limit = (
-                    torch.arange(1, seqlen + 1, device=q.device).unsqueeze(1)
-                    // self.compress_ratio
-                )
-                cmp_topk = torch.where(
-                    cmp_topk < causal_limit.unsqueeze(0), seqlen + cmp_topk, -1
-                )
-                selected_indices.append(cmp_topk)
-            elif self.compress_ratio > 1:
+            if self.compress_ratio > 1:
                 selected_indices.append(
                     self.get_compress_topk_idxs(
                         bsz=1, seqlen=seqlen, n_cmp=n_cmp, device=q.device
@@ -322,12 +303,65 @@ class HeavilyCompressedAttention(DSV4FlexInnerAttention):
         )
 
 
-class CompressedSparseAttention(DSV4FlexInnerAttention):
+class DSV4InnerAttention(InnerAttention):
+    """DeepSeek-V4 sparse attention core on Attention Gym's ``gather_attn``.
+
+    Each query attends to its causal sliding window over the uncompressed KV
+    (``swa_k``), to the compressed KV positions (``cmp_k``) listed for it in
+    ``cmp_topk``, and to a learned per-head attention sink. K and V are the
+    same single-head latent.
+    """
+
     @dataclass(kw_only=True, slots=True)
-    class Config(DSV4FlexInnerAttention.Config):
+    class Config(InnerAttention.Config):
+        window_size: int
+        compress_ratio: int
+        softmax_scale: float
+        index_topk: int
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.window_size = config.window_size
+        self.compress_ratio = config.compress_ratio
+        self.softmax_scale = config.softmax_scale
+        self.index_topk = config.index_topk
+
+    def _gather_attn(
+        self, q_THD, swa_k_TD, cmp_k_SD, cmp_topk_TK, attn_sink, attention_masks
+    ) -> torch.Tensor:
+        """``cmp_topk_TK`` holds indices into ``cmp_k_SD``; -1 marks unused slots."""
+        if attention_masks is not None:
+            raise ValueError(
+                f"{type(self).__name__} does not accept attention_masks; "
+                "the attended positions are built internally."
+            )
+        with spmd.no_typecheck():
+            # gather_attn takes [B, H, T, D]; the KV latent has one head.
+            out_1HTD = gather_attn(
+                q_THD.transpose(0, 1).unsqueeze(0),
+                swa_k_TD[None, None],
+                cmp_k_SD[None, None],
+                cmp_topk_TK.unsqueeze(0),
+                attention_sink=attn_sink,
+                sliding_window_size=self.window_size,
+                scale=self.softmax_scale,
+                impl="fused" if q_THD.device.type == "cuda" else "reference",
+            )
+            out_THD = out_1HTD.squeeze(0).transpose(0, 1)
+        # Kernel output is opaque to SPMD typechecking; it keeps q's layout.
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                out_THD, spmd.get_local_type(q_THD), spmd.get_partition_spec(q_THD)
+            )
+        return out_THD
+
+
+class CompressedSparseAttention(DSV4InnerAttention):
+    @dataclass(kw_only=True, slots=True)
+    class Config(DSV4InnerAttention.Config):
         pass
 
-    def forward(  # pyrefly: ignore[bad-param-name-override]
+    def forward(
         self,
         q,
         swa_k,
@@ -339,16 +373,21 @@ class CompressedSparseAttention(DSV4FlexInnerAttention):
         *,
         attention_masks=None,
     ) -> torch.Tensor:
-        return self._forward_impl(
-            q,
-            swa_k,
-            attn_sink,
-            cmp_k=cmp_k,
-            idx_q=idx_q,
-            idx_k=idx_k,
-            idx_w=idx_w,
-            attention_masks=attention_masks,
-        )
+        with spmd.no_typecheck():
+            cmp_topk = Indexer.select(
+                idx_q,
+                idx_k,
+                idx_w,
+                seqlen=q.size(0),
+                ratio=self.compress_ratio,
+                topk=self.index_topk,
+            )
+            # Mask compressed blocks that end after the query; -1 marks unused slots.
+            limit_T1 = (
+                torch.arange(1, q.size(0) + 1, device=q.device) // self.compress_ratio
+            ).unsqueeze(1)
+            cmp_topk = torch.where(cmp_topk < limit_T1, cmp_topk, -1)
+        return self._gather_attn(q, swa_k, cmp_k, cmp_topk, attn_sink, attention_masks)
 
 
 class Attention(BaseAttention):
@@ -363,7 +402,9 @@ class Attention(BaseAttention):
     class Config(BaseAttention.Config):
         dim: int
         n_heads: int
-        inner_attention: DSV4FlexInnerAttention.Config  # pyrefly: ignore [bad-override]
+        inner_attention: (  # pyrefly: ignore [bad-override]
+            DSV4FlexInnerAttention.Config | DSV4InnerAttention.Config
+        )
         rope: RoPE.Config
         head_dim: int = 512
         rope_head_dim: int = 64
