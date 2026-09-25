@@ -46,14 +46,6 @@ install_pip_dependencies() {
   pip_install -r /opt/conda/requirements-transformers-modeling-backend.txt
   if [[ "${INSTALL_RL_DEPS:-0}" == "1" ]]; then
     pip_install -r /opt/conda/requirements-rl.txt
-    # Match the RL test jobs: install ABI-compatible CUDA nightlies together.
-    # The MCP constraint keeps Verifiers 0.3.1 on the compatible cohort.
-    conda_run uv pip install --upgrade torch torchvision vllm xformers --pre \
-      --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
-      --index-strategy unsafe-best-match \
-      --constraint /opt/conda/requirements-rl.txt
-    # Fail the build if a PyPI release displaces any required nightly wheel.
-    conda_run python -c 'from importlib.metadata import version; assert all(".dev" in version(name) and "+cu130" in version(name) for name in ("torch", "torchvision", "vllm"))'
     # TorchStore is not published to PyPI; install it without changing torch.
     pip_install --no-deps \
       "git+https://github.com/meta-pytorch/torchstore.git@main"
