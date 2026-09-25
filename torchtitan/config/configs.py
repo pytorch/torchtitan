@@ -237,6 +237,14 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
+    pipeline_parallel_max_param_unsharded_stages: int | None = None
+    """Maximum local pipeline stages whose parameters may remain unsharded.
+
+    By default, all local stages may remain unsharded to maximize communication
+    overlap. Set a smaller value to reduce peak parameter memory at the cost of
+    potentially exposing additional FSDP all-gather communication.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -269,6 +277,13 @@ class ParallelismConfig:
                 "parallelism.context_parallel_load_balancer must be one of: "
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
+            )
+        if (
+            self.pipeline_parallel_max_param_unsharded_stages is not None
+            and self.pipeline_parallel_max_param_unsharded_stages < 1
+        ):
+            raise ValueError(
+                "pipeline_parallel_max_param_unsharded_stages must be positive"
             )
         if self.fsdp_symm_mem_scope not in _FSDP_SYMM_MEM_SCOPES:
             raise ValueError(
