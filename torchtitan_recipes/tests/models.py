@@ -30,6 +30,7 @@ from torchtitan.models.qwen3.config_registry import (
 from torchtitan.trainer import Trainer
 
 from . import _set_spmd_typechecking
+from .multimodal import set_rank_conditional_image_presence
 
 
 def _configure_fsdp_numerics(
@@ -280,6 +281,7 @@ def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     config.parallelism.expert_parallel_degree = 4
     _set_spmd_typechecking(config, typechecking=False)
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
@@ -296,6 +298,7 @@ def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
     )
     config.training.steps = 10
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
@@ -308,6 +311,7 @@ def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     config.activation_checkpoint = SelectiveAC.Config()
     _set_spmd_typechecking(config, typechecking=False)
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
@@ -392,6 +396,7 @@ def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 4
     config.training.steps = 1
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
@@ -403,6 +408,7 @@ def kimi_k2_5_debugmodel_muon_fsdp8_ep8() -> Trainer.Config:
     config.parallelism.expert_parallel_degree = 8
     config.training.steps = 10
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
@@ -448,6 +454,7 @@ def muse_glimmer_debugmodel_mm_fsdp2_tp2() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 

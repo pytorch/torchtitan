@@ -100,7 +100,8 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
                 parallel_dims=parallel_dims,
                 parallelism=parallelism,
             )
-        model(inputs, **batch)
+        with torch.no_grad():
+            model(inputs, **batch)
         return batch
 
     def test_text_batch_routes_1d_positions_to_layers(self):
