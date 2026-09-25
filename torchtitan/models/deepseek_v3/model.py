@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -100,80 +101,117 @@ class Attention(BaseAttention):
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
-    def _gather_tp_input(self, x: torch.Tensor) -> torch.Tensor:
+    def _gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
         """Gather the shared MLA input before its projection branches."""
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
-            return x
+            return x_TD
         return spmd.redistribute(
-            x,
+            x_TD,
             tp_group,
             src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
             dst=spmd.R,
-            backward_options={"op_dtype": x.dtype},
+            backward_options={"op_dtype": x_TD.dtype},
         )
 
-    def forward(
+    def _project_qkv(
         self,
-        x: torch.Tensor,
-        attention_masks: AttentionMasksType,
-        positions: torch.Tensor | None = None,
-    ):
-        x = self._gather_tp_input(x)
+        x_TD: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x_TD = self._gather_tp_input(x_TD)
+        num_tokens = x_TD.shape[0]
 
-        num_tokens = x.shape[0]
-
-        # Query projection
         if self.q_lora_rank == 0:
-            q = self.wq(x)
+            q_THK = self.wq(x_TD)
         else:
-            q = self.wq_a(x)
-            q = self.wq_b(self.q_norm(q))
+            q_TC = self.wq_a(x_TD)
+            q_THK = self.wq_b(self.q_norm(q_TC))
 
         # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
         with spmd.local():
-            q = q.view(num_tokens, -1, self.qk_head_dim)
+            q_THK = q_THK.view(num_tokens, -1, self.qk_head_dim)
             if spmd.is_type_checking():
                 spmd.assert_type(
-                    q,
+                    q_THK,
                     spmd.V,
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
                 )
 
-        q_nope, q_pe = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        q_nope_THK, q_pe_THK = torch.split(
+            q_THK,
+            [self.qk_nope_head_dim, self.qk_rope_head_dim],
+            dim=-1,
         )
 
-        # Key-value projection
-        kv = self.wkv_a(x)
-        kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        compressed_kv_TC = self.wkv_a(x_TD)
+        kv_latent_TC, k_pe_TK = torch.split(
+            compressed_kv_TC,
+            [self.kv_lora_rank, self.qk_rope_head_dim],
+            dim=-1,
+        )
 
-        q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
-        q = torch.cat([q_nope, q_pe], dim=-1)
+        q_pe_THK, k_pe_TK = self.rope(q_pe_THK, k_pe_TK.unsqueeze(1), positions)
+        q_THK = torch.cat([q_nope_THK, q_pe_THK], dim=-1)
 
-        kv = self.wkv_b(self.kv_norm(kv))
+        kv_THC = self.wkv_b(self.kv_norm(kv_latent_TC))
 
         with (
             spmd.local()
         ):  # QKV even shard unflatten, but the expand is truly local SPMD
-            kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = torch.split(
-                kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            kv_THC = kv_THC.view(
+                num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim
             )
-            k = torch.cat([k_nope, k_pe.expand(-1, k_nope.size(1), -1)], dim=-1)
+            k_nope_THK, v_THV = torch.split(
+                kv_THC,
+                [self.qk_nope_head_dim, self.v_head_dim],
+                dim=-1,
+            )
+            k_THK = torch.cat(
+                [k_nope_THK, k_pe_TK.expand(-1, k_nope_THK.size(1), -1)],
+                dim=-1,
+            )
             if spmd.is_type_checking() and not torch.compiler.is_compiling():
-                for t in [k, v]:
+                for tensor in [k_THK, v_THV]:
                     spmd.assert_type(
-                        t,
+                        tensor,
                         spmd.V,
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
 
-        output = self.inner_attention(
-            q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
-        ).contiguous()
-        output = output.view(num_tokens, -1)
-        return self.wo(output)
+        return q_THK, k_THK, v_THV
+
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        attention_masks: AttentionMasksType,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        q_THK, k_THK, v_THV = remat.region(
+            self._project_qkv,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x_TD, positions)
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
+            q_THK,
+            k_THK,
+            v_THV,
+            attention_masks=attention_masks,
+            scale=self.softmax_scale,
+        )
+        remat.recompute_needs_tensor(out_THV)
+        out_TD = out_THV.contiguous().view(out_THV.shape[0], -1)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):
