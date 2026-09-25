@@ -245,44 +245,38 @@ class KDA(Module):
         self.A_log = nn.Parameter(torch.empty(config.num_heads))
         self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
 
-    def _project_inputs(
-        self, x_TD: torch.Tensor
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
+    def _maybe_gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # All KDA input projections consume x, so gather once at their
-            # common module boundary.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
+        if tp_group is None:
+            return x_TD
 
+        x_TD = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("input_redistribution"),
+            recompute=self.remat_should_recompute("input_redistribution"),
+        )(
+            x_TD,
+            tp_group,
+            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            dst=spmd.R,
+            backward_options={"op_dtype": x_TD.dtype},
+        )
+        remat.recompute_needs_tensor(x_TD)
+        return x_TD
+
+    def _project_qkv(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.q_proj(x_TD), self.k_proj(x_TD), self.v_proj(x_TD)
+
+    def _compute_recurrence_parameters(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         raw_gate_THK = local_head_split(
             self.forget_b(self.forget_a(x_TD)), self.head_dim
         )
         raw_beta_TH = self.beta(x_TD)
-        query_TC = self.q_proj(x_TD)
-        key_TC = self.k_proj(x_TD)
-        value_TC = self.v_proj(x_TD)
-        output_gate_THV = local_head_split(self.output_gate(x_TD), self.head_dim)
-        return (
-            query_TC,
-            key_TC,
-            value_TC,
-            raw_gate_THK,
-            raw_beta_TH,
-            output_gate_THV,
-        )
+        return raw_gate_THK, raw_beta_TH
 
     def forward(
         self,
@@ -296,20 +290,19 @@ class KDA(Module):
                 f"KDA input must have shape [T, D], got {tuple(x_TD.shape)}."
             )
 
-        (
-            query_TC,
-            key_TC,
-            value_TC,
-            raw_gate_THK,
-            raw_beta_TH,
-            output_gate_THV,
-        ) = remat.region(
-            self._project_inputs,
-            self.remat_region_name("input_projections"),
-            recompute=self.remat_should_recompute("input_projections"),
-        )(
-            x_TD
-        )
+        x_TD = self._maybe_gather_tp_input(x_TD)
+        query_TC, key_TC, value_TC = remat.region(
+            self._project_qkv,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x_TD)
+        raw_gate_THK, raw_beta_TH = self._compute_recurrence_parameters(x_TD)
+        output_gate_TC = remat.region(
+            self.output_gate,
+            self.remat_region_name("gate"),
+            recompute=self.remat_should_recompute("gate"),
+        )(x_TD)
+        output_gate_THV = local_head_split(output_gate_TC, self.head_dim)
         num_tokens = query_TC.shape[0]
         if attention_masks is None:
             cu_seqlens = None
@@ -322,8 +315,8 @@ class KDA(Module):
             )
         out_THV = remat.region(
             self.inner_kda,
-            self.remat_region_name("inner_compute"),
-            recompute=self.remat_should_recompute("inner_compute"),
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
         )(
             query_TC,
             key_TC,
@@ -342,8 +335,8 @@ class KDA(Module):
         out_TD = self.output_norm(out_THV, output_gate_THV).reshape(num_tokens, -1)
         out_TD = remat.region(
             self.output_proj,
-            self.remat_region_name("output_projection"),
-            recompute=self.remat_should_recompute("output_projection"),
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
         )(out_TD)
         remat.recompute_needs_tensor(out_TD)
         return out_TD

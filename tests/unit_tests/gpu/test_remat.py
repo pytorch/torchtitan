@@ -111,7 +111,7 @@ class _CountingModelSpecificAttention:
     inner_compute: _CountingOp
     output_projection: _CountingOp
 
-    def region_counts(self) -> tuple[int, int, int]:
+    def region_counts(self) -> tuple[int, ...]:
         return (
             self.projection_forwards,
             self.inner_compute.num_forwards,
@@ -133,10 +133,13 @@ class _CountingDeepSeekV3Attention(
         )
         self.wo = self.output_projection
 
-    def _project_qkv(self, x_TD, positions):
-        del positions
+    def _project_latents(self, x_TD):
         self.projection_forwards += 1
-        x_T1D = x_TD.unsqueeze(1)
+        return x_TD * 1.0, x_TD + 0.0
+
+    def _project_qkv(self, x_TD, q_latent_TC, compressed_kv_TC, positions):
+        del positions
+        x_T1D = (x_TD + q_latent_TC + compressed_kv_TC).unsqueeze(1)
         return x_T1D, x_T1D, x_T1D
 
 
@@ -175,12 +178,26 @@ class _CountingKimiMLAAttention(KimiMLAAttention, _CountingModelSpecificAttentio
             Linear(Linear.Config(in_features=4, out_features=4))
         )
         self.wo = self.output_projection
+        self.gate_projection = _CountingOp(
+            Linear(Linear.Config(in_features=4, out_features=4))
+        )
+        self.gate = self.gate_projection
 
-    def _project_qkv(self, x_TD):
+    def _project_latents(self, x_TD):
         self.projection_forwards += 1
-        projected_TD = x_TD * 1.0
-        projected_T1D = projected_TD.unsqueeze(1)
-        return projected_T1D, projected_T1D, projected_T1D, projected_TD
+        return x_TD * 1.0, x_TD + 0.0
+
+    def _project_qkv(self, q_latent_TC, compressed_kv_TC):
+        projected_T1D = (q_latent_TC + compressed_kv_TC).unsqueeze(1)
+        return projected_T1D, projected_T1D, projected_T1D
+
+    def region_counts(self) -> tuple[int, ...]:
+        return (
+            self.projection_forwards,
+            self.gate_projection.num_forwards,
+            self.inner_compute.num_forwards,
+            self.output_projection.num_forwards,
+        )
 
 
 class _CountingMuseGlimmerAttention(
@@ -201,12 +218,22 @@ class _CountingMuseGlimmerAttention(
             Linear(Linear.Config(in_features=4, out_features=4))
         )
         self.wo = self.output_projection
+        self.gate_projection = _CountingOp(lambda x_TD: x_TD * 1.0)
+        self.o_gate = self.gate_projection
 
     def _project_qkv(self, x_TD):
         self.projection_forwards += 1
         projected_TD = x_TD * 1.0
         projected_T1D = projected_TD.unsqueeze(1)
-        return projected_T1D, projected_T1D, projected_T1D, None
+        return projected_T1D, projected_T1D, projected_T1D
+
+    def region_counts(self) -> tuple[int, ...]:
+        return (
+            self.projection_forwards,
+            self.gate_projection.num_forwards,
+            self.inner_compute.num_forwards,
+            self.output_projection.num_forwards,
+        )
 
 
 def _recurrent_inner(query_TC, key_TC, value_TC, *_args, **_kwargs):
@@ -230,16 +257,29 @@ class _CountingGatedDeltaNet(GatedDeltaNet, _CountingModelSpecificAttention):
             Linear(Linear.Config(in_features=4, out_features=4))
         )
         self.out_proj = self.output_projection
+        self.gate_projection = _CountingOp(lambda x_TD: x_TD * 1.0)
+        self.in_proj_z = self.gate_projection
         self.conv_q = SimpleNamespace(weight=torch.empty(0))
         self.conv_k = SimpleNamespace(weight=torch.empty(0))
         self.conv_v = SimpleNamespace(weight=torch.empty(0))
         self.A_log = torch.empty(0)
         self.dt_bias = torch.empty(0)
 
-    def _project_inputs(self, x_TD):
+    def _project_qkv(self, x_TD):
         self.projection_forwards += 1
         projected_TD = x_TD * 1.0
-        return (projected_TD,) * 6
+        return projected_TD, projected_TD, projected_TD
+
+    def _compute_recurrence_parameters(self, x_TD):
+        return x_TD, x_TD
+
+    def region_counts(self) -> tuple[int, ...]:
+        return (
+            self.projection_forwards,
+            self.gate_projection.num_forwards,
+            self.inner_compute.num_forwards,
+            self.output_projection.num_forwards,
+        )
 
 
 class _CountingKDA(KDA, _CountingModelSpecificAttention):
@@ -253,22 +293,29 @@ class _CountingKDA(KDA, _CountingModelSpecificAttention):
             Linear(Linear.Config(in_features=4, out_features=4))
         )
         self.output_proj = self.output_projection
+        self.gate_projection = _CountingOp(lambda x_TD: x_TD * 1.0)
+        self.output_gate = self.gate_projection
+        self.head_dim = 4
         self.q_conv = SimpleNamespace(weight=torch.empty(0))
         self.k_conv = SimpleNamespace(weight=torch.empty(0))
         self.v_conv = SimpleNamespace(weight=torch.empty(0))
         self.A_log = torch.empty(0)
         self.dt_bias = torch.empty(0)
 
-    def _project_inputs(self, x_TD):
+    def _project_qkv(self, x_TD):
         self.projection_forwards += 1
         projected_TD = x_TD * 1.0
+        return projected_TD, projected_TD, projected_TD
+
+    def _compute_recurrence_parameters(self, x_TD):
+        return x_TD.unsqueeze(1), x_TD
+
+    def region_counts(self) -> tuple[int, ...]:
         return (
-            projected_TD,
-            projected_TD,
-            projected_TD,
-            projected_TD,
-            projected_TD,
-            projected_TD.unsqueeze(1),
+            self.projection_forwards,
+            self.gate_projection.num_forwards,
+            self.inner_compute.num_forwards,
+            self.output_projection.num_forwards,
         )
 
 
@@ -643,7 +690,7 @@ class TestRematRegions(unittest.TestCase):
         attention_cases = (
             (
                 _CountingDeepSeekV3Attention,
-                ("qkv", "inner_attention", "wo"),
+                ("latent_projections", "inner_attention", "wo"),
             ),
             (
                 _CountingQwen35Attention,
@@ -651,28 +698,31 @@ class TestRematRegions(unittest.TestCase):
             ),
             (
                 _CountingKimiMLAAttention,
-                ("qkv", "inner_attention", "wo"),
+                ("latent_projections", "gate", "inner_attention", "wo"),
             ),
             (
                 _CountingMuseGlimmerAttention,
-                ("qkv", "inner_attention", "wo"),
+                ("qkv", "gate", "inner_attention", "wo"),
             ),
             (
                 _CountingGatedDeltaNet,
-                ("input_projections", "inner_compute", "output_projection"),
+                ("qkv", "gate", "inner_attention", "wo"),
             ),
             (
                 _CountingKDA,
-                ("input_projections", "inner_compute", "output_projection"),
+                ("qkv", "gate", "inner_attention", "wo"),
             ),
         )
         for attention_factory, region_names in attention_cases:
             policies = [
-                ([], (2, 2, 2)),
+                ([], tuple(2 for _ in region_names)),
                 *[
                     (
                         [f"attention.{region_name}"],
-                        tuple(1 if index == saved_index else 2 for index in range(3)),
+                        tuple(
+                            1 if index == saved_index else 2
+                            for index in range(len(region_names))
+                        ),
                     )
                     for saved_index, region_name in enumerate(region_names)
                 ],
@@ -1039,7 +1089,7 @@ class TestRematRegions(unittest.TestCase):
                     expected_counts,
                 )
 
-    def test_router_decision_is_always_saved(self):
+    def test_router_statistics_are_recorded_once(self):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
@@ -1062,7 +1112,7 @@ class TestRematRegions(unittest.TestCase):
             output = checkpointed_forward(torch.randn(3, 4, requires_grad=True))
             output.backward()
 
-        self.assertEqual(select_experts.call_count, 1)
+        self.assertEqual(select_experts.call_count, 2)
         self.assertEqual(router.tokens_per_expert_E.sum().item(), 3)
 
     def test_quantile_router_statistics_are_recorded_once(self):
