@@ -89,6 +89,7 @@ class Trainer(Configurable):
 
             if (
                 not self.training.disable_cuda_graphs
+                and "forward_backward" in self.cuda_graph.components
                 and cuda_graphs_supported()
                 and self.parallelism.pipeline_parallel_degree > 1
                 and self.validator is not None
@@ -104,6 +105,7 @@ class Trainer(Configurable):
                     self.model,
                     parallelism=self.parallelism,
                     training=self.training,
+                    cuda_graph=self.cuda_graph,
                     debug=self.debug,
                     activation_checkpoint=self.activation_checkpoint,
                     compile_config=self.compile,

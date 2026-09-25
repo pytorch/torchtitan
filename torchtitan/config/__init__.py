@@ -15,6 +15,7 @@ TORCH_DTYPE_MAP = {
 from .configs import (
     CommConfig,
     CompileConfig,
+    CUDAGraphConfig,
     DebugConfig,
     FSDPSymmMemScope,
     ParallelismConfig,
@@ -39,6 +40,7 @@ __all__ = [
     "TORCH_DTYPE_MAP",
     # Config dataclasses
     "CompileConfig",
+    "CUDAGraphConfig",
     "ParallelismConfig",
     "CommConfig",
     "TrainingConfig",

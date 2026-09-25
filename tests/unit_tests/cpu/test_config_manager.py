@@ -18,6 +18,7 @@ from torchtitan.components.validate import Validator
 from torchtitan.config import (
     CompileConfig,
     ConfigManager,
+    CUDAGraphConfig,
     DebugConfig,
     ParallelismConfig,
     TrainingConfig,
@@ -273,6 +274,39 @@ class TestConfigManager(unittest.TestCase):
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
         assert not config.training.disable_cuda_graphs
+        assert config.cuda_graph.components == ["forward_backward"]
+
+    def test_cuda_graph_components(self):
+        with pytest.raises(ValueError, match="Unknown cuda_graph.components"):
+            CUDAGraphConfig(components=["unknown"])
+
+        config = ConfigManager().parse_args(
+            ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
+        )
+        config.cuda_graph.components = ["optimizer_step"]
+
+        with pytest.raises(ValueError, match="requires the forward_backward component"):
+            config.__post_init__()
+
+    def test_optimizer_cuda_graph_requires_cuda_graphs_enabled(self):
+        config = ConfigManager().parse_args(
+            ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
+        )
+        config.cuda_graph.components.append("optimizer_step")
+        config.training.disable_cuda_graphs = True
+
+        with pytest.raises(ValueError, match="requires CUDA graphs"):
+            config.__post_init__()
+
+    def test_optimizer_cuda_graph_requires_fused_adam(self):
+        config = ConfigManager().parse_args(
+            ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
+        )
+        config.cuda_graph.components.append("optimizer_step")
+        config.optimizer.implementation = "foreach"
+
+        with pytest.raises(ValueError, match="fused implementation"):
+            config.__post_init__()
 
     def test_cuda_graphs_reject_unsupported_expert_parallelism(self):
         with cuda_graphs_supported(True):
