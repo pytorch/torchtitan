@@ -1,0 +1,15 @@
+# Keep RL runtime dependencies in sync with torchtitan/rl/requirements.txt.
+torchmonarch
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+pygtrie
+portpicker
+
+# The RL test image also needs the inference runtime and example dependencies.
+vllm
+xformers
+verifiers==0.3.1
+math-verify==0.9.0
+# Match torchtitan's dataset bound when resolving Verifiers and vLLM together.
+datasets>=3.6.0,<4.8.0
+uv
