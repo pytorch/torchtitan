@@ -14,6 +14,17 @@ from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.qwen3 import model_registry
 
 
+class TestTokenDispatcherModule(unittest.TestCase):
+    def test_dispatcher_has_no_checkpoint_state(self):
+        dispatcher = AllToAllTokenDispatcher.Config(
+            num_experts=2,
+            top_k=1,
+        ).build()
+
+        self.assertIsInstance(dispatcher, torch.nn.Module)
+        self.assertEqual(list(dispatcher.state_dict()), [])
+
+
 class TestExpertParallelConfigValidation(unittest.TestCase):
     @staticmethod
     def _config(ep: int, tp: int = 1):
