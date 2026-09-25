@@ -14,7 +14,7 @@ produces, so a template change upstream fails here first.
 Needs a Muse Glimmer tokenizer; point ``MUSE_GLIMMER_TOKENIZER`` at a local checkpoint
 directory or leave it unset to pull the public one from the Hub.
 
-  pytest tests/unit_tests/rl/test_muse_glimmer_renderer.py -v
+  pytest tests/rl/unit_tests/test_muse_glimmer_renderer.py -v
 """
 
 from __future__ import annotations
