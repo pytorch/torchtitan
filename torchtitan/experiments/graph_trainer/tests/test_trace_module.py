@@ -155,9 +155,9 @@ class _TraceableWrapper(torch.Tensor):
 
 
 class TestGraphGradientAccumulation(unittest.TestCase):
-    def test_tears_down_graph_trainer_cuda_graphs(self):
+    def test_close_releases_graph_trainer_resources(self):
         from types import SimpleNamespace
-        from unittest.mock import patch
+        from unittest.mock import MagicMock, patch
 
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
         from torchtitan.training_engine import TrainingEngine
@@ -168,6 +168,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         )
         engine._pinned_pool_ctx = None
         engine._graphtrainer_cudagraphs_enabled = True
+        metadata_handle = MagicMock()
+        engine._metadata_inference_state_handle = metadata_handle
 
         with (
             patch(
@@ -178,6 +180,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             engine.close()
 
         teardown.assert_called_once_with()
+        metadata_handle.remove.assert_called_once_with()
+        self.assertIsNone(engine._metadata_inference_state_handle)
         base_close.assert_called_once_with()
 
     def test_rejects_fsdp2_deferred_gradient_reduction(self):
