@@ -37,6 +37,7 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
     make_shared_expert_ffn_config,
+    select_shared_expert_w2_config,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
@@ -540,6 +541,10 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             hidden_dim=shared_info["hidden_dim"],
             w1_param_init=_LINEAR_INIT,
             w2w3_param_init=_LINEAR_INIT,
+        )
+        select_shared_expert_w2_config(
+            ffn_config,
+            enable_sp=config.parallelism.enable_sequence_parallel,
         )
         if shared_info["has_sigmoid_gate"]:
             # Import only for the Qwen3.5 topology so unrelated HF models do

@@ -26,7 +26,6 @@ from torchtitan.models.common.linear import (
     Linear,
     RouterGateLinear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import (
     MoE,
@@ -520,7 +519,7 @@ class TestRematRegions(unittest.TestCase):
                         out_features=8,
                         num_linears=2,
                     ),
-                    w2=SharedExpertRowParallelLinear.Config(
+                    w2=RowParallelLinear.Config(
                         in_features=8,
                         out_features=4,
                     ),

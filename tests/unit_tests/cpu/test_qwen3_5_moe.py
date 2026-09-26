@@ -10,20 +10,12 @@ from unittest.mock import ANY, call, patch
 import spmd_types as spmd
 import torch
 
-from torchtitan.models.common.linear import Linear, SharedExpertRowParallelLinear
+from torchtitan.models.common.linear import Linear, RowParallelLinear
 from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
 
 
 class TestSigmoidGatedFeedForward(unittest.TestCase):
     def test_shared_input_gather_and_projections_use_one_remat_region(self):
-        shared_expert = SigmoidGatedFeedForward.Config(
-            w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
-            w2=SharedExpertRowParallelLinear.Config(
-                in_features=8,
-                out_features=4,
-            ),
-            gate=Linear.Config(in_features=4, out_features=1),
-        ).build()
         x_TD = torch.randn(4, 4)
         tp_group = object()
 
@@ -69,6 +61,16 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
                 ],
             ),
         ):
+            w2_config = (
+                RowParallelLinear.Config(in_features=8, out_features=4)
+                if sp_enabled
+                else Linear.Config(in_features=8, out_features=4)
+            )
+            shared_expert = SigmoidGatedFeedForward.Config(
+                w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
+                w2=w2_config,
+                gate=Linear.Config(in_features=4, out_features=1),
+            ).build()
             with (
                 self.subTest(sp_enabled=sp_enabled),
                 patch(

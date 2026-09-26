@@ -26,13 +26,17 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
 ) -> None:
     import spmd_types as spmd
     from torchtitan.distributed.parallel_dims import MeshAxisName
-    from torchtitan.models.common.linear import Linear, SharedExpertRowParallelLinear
+    from torchtitan.models.common.linear import Linear, RowParallelLinear
     from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
     config = cast(
         Qwen35Model.Config,
-        model_registry("debugmodel_moe", moe_comm_backend="standard"),
+        model_registry(
+            "debugmodel_moe",
+            enable_sp=enable_sp,
+            moe_comm_backend="standard",
+        ),
     )
     moe = config.layers[0].moe
     assert moe is not None
@@ -42,7 +46,8 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     assert type(shared_experts.w13) is Linear.Config
     assert shared_experts.w13.num_linears == 2
     assert type(shared_experts.gate) is Linear.Config
-    assert type(shared_experts.w2) is SharedExpertRowParallelLinear.Config
+    expected_w2_type = RowParallelLinear.Config if enable_sp else Linear.Config
+    assert type(shared_experts.w2) is expected_w2_type
 
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None

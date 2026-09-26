@@ -27,6 +27,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     set_dense_ffn_sharding,
 )
+from torchtitan.models.common.linear import RowParallelLinear
 from torchtitan.models.common.moe_sharding import set_shared_moe_sharding_config
 
 
@@ -223,6 +224,11 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
         )
         reference = copy.deepcopy(base_config).build().to(device)
         parallel_config = copy.deepcopy(base_config)
+        parallel_config.w2 = RowParallelLinear.Config(
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init=init,
+        )
         set_shared_moe_sharding_config(
             parallel_config,
             enable_ep=True,
