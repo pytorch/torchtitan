@@ -3,12 +3,11 @@ name: RL Unit Tests
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - 'torchtitan/experiments/**'
-  pull_request:
-    paths-ignore:
-      - 'torchtitan/experiments/**'
-  workflow_dispatch:
+    tags:
+      - ciflow/rl/*
+  schedule:
+    # Runs every 12 hours
+    - cron: '0 */12 * * *'
 
 concurrency:
   group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -20,11 +19,12 @@ permissions:
 
 jobs:
   set-matrix:
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     uses: ./.github/workflows/set-matrix.yaml
     with:
       runner-cuda: mt-l-x86aavx2-11-41-a10g
       gpu-arch: cuda
-      run-on-draft: true
 
   rl-unit-tests:
     name: RL Unit Tests (1 GPU)
