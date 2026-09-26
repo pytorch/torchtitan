@@ -311,7 +311,7 @@ def make_shared_expert_ffn_config(
     )
 
 
-def select_shared_expert_w2_config(
+def configure_shared_expert_w2_for_sp(
     model_config: Module.Config, *, enable_sp: bool
 ) -> None:
     """Select the shared-expert w2 implementation before config transforms."""

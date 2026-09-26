@@ -32,12 +32,12 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
 )
 from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
+    configure_shared_expert_w2_for_sp,
     fused_gate_up_param_init,
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
     make_shared_expert_ffn_config,
-    select_shared_expert_w2_config,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
@@ -542,7 +542,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             w1_param_init=_LINEAR_INIT,
             w2w3_param_init=_LINEAR_INIT,
         )
-        select_shared_expert_w2_config(
+        configure_shared_expert_w2_for_sp(
             ffn_config,
             enable_sp=config.parallelism.enable_sequence_parallel,
         )

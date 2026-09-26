@@ -81,7 +81,7 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
-    config = cast(Qwen35Model.Config, model_registry("debugmodel"))
+    config = cast(Qwen35Model.Config, model_registry("debugmodel", enable_sp=True))
     vision_encoder = config.vision_encoder
     assert vision_encoder is not None
 
@@ -110,7 +110,7 @@ def test_qwen35_attention_output_matches_row_parallel_projection(
 ) -> None:
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
-    config = cast(Qwen35Model.Config, model_registry("debugmodel"))
+    config = cast(Qwen35Model.Config, model_registry("debugmodel", enable_sp=True))
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=False)
 
     for layer in config.layers:
@@ -145,7 +145,9 @@ class _RecordingVisionEncoder(nn.Module):
 
 
 def _small_qwen35_model() -> Qwen35Model:
-    config = cast(Qwen35Model.Config, model_registry("debugmodel", seq_len=8))
+    config = cast(
+        Qwen35Model.Config, model_registry("debugmodel", enable_sp=True, seq_len=8)
+    )
     config = replace(
         config,
         vocab_size=8,
@@ -181,6 +183,7 @@ def test_qwen35_registry_keeps_released_flavors() -> None:
 def test_qwen35_registry_builds_every_flavor(flavor: str) -> None:
     config = model_registry(
         flavor,
+        enable_sp=True,
         moe_comm_backend=(
             "standard" if flavor == "debugmodel_moe" or "-A" in flavor else None
         ),
@@ -190,8 +193,8 @@ def test_qwen35_registry_builds_every_flavor(flavor: str) -> None:
 
 
 def test_qwen35_is_the_shared_model_implementation() -> None:
-    config = cast(Qwen35Model.Config, model_registry("0.8B"))
-    qwen38_config = qwen3_8_model_registry("27B")
+    config = cast(Qwen35Model.Config, model_registry("0.8B", enable_sp=True))
+    qwen38_config = qwen3_8_model_registry("27B", enable_sp=True)
 
     assert config.dim == 1024
     assert len(config.layers) == 24
@@ -199,10 +202,10 @@ def test_qwen35_is_the_shared_model_implementation() -> None:
 
 
 def test_qwen35_keeps_small_dense_and_moe_models() -> None:
-    dense_config = cast(Qwen35Model.Config, model_registry("0.8B"))
+    dense_config = cast(Qwen35Model.Config, model_registry("0.8B", enable_sp=True))
     moe_config = cast(
         Qwen35Model.Config,
-        model_registry("35B-A3B", moe_comm_backend="standard"),
+        model_registry("35B-A3B", enable_sp=True, moe_comm_backend="standard"),
     )
 
     assert dense_config.dim == 1024
