@@ -29,6 +29,7 @@ def test_qwen36_registry_exposes_released_flavors() -> None:
 def test_qwen36_registry_builds_every_flavor(flavor: str) -> None:
     config = model_registry(
         flavor,
+        enable_sp=True,
         moe_comm_backend=(
             "standard" if flavor == "debugmodel_moe" or "-A" in flavor else None
         ),
@@ -39,7 +40,7 @@ def test_qwen36_registry_builds_every_flavor(flavor: str) -> None:
 
 
 def test_qwen36_27b_matches_hugging_face_config() -> None:
-    config = cast(Qwen35Model.Config, model_registry("27B"))
+    config = cast(Qwen35Model.Config, model_registry("27B", enable_sp=True))
 
     assert config.dim == 5120
     assert len(config.layers) == 64
@@ -60,7 +61,7 @@ def test_qwen36_27b_matches_hugging_face_config() -> None:
 def test_qwen36_35b_a3b_matches_hugging_face_config() -> None:
     config = cast(
         Qwen35Model.Config,
-        model_registry("35B-A3B", moe_comm_backend="standard"),
+        model_registry("35B-A3B", enable_sp=True, moe_comm_backend="standard"),
     )
 
     assert config.dim == 2048

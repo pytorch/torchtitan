@@ -237,6 +237,7 @@ def _latent_moe_config(
     *,
     dim: int,
     latent_dim: int,
+    enable_sp: bool,
     expert_hidden_dim: int,
     num_experts: int,
     top_k: int,
@@ -281,6 +282,7 @@ def _latent_moe_config(
             make_shared_expert_ffn_config(
                 dim=dim,
                 hidden_dim=num_shared_experts * expert_hidden_dim,
+                enable_sp=enable_sp,
                 w1_param_init=_LINEAR_INIT,
                 w2w3_param_init=_LINEAR_INIT,
             ),
@@ -370,6 +372,7 @@ def _kimi_k3_config(
     *,
     max_context_length: int,
     dim: int,
+    enable_sp: bool,
     vocab_size: int,
     num_layers: int,
     full_attention_layers: set[int],
@@ -440,6 +443,7 @@ def _kimi_k3_config(
                     else _latent_moe_config(
                         dim=dim,
                         latent_dim=latent_dim,
+                        enable_sp=enable_sp,
                         expert_hidden_dim=expert_hidden_dim,
                         num_experts=num_experts,
                         top_k=top_k,
@@ -482,12 +486,14 @@ def _debugmodel(
     attn_backend: str,
     moe_comm_backend: str,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK3Model.Config:
     dim = 1024
     return _kimi_k3_config(
         max_context_length=seq_len,
         dim=dim,
+        enable_sp=enable_sp,
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=24,
@@ -525,12 +531,14 @@ def _kimi_k3(
     attn_backend: str,
     moe_comm_backend: str,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK3Model.Config:
     dim = 7168
     return _kimi_k3_config(
         max_context_length=seq_len,
         dim=dim,
+        enable_sp=enable_sp,
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=93,
@@ -576,6 +584,7 @@ def model_registry(
     converters: list[ModelConfigConverter.Config] | None = None,
     moe_comm_backend: str = "standard",
     *,
+    enable_sp: bool,
     seq_len: int | None = None,
 ) -> KimiK3Model.Config:
     get_config, max_context_len = kimi_k3_configs[flavor]
@@ -587,6 +596,7 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
+        enable_sp=enable_sp,
         moe_comm_backend=moe_comm_backend,
         seq_len=context_len,
     )
