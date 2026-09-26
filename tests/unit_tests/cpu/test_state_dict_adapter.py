@@ -136,7 +136,10 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
     def test_to_hf_handles_replicated_grouped_experts(self) -> None:
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
-            attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+            attn_backend="flex",
+            moe_comm_backend="standard",
+            enable_sp=True,
+            seq_len=max_context_length,
         )
         adapter = DeepSeekV3StateDictAdapter(config, hf_assets_path=None)
         mesh = init_device_mesh(
@@ -178,6 +181,7 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         config = build_config(
             attn_backend="flex",
             moe_comm_backend="standard",
+            enable_sp=True,
             seq_len=128,
             num_mtp_layers=1,
         )
