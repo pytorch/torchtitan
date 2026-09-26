@@ -244,6 +244,7 @@ def build_minimal_trainer(
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
+            debug=DebugConfig(),
             training=TrainingConfig(),
             parallelism=SimpleNamespace(enable_sequence_parallel=False),
         )
