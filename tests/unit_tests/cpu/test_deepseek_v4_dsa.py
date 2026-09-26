@@ -19,6 +19,7 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.models.deepseek_v4.attention import DSV4FlexInnerAttention
 from torchtitan.models.deepseek_v4.compressor import Indexer
+from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 
 
 def window_idxs(window_size, bsz, seqlen, device):
@@ -170,6 +171,28 @@ class TestDSABlockMask(unittest.TestCase):
         self.assertEqual(selected.shape, (seqlen, topk))
         self.assertTrue((selected >= 0).all())
         self.assertTrue(torch.equal(selected.masked_fill(old < 0, -1), old))
+
+
+class TestDSVPackedDocuments(unittest.TestCase):
+    def test_get_attention_masks_rejects_position_resets(self):
+        positions = torch.arange(64).repeat(2)
+        with self.assertRaisesRegex(
+            NotImplementedError, "packed documents.*position resets"
+        ):
+            DeepSeekV4Model.get_attention_masks(None, positions)
+
+    def test_get_attention_masks_accepts_single_document(self):
+        positions = torch.arange(128)
+        self.assertIsNone(DeepSeekV4Model.get_attention_masks(None, positions))
+
+    def test_get_attention_masks_ignores_padding_position_resets(self):
+        positions = torch.tensor([0, 1, 2, 3, 0, 1])
+        padding_mask = torch.tensor([False, False, False, False, True, True])
+        self.assertIsNone(
+            DeepSeekV4Model.get_attention_masks(
+                None, positions, padding_mask=padding_mask
+            )
+        )
 
 
 if __name__ == "__main__":

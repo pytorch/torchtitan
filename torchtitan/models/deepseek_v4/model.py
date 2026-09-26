@@ -272,7 +272,17 @@ class DeepSeekV4Model(Decoder):
         max_num_documents=None,
         max_context_length=None,
     ):
-        del positions, padding_mask, max_num_documents, max_context_length
+        # NOTE: Packed-document support requires document-aware compression
+        # and index selection.
+        document_resets = positions[1:] == 0
+        if padding_mask is not None:
+            document_resets &= ~padding_mask[1:].to(torch.bool)
+        if torch.any(document_resets):
+            raise NotImplementedError(
+                "DeepSeek V4 sparse attention does not support packed documents "
+                "with position resets."
+            )
+        del max_num_documents, max_context_length
         return None
 
     def forward(
