@@ -36,6 +36,28 @@ def test_bf16x9_is_enabled_on_future_nvidia_gpus(
     assert matmul.fp32_precision == "bfx9"
 
 
+@pytest.mark.parametrize(
+    ("pipeline_parallel_degree", "expected"), [(1, False), (2, True)]
+)
+def test_init_distributed_configures_pipeline_per_edge_p2p(
+    monkeypatch: pytest.MonkeyPatch,
+    pipeline_parallel_degree: int,
+    expected: bool,
+) -> None:
+    monkeypatch.setenv("NGPU", "2")
+    monkeypatch.setenv("FAKE_PP_RANK", "0")
+    with (
+        patch("torch.distributed.is_initialized", return_value=False),
+        patch("torchtitan.distributed.utils.init_fake_mode"),
+        patch.object(dist_utils.dist_config, "pipeline_per_edge_p2p", not expected),
+    ):
+        init_distributed(
+            CommConfig(mode="fake_backend"),
+            pipeline_parallel_degree=pipeline_parallel_degree,
+        )
+        assert dist_utils.dist_config.pipeline_per_edge_p2p is expected
+
+
 def test_fake_pg_uses_requested_rank(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NGPU", "8")
     monkeypatch.setenv("RANK", "6")
