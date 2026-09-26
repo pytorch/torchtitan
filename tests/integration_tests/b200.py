@@ -25,6 +25,12 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
             ngpu=2,
         ),
         OverrideDefinitions(
+            configs=[recipes.kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4],
+            test_descr="Kimi K3 FSDP, TP, EP and PP with 4 VPP stages",
+            test_name="kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_mxfp8_fsdp2],
             test_descr="MXFP8 linear with an FSDP-managed weight cache",
             test_name="mxfp8_linear_fsdp",
