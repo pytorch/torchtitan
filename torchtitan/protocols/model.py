@@ -12,7 +12,7 @@ from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 
@@ -138,7 +138,6 @@ class BaseModel(Module, ABC):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
@@ -148,14 +147,6 @@ class BaseModel(Module, ABC):
             self._parallelize(parallelism_context)
             if ac_config is not None:
                 ac_config.build(dump_folder=dump_folder).apply(self)
-            if compile_config is not None and "model" in compile_config.components:
-                from torchtitan.distributed.compile import apply_compile
-
-                apply_compile(
-                    self,
-                    compile_config=compile_config,
-                    parallelism_context=parallelism_context,
-                )
             if not skip_dp:
                 self._apply_fsdp(
                     parallelism_context=parallelism_context,

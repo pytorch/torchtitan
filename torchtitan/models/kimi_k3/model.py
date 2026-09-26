@@ -13,7 +13,7 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
@@ -405,7 +405,6 @@ class KimiK3Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
@@ -414,9 +413,6 @@ class KimiK3Model(MultimodalModel):
             raise NotImplementedError(
                 "Kimi K3 does not support context parallelism yet."
             )
-        if compile_config is not None and "model" in compile_config.components:
-            raise NotImplementedError("Kimi K3 does not support model compilation yet.")
-
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)

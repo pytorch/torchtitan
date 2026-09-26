@@ -7,8 +7,8 @@
 """
 Single entry point that registers the TorchTitan model class and the
 TorchTitan custom ConfigParser with vLLM, plus the HF-shaped config-dict
-helper they share. All per-engine torchtitan config (``model_config``,
-``parallelism``, ``compile_config``) is captured via closure on dynamic
+helper they share. All per-engine torchtitan config (``model_config`` and
+``parallelism``) is captured via closure on dynamic
 subclasses — vLLM's ``hf_config`` only carries HF-shaped fields.
 
 Usage:
@@ -20,7 +20,6 @@ Usage:
     register_to_vllm(
         model_config,
         parallelism=parallelism_config,
-        compile_config=compile_config,
     )
     # then construct EngineArgs(config_format=TORCHTITAN_CONFIG_FORMAT, ...)
 """
@@ -30,7 +29,7 @@ from __future__ import annotations
 from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import CompileConfig, OverrideConfig
+from torchtitan.config import OverrideConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 
@@ -195,7 +194,6 @@ def register_to_vllm(
     model_config: Decoder.Config,
     *,
     parallelism: InferenceParallelismConfig,
-    compile_config: CompileConfig | None,
     checkpointer_config: CheckpointManager.Config | None,
     override: OverrideConfig,
 ) -> None:
@@ -207,13 +205,13 @@ def register_to_vllm(
       1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
-         ``model_config``/``parallelism``/``compile_config``/``checkpointer_config``
+         ``model_config``/``parallelism``/``checkpointer_config``
          and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
          produces the HF-shaped ``PretrainedConfig`` from ``model_config``.
 
-    Per-engine torchtitan config (parallelism, compile, checkpoint) is
+    Per-engine torchtitan config (parallelism and checkpoint) is
     delivered to the wrapper via closure rather than via vLLM's
     ``hf_overrides`` channel. This keeps the parser scope strictly HF-shaped
     and isolates vLLM-specific plumbing from torchtitan-specific config.
@@ -225,8 +223,6 @@ def register_to_vllm(
             ``ParallelismContext``; the caller is responsible for translating the
             relevant fields (TP, EP) to ``EngineArgs`` so vLLM's own world
             layout matches.
-        compile_config: torch.compile config applied per-layer by the
-            wrapper's parallelize step.
         checkpointer_config: Optional CheckpointManager configuration for
             initial weight loading. Pass ``None`` for the RL loop, where
             weights arrive from TorchStore.
@@ -254,7 +250,6 @@ def register_to_vllm(
             super().__init__(
                 model_config=model_config,
                 parallelism=parallelism,
-                compile_config=compile_config,
                 checkpointer_config=checkpointer_config,
                 vllm_config=vllm_config,
                 prefix=prefix,

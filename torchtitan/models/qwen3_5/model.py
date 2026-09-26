@@ -14,7 +14,7 @@ import torch
 from spmd_types import SpmdType
 from torch import nn
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
@@ -410,7 +410,6 @@ class Qwen35Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
@@ -426,7 +425,6 @@ class Qwen35Model(MultimodalModel):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
             ac_config=ac_config,
             dump_folder=dump_folder,
             skip_dp=skip_dp,

@@ -18,11 +18,6 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
     """
     return [
         OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_tp2_asynctp_compile],
-            test_descr="2D async TP compile",
-            test_name="2d_asynctp_compile",
-        ),
-        OverrideDefinitions(
             configs=[llama3_debugmodel_float8],
             test_descr="Float8 test",
             test_name="float8",
@@ -32,32 +27,6 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             test_descr="FSDP symmetric memory",
             test_name="fsdp_symm_mem",
             ngpu=2,
-            skip_rocm_test=True,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_float8_fsdp2_tp2_pp2_asynctp_compile],
-            test_descr="FSDP+async TP+PP+torch.compile+Float8",
-            test_name="fsdp+tp+pp+compile+float8",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_float8_hsdp2x2_cp2_compile],
-            test_descr="HSDP+CP+torch.compile+Float8",
-            test_name="hsdp+cp+compile+float8",
-            ngpu=8,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.deepseek_v3_debugmodel_float8_grouped_fsdp2_ep2_compile],
-            test_descr="Float8 grouped experts with expert FSDP and torch.compile",
-            test_name="float8_grouped_experts_fsdp",
-            ngpu=4,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.deepseek_v3_debugmodel_hybridep_fsdp4_ep2_compile],
-            test_descr="DeepSeek V3 FSDP+HybridEP+compile",
-            test_name="deepseek_v3_fsdp+hybridep+compile",
-            ngpu=4,
-            # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
             skip_rocm_test=True,
         ),
         OverrideDefinitions(

@@ -8,7 +8,7 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -84,6 +84,10 @@ class GraphTrainingEngine(TrainingEngine):
             output_dir=output_dir,
         )
         self._pinned_pool_ctx = None
+
+    def _model_parallelize_kwargs(self) -> dict[str, Any]:
+        config = cast("GraphTrainer.Config", self.config)
+        return {"compile_config": config.compile}
 
     def _initialize_forward_backward(self) -> None:
         if self.config.parallelism.fsdp_defer_gradient_reduction:

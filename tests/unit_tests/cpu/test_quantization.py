@@ -528,8 +528,7 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert isinstance(dataset.source, HuggingFaceRandomAccessSource.Config)
         assert dataset.source.path == "openai/gsm8k"
         assert config.checkpointer.initial_load_in_hf
-        assert config.compile is not None
-        assert "model" in config.compile.components
+        assert config.compile is None
 
 
 def test_nvfp4_module_buffers_and_native_checkpoint():

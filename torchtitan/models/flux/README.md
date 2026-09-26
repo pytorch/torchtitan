@@ -31,7 +31,7 @@ MODULE=flux CONFIG=flux_schnell ./run_train.sh
 ## Supported Features
 - Parallelism: The model supports FSDP, HSDP, CP for training on multiple GPUs.
 - Activation checkpointing: The model uses activation checkpointing to reduce memory usage during training.
-- `torch.compile`: Per-block compilation for the Flux transformer (DoubleStreamBlock, SingleStreamBlock). See [torch.compile](#torchcompile) below.
+- `torch.compile`: Independent loss-function compilation. See [torch.compile](#torchcompile) below.
 - MXFP8 quantization: Dynamic MXFP8 quantization for linear layers on SM100+ (Blackwell) hardware. See [MXFP8 Quantization](#mxfp8-quantization) below.
 - Distributed checkpointing and loading.
     - Notes on the current checkpointing implementation: To keep the model weights are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of evaluation, and sharding the weights of the module if it is a FSDPModule.
@@ -39,18 +39,13 @@ MODULE=flux CONFIG=flux_schnell ./run_train.sh
 
 ## torch.compile
 
-The Flux model supports `torch.compile` for accelerating training. Compilation is applied per-block to the repeated DoubleStreamBlock and SingleStreamBlock layers in the main transformer.
+The loss function can be compiled independently with:
 
-Enable compilation in the config registry with `compile=CompileConfig()`.
-By default, both the model and the loss function are compiled. Set
-`CompileConfig(components=["model"])` or `CompileConfig(components=["loss"])`
-to compile only one component.
+```python
+config.compile = CompileConfig(components=["loss"])
+```
 
-**Notes:**
-- The Flux model blocks are compiled with `fullgraph=True` for maximum optimization.
-- The default backend is `inductor`. Set `CompileConfig(backend=<backend>)` to
-  change it.
-
+The model itself is not compiled by the standard Trainer.
 
 ## MXFP8 Quantization
 
@@ -62,7 +57,7 @@ The Flux model supports MXFP8 (Microscaling FP8) quantization for accelerating t
 
 ### Using Config Presets
 
-Pre-configured presets with MXFP8 and `torch.compile` enabled:
+Pre-configured presets with MXFP8 enabled:
 
 ```bash
 # Flux schnell with MXFP8
@@ -82,7 +77,6 @@ from torchtitan.config.transform import MXFP8LinearConverter
 
 def my_custom_mxfp8() -> FluxTrainer.Config:
     config = flux_schnell()  # or flux_dev()
-    config.compile = CompileConfig()
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             MXFP8LinearConverter.Config(

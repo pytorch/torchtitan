@@ -155,7 +155,6 @@ def build_trainer_model(
         parallelism_context=parallelism_context,
         training=trainer_config.training,
         parallelism=parallelism,
-        compile_config=config.compile,
         ac_config=trainer_config.activation_checkpoint,
         dump_folder=config.dump_folder,
     )
@@ -675,7 +674,6 @@ class BitwiseParityTestBase(unittest.TestCase):
         register_to_vllm(
             config.model,
             parallelism=config.generator.parallelism,
-            compile_config=config.compile,
             checkpointer_config=generator_checkpointer,
             override=config.generator.override,
         )

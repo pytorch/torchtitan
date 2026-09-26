@@ -27,7 +27,7 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
-from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
@@ -77,7 +77,6 @@ def pipeline_llm(
     parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig | None,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     device: torch.device,
@@ -135,15 +134,14 @@ def pipeline_llm(
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
-    # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
-    # optimizer, and checkpointing
+    # We need to iterate through model_parts to apply SPMD parallelisms,
+    # optimizer, and checkpointing.
     for i, m in enumerate(model_parts):
         # apply SPMD-style PT-D techniques
         m = m.parallelize(
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
             ac_config=ac_config,
             dump_folder=dump_folder,
         )

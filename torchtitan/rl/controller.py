@@ -598,7 +598,6 @@ class Controller(Configurable):
                     config.generator,
                     model_config=config.model,
                     model_path=config.hf_assets_path,
-                    compile_config=config.compile,
                     max_num_seqs=max_num_seqs,
                     output_dir=config.dump_folder,
                 )
