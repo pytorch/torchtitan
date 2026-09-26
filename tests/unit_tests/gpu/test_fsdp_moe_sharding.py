@@ -342,7 +342,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
             enable_sequence_parallel=True,
         )
         parallel_dims.build_mesh()
-        config = model_registry("debugmodel")
+        config = model_registry("debugmodel", enable_sp=True)
         set_deepseek_v4_sharding_config(config, enable_sp=True, enable_ep=True)
         model = config.build().to(self.device_type)
 

@@ -36,6 +36,7 @@ def _qwen3_8_2_4t_a95b(
     attn_backend: str,
     moe_comm_backend: str = "standard",
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> Qwen35Model.Config:
     """Qwen3.8-2.4T-A95B text-only MoE config."""
@@ -61,6 +62,7 @@ def _qwen3_8_2_4t_a95b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_qwen35_moe_layers(
+            enable_sp=enable_sp,
             rope=MRoPE.Config(
                 dim=rotary_dim,
                 max_context_length=seq_len,
@@ -98,6 +100,7 @@ qwen3_8_configs = {
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
@@ -112,6 +115,7 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
+        enable_sp=enable_sp,
         seq_len=context_len,
         **(
             {"moe_comm_backend": moe_comm_backend}

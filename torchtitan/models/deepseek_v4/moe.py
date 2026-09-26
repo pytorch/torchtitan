@@ -6,8 +6,11 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group, spmd_sparse_mesh
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 
 
@@ -83,6 +86,16 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
             if input_ids_T is None:
                 raise ValueError(
                     "input_ids_T is required for DeepSeek V4 hash routing."
+                )
+            # Hash routing must index the same TP token shard as scores_TE.
+            tp_group = spmd_mesh_group(MeshAxisName.TP)
+            if spmd_sparse_mesh() is not None and tp_group is not None:
+                input_ids_T = spmd.redistribute(
+                    input_ids_T,
+                    tp_group,
+                    src=spmd.R,
+                    dst=spmd.S(0),
+                    backward_options={"op_dtype": input_ids_T.dtype},
                 )
             return self.tid2eid.to(input_ids_T.device)[input_ids_T]
         return super()._select_experts(

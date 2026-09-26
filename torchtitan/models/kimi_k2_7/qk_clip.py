@@ -10,6 +10,7 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.nn.attention.flex_attention import AuxRequest
@@ -39,10 +40,11 @@ class QKClipFlexInnerAttention(FlexInnerAttention):
         return AuxRequest(lse=return_lse, max_scores=self.training)
 
     def _process_aux(self, aux: Any) -> None:
-        if self.training:
+        if self.training and not remat.is_recomputing():
             max_scores_1HT = aux.max_scores
             assert max_scores_1HT is not None
-            # Record gradient-accumulation and PP microbatches, plus AC recomputation.
+            # Record gradient-accumulation and PP microbatches once, excluding
+            # activation-checkpoint replay.
             self.max_attention_logits_H.append(max_scores_1HT.amax(dim=(0, 2)).detach())
 
 
