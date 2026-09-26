@@ -1,26 +1,30 @@
 # `torch_remat` activation checkpointing
 
-`RegionAC` uses `torch_remat` to checkpoint each transformer block while
-allowing selected regions inside the block to retain their outputs. Operations
+TorchTitan's full, selective, and configurable region activation-checkpointing
+policies use `torch_remat` to checkpoint each transformer block. Operations
 outside saved regions are recomputed during backward.
 
 ## Motivation
 
-TorchTitan currently provides full and selective activation checkpointing.
-Selective activation checkpointing makes save decisions at the operator level.
-`torch_remat` provides a model-aware alternative: model code identifies
-semantic regions, while training configuration chooses which region outputs to
-retain.
+Model code identifies semantic compute and communication regions, while the
+activation-checkpointing policy chooses which region outputs to retain.
 
 This requires small, explicit annotations in model code. In return, the policy
 surface is visible next to the operations it controls, and configurations refer
 to stable model concepts such as attention projections instead of individual
 ATen operators.
 
-`RegionAC` is the initial integration name. The long-term plan is to migrate
-the existing `FullAC` and `SelectiveAC` implementations to `torch_remat` and
-converge on one activation-checkpointing implementation. The `RegionAC` name is
-therefore provisional and may change as that migration progresses.
+The policies differ only in which optional regions they retain:
+
+- `FullAC` retains none and recomputes the full block except mandatory
+  correctness regions.
+- `SelectiveAC` retains every model-declared region and recomputes operations
+  outside those regions.
+- `RegionAC` uses an explicit `save_regions` pattern list.
+
+The former operator-level SelectiveAC policy and its
+`force_recompute_mm_shapes_by_fqns` option have been removed. Use `RegionAC`
+when a policy needs finer control than saving all declared regions.
 
 ## Configuring saved regions
 
@@ -118,11 +122,11 @@ q, k, v = remat.region(
 )(x)
 ```
 
-`RegionAC` configures each module with its name relative to the transformer
-block and the user's save patterns. The helpers above therefore resolve `qkv`
-to a qualified name such as `attention.qkv` and select whether it is saved or
-recomputed. Without an enclosing `remat.checkpoint`, `remat.region` does not
-change execution.
+The activation-checkpointing policy configures each module with its name
+relative to the transformer block and its save patterns. The helpers above
+therefore resolve `qkv` to a qualified name such as `attention.qkv` and select
+whether it is saved or recomputed. Without an enclosing `remat.checkpoint`,
+`remat.region` does not change execution.
 
 ## Declaring recomputation dependencies
 
@@ -166,8 +170,8 @@ boundary permits.
 
 ## Random state
 
-`RegionAC` requires `preserve_rng_state=False`. Random state that can advance
-inside a saved region must instead be managed with an explicit
+All `torch_remat` policies require `preserve_rng_state=False`. Random state
+that can advance inside a saved region must instead be managed with an explicit
 `torch_remat.RecomputeStateHook`.
 
 ## Forward side effects
@@ -179,10 +183,10 @@ accumulation explicitly ignores checkpoint replay. Both reuse the routing map
 built for dispatch and auxiliary loss. Kimi K2.7 QK-clipping statistics also
 ignore replay. Auxiliary-loss accumulation uses an always-retained region.
 
-The currently supported RegionAC transformer blocks do not advance RNG state
+The currently supported transformer blocks do not advance RNG state
 inside their forwards, so they do not require a `RecomputeStateHook`. Any future
 dropout, stochastic rounding counter, or other external RNG state must add a
-hook before it can be used safely with RegionAC.
+hook before it can be used safely with these policies.
 
 ## Saving expensive MoE work
 

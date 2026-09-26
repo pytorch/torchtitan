@@ -20,7 +20,6 @@ _FROZEN_CLI_OPTIONS = frozenset(
     {
         "activation_checkpoint.debug",
         "activation_checkpoint.determinism_check",
-        "activation_checkpoint.force_recompute_mm_shapes_by_fqns",
         "activation_checkpoint.memory_budget",
         "activation_checkpoint.preserve_rng_state",
         "activation_checkpoint.save_regions",

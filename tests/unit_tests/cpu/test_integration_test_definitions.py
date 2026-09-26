@@ -189,7 +189,6 @@ def test_flux_fake_pg_filters_real_collective_cases() -> None:
     [
         ("checkpoint", "checkpointing"),
         ("pipeline_parallel", "pipeline parallelism"),
-        ("fsdp+varlen_attn+per_op_sac", "selective AC"),
     ],
 )
 def test_fake_pg_incompatible_test_requires_explicit_marker(
