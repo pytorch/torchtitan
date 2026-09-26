@@ -112,6 +112,8 @@ class _Float8GroupedMMFunction(torch.autograd.Function):
             if has_unsharded_tensor
             else (weight_qdata_dgrad_EOI, weight_scale_dgrad_EI)
         )
+        # TODO: Honor ctx.needs_input_grad like _Float8LinearFunction so frozen
+        # expert weights do not save A_RI for or compute WGRAD.
         ctx.save_for_backward(A_RI, offsets_E, *saved_weight_tensors)
         ctx.has_unsharded_tensor = has_unsharded_tensor
         ctx.weight_dtype = weight_EOI.dtype
