@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Real PG (8 GPU) integration suite.
 #
-# Shared by the CUDA and ROCm jobs in integration_test.yaml. They cannot be one
-# job because `uses:` is not templatable and ROCm has to stay on linux_job_v2 --
-# v3 pulls from the private ECR, which the ROCm runners cannot authenticate to.
+# Shared by the CUDA job in integration_test.yaml and the ROCm job in
+# integration_test_rocm.yaml. They cannot be one job because `uses:` is not
+# templatable and ROCm has to stay on linux_job_v2 -- v3 pulls from the private
+# ECR, which the ROCm runners cannot authenticate to.
 #
 # Inputs (environment):
 #   GPU_ARCH_TYPE   cuda | rocm
