@@ -15,6 +15,7 @@ import pytest
 
 import torch
 import torch.nn as nn
+import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard
 from torch.distributed.tensor.debug import CommDebugMode
@@ -82,6 +83,42 @@ class QKClipTest(unittest.TestCase):
             )
 
         self.assertFalse(attention.max_attention_logits_H)
+
+    def test_remat_replay_does_not_record_duplicate_maxima(self) -> None:
+        attention = QKClipFlexInnerAttention.Config().build()
+        attention.train()
+        q_THK = torch.randn(2, 2, 4, requires_grad=True)
+        max_scores_1HT = torch.tensor([[[1.0, 3.0], [4.0, 2.0]]])
+        block_mask = create_block_mask(
+            lambda _b, _h, q_idx, kv_idx: q_idx >= kv_idx,
+            1,
+            2,
+            2,
+            2,
+            device="cpu",
+            _compile=False,
+        )
+        aux = SimpleNamespace(lse=None, max_scores=max_scores_1HT)
+
+        def forward(q_THK: torch.Tensor) -> torch.Tensor:
+            return attention(
+                q_THK,
+                q_THK,
+                q_THK,
+                attention_masks=block_mask,
+            ).sum()
+
+        with patch(
+            "torchtitan.models.common.attention.FlexInnerAttention.compiled_flex_attn",
+            return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
+        ):
+            remat.checkpoint(region_name="attention")(forward)(q_THK).backward()
+
+        self.assertEqual(len(attention.max_attention_logits_H), 1)
+        torch.testing.assert_close(
+            attention.max_attention_logits_H[0],
+            torch.tensor([3.0, 4.0]),
+        )
 
     def test_optimizer_hook_runs_qk_clip(self) -> None:
         model = nn.Linear(2, 2, bias=False)
