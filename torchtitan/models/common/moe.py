@@ -263,14 +263,14 @@ class TokenChoiceTopKRouter(Module):
         if self._debug_force_load_balance:
             topk_expert_ids_TK, topk_scores_TK = remat.region(
                 self._debug_force_load_balance_routing,
-                "routing_decision",
+                self.remat_region_name("routing_decision"),
                 recompute=False,
             )(scores_TE)
             remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
         else:
             topk_expert_ids_TK = remat.region(
                 self._select_experts,
-                "routing_decision",
+                self.remat_region_name("routing_decision"),
                 recompute=False,
             )(
                 scores_TE,

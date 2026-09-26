@@ -78,12 +78,6 @@ def validate_fake_pg_compatibility(
         incompatibilities.append("checkpointing")
     if config.parallelism.pipeline_parallel_degree > 1:
         incompatibilities.append("pipeline parallelism")
-    # TODO: FSDP + selective AC backward recompute has a shard/storage shape
-    # mismatch with Fake PG under spmd_types. Keep this test on a real PG until
-    # that interaction is fixed. Issue #4149.
-    if "varlen_attn+per_op_sac" in test.test_name:
-        incompatibilities.append("FSDP + selective AC under spmd_types")
-
     if incompatibilities and not test.use_real_pg:
         reasons = ", ".join(dict.fromkeys(incompatibilities))
         raise ValueError(

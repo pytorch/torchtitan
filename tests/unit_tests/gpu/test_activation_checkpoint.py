@@ -8,262 +8,159 @@ import unittest
 from copy import deepcopy
 
 import torch
-from torch.utils.flop_counter import FlopCounterMode
+import torch_remat as remat
+
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
 
-class ToyModule(Module):
-    def __init__(self):
+class _CountingLinear(Module):
+    def __init__(self, in_features: int, out_features: int):
         super().__init__()
-        self.layers = ModuleDict({"0": TransformerBlock()})
+        self.linear = Linear.Config(
+            in_features=in_features,
+            out_features=out_features,
+            bias=False,
+        ).build()
+        self.num_forwards = 0
 
-    def forward(self, x):
-        return self.layers["0"](x)
+    def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
+        self.num_forwards += 1
+        return self.linear(x_BD)
 
 
 class TransformerBlock(Module):
     def __init__(self):
         super().__init__()
-        linear_config = Linear.Config(in_features=512, out_features=512, bias=False)
-        self.moe = Module()
-        self.moe.router = Module()
-        self.moe.router.gate = linear_config.build()
-        self.attention = Module()
-        self.attention.wq = linear_config.build()
-        output_config = deepcopy(linear_config)
-        output_config.out_features = 1024
-        self.output = output_config.build()
+        self.input_projection = _CountingLinear(32, 32)
+        self.inner_compute = _CountingLinear(32, 32)
+        self.output_projection = _CountingLinear(32, 32)
 
-    def forward(self, x):
-        gate_out = self.moe.router.gate(x)
-        wq_out = self.attention.wq(gate_out)
-        final_out = self.output(wq_out)
-        return final_out.sum()
+    def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
+        hidden_BD = remat.region(
+            self.input_projection,
+            self.remat_region_name("input_projection"),
+            recompute=self.remat_should_recompute("input_projection"),
+        )(x_BD)
+        hidden_BD = remat.region(
+            self.inner_compute,
+            self.remat_region_name("inner_compute"),
+            recompute=self.remat_should_recompute("inner_compute"),
+        )(hidden_BD)
+        output_BD = remat.region(
+            self.output_projection,
+            self.remat_region_name("output_projection"),
+            recompute=self.remat_should_recompute("output_projection"),
+        )(hidden_BD)
+        remat.recompute_needs_tensor(output_BD)
+        return output_BD.sum()
 
 
-class TestApplyAC(unittest.TestCase):
-    def test_flops(self):
-        def get_bw_flops(model_fn):
-            x = torch.randn(512, 512, requires_grad=True)
-            out = model_fn(x)
-            out.backward()
+class ToyModel(Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = ModuleDict({"0": TransformerBlock()})
 
-            x = torch.randn(512, 512, requires_grad=True)
-            with FlopCounterMode(display=False) as fwd_mode:
-                out = model_fn(x)
-            with FlopCounterMode(display=False) as bwd_mode:
-                out.backward()
-            return bwd_mode.get_total_flops() / (512**3 * 2)
+    def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
+        return self.layers["0"](x_BD)
 
-        # 1. No AC
-        model_no_ac = ToyModule()
-        flops_no_ac = get_bw_flops(model_no_ac)
 
-        # 2. SAC
-        # Per-op SAC's policy is to save every other mm
-        model_selective_ac = ToyModule()
-        SelectiveAC.Config(
-            force_recompute_mm_shapes_by_fqns=[],  # Empty list
-        ).build().apply(model_selective_ac)
-        flops_selective_ac = get_bw_flops(model_selective_ac)
+class _MultipleBlockContainerModel(Module):
+    def __init__(self):
+        super().__init__()
+        self.first_blocks = ModuleDict({"0": TransformerBlock()})
+        self.second_blocks = ModuleDict({"0": TransformerBlock()})
 
-        # 3. Per-op SAC with force recompute "moe.router.gate"
-        # This leads to two mms being recomputed since they share the same shape!
-        model_with_force_first = ToyModule()
-        SelectiveAC.Config(
-            force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
-        ).build().apply(model_with_force_first)
-        flops_with_force_first = get_bw_flops(model_with_force_first)
+    def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
+        return self.first_blocks["0"](x_BD) + self.second_blocks["0"](x_BD)
 
-        # 4. Per-op SAC early-stop skips the terminal output recomputation.
-        model_with_force_last = ToyModule()
-        SelectiveAC.Config(
-            force_recompute_mm_shapes_by_fqns=["output"],
-        ).build().apply(model_with_force_last)
-        flops_with_force_last = get_bw_flops(model_with_force_last)
 
-        # 5. Full AC
-        model_with_full_ac = ToyModule()
-        FullAC.Config().build().apply(model_with_full_ac)
-        flops_full_ac = get_bw_flops(model_with_full_ac)
+def _run_forward_backward(
+    model: ToyModel,
+    x_BD: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+    model.zero_grad(set_to_none=True)
+    input_BD = x_BD.detach().clone().requires_grad_(True)
+    output = model(input_BD)
+    output.backward()
+    assert input_BD.grad is not None
+    parameter_grads = [
+        parameter.grad.detach().clone()
+        for parameter in model.parameters()
+        if parameter.grad is not None
+    ]
+    return output.detach(), input_BD.grad.detach().clone(), parameter_grads
 
-        self.assertEqual(flops_no_ac, 8.0)
-        self.assertEqual(flops_selective_ac, 9.0)
-        self.assertEqual(flops_with_force_first, 10.0)
-        self.assertEqual(flops_with_force_last, 9.0)
-        self.assertEqual(flops_full_ac, 10.0)
 
-    def test_mem(self):
-        if not torch.cuda.is_available():
-            raise unittest.SkipTest("CUDA is unavailable")
+class TestActivationCheckpointing(unittest.TestCase):
+    def test_custom_block_containers(self):
+        model = _MultipleBlockContainerModel()
+        FullAC.Config().build().apply(
+            model,
+            block_container_fqns=("first_blocks", "second_blocks"),
+        )
+        model(torch.randn(8, 32, requires_grad=True)).backward()
 
-        def get_act_mem(model_fn):
-            x = torch.randn(512, 512, requires_grad=True, device="cuda")
-            out = model_fn(x)
-            out.backward()
-            start_mem = torch.cuda.memory_stats()["requested_bytes.all.current"]
+        for blocks in (model.first_blocks, model.second_blocks):
+            block = blocks["0"]
+            assert isinstance(block, TransformerBlock)
+            self.assertEqual(block.input_projection.num_forwards, 2)
 
-            out = model_fn(x)
-            cur_mem = torch.cuda.memory_stats()["requested_bytes.all.current"]
-            act_mem = (cur_mem - start_mem) / (1024 * 1024)  # → MB
-            out.backward()
-            return act_mem
-
-        # 1. No AC
-        model_no_ac = ToyModule().cuda()
-        mem_no_ac = get_act_mem(model_no_ac)
-
-        # 2. SAC
-        # Per-op SAC's policy is to save every other mm
-        model_selective_ac = ToyModule().cuda()
-        SelectiveAC.Config(
-            force_recompute_mm_shapes_by_fqns=[],  # Empty list
-        ).build().apply(model_selective_ac)
-        mem_selective_ac = get_act_mem(model_selective_ac)
-
-        # 3. Per-op SAC with force recompute "moe.router.gate"
-        # This leads to two mms being recomputed since they share the same shape!
-        model_with_force_first = ToyModule().cuda()
-        SelectiveAC.Config(
-            force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
-        ).build().apply(model_with_force_first)
-        mem_with_force_first = get_act_mem(model_with_force_first)
-
-        # 4. Per-op SAC with force recompute "output"
-        model_with_force_last = ToyModule().cuda()
-        SelectiveAC.Config(
-            force_recompute_mm_shapes_by_fqns=["output"],
-        ).build().apply(model_with_force_last)
-        mem_with_force_last = get_act_mem(model_with_force_last)
-
-        # 5. Full AC
-        model_with_full_ac = ToyModule().cuda()
-        FullAC.Config().build().apply(model_with_full_ac)
-        mem_full_ac = get_act_mem(model_with_full_ac)
-
-        self.assertEqual(mem_no_ac, 2.0)
-        self.assertEqual(mem_selective_ac, 3.0)
-        self.assertEqual(mem_with_force_first, 2.0)
-        self.assertEqual(mem_with_force_last, 1.0)
-        self.assertEqual(mem_full_ac, 0.0)
-        # Note: SAC > no-AC here because it unnecessarily saves "output"
-        # even that is not needed for recomputation and output is double
-        # the size of the other two mms.
-
-    def test_correctness(self):
-        model_no_ac = ToyModule()
-
-        model_selective_ac = ToyModule()
-        model_selective_ac.load_state_dict(model_no_ac.state_dict())
-        SelectiveAC.Config(
-            force_recompute_mm_shapes_by_fqns=[],
-        ).build().apply(model_selective_ac)
-
-        model_force_first = ToyModule()
-        model_force_first.load_state_dict(model_no_ac.state_dict())
-        SelectiveAC.Config(
-            force_recompute_mm_shapes_by_fqns=["moe.router.gate"],
-        ).build().apply(model_force_first)
-
-        model_force_last = ToyModule()
-        model_force_last.load_state_dict(model_no_ac.state_dict())
-        SelectiveAC.Config(
-            force_recompute_mm_shapes_by_fqns=["output"],
-        ).build().apply(model_force_last)
-
-        def run_fwd_bwd(model, batch):
-            model.zero_grad(set_to_none=True)
-            xin = batch.clone().detach().requires_grad_(True)
-            out = model(xin)  # scalar
-            out.backward()
-
-            grad_in = xin.grad.detach().clone()
-            grad_params = [
-                p.grad.detach().clone() if isinstance(p.grad, torch.Tensor) else None
-                for p in model.parameters()
-            ]
-            return out.detach(), grad_in, grad_params
-
-        batch = torch.randn(64, 512)
-
-        out_ref, gin_ref, gparams_ref = run_fwd_bwd(model_no_ac, batch)
-        out_sel, gin_sel, gparams_sel = run_fwd_bwd(model_selective_ac, batch)
-        out_f1, gin_f1, gparams_f1 = run_fwd_bwd(model_force_first, batch)
-        out_fl, gin_fl, gparams_fl = run_fwd_bwd(model_force_last, batch)
-
-        for other_out in (out_sel, out_f1, out_fl):
-            torch.testing.assert_close(out_ref, other_out)
-
-        for other_gin in (gin_sel, gin_f1, gin_fl):
-            torch.testing.assert_close(gin_ref, other_gin)
-
-        for g_ref, g_sel, g_f1, g_fl in zip(
-            gparams_ref, gparams_sel, gparams_f1, gparams_fl
+    def test_full_and_selective_recomputation(self):
+        for policy_config, expected_counts in (
+            (FullAC.Config(), (2, 2, 2)),
+            (SelectiveAC.Config(), (1, 1, 1)),
         ):
-            # Skip wrapper / missing grads
-            if not (
-                torch.is_tensor(g_ref)
-                and torch.is_tensor(g_sel)
-                and torch.is_tensor(g_f1)
-                and torch.is_tensor(g_fl)
+            with self.subTest(policy=type(policy_config).__qualname__):
+                model = ToyModel()
+                policy_config.build().apply(model)
+                _run_forward_backward(model, torch.randn(8, 32))
+
+                block = model.layers["0"]
+                assert isinstance(block, TransformerBlock)
+                self.assertEqual(
+                    (
+                        block.input_projection.num_forwards,
+                        block.inner_compute.num_forwards,
+                        block.output_projection.num_forwards,
+                    ),
+                    expected_counts,
+                )
+
+    def test_full_and_selective_match_uncheckpointed_model(self):
+        torch.manual_seed(42)
+        baseline = ToyModel()
+        x_BD = torch.randn(8, 32)
+        expected = _run_forward_backward(baseline, x_BD)
+
+        for policy_config in (FullAC.Config(), SelectiveAC.Config()):
+            with self.subTest(policy=type(policy_config).__qualname__):
+                model = deepcopy(baseline)
+                policy_config.build().apply(model)
+                actual = _run_forward_backward(model, x_BD)
+
+                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                self.assertEqual(len(actual[2]), len(expected[2]))
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad,
+                        expected_grad,
+                        rtol=0,
+                        atol=0,
+                    )
+
+    def test_remat_policies_reject_unsupported_options(self):
+        for config_factory, message in (
+            (lambda: FullAC.Config(preserve_rng_state=True), "preserve_rng_state"),
+            (lambda: SelectiveAC.Config(debug=True), "debug option"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                ValueError,
+                message,
             ):
-                continue
-
-            torch.testing.assert_close(g_ref, g_sel)
-            torch.testing.assert_close(g_ref, g_f1)
-            torch.testing.assert_close(g_ref, g_fl)
-
-    def test_force_recompute_mm_fqns(self):
-        """Test that force_recompute_mm_shapes_by_fqns controls
-        exactly which matmuls are recomputed vs stored during backward.
-
-        Approach: during backward, count aten.mm calls per weight tensor.
-        count=1 means stored (gradient mm only), count=2 means recomputed
-        (gradient mm + recomputed forward mm).
-        """
-        from torch.utils._python_dispatch import TorchDispatchMode
-
-        class MmWeightTracker(TorchDispatchMode):
-            def __init__(self, ptrs):
-                super().__init__()
-                self._ptrs = ptrs
-                self.counts = {n: 0 for n in ptrs.values()}
-
-            def __torch_dispatch__(self, func, types, args, kwargs=None):
-                if func == torch.ops.aten.mm.default:
-                    for arg in args:
-                        name = self._ptrs.get(arg.data_ptr())
-                        if name is not None:
-                            self.counts[name] += 1
-                            break
-                return func(*args, **(kwargs or {}))
-
-        def get_recomputed(force_recompute_fqns):
-            m = ToyModule()
-            SelectiveAC.Config(
-                force_recompute_mm_shapes_by_fqns=force_recompute_fqns,
-            ).build().apply(m)
-            ptr_to_name = {
-                mod.weight.data_ptr(): fqn.rsplit(".", 1)[-1]
-                for fqn, mod in m.named_modules()
-                if isinstance(mod, Linear)
-            }
-            x = torch.randn(64, 512, requires_grad=True)
-            out = m(x)
-            tracker = MmWeightTracker(ptr_to_name)
-            with tracker:
-                out.backward()
-            return {n for n, c in tracker.counts.items() if c == 2}
-
-        # No force recompute: alternating pattern recomputes every 2nd mm
-        self.assertEqual(get_recomputed([]), {"wq"})
-        # force_recompute="moe.router.gate": shape (512,512) also matches wq,
-        # so both are force-recomputed; output is 1st in alternation → saved
-        self.assertEqual(get_recomputed(["moe.router.gate"]), {"gate", "wq"})
-        # Early-stop skips the terminal output once backward has all its tensors.
-        self.assertEqual(get_recomputed(["output"]), {"wq"})
+                config_factory()
 
 
 if __name__ == "__main__":

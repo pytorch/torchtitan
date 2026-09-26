@@ -13,7 +13,6 @@ from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
 
 import torch
 import torch.nn as nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -469,10 +468,6 @@ def register_moe_load_balancing_hook(
                 )
         return load_balance_enabled
 
-    # for MoE auxiliary-loss-free load balancing
-    def _is_recomputation_enabled(module):
-        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
-
     def _update_expert_bias(
         model_parts: list[nn.Module],
         parallel_dims: ParallelDims,
@@ -483,12 +478,6 @@ def register_moe_load_balancing_hook(
         tokens_per_expert_E_list = []
         for transformer_block, moe in _iter_moe_layers(model_parts):
             tokens_per_expert_E = moe.router.tokens_per_expert_E
-            if _is_recomputation_enabled(transformer_block):
-                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
-                # This does not affect to expert choice, but affects the experts usage metrics.
-                # We divide by 2 to correct for this double-counting due to recomputation
-                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                tokens_per_expert_E = tokens_per_expert_E // 2
             tokens_per_expert_E_list.append(tokens_per_expert_E)
 
         if not tokens_per_expert_E_list:
