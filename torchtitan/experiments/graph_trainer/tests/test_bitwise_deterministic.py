@@ -104,6 +104,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
     """
 
     model_registry: Callable
+    model_registry_kwargs: dict[str, object] = {}
     annotate_model: Callable
     model_flavor: str
     # The unsuffixed subclasses use SDPA (a test-only backend that exercises the
@@ -132,7 +133,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
         _set_deterministic()
         self.model_config = self.model_registry(
-            self.model_flavor, attn_backend=self.attn_backend
+            self.model_flavor,
+            attn_backend=self.attn_backend,
+            **self.model_registry_kwargs,
         )
         # Match Trainer.__init__: model configs consume runtime settings before
         # build. DSv3 uses the synced RoPE length to decide YaRN scaling.
@@ -454,6 +457,7 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
 
     model_registry = staticmethod(dsv3_model_registry)
+    model_registry_kwargs = {"enable_sp": True}
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
@@ -590,6 +594,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """
 
     model_registry = staticmethod(dsv3_model_registry)
+    model_registry_kwargs = {"enable_sp": True}
     model_flavor = "debugmodel"
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_graph_trainer_model)

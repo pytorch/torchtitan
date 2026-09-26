@@ -23,6 +23,17 @@ from torchtitan.config import FSDPSymmMemScope
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.linear import GroupedLinear
 
+__all__ = [
+    "apply_fsdp_to_decoder",
+    "apply_fsdp_to_multimodal_encoder",
+    "disable_fsdp_gradient_division",
+    "enable_fsdp_symm_mem",
+    "get_fsdp_reshard_after_forward_policy",
+    "linear_param_shard_placements",
+    "resolve_fsdp_mesh",
+    "resolve_sparse_fsdp_mesh",
+]
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,7 +46,7 @@ _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
 
 
-def _linear_param_shard_placements(
+def linear_param_shard_placements(
     module: nn.Module,
     *,
     include_unstacked_grouped: bool = False,
@@ -310,7 +321,7 @@ def apply_fsdp_to_decoder(
     for layer_id, transformer_block in model.layers.items():
         # A stacked Linear keeps W1/W3 separate from the matrix-row dimension.
         # Shard matrix rows so every rank retains both projections.
-        stacked_param_placements = _linear_param_shard_placements(transformer_block)
+        stacked_param_placements = linear_param_shard_placements(transformer_block)
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
@@ -338,7 +349,7 @@ def apply_fsdp_to_decoder(
                     efsdp_ep_size *= dp_storage_mesh["cp"].size()
 
             if efsdp_ep_size > num_experts:
-                expert_param_placements = _linear_param_shard_placements(
+                expert_param_placements = linear_param_shard_placements(
                     routed_experts,
                     include_unstacked_grouped=True,
                 )

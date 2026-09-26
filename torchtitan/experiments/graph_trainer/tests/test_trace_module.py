@@ -1646,7 +1646,10 @@ class TestTraceModels(unittest.TestCase):
 
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
-            attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+            attn_backend="flex",
+            moe_comm_backend="standard",
+            enable_sp=True,
+            seq_len=max_context_length,
         )
         # Aux losses normalize by the step's global valid-token count, which
         # the trainer sets; there is no training context here.
@@ -2057,7 +2060,10 @@ class TestTraceFSDP(FSDPTest):
 
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
-            attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+            attn_backend="flex",
+            moe_comm_backend="standard",
+            enable_sp=True,
+            seq_len=max_context_length,
         )
         # 2 matches the batch used inside _run_fsdp_model_test.
         AuxLoss.set_step_denominator(torch.tensor(2.0))

@@ -13,11 +13,6 @@ import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
-from torch.distributed.pipelining.schedules import (
-    _PipelineScheduleRuntime,
-    get_schedule_class,
-    PipelineScheduleMulti,
-)
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
@@ -115,22 +110,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     "Validate the same config without PP "
                     "(--parallelism.pipeline_parallel_degree 1)."
                 )
-
-            if (
-                not self.training.disable_cuda_graphs
-                and cuda_graphs_supported()
-                and self.parallelism.pipeline_parallel_degree > 1
-            ):
-                pp_schedule_class = (
-                    _PipelineScheduleRuntime
-                    if self.parallelism.pipeline_parallel_schedule_csv
-                    else get_schedule_class(self.parallelism.pipeline_parallel_schedule)
-                )
-                if issubclass(pp_schedule_class, PipelineScheduleMulti):
-                    raise ValueError(
-                        "CUDA graphs do not support looped pipeline schedules yet. "
-                        "Use a single-stage pipeline schedule or disable CUDA graphs."
-                    )
 
             if self.parallelism.num_pp_microbatches <= 0:
                 raise ValueError(
@@ -230,12 +209,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         config = self.config
         dist_utils.set_batch_invariance(config.debug.batch_invariant)
         with sl.log_trace_span("torch_distributed_init"):
-            world_size = dist_utils.init_distributed(
+            topology = dist_utils.init_distributed(
                 config.comm,
                 enable_cpu_backend=config.training.enable_cpu_offload,
                 base_folder=self.output_dir,
+                pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
-        self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, topology)
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq,
             debug=config.training.gc_debug,
