@@ -312,24 +312,19 @@ class ParallelismConfig:
 
 @dataclass(kw_only=True, slots=True)
 class CompileConfig:
-    enable_async_tensor_parallel: bool = False
-    """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
-
-    components: list[str] = field(default_factory=lambda: ["model", "loss"])
-    """Which components to compile"""
+    components: list[str] = field(default_factory=lambda: ["loss"])
+    """Non-model components to compile."""
 
     backend: str = "inductor"
 
     def __post_init__(self) -> None:
-        allowed = frozenset({"model", "loss"})
+        allowed = frozenset({"loss"})
         unknown = [c for c in self.components if c not in allowed]
         if unknown:
             raise ValueError(
                 f"Unknown compile.components entries {unknown}; "
                 f"allowed values are {sorted(allowed)}"
             )
-        if self.enable_async_tensor_parallel and "model" not in self.components:
-            raise ValueError("Async TP requires 'model' in --compile.components.")
 
 
 @dataclass(kw_only=True, slots=True)

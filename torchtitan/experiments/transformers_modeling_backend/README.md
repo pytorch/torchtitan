@@ -1,6 +1,6 @@
 # Huggingface Transformers Modeling backend
 
-This enables HF transformers models to be trained with `4D parallelism + torch.compile`
+This enables HF transformers models to be trained with 4D parallelism.
 
 This backend uses the TorchTitan SPMD type system.
 
@@ -16,14 +16,14 @@ This backend uses the TorchTitan SPMD type system.
 --config transformers_modeling_backend_debugmodel
 ...
 ```
-- Train: `LOG_RANK=7 MODEL=transformers_modeling_backend CONFIG=transformers_modeling_backend_debugmodel_compile ./run_train.sh`
+- Train: `LOG_RANK=7 MODEL=transformers_modeling_backend CONFIG=transformers_modeling_backend_debugmodel ./run_train.sh`
     - Make sure you have created the tokenizers beforehand
 <img width="1334" height="453" alt="image" src="https://github.com/user-attachments/assets/da459448-027b-4af9-8176-6a3e433a272c" />
 
 ## Supported Features
 
 - The following models were tested:
-    - Dense (FSDP/CP/TP/PP/`torch.compile`)
+    - Dense (FSDP/CP/TP/PP)
         - `meta-llama/Llama-3.2-1B`
         - `microsoft/phi-2`
         - `Qwen/Qwen2.5-7B`

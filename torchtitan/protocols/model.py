@@ -139,18 +139,11 @@ class BaseModel(Module, ABC):
         """Apply the ordered model-level parallelization lifecycle."""
         from torchtitan.distributed.utils import get_spmd_context
 
+        del compile_config
         with get_spmd_context(parallel_dims=parallel_dims):
             self._parallelize(parallel_dims)
             if ac_config is not None:
                 ac_config.build(dump_folder=dump_folder).apply(self)
-            if compile_config is not None and "model" in compile_config.components:
-                from torchtitan.distributed.compile import apply_compile
-
-                apply_compile(
-                    self,
-                    compile_config=compile_config,
-                    parallel_dims=parallel_dims,
-                )
             if not skip_dp:
                 self._apply_fsdp(
                     parallel_dims=parallel_dims,

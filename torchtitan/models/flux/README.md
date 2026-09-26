@@ -37,21 +37,6 @@ MODULE=flux CONFIG=flux_schnell ./run_train.sh
     - Notes on the current checkpointing implementation: To keep the model weights are sharded the same way as checkpointing, we need to shard the model weights before saving the checkpoint. This is done by checking each module at the end of evaluation, and sharding the weights of the module if it is a FSDPModule.
 - CI for FLUX model. Supported periodically running integration tests on 8 GPUs, and unittests.
 
-## torch.compile
-
-The Flux model supports `torch.compile` for accelerating training. Compilation is applied per-block to the repeated DoubleStreamBlock and SingleStreamBlock layers in the main transformer.
-
-Enable compilation in the config registry with `compile=CompileConfig()`.
-By default, both the model and the loss function are compiled. Set
-`CompileConfig(components=["model"])` or `CompileConfig(components=["loss"])`
-to compile only one component.
-
-**Notes:**
-- The Flux model blocks are compiled with `fullgraph=True` for maximum optimization.
-- The default backend is `inductor`. Set `CompileConfig(backend=<backend>)` to
-  change it.
-
-
 ## MXFP8 Quantization
 
 The Flux model supports MXFP8 (Microscaling FP8) quantization for accelerating training on SM100+ hardware (B200, B100). This uses the existing `MXFP8LinearConverter` from torchtitan, which dynamically quantizes linear layers to MXFP8 precision.
@@ -62,7 +47,7 @@ The Flux model supports MXFP8 (Microscaling FP8) quantization for accelerating t
 
 ### Using Config Presets
 
-Pre-configured presets with MXFP8 and `torch.compile` enabled:
+Pre-configured presets with MXFP8 enabled:
 
 ```bash
 # Flux schnell with MXFP8
@@ -82,7 +67,6 @@ from torchtitan.config.transform import MXFP8LinearConverter
 
 def my_custom_mxfp8() -> FluxTrainer.Config:
     config = flux_schnell()  # or flux_dev()
-    config.compile = CompileConfig()
     config.model_converters = ModelConvertersContainer.Config(
         converters=[
             MXFP8LinearConverter.Config(

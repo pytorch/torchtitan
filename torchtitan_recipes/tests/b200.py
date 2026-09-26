@@ -53,7 +53,7 @@ def llama3_debugmodel_nvfp4_fsdp2() -> Trainer.Config:
     from torchtitan.models.llama3.config_registry import llama3_debugmodel_nvfp4
 
     config = llama3_debugmodel_nvfp4(seq_len=2048)
-    config.compile = CompileConfig(components=["model"])
+    config.compile = CompileConfig()
     config.parallelism.data_parallel_shard_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     return config

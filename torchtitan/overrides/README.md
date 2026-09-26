@@ -433,13 +433,9 @@ One thing worth stating plainly:
 
 ## Custom kernels and `torch.compile`
 
-An override that wraps a custom CUDA or Triton kernel must stay compatible with
-`torch.compile`, because torchtitan compiles the transformer blocks by default
-(`compile.components` includes `"model"`). A raw kernel call is opaque to Dynamo
-and will graph-break or fail to trace. Making it compose is the override
-author's responsibility — the mechanism deliberately adds **no** TorchTitan
-operator-override API. Instead, register the kernel as a first-class PyTorch
-custom operator, which gives `torch.compile` (and export) a concrete contract:
+An override that wraps a custom CUDA or Triton kernel should be registered as a
+first-class PyTorch custom operator when it needs to compose with `torch.compile`
+or export:
 
 - **`torch.library.custom_op`** — wrap a Python/CUDA-extension kernel as an op
   with a stable schema and a clear functional/mutation contract.

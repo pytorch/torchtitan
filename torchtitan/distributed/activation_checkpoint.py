@@ -8,12 +8,10 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Annotated, cast
 
 import torch
-import torch._functorch.config
 import torch.nn as nn
 import torch_remat as remat
 import tyro
@@ -374,49 +372,6 @@ class RegionAC(ActivationCheckpointing):
         )
 
 
-class MemoryBudgetAC(ActivationCheckpointing):
-    """Let the compiler partitioner trade compute for memory via a memory budget.
-
-    Requires the model to be compiled (validated in ``Trainer.Config``).
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ActivationCheckpointing.Config):
-        memory_budget: float = 0.5
-        """
-        This value determines how much partitioner in the compiler should trade off
-        compute for memory. 0.0 corresponds to the activation memory from applying
-        activation checkpointing to the full compiled region, and 1.0 corresponds to
-        the activation memory from the default runtime-optimized strategy. Read here:
-        https://pytorch.org/blog/activation-checkpointing-techniques/
-        """
-
-        visualize_memory_budget_pareto: bool = False
-        """
-        This dumps out a SVG visualization of the expected runtime vs. activation
-        memory tradeoffs for all memory budget values from 0 to 1 in increments of
-        0.05 in {--dump_folder}/memory_budget_pareto folder. See an example here:
-        https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
-        """
-
-        def __post_init__(self) -> None:
-            if not 0 <= self.memory_budget <= 1:
-                raise ValueError("memory_budget must be finite and between 0 and 1.")
-
-    def apply(self, model: nn.Module) -> None:
-        _disable_dynamo_lru_cache()
-        config = cast("MemoryBudgetAC.Config", self.config)
-        if config.visualize_memory_budget_pareto:
-            pareto_dir = os.path.join(self.dump_folder, "memory_budget_pareto")
-            if not os.path.exists(pareto_dir):
-                os.makedirs(pareto_dir, exist_ok=True)
-            torch._functorch.config.memory_budget_pareto_dir = pareto_dir
-            torch._functorch.config.visualize_memory_budget_pareto = True
-
-        torch._functorch.config.activation_memory_budget = config.memory_budget
-        logger.info(f"Selected {config.memory_budget} budget option")
-
-
 # Trainer config field type: select a policy via tyro subcommand, or ``None`` to
 # disable activation checkpointing. Explicit subcommand names are required because
 # every nested Config class is named "Config" and would otherwise collide.
@@ -424,6 +379,5 @@ ActivationCheckpointingConfig = (
     Annotated[SelectiveAC.Config, tyro.conf.subcommand("selective")]
     | Annotated[RegionAC.Config, tyro.conf.subcommand("region")]
     | Annotated[FullAC.Config, tyro.conf.subcommand("full")]
-    | Annotated[MemoryBudgetAC.Config, tyro.conf.subcommand("memory-budget")]
     | Annotated[None, tyro.conf.subcommand("none")]
 )

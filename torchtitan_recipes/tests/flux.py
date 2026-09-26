@@ -10,7 +10,6 @@ from dataclasses import replace
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
-from torchtitan.config import CompileConfig
 from torchtitan.models.flux.configs import SamplingConfig
 from torchtitan.models.flux.flux_datasets import (
     DATASETS,
@@ -78,12 +77,5 @@ def flux_debugmodel_hsdp2x2_cp2_validation() -> FluxTrainer.Config:
         save_img_folder="img",
     )
     config.checkpointer = CheckpointManager.Config()
-    config.training.disable_cuda_graphs = True
-    return config
-
-
-def flux_debugmodel_compile() -> FluxTrainer.Config:
-    config = flux_debugmodel_test()
-    config.compile = CompileConfig()
     config.training.disable_cuda_graphs = True
     return config
