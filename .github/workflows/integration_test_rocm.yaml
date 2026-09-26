@@ -1,5 +1,10 @@
 name: Integration Tests (ROCm)
 
+# ROCm runs its own jobs rather than calling integration_test.yaml, because it
+# has to stay on linux_job_v2: v3 pulls the job image from the private ECR and
+# the ROCm runners cannot authenticate to it. `uses:` is not templatable, so
+# one workflow cannot serve both. The test body is shared as a script instead.
+
 on:
   push:
     branches: [ main ]
@@ -8,14 +13,46 @@ on:
     paths-ignore:
       - 'torchtitan/experiments/**'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  rocm:
-    uses: ./.github/workflows/integration_test.yaml
+  set-matrix:
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
+    uses: ./.github/workflows/set-matrix.yaml
     with:
       gpu-arch: rocm
-      execution_mode: real_pg
-    secrets: inherit
+
+  integration-real-pg:
+    name: ROCm 8 GPU Integration (Real PG - full suite - ${{ matrix.test_suite }})
+    needs: set-matrix
+    if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix:
+        test_suite: [features, models]
+        runner_config: ${{ fromJSON(needs.set-matrix.outputs.matrix).include }}
+    with:
+      runner: ${{ matrix.runner_config.runner }}
+      gpu-arch-type: ${{ matrix.runner_config['gpu-arch-type'] }}
+      gpu-arch-version: ${{ matrix.runner_config['gpu-arch-version'] }}
+      docker-image: ${{ matrix.runner_config['docker-image'] }}
+      repository: pytorch/torchtitan
+      upload-artifact: integration-8gpu-${{ matrix.test_suite }}-outputs
+      timeout: 60
+      script: |
+        GPU_ARCH_TYPE="${{ matrix.runner_config['gpu-arch-type'] }}" \
+        TORCH_VERSION="${{ matrix.runner_config['torch-version'] }}" \
+        INDEX_URL="${{ matrix.runner_config['index-url'] }}" \
+        TEST_SUITE="${{ matrix.test_suite }}" \
+        EXPORT_RESULTS="false" \
+        TEST_NAME="all" \
+        TEST_SCOPE="" \
+        bash .github/scripts/integration_test_real_pg.sh
