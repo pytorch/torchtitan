@@ -21,10 +21,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_attention_sharding,
     set_gqa_inner_attention_local_spmd,
 )
-from torchtitan.models.common.moe_sharding import (
-    set_moe_block_padding_mask_sharding,
-    set_moe_sharding_config,
-)
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
@@ -101,7 +98,6 @@ def _set_qwen3_layer_sharding(
 
     # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
-        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
