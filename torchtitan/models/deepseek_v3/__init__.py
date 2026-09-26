@@ -29,13 +29,13 @@ from torchtitan.models.common import (
     UnaryActivationFn,
 )
 from torchtitan.models.common.config_utils import (
+    configure_shared_expert_w2_for_sp,
     get_attention_config,
     make_ffn_config,
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
     make_shared_expert_ffn_config,
-    select_shared_expert_w2_config,
 )
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -692,7 +692,7 @@ deepseekv3_configs = {
 def model_registry(
     flavor: str,
     *,
-    enable_sp: bool = True,
+    enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
@@ -714,7 +714,7 @@ def model_registry(
         num_mtp_layers=num_mtp_layers,
         seq_len=context_len,
     )
-    select_shared_expert_w2_config(config, enable_sp=enable_sp)
+    configure_shared_expert_w2_for_sp(config, enable_sp=enable_sp)
     if converters is not None:
         validate_converter_compatibility(converters)
         for c in converters:

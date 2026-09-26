@@ -54,7 +54,7 @@ def deepseek_v3_mxfp8_linear_converter_config(
 def deepseek_v3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = model_registry("debugmodel", seq_len=seq_len)
+    model_config = model_registry("debugmodel", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -91,7 +91,9 @@ def deepseek_v3_debugmodel_mtp(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model = model_registry("debugmodel", seq_len=seq_len, num_mtp_layers=1)
+    config.model = model_registry(
+        "debugmodel", enable_sp=True, seq_len=seq_len, num_mtp_layers=1
+    )
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=MTPLoss.Config(
             global_vocab_size=decoder_vocab_size(config.model),
@@ -115,6 +117,7 @@ def deepseek_v3_debugmodel_mxfp8(
     )
     config.model = model_registry(
         "debugmodel",
+        enable_sp=True,
         seq_len=seq_len,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(
@@ -136,6 +139,7 @@ def deepseek_v3_debugmodel_float8_grouped(
     config.compile = CompileConfig(components=["model"])
     config.model = model_registry(
         "debugmodel",
+        enable_sp=True,
         seq_len=seq_len,
         converters=[
             Float8GroupedLinearConverter.Config(model_compile_enabled=True),
@@ -150,6 +154,7 @@ def deepseek_v3_debugmodel_hybridep(
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model = model_registry(
         "debugmodel",
+        enable_sp=True,
         seq_len=seq_len,
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
@@ -158,7 +163,9 @@ def deepseek_v3_debugmodel_hybridep(
 
 
 def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = model_registry("16B", seq_len=seq_len, attn_backend="flex")
+    model_config = model_registry(
+        "16B", enable_sp=True, seq_len=seq_len, attn_backend="flex"
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -196,6 +203,7 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
     config = deepseek_v3_16b(seq_len=seq_len)
     config.model = model_registry(
         "16B",
+        enable_sp=True,
         seq_len=seq_len,
         attn_backend="flex",
         moe_comm_backend="hybridep",
@@ -208,6 +216,7 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     model_config = model_registry(
         "671B",
+        enable_sp=True,
         seq_len=seq_len,
         attn_backend="flex",
     )
@@ -256,6 +265,7 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
     )
     config.model = model_registry(
         "671B",
+        enable_sp=True,
         seq_len=seq_len,
         attn_backend="flex",
         converters=[
