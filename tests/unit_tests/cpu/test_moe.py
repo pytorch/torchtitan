@@ -18,7 +18,6 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.activation import Sigmoid, SiTUGLU, Softmax, SqrtSoftplus
 from torchtitan.models.common.config_utils import (
-    configure_shared_expert_w2_for_sp,
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
@@ -339,10 +338,10 @@ class TestMoE(unittest.TestCase):
                 config = make_shared_expert_ffn_config(
                     dim=4,
                     hidden_dim=8,
+                    enable_sp=enable_sp,
                     w1_param_init={},
                     w2w3_param_init={},
                 )
-                configure_shared_expert_w2_for_sp(config, enable_sp=enable_sp)
 
                 self.assertIs(type(config.w13), ColumnParallelLinear.Config)
                 self.assertIs(type(config.w2), expected_w2_type)
