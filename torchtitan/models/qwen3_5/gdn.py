@@ -263,7 +263,9 @@ class GatedDeltaKernel(Module):
         return output.squeeze(0)
 
 
-def _cp_slice(tensor: torch.Tensor, group: dist.ProcessGroup, dim: int = 0) -> torch.Tensor:
+def _cp_slice(
+    tensor: torch.Tensor, group: dist.ProcessGroup, dim: int = 0
+) -> torch.Tensor:
     """Take this rank's contiguous chunk of a CP-replicated tensor."""
     world = dist.get_world_size(group)
     rank = dist.get_rank(group)
