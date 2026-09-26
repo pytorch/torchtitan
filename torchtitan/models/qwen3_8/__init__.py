@@ -9,6 +9,7 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import Embedding, Linear
+from torchtitan.models.common.config_utils import select_shared_expert_w2_config
 from torchtitan.models.qwen3_5 import (
     _27b,
     _build_qwen35_moe_layers,
@@ -98,6 +99,7 @@ qwen3_8_configs = {
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool = True,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
@@ -119,6 +121,7 @@ def model_registry(
             else {}
         ),
     )
+    select_shared_expert_w2_config(config, enable_sp=enable_sp)
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter_config in converters:

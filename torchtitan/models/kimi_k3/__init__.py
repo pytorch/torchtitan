@@ -30,6 +30,7 @@ from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_routed_experts_config,
     make_shared_expert_ffn_config,
+    select_shared_expert_w2_config,
 )
 from torchtitan.models.common.moe import QuantileBalancedTopKRouter
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
@@ -576,6 +577,7 @@ def model_registry(
     converters: list[ModelConfigConverter.Config] | None = None,
     moe_comm_backend: str = "standard",
     *,
+    enable_sp: bool = True,
     seq_len: int | None = None,
 ) -> KimiK3Model.Config:
     get_config, max_context_len = kimi_k3_configs[flavor]
@@ -590,6 +592,7 @@ def model_registry(
         moe_comm_backend=moe_comm_backend,
         seq_len=context_len,
     )
+    select_shared_expert_w2_config(config, enable_sp=enable_sp)
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter in converters:

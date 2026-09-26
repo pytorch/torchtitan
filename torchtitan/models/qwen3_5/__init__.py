@@ -19,7 +19,6 @@ from torchtitan.models.common import (  # noqa: F401
     Embedding,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
     Softmax,
 )
 from torchtitan.models.common.config_utils import (
@@ -29,6 +28,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    select_shared_expert_w2_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
@@ -139,7 +139,7 @@ def _shared_experts_config(
             num_linears=2,
             param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
         ),
-        w2=SharedExpertRowParallelLinear.Config(
+        w2=Linear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=depth_init,
@@ -1113,6 +1113,7 @@ qwen3_5_configs = {
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool = True,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
@@ -1134,6 +1135,7 @@ def model_registry(
             else {}
         ),
     )
+    select_shared_expert_w2_config(config, enable_sp=enable_sp)
     if converters is not None:
         validate_converter_compatibility(converters)
         for c in converters:

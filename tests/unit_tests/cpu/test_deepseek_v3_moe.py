@@ -18,7 +18,6 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     RouterGateLinear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.deepseek_v3 import deepseekv3_configs, model_registry
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
@@ -91,9 +90,9 @@ class TestDeepSeekV3Router(unittest.TestCase):
         )
 
     def test_model_config_uses_deepseek_v3_router(self):
-        build_config, _ = deepseekv3_configs["236B"]
-        config = build_config(
-            attn_backend="flex",
+        config = model_registry(
+            "236B",
+            enable_sp=True,
             moe_comm_backend="standard",
             seq_len=2048,
         )
@@ -107,7 +106,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertIsNotNone(shared_experts)
         assert shared_experts is not None
         self.assertIs(type(shared_experts.w13), ColumnParallelLinear.Config)
-        self.assertIs(type(shared_experts.w2), SharedExpertRowParallelLinear.Config)
+        self.assertIs(type(shared_experts.w2), RowParallelLinear.Config)
 
     def test_attention_owns_input_gather_and_wo_owns_output_reduction(self):
         build_config, _ = deepseekv3_configs["debugmodel"]
