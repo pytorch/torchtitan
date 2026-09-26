@@ -71,6 +71,41 @@ repeated region names from different transformer blocks. This diagnostic is
 explicitly controlled by the caller, so it can be scoped to the model input,
 batch, or block under investigation without changing the training config.
 
+## Regions by model
+
+Attention region names use the same meanings across models: `qkv` covers the
+query, key, and value input projections; `latent_projections` covers the MLA
+down-projections; `gate` covers a separate output-gate projection;
+`inner_attention` covers the attention kernel; and `wo` covers the output
+projection. `input_redistribution` is the TP gather shared by multiple input
+branches and is exercised only when a TP group exists. `routed_down` and
+`routed_up` cover the Kimi K3 latent-MoE projections around its routed experts.
+
+Each row below lists the complete region set for that model component. Names
+are relative to a transformer block and can be used directly in
+`RegionAC.save_regions`.
+
+| Model component | Regions |
+| --- | --- |
+| Llama 3 attention | `attention.qkv`, `attention.inner_attention`, `attention.wo` |
+| Qwen 3 attention | `attention.qkv`, `attention.inner_attention`, `attention.wo` |
+| DeepSeek V3 attention | `attention.input_redistribution`, `attention.latent_projections`, `attention.inner_attention`, `attention.wo` |
+| Kimi K2.7 attention | `attention.input_redistribution`, `attention.latent_projections`, `attention.inner_attention`, `attention.wo` |
+| Muse Glimmer attention | `attention.input_redistribution`, `attention.qkv`, `attention.gate` (when configured), `attention.inner_attention`, `attention.wo` |
+| Qwen3.5 full attention | `attn.input_redistribution`, `attn.qkv`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.5 DeltaNet | `attn.input_redistribution`, `attn.qkv`, `attn.gate`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.6 full attention | `attn.input_redistribution`, `attn.qkv`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.6 DeltaNet | `attn.input_redistribution`, `attn.qkv`, `attn.gate`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.8 full attention | `attn.input_redistribution`, `attn.qkv`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.8 DeltaNet | `attn.input_redistribution`, `attn.qkv`, `attn.gate`, `attn.inner_attention`, `attn.wo` |
+| Kimi K3 MLA | `attention.input_redistribution`, `attention.latent_projections`, `attention.gate`, `attention.inner_attention`, `attention.wo` |
+| Kimi K3 KDA | `delta_attention.input_redistribution`, `delta_attention.qkv`, `delta_attention.gate`, `delta_attention.inner_attention`, `delta_attention.wo` |
+| Kimi K3 latent MoE | `moe.routed_down`, `moe.routed_up` |
+
+The DeepSeek V3 and Kimi K3 MLA QKV up-projections are intentionally outside a
+region and are therefore recomputed. The Qwen3.5-family full-attention output
+gate is fused into the query projection and is covered by `attn.qkv`.
+
 ## Adding regions to model code
 
 Model code defines a region at the operation being controlled:
@@ -105,17 +140,16 @@ gate_up = remat.region(
     self.remat_region_name("w13"),
     recompute=self.remat_should_recompute("w13"),
 )(x)
+remat.recompute_needs_tensor(gate_up)
 gate, up = gate_up.unflatten(-1, (-1, 2)).unbind(-1)
-remat.recompute_needs_tensor(gate, up)
 hidden = F.silu(gate) * up
 ```
 
 Without this marker, a tensor required by ordinary recomputed operations may
 not be retained. Place the marker on the consumer side, immediately before the
-bare operation that reads the tensor, rather than immediately after the region
-that produced it. This ensures the output is retained only when that consumer
-actually runs. Views may be passed because `torch_remat` resolves them to their
-producing region by storage.
+first bare operation that reads the region output. If that operation is a view,
+split, or unbind that will itself be recomputed, mark the region output before
+the operation rather than marking its derived tensors.
 
 When one bare operation consumes multiple region outputs, pass all of them to
 one call, as in the example above. Keep separate calls for separate consumers.
