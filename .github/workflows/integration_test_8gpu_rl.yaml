@@ -61,7 +61,9 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        # 1. Install batch-invariant ops (Monarch and RL extras are in the image).
+        python -m pip install uv
+
+        # 1. Install batch-invariant ops (Monarch and shared RL deps are in the image).
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 
         # 2. Install PyTorch, torchvision, and vLLM CUDA nightlies here.
@@ -70,7 +72,7 @@ jobs:
         uv pip install --upgrade torch torchvision vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
           --index-strategy unsafe-best-match \
-          --constraint .ci/docker/requirements-rl.txt
+          --constraint .ci/docker/requirements.txt
         python -c '
         from importlib.metadata import version
         wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}

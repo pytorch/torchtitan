@@ -20,7 +20,7 @@ It also uses the same directory structure as PyTorch.
 # Build a specific image
 ./build.sh torchtitan-ubuntu-22.04-clang12 -t myimage:latest
 
-# Build the CUDA image with shared RL dependencies (Monarch and test extras)
+# Build the CUDA image with RL runtime dependencies (Monarch and observability)
 ./build.sh torchtitan-ubuntu-22.04-clang12:rl -t my-rl-image:latest
 ```
 
