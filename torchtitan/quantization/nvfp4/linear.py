@@ -33,7 +33,6 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
@@ -375,7 +374,6 @@ class NVFP4Linear(Linear):
                     (
                         ColumnParallelLinear,
                         RowParallelLinear,
-                        SharedExpertRowParallelLinear,
                     ),
                 ):
                     # The explicit TP class owns its TP behavior in forward.

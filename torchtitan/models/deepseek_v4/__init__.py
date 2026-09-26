@@ -33,6 +33,7 @@ from torchtitan.models.common.config_utils import (
     make_ffn_config,
     make_routed_experts_config,
     make_shared_expert_ffn_config,
+    select_shared_expert_w2_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 
@@ -1024,6 +1025,7 @@ deepseek_v4_configs = {
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool = True,
     seq_len: int | None = None,
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
@@ -1048,6 +1050,7 @@ def model_registry(
         n_mtp_layers=n_mtp_layers,
         seq_len=context_len,
     )
+    select_shared_expert_w2_config(config, enable_sp=enable_sp)
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter_cfg in converters:

@@ -144,17 +144,16 @@ gate_up = remat.region(
     self.remat_region_name("w13"),
     recompute=self.remat_should_recompute("w13"),
 )(x)
+remat.recompute_needs_tensor(gate_up)
 gate, up = gate_up.unflatten(-1, (-1, 2)).unbind(-1)
-remat.recompute_needs_tensor(gate, up)
 hidden = F.silu(gate) * up
 ```
 
 Without this marker, a tensor required by ordinary recomputed operations may
 not be retained. Place the marker on the consumer side, immediately before the
-bare operation that reads the tensor, rather than immediately after the region
-that produced it. This ensures the output is retained only when that consumer
-actually runs. Views may be passed because `torch_remat` resolves them to their
-producing region by storage.
+first bare operation that reads the region output. If that operation is a view,
+split, or unbind that will itself be recomputed, mark the region output before
+the operation rather than marking its derived tensors.
 
 When one bare operation consumes multiple region outputs, pass all of them to
 one call, as in the example above. Keep separate calls for separate consumers.

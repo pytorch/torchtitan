@@ -41,7 +41,6 @@ from torchtitan.models.common.linear import (
     Linear,
     RouterGateLinear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
@@ -91,15 +90,12 @@ def _router_config_for_quantization(dim: int):
     )
 
 
-@pytest.mark.parametrize(
-    "parallel_cls", [InvariantRowParallelLinear, SharedExpertRowParallelLinear]
-)
-def test_quantization_preserves_specialized_row_parallel_linear(parallel_cls):
-    config_cls = get_quantized_linear(_ScaledLinear, parallel_cls).Config
+def test_quantization_preserves_invariant_row_parallel_linear():
+    config_cls = get_quantized_linear(_ScaledLinear, InvariantRowParallelLinear).Config
     converted = config_cls(in_features=16, out_features=16, bias=True, scale=3.0)
 
     assert converted._owner is not None
-    assert issubclass(converted._owner, parallel_cls)
+    assert issubclass(converted._owner, InvariantRowParallelLinear)
     assert issubclass(converted._owner, _ScaledLinear)
 
     linear = converted.build()

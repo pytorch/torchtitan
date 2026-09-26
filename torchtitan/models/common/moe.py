@@ -130,8 +130,8 @@ class RoutedExperts(Module):
                 self.remat_region_name("w13"),
                 recompute=self.remat_should_recompute("w13"),
             )(routed_input_RD.bfloat16(), offsets_E)
+            remat.recompute_needs_tensor(gate_up_R2F)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
-            remat.recompute_needs_tensor(gate_RF, up_RF)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = remat.region(
                 self.w2,
@@ -309,7 +309,7 @@ class TokenChoiceTopKRouter(Module):
                 else routing_map_TE & ~padding_mask_T.unsqueeze(-1)
             )
             if not remat.is_recomputing():
-                with spmd.no_typecheck(), torch.no_grad():
+                with torch.no_grad():
                     self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
             if self.aux_loss is not None:
                 topk_scores_TK = self.aux_loss(
@@ -731,6 +731,9 @@ class MoE(Module):
         either case and is explicitly sharded here to follow the routed tokens.
         """
         if spmd_sparse_mesh() is None:
+            assert (
+                spmd_mesh_group(MeshAxisName.TP) is None
+            ), "MoE requires expert parallelism when tensor parallelism is enabled"
             return x_TD, padding_mask_T
 
         tp_group = spmd_mesh_group(MeshAxisName.TP)
@@ -745,6 +748,7 @@ class MoE(Module):
                 dst=spmd.S(0),
                 backward_options={"op_dtype": x_TD.dtype},
             )
+        # The padding mask is replicated even when SP has already sharded x_TD.
         if padding_mask_T is not None:
             padding_mask_T = spmd.redistribute(
                 padding_mask_T,
