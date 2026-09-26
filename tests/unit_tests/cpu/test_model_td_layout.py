@@ -67,7 +67,9 @@ class TestModelTDLayout(unittest.TestCase):
 
     def test_deepseek_attention_preserves_td_shape(self):
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
-        config = build_config("flex", "standard", seq_len=max_context_length)
+        config = build_config(
+            "flex", "standard", enable_sp=True, seq_len=max_context_length
+        )
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
@@ -92,7 +94,7 @@ class TestModelTDLayout(unittest.TestCase):
 
     def test_qwen35_attention_preserves_td_shape(self):
         build_config, max_context_length = qwen3_5_configs["debugmodel"]
-        config = build_config("varlen", seq_len=max_context_length)
+        config = build_config("varlen", enable_sp=True, seq_len=max_context_length)
         attention_config = next(
             layer.attention for layer in config.layers if layer.attention is not None
         )

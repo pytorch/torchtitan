@@ -19,6 +19,9 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel_dist_gemm,
     llama3_debugmodel_float8,
 )
+from torchtitan.models.qwen3_5.config_registry import (
+    qwen35_debugmodel_moe_float8_lora as _qwen35_debugmodel_moe_float8_lora,
+)
 from torchtitan.trainer import Trainer
 
 
@@ -91,3 +94,7 @@ def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 4
     return config
+
+
+def qwen35_debugmodel_moe_float8_lora() -> Trainer.Config:
+    return _qwen35_debugmodel_moe_float8_lora(seq_len=512)
