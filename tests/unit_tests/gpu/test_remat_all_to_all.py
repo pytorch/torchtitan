@@ -52,6 +52,7 @@ class _AllToAllBlock(Module):
             out_features=_MODEL_DIM,
         ).build()
         routed_experts.activation_fn = SwiGLU.Config().build()
+        routed_experts.output_postprocess = None
         routed_experts.token_dispatcher = AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=1,
