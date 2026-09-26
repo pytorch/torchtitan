@@ -12,8 +12,8 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.config import FSDPSymmMemScope
 from torchtitan.distributed.fsdp import (
-    _linear_param_shard_placements,
     enable_fsdp_symm_mem,
+    linear_param_shard_placements,
 )
 from torchtitan.models.common.linear import Linear
 
@@ -45,7 +45,7 @@ def test_stacked_linear_shard_placements_use_num_linears() -> None:
     module.add_module("stacked", stacked)
     module.add_module("shape_only", shape_only)
 
-    placements = _linear_param_shard_placements(module)
+    placements = linear_param_shard_placements(module)
 
     assert stacked.bias is not None
     assert placements == {
