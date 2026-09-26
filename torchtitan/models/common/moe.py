@@ -246,11 +246,13 @@ class TokenChoiceTopKRouter(Module):
                 )
 
         if self._debug_force_load_balance:
-            topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
-                scores_TE
-            )
+            topk_expert_ids_TK, topk_scores_TK = remat.region(
+                self._debug_force_load_balance_routing,
+                "routing_decision",
+                recompute=False,
+            )(scores_TE)
+            remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
         else:
-            # Routing choices must remain identical between forward and replay.
             topk_expert_ids_TK = remat.region(
                 self._select_experts,
                 "routing_decision",
@@ -261,10 +263,9 @@ class TokenChoiceTopKRouter(Module):
                 padding_mask_T=padding_mask_T,
                 **router_kwargs,
             )
-
+            remat.recompute_needs_tensor(topk_expert_ids_TK)
             # The expert bias is only used for routing. The gating value is
             # still derived from the original scores.
-            remat.recompute_needs_tensor(topk_expert_ids_TK)
             topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
@@ -292,11 +293,9 @@ class TokenChoiceTopKRouter(Module):
                 if padding_mask_T is None
                 else routing_map_TE & ~padding_mask_T.unsqueeze(-1)
             )
-            # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert_E --
-            #       first in the forward pass, and then in the backward pass. However, this has no
-            #       effect on the expert bias update thanks to the torch.sign() operator.
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
+            if not remat.is_recomputing():
+                with torch.no_grad():
+                    self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
             if self.aux_loss is not None:
                 topk_scores_TK = self.aux_loss(
                     scores_TE,
@@ -355,12 +354,13 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             dim=-1,
             sorted=True,
         )
-        self.quantile_balancer.observe(
-            scores_TE,
-            topk_plus_one_scores[:, self.top_k :],
-            expert_bias_E,
-            padding_mask_T,
-        )
+        if not remat.is_recomputing():
+            self.quantile_balancer.observe(
+                scores_TE,
+                topk_plus_one_scores[:, self.top_k :],
+                expert_bias_E,
+                padding_mask_T,
+            )
         return topk_plus_one_expert_ids[:, : self.top_k].contiguous()
 
 
