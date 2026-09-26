@@ -12,6 +12,7 @@ import torch
 from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_mtp_debugmodel
 
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
+from torchtitan.models.deepseek_v4.sharding import set_deepseek_v4_sharding_config
 
 
 class TestDeepSeekV4MTPConfig(unittest.TestCase):
@@ -21,6 +22,16 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         self.assertEqual(model_config.n_mtp_layers, 1)
         self.assertIsNotNone(model_config.mtp_layers)
         self.assertEqual(len(model_config.mtp_layers), 1)
+
+    def test_mtp_metadata_remains_replicated_at_block_boundary(self):
+        config = deepseek_v4_mtp_debugmodel().model
+        set_deepseek_v4_sharding_config(config, enable_sp=True, enable_ep=True)
+
+        assert config.mtp_layers is not None
+        mtp_config = config.mtp_layers[0].sharding_config
+        assert mtp_config is not None
+        self.assertIsNotNone(mtp_config.in_src_shardings)
+        self.assertIsNone(mtp_config.in_dst_shardings)
 
     @patch("torchtitan.distributed.fsdp.resolve_sparse_fsdp_mesh")
     @patch("torchtitan.distributed.fsdp.resolve_fsdp_mesh")

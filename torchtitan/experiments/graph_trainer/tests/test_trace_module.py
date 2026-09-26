@@ -153,7 +153,7 @@ class _TraceableWrapper(torch.Tensor):
 
 
 class TestGraphGradientAccumulation(unittest.TestCase):
-    def test_aot_fx_initializes_one_stage_pipeline_runtime(self):
+    def test_initializes_one_stage_pipeline_runtime(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
 
@@ -162,7 +162,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
-            compile=SimpleNamespace(mode="aot_fx_trace", memory_policy="none"),
+            compile=SimpleNamespace(memory_policy="none"),
             parallelism=SimpleNamespace(),
             training=SimpleNamespace(
                 num_tokens_per_microbatch_per_dp_rank=1,
@@ -1646,7 +1646,10 @@ class TestTraceModels(unittest.TestCase):
 
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
-            attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+            attn_backend="flex",
+            moe_comm_backend="standard",
+            enable_sp=True,
+            seq_len=max_context_length,
         )
         # Aux losses normalize by the step's global valid-token count, which
         # the trainer sets; there is no training context here.
@@ -2057,7 +2060,10 @@ class TestTraceFSDP(FSDPTest):
 
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
-            attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+            attn_backend="flex",
+            moe_comm_backend="standard",
+            enable_sp=True,
+            seq_len=max_context_length,
         )
         # 2 matches the batch used inside _run_fsdp_model_test.
         AuxLoss.set_step_denominator(torch.tensor(2.0))
@@ -2153,7 +2159,6 @@ class TestTraceContextParallel(FSDPTest):
                 config.parallelism.context_parallel_degree = context_parallel_degree
                 config.parallelism.tensor_parallel_degree = 1
                 config.activation_checkpoint = None
-                config.compile.mode = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
                 config.model.layers = config.model.layers[:1]
