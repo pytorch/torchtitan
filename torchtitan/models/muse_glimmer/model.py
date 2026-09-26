@@ -13,7 +13,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.attention.flex_attention import and_masks, BlockMask
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -28,14 +28,15 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_group,
 )
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    create_attention_mask,
-    create_varlen_metadata_for_document,
+    AttentionMetadata,
+    FlexAttentionMetadata,
     FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
     GQAttention,
+    InnerAttention,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -122,7 +123,7 @@ class Attention(GQAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
@@ -153,17 +154,17 @@ class Attention(GQAttention):
 
         # Select this layer's mask by its window ("global" key = full attention).
         # Only flex passes a window-keyed dict of BlockMasks to index into. Varlen
-        # passes a single VarlenMetadata shared by every layer (each layer's window is
+        # passes one VarlenAttentionMetadata shared by every layer (each layer's window is
         # a kernel arg, baked in at build time), so it goes straight through to the
         # kernel (mirrors gpt_oss).
-        if isinstance(attention_masks, dict):
-            attention_masks = attention_masks[_window_mask_key(self.window_size)]
+        if isinstance(attention_metadata, dict):
+            attention_metadata = attention_metadata[_window_mask_key(self.window_size)]
 
         output = self.inner_attention(
             xq,
             xk,
             xv,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
@@ -200,11 +201,11 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ):
         h = x + self.post_attention_norm(
-            self.attention(self.attention_norm(x), attention_masks, positions)
+            self.attention(self.attention_norm(x), attention_metadata, positions)
         )
         out = h + self.post_ffn_norm(self.feed_forward(self.ffn_norm(h)))
         return out
@@ -463,7 +464,7 @@ class MuseGlimmerModel(MultimodalModel):
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                input_dict["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_metadata"] = self.get_attention_metadata(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
@@ -559,7 +560,7 @@ class MuseGlimmerModel(MultimodalModel):
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: AttentionMetadata | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
@@ -588,7 +589,16 @@ class MuseGlimmerModel(MultimodalModel):
             h_TD = tokens
 
         for layer in self.layers.values():
-            h_TD = layer(h_TD, attention_masks, positions)
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(type(layer.attention.inner_attention))
+            )
+            h_TD = layer(
+                h_TD,
+                layer_attention_metadata,
+                positions,
+            )
 
         h_TD = self.norm(h_TD) if self.norm is not None else h_TD
 
@@ -598,57 +608,51 @@ class MuseGlimmerModel(MultimodalModel):
             return h_TD
         return self.lm_head(h_TD) if self.lm_head is not None else h_TD
 
-    def get_attention_masks(
+    def get_attention_metadata(
         self,
         positions: torch.Tensor,
         *,
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> AttentionMasksType:
+    ) -> AttentionMetadata:
         attn_config = self.config.first_attention
         assert attn_config is not None
-        inner_attn = attn_config.inner_attention
+        inner_attention_config = attn_config.inner_attention
+        backend = inner_attention_config._owner
+        assert backend is not None and issubclass(backend, InnerAttention)
         # Varlen carries each layer's sliding window in its own kernel arg (baked at
         # build time), so all layers share one document-varlen metadata; only the
         # flex path needs the per-window BlockMask dict built below.
-        if isinstance(inner_attn, VarlenInnerAttention.Config):
-            return create_varlen_metadata_for_document(
-                positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-        if not isinstance(inner_attn, FlexInnerAttention.Config):
+        if issubclass(backend, VarlenInnerAttention):
+            return {
+                backend: backend.build_attention_metadata(
+                    positions,
+                    config=inner_attention_config,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                )
+            }
+        if not issubclass(backend, FlexInnerAttention):
             raise TypeError(
                 "Muse Glimmer requires FlexInnerAttention or VarlenInnerAttention for "
-                f"sliding-window masks, got {type(inner_attn).__name__}"
+                f"sliding-window masks, got {backend.__name__}"
             )
 
         # Language models always use block-causal (per-document) masking: the
         # dataloaders emit per-document positions, and the efficient packed-doc
         # mask ANDed with the causal mask yields same-document causal attention.
-        seq_len = positions.shape[0]
         base_mods = [
             get_causal_mask_mod(),
             get_efficient_causal_mask_mod_for_packed_document(positions),
         ]
 
-        # Match the base Decoder mask-building so the configured block size and
-        # batch-invariance handling are honored.
-        block_size = inner_attn.block_size
-        separate_full_blocks = not is_in_batch_invariant_mode()
-
         def _build_mask(mask_mods: list) -> BlockMask:
-            return create_attention_mask(
-                and_masks(*mask_mods),
-                1,
-                None,
-                seq_len,
-                seq_len,
-                device=positions.device,
-                BLOCK_SIZE=block_size,
-                separate_full_blocks=separate_full_blocks,
+            return backend.build_attention_metadata_from_mask_mods(
+                positions,
+                config=inner_attention_config,
+                mask_mods=mask_mods,
             )
 
         # "global" mask (no sliding window) plus one mask per distinct sliding
@@ -666,4 +670,4 @@ class MuseGlimmerModel(MultimodalModel):
                 [*base_mods, get_sliding_window_mask_mod(window_size)]
             )
 
-        return masks
+        return {backend: masks}

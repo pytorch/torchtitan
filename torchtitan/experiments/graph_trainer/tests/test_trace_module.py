@@ -1660,9 +1660,9 @@ class TestTraceModels(unittest.TestCase):
             attn_masks = create_attention_mask(
                 get_causal_mask_mod(), 1, None, num_tokens, num_tokens
             )
-            # Decoder.forward is (tokens, positions, attention_masks). Pass
+            # Decoder.forward is (tokens, positions, attention_metadata). Pass
             # explicit sequential positions (make_fx can't trace a None
-            # placeholder) so the BlockMask lands in the attention_masks slot.
+            # placeholder) so the BlockMask lands in the attention_metadata slot.
             positions = torch.arange(num_tokens, device=self.DEVICE)
             fwd_args = (tokens, positions, attn_masks)
 
@@ -1948,7 +1948,7 @@ class TestTraceModels(unittest.TestCase):
         maybe_register_blockmask_pytree_node()
 
         def forward(tokens, attn_masks):
-            return model(tokens, attention_masks=attn_masks)
+            return model(tokens, attention_metadata=attn_masks)
 
         traced = minimal_fx_tracer(forward, module=model)(tokens, attn_masks)
 
@@ -2032,9 +2032,9 @@ class TestTraceFSDP(FSDPTest):
         num_tokens = 2 * seq_len
         tokens = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
         labels = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
-        # Decoder.forward is (tokens, positions, attention_masks). Pass explicit
+        # Decoder.forward is (tokens, positions, attention_metadata). Pass explicit
         # sequential positions (make_fx can't trace a None placeholder) so the
-        # BlockMask lands in the attention_masks slot.
+        # BlockMask lands in the attention_metadata slot.
         positions = torch.arange(num_tokens, device="cuda")
 
         if attn_masks is not None:
@@ -2400,17 +2400,17 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
                 get_causal_mask_mod,
             )
 
-            attention_masks = create_attention_mask(
+            attention_metadata = create_attention_mask(
                 get_causal_mask_mod(), 1, None, num_tokens, num_tokens
             )
 
             def run_backward(model):
-                logits = model(tokens, attention_masks=attention_masks)
+                logits = model(tokens, attention_metadata=attention_metadata)
                 loss = get_loss(logits, labels)
                 loss.backward()
 
             def run_grad(model):
-                logits = model(tokens, attention_masks=attention_masks)
+                logits = model(tokens, attention_metadata=attention_metadata)
                 loss = get_loss(logits, labels)
                 params = [p for p in model.parameters() if p.requires_grad]
                 grads = torch.autograd.grad(loss, params)

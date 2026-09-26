@@ -22,11 +22,7 @@ from torch import nn
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    local_head_split,
-    VarlenMetadata,
-)
+from torchtitan.models.common.attention import local_head_split, VarlenAttentionMetadata
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
@@ -235,7 +231,7 @@ class KDA(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: VarlenAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
@@ -256,14 +252,14 @@ class KDA(Module):
                 f"KDA input must have shape [T, D], got {tuple(x_TD.shape)}."
             )
 
-        if attention_masks is None:
+        if attention_metadata is None:
             cu_seqlens = None
-        elif isinstance(attention_masks, VarlenMetadata):
-            cu_seqlens = attention_masks.cu_seq_q
+        elif isinstance(attention_metadata, VarlenAttentionMetadata):
+            cu_seqlens = attention_metadata.cu_seq_q
         else:
             raise ValueError(
-                "KDA attention_masks must be VarlenMetadata or None, "
-                f"got {type(attention_masks).__name__}."
+                "KDA attention_metadata must be VarlenAttentionMetadata or None, "
+                f"got {type(attention_metadata).__name__}."
             )
         raw_gate_THK = local_head_split(
             self.forget_b(self.forget_a(x_TD)), self.head_dim

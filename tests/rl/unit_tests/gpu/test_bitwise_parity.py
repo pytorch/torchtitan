@@ -361,7 +361,7 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
 
-    attention_masks = create_attention_mask(
+    attention_metadata = create_attention_mask(
         and_masks(*mask_mods),
         1,
         None,
@@ -371,7 +371,7 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
         separate_full_blocks=not batch_invariant,
     )
 
-    logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
+    logits = model(packed_ids, attention_metadata=attention_metadata, positions=positions)
 
     # Build pre-shifted labels matching the trainer convention:
     # labels[i] = packed_ids[i+1] for valid positions, IGNORE_INDEX otherwise.
@@ -406,9 +406,9 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
     # which can break torch.compile with symbolic shapes.
     # Hybrid models may require different metadata for each attention type.
-    attention_masks = model.get_attention_masks(positions)
+    attention_metadata = model.get_attention_metadata(positions)
 
-    logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
+    logits = model(packed_ids, attention_metadata=attention_metadata, positions=positions)
 
     # Build pre-shifted labels matching the trainer convention:
     # labels[i] = packed_ids[i+1] within each segment, IGNORE_INDEX otherwise.

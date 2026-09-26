@@ -104,7 +104,7 @@ class _AttentionBlock(Module):
         self.attention = _CountingGQAttention()
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        return self.attention(x_TD, attention_masks=None).sum()
+        return self.attention(x_TD, attention_metadata=None).sum()
 
 
 class _FeedForwardBlock(Module):

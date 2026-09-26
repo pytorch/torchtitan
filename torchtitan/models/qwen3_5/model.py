@@ -27,12 +27,14 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
+    AttentionMetadata,
     BaseAttention,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
-    HybridAttentionMetadata,
+    FlexAttentionMetadata,
+    InnerAttention,
     local_head_split,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
@@ -145,7 +147,7 @@ class Qwen35Attention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
@@ -190,7 +192,7 @@ class Qwen35Attention(BaseAttention):
             xq_THK,
             xk_THK,
             xv_THV,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
@@ -221,13 +223,14 @@ class Qwen35TransformerBlock(Module):
     def __init__(self, config: Config):
         super().__init__()
         self.full_attn = config.attention is not None
-        self.attn_mask_key = "quadratic_attention" if self.full_attn else "deltanet"
 
         if self.full_attn:
             self.attn = config.attention.build()  # pyrefly: ignore [missing-attribute]
+            self.attention_metadata_key = type(self.attn.inner_attention)
         else:
             assert config.delta_net is not None
             self.attn = config.delta_net.build()
+            self.attention_metadata_key = type(self.attn)
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
@@ -243,19 +246,16 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: HybridAttentionMetadata | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        layer_mask = (
-            attention_masks[self.attn_mask_key] if attention_masks is not None else None
-        )
         h_TD = self.attention_norm(x_TD)
         if self.full_attn:
-            h_TD = self.attn(h_TD, layer_mask, positions)
+            h_TD = self.attn(h_TD, attention_metadata, positions)
         else:
-            h_TD = self.attn(h_TD, layer_mask)
+            h_TD = self.attn(h_TD, attention_metadata)
         x_TD = x_TD + h_TD
 
         h_TD = self.ffn_norm(x_TD)
@@ -445,16 +445,12 @@ class Qwen35Model(MultimodalModel):
         # Attention masks are built from the 1D ``positions``.
         positions = input_dict.get("positions")
         if positions is not None:
-            inner = self.config.first_full_attention_backend
-            if isinstance(
-                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-            ):
-                input_dict["attention_masks"] = self.get_attention_masks(
-                    positions=positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                )
+            input_dict["attention_metadata"] = self.get_attention_metadata(
+                positions=positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
 
         input_shardings = {
             **decoder_input_sharding(),
@@ -496,24 +492,24 @@ class Qwen35Model(MultimodalModel):
             parallelism_context, input_dict, input_shardings
         )
         # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
-        # nested inside attention_masks, must be annotated at its container.
-        attention_masks = input_dict.get("attention_masks")
-        if attention_masks is not None:
+        # nested inside attention_metadata, must be annotated at its container.
+        attention_metadata = input_dict.get("attention_metadata")
+        if attention_metadata is not None:
             with parallelism_context.activate_spmd():
-                annotate_deltanet_cu_seqlens(attention_masks)
+                annotate_deltanet_cu_seqlens(attention_metadata)
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         return inputs, labels, input_dict
 
-    def get_attention_masks(
+    def get_attention_metadata(
         self,
         positions: torch.Tensor,
         *,
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> HybridAttentionMetadata:
+    ) -> AttentionMetadata:
         attn_config = self.config.first_attention
 
         # Multimodal padding uses position 0 for every padded token. A real
@@ -545,23 +541,29 @@ class Qwen35Model(MultimodalModel):
         ):
             deltanet_metadata = None
 
+        attention_metadata: dict[
+            type[Module], FlexAttentionMetadata | VarlenAttentionMetadata
+        ] = {}
+        if deltanet_metadata is not None:
+            attention_metadata[GatedDeltaNet] = deltanet_metadata
+
         if attn_config is None:
-            quadratic_attention = None
-        elif isinstance(attn_config.inner_attention, VarlenInnerAttention.Config):
+            return attention_metadata
+        if isinstance(attn_config.inner_attention, VarlenInnerAttention.Config):
             # Under varlen both consumers read the same document offsets.
-            quadratic_attention = deltanet_metadata
+            assert deltanet_metadata is not None
+            backend = attn_config.inner_attention._owner
+            assert backend is not None and issubclass(backend, InnerAttention)
+            attention_metadata[backend] = deltanet_metadata
         else:
-            quadratic_attention = super().get_attention_masks(
+            full_attention_metadata = super().get_attention_metadata(
                 positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
-        # pyrefly: ignore [bad-return]
-        return {
-            "quadratic_attention": quadratic_attention,
-            "deltanet": deltanet_metadata,
-        }
+            attention_metadata.update(full_attention_metadata)
+        return attention_metadata
 
     def _get_vision_embeds(
         self,
@@ -682,7 +684,7 @@ class Qwen35Model(MultimodalModel):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: HybridAttentionMetadata | None = None,
+        attention_metadata: AttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
@@ -711,7 +713,16 @@ class Qwen35Model(MultimodalModel):
         # 2D (batch, seq) for text; ``preprocess_inputs`` resolved which one to
         # forward. The per-layer MRoPE dispatches on rank.
         for layer in self.layers.values():
-            x = layer(x, attention_masks, positions, padding_mask=padding_mask)
+            x = layer(
+                x,
+                (
+                    attention_metadata.get(layer.attention_metadata_key)
+                    if attention_metadata is not None
+                    else None
+                ),
+                positions,
+                padding_mask=padding_mask,
+            )
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

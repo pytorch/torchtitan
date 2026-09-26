@@ -26,9 +26,9 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_group,
 )
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    FlexInnerAttention,
-    VarlenInnerAttention,
+    AttentionMetadata,
+    FlexAttentionMetadata,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -163,7 +163,7 @@ class MTPTransformerBlock(TransformerBlock):
         mtp_input_embed: torch.Tensor,
         prev_embed: torch.Tensor,
         mtp_input_valid_mask: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -184,7 +184,7 @@ class MTPTransformerBlock(TransformerBlock):
         h = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
-        h = h + self.attention(self.attention_norm(h), attention_masks, positions)
+        h = h + self.attention(self.attention_norm(h), attention_metadata, positions)
         if self.moe_enabled:
             h = h + self.moe(
                 self.ffn_norm(h),
@@ -322,16 +322,13 @@ class MTPDecoder(Decoder):
             input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
 
         if positions is not None:
-            inner = self.config.first_full_attention_backend
-            if isinstance(
-                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-            ):
-                input_dict["attention_masks"] = self.get_attention_masks(
-                    positions=positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                )
+            attention_metadata = self.get_attention_metadata(
+                positions=positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+            input_dict["attention_metadata"] = attention_metadata
 
         if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
@@ -366,7 +363,7 @@ class MTPDecoder(Decoder):
         self,
         tokens: torch.Tensor | tuple[torch.Tensor, ...],
         positions: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: AttentionMetadata | None = None,
         mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -377,7 +374,7 @@ class MTPDecoder(Decoder):
             return super().forward(
                 tokens,
                 positions,
-                attention_masks,
+                attention_metadata,
                 padding_mask=padding_mask,
             )
         if self.tok_embeddings is None:
@@ -398,7 +395,17 @@ class MTPDecoder(Decoder):
         # hidden state because MTP consumes the last decoder-layer output.
         h = self.tok_embeddings(main_tokens)
         for layer in self.layers.values():
-            h = layer(h, attention_masks, positions, padding_mask=padding_mask)
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(type(layer.attention.inner_attention))
+            )
+            h = layer(
+                h,
+                layer_attention_metadata,
+                positions,
+                padding_mask=padding_mask,
+            )
 
         prev_depth_hidden = h
         h = self.norm(h) if self.norm is not None else h
@@ -411,11 +418,16 @@ class MTPDecoder(Decoder):
             strict=True,
         ):
             mtp_input_embed = self.tok_embeddings(depth_tokens)
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(type(layer.attention.inner_attention))
+            )
             prev_depth_hidden = layer(
                 mtp_input_embed,
                 prev_depth_hidden,
                 mtp_input_valid_mask,
-                attention_masks,
+                layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
             )

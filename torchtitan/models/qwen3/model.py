@@ -12,7 +12,10 @@ import torch
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import (
+    FlexAttentionMetadata,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -55,12 +58,12 @@ class Qwen3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
+        x = x + self.attention(self.attention_norm(x), attention_metadata, positions)
 
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)

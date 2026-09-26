@@ -16,9 +16,10 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
     BaseAttention,
+    FlexAttentionMetadata,
     FlexInnerAttention,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -117,7 +118,7 @@ class Attention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ):
         x = self._gather_tp_input(x)
@@ -171,7 +172,7 @@ class Attention(BaseAttention):
                     )
 
         output = self.inner_attention(
-            q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
+            q, k, v, attention_metadata=attention_metadata, scale=self.softmax_scale
         ).contiguous()
         output = output.view(num_tokens, -1)
         return self.wo(output)
@@ -203,12 +204,12 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
+        x = x + self.attention(self.attention_norm(x), attention_metadata, positions)
         if self.moe_enabled:
             x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:

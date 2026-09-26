@@ -158,11 +158,11 @@ def test_lora_forward():
     num_tokens = num_documents * seq_len
     tokens = torch.randint(0, vocab_size, (num_tokens,))
     positions = torch.arange(seq_len).repeat(num_documents)
-    attention_masks = model.get_attention_masks(positions)
+    attention_metadata = model.get_attention_metadata(positions)
     # The default attention backend is FlexInnerAttention, which does not support
     # backward on CPU; this is a forward-only shape check, so run under no_grad.
     with torch.no_grad():
-        output = model(tokens, attention_masks=attention_masks, positions=positions)
+        output = model(tokens, attention_metadata=attention_metadata, positions=positions)
     assert output.shape == (num_tokens, vocab_size)
 
 

@@ -34,10 +34,7 @@ from torchtitan.distributed.spmd_types import (
 )
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.attention import (
-        AttentionMasksType,
-        FlexAttentionMetadata,
-    )
+    from torchtitan.models.common.attention import FlexAttentionMetadata
 
 __all__ = [
     "ContextParallelLoadBalancer",
@@ -69,7 +66,7 @@ class HeadTailCPLoadBalancer(ContextParallelLoadBalancer):
         config: Config,
         *,
         seq_len: int,
-        attention_metadata: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | None,
     ) -> None:
         del config, attention_metadata
         cp_group = spmd_mesh_group(MeshAxisName.CP)
@@ -95,8 +92,6 @@ class HeadTailCPLoadBalancer(ContextParallelLoadBalancer):
         return permutation
 
 
-# TODO(acisseJZhong): Maintain an explicit mapping from each CP load balancer
-# to the CP attention backends it supports, and validate configured pairs.
 class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
     """Balance FlexAttention tokens with PTRR.
 
@@ -108,22 +103,21 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
         """Configuration for PTRR context-parallel load balancing."""
 
         mask_key: str | None = None
-        """Mask used to derive the partition when context metadata is a mapping."""
+        """Mask used to derive the partition when attention metadata is a mapping."""
 
     def __init__(
         self,
         config: Config,
         *,
         seq_len: int,
-        attention_metadata: FlexAttentionMetadata,
+        attention_metadata: FlexAttentionMetadata | None,
     ) -> None:
         del seq_len
         mask_key = config.mask_key
 
         if attention_metadata is None:
             raise ValueError(
-                "PTRR load balancing requires context metadata to be a BlockMask "
-                "or Mapping[str, BlockMask], but got None."
+                "PTRR load balancing requires attention metadata, but got None."
             )
         if isinstance(attention_metadata, Mapping):
             if mask_key is None:
@@ -136,7 +130,7 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
                 )
             if mask_key not in attention_metadata:
                 raise ValueError(
-                    f"PTRR mask key '{mask_key}' is not a key in context metadata. "
+                    f"PTRR mask key '{mask_key}' is not a key in attention metadata. "
                     f"Available keys: {sorted(attention_metadata.keys())}"
                 )
             block_mask = attention_metadata[mask_key]
