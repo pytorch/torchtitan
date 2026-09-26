@@ -22,12 +22,14 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
     make_shared_expert_ffn_config,
+    select_shared_expert_w2_config,
 )
 from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    Linear,
     RouterGateLinear,
-    SharedExpertRowParallelLinear,
+    RowParallelLinear,
 )
 from torchtitan.models.common.moe import (
     MicrobatchWiseLoadBalanceLoss,
@@ -328,17 +330,23 @@ class TestMoE(unittest.TestCase):
                     _per_axis_types(token_id_placement(enable_sp=enable_ep)),
                 )
 
-    def test_shared_expert_ffn_uses_explicit_output_reduction(self):
-        config = make_shared_expert_ffn_config(
-            dim=4,
-            hidden_dim=8,
-            w1_param_init={},
-            w2w3_param_init={},
-        )
+    def test_shared_expert_w2_type_follows_sequence_parallelism(self):
+        for enable_sp, expected_w2_type in (
+            (False, Linear.Config),
+            (True, RowParallelLinear.Config),
+        ):
+            with self.subTest(enable_sp=enable_sp):
+                config = make_shared_expert_ffn_config(
+                    dim=4,
+                    hidden_dim=8,
+                    w1_param_init={},
+                    w2w3_param_init={},
+                )
+                select_shared_expert_w2_config(config, enable_sp=enable_sp)
 
-        self.assertIs(type(config.w13), ColumnParallelLinear.Config)
-        self.assertIs(type(config.w2), SharedExpertRowParallelLinear.Config)
-        self.assertEqual(config.w13.num_linears, 2)
+                self.assertIs(type(config.w13), ColumnParallelLinear.Config)
+                self.assertIs(type(config.w2), expected_w2_type)
+                self.assertEqual(config.w13.num_linears, 2)
 
     def test_common_shared_expert_input_gather_is_owned_by_w13(self):
         moe_config = _moe_sharding_config(enable_ep=True, enable_sp=True)
@@ -439,6 +447,26 @@ class TestMoE(unittest.TestCase):
                 recompute=True,
             )
             recompute_needs_tensor.assert_called_once_with(x_TD)
+
+    def test_routed_branch_rejects_tp_without_ep(self):
+        moe = MoE.__new__(MoE)
+        x_TD = torch.randn(4, 8)
+
+        with (
+            patch(
+                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                return_value=None,
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_mesh_group",
+                return_value=object(),
+            ),
+            self.assertRaisesRegex(
+                AssertionError,
+                "requires expert parallelism",
+            ),
+        ):
+            moe._maybe_shard_routed_branch_inputs_across_tp(x_TD, None)
 
     def test_expert_branch_layouts_before_moe_boundary(self):
         for enable_ep, enable_sp, expected, expected_routed in (
