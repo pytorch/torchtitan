@@ -95,8 +95,6 @@ def compute_config_fingerprint(
         if not f.name.startswith("_"):
             h.update(f"parallel:{f.name}:{getattr(parallel_dims, f.name)}\n".encode())
 
-    h.update(f"compile:mode:{compile_config.mode}\n".encode())
-    h.update(f"compile:backend:{compile_config.backend}\n".encode())
     h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
     h.update(f"compile:memory_policy:{compile_config.memory_policy}\n".encode())
     h.update(
