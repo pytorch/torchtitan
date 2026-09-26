@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.components.optimizer import Adam, OptimizersContainer
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import Llama3Model, model_registry
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -64,12 +64,10 @@ def test_optimizer_hook_is_owned_by_model_class() -> None:
     model = FakeModel.Config().build()
     model_parts = [model]
     optimizers = OptimizersContainer.Config(
-        implementation="fused",
-        param_groups=[
-            ParamGroupConfig(
+        optimizers=[
+            Adam.Config(
                 pattern=r".*",
-                optimizer_name="Adam",
-                optimizer_kwargs={"lr": 0.1},
+                lr=0.1,
             )
         ],
     ).build(model_parts=model_parts)

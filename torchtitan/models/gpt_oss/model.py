@@ -197,7 +197,7 @@ class GptOssModel(Decoder):
 
     @classmethod
     def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
-        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
 

@@ -4,22 +4,28 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import logging
 import re
-from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast, Generic, Literal, overload, Protocol, TypeVar
+from typing import Annotated, Any, cast, Literal, overload
 
 import torch
 import torch.nn as nn
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
+import tyro
+from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
+
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.flex_shard import build_dist_muon
+from torchtitan.distributed.flex_shard import (
+    BucketConfig,
+    ComputeLayout,
+    DistMuon as FlexShardDistMuon,
+)
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -31,68 +37,198 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
+    "Adam",
+    "AdamW",
+    "BaseOptimizer",
+    "DistMuon",
     "OptimizersContainer",
-    "ParamGroupConfig",
-    "default_adamw",
-    "register_moe_load_balancing_hook",
-    "register_moe_quantile_balancing_hook",
 ]
 
-
-@dataclass(kw_only=True, slots=True)
-class ParamGroupConfig:
-    """Configuration for a parameter group with its own optimizer.
-
-    Each entry specifies a regex pattern matching parameter FQNs and a
-    self-contained optimizer setup. ``optimizer_name`` and ``optimizer_kwargs``
-    fully define the optimizer for matched parameters — no implicit inheritance.
-
-    Patterns are checked in order; first match wins. Place specific patterns
-    before a broad fallback pattern. Example::
-
-        param_groups=[
-            ParamGroupConfig(pattern=r"\\.bias$", ...),
-            ParamGroupConfig(pattern=r"\\.router\\.", ...),
-            ParamGroupConfig(pattern=r".*", ...),
-        ]
-    """
-
-    pattern: str
-    """Regex pattern matched against parameter fully qualified names (FQNs).
-    E.g. '.*bias$', '.*norm.*', '.*\\.embed_tokens\\..*', '.*' (catch-all)"""
-
-    optimizer_name: str
-    """Optimizer type for this group."""
-
-    optimizer_kwargs: dict[str, Any] = field(default_factory=dict)
-    """Keyword arguments passed to the optimizer constructor.
-    Must include all required kwargs (e.g. ``lr``). No implicit defaults."""
+MomentDType = Literal["parameter", "bfloat16"]
 
 
-T = TypeVar("T", bound=Optimizer)
+class BaseOptimizer(Optimizer, Configurable):
+    """Base class for configurable TorchTitan optimizers."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        pattern: str
+        """Regex matched against parameter fully qualified names."""
 
 
-class _MoERouterLike(Protocol):
-    tokens_per_expert_E: torch.Tensor  # noqa: N815
+def _validate_moment_dtype(
+    *,
+    moment_dtype: MomentDType,
+    fused: bool | None,
+) -> None:
+    if moment_dtype not in ("parameter", "bfloat16"):
+        raise ValueError(f"Unsupported Adam moment dtype {moment_dtype!r}")
+    if moment_dtype == "bfloat16" and fused is not True:
+        raise ValueError("bfloat16 Adam moments require fused=True")
 
 
-class _MoELike(Protocol):
-    load_balance_coeff: float | None
-    expert_bias_E: torch.Tensor  # noqa: N815
-    router: _MoERouterLike
+def _register_bfloat16_moment_hooks(optimizer: torch.optim.Optimizer) -> None:
+    """Create and restore Adam moment tensors in bfloat16."""
+
+    def initialize_moments(
+        optimizer: torch.optim.Optimizer, args: tuple, kwargs: dict
+    ) -> None:
+        for group in optimizer.param_groups:
+            for param in group["params"]:
+                if param.grad is None:
+                    continue
+                state = optimizer.state[param]
+                if state:
+                    continue
+                state["step"] = (
+                    torch.zeros((), dtype=torch.float32, device=param.device)
+                    if group.get("capturable") or group.get("fused")
+                    else torch.tensor(0.0, dtype=torch.float32)
+                )
+                state["exp_avg"] = torch.zeros_like(
+                    param, dtype=torch.bfloat16, memory_format=torch.preserve_format
+                )
+                state["exp_avg_sq"] = torch.zeros_like(
+                    param, dtype=torch.bfloat16, memory_format=torch.preserve_format
+                )
+                if group.get("amsgrad"):
+                    state["max_exp_avg_sq"] = torch.zeros_like(
+                        param,
+                        dtype=torch.bfloat16,
+                        memory_format=torch.preserve_format,
+                    )
+
+    def restore_moment_dtype(optimizer: torch.optim.Optimizer) -> None:
+        for group in optimizer.param_groups:
+            for param in group["params"]:
+                state = optimizer.state.get(param, {})
+                for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
+                    if key in state:
+                        state[key] = state[key].to(dtype=torch.bfloat16)
+
+    optimizer.register_step_pre_hook(initialize_moments)
+    optimizer.register_load_state_dict_post_hook(restore_moment_dtype)
 
 
-class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
+class Adam(torch.optim.Adam, BaseOptimizer):
+    """Configurable ``torch.optim.Adam``."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseOptimizer.Config):
+        lr: float = 1e-3
+        betas: tuple[float, float] = (0.9, 0.999)
+        eps: float = 1e-8
+        fused: bool | None = True
+        moment_dtype: MomentDType = "parameter"
+
+        def __post_init__(self) -> None:
+            _validate_moment_dtype(
+                moment_dtype=self.moment_dtype,
+                fused=self.fused,
+            )
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        params: Iterable[dict[str, Any]] | Iterable[Tensor],
+    ) -> None:
+        super().__init__(
+            params,
+            lr=config.lr,
+            betas=config.betas,
+            eps=config.eps,
+            fused=config.fused,
+        )
+        if config.moment_dtype == "bfloat16":
+            _register_bfloat16_moment_hooks(self)
+
+
+class AdamW(torch.optim.AdamW, BaseOptimizer):
+    """Configurable ``torch.optim.AdamW``."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseOptimizer.Config):
+        lr: float = 8e-4
+        betas: tuple[float, float] = (0.9, 0.95)
+        eps: float = 1e-8
+        weight_decay: float = 0.1
+        foreach: bool | None = None
+        fused: bool | None = True
+        moment_dtype: MomentDType = "parameter"
+
+        def __post_init__(self) -> None:
+            _validate_moment_dtype(
+                moment_dtype=self.moment_dtype,
+                fused=self.fused,
+            )
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        params: Iterable[dict[str, Any]] | Iterable[Tensor],
+    ) -> None:
+        super().__init__(
+            params,
+            lr=config.lr,
+            betas=config.betas,
+            eps=config.eps,
+            weight_decay=config.weight_decay,
+            foreach=config.foreach,
+            fused=config.fused,
+        )
+        if config.moment_dtype == "bfloat16":
+            _register_bfloat16_moment_hooks(self)
+
+
+class DistMuon(FlexShardDistMuon, BaseOptimizer):
+    """Configurable TorchTitan wrapper around FlexShard's ``DistMuon``."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseOptimizer.Config):
+        compute_sharding_by_fqn: Mapping[str, ComputeLayout]
+        bucket_configs: Sequence[BucketConfig]
+        lr: float = 1e-3
+        weight_decay: float = 0.1
+        momentum: float = 0.95
+        nesterov: bool = True
+        ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
+        eps: float = 1e-7
+        ns_steps: int = 5
+        adjust_lr_fn: Literal[
+            "original", "match_rms_adamw", "spectral_unclamped"
+        ] | None = None
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        params: Iterable[dict[str, Any]] | Iterable[Tensor],
+    ) -> None:
+        super().__init__(
+            cast(Iterable[dict[str, Any]], params),
+            compute_sharding_by_fqn=config.compute_sharding_by_fqn,
+            bucket_configs=config.bucket_configs,
+            lr=config.lr,
+            weight_decay=config.weight_decay,
+            momentum=config.momentum,
+            nesterov=config.nesterov,
+            ns_coefficients=config.ns_coefficients,
+            eps=config.eps,
+            ns_steps=config.ns_steps,
+            adjust_lr_fn=config.adjust_lr_fn,
+        )
+
+
+class OptimizersContainer(Optimizer, Stateful, Configurable):
     """A container for multiple optimizers, supporting mixed optimizer types.
 
     This class wraps multiple optimizers into a single object to simplify the
-    training loop. Each parameter group is configured via ``ParamGroupConfig``
-    with its own optimizer type and kwargs. Parameters are matched to groups
-    by regex pattern (first match wins), and groups using the same optimizer
-    type are batched into a single optimizer instance for performance.
+    training loop. Each configured optimizer selects parameters by regex pattern;
+    patterns are checked in order and the first match wins.
 
-    Each model part (from pipeline parallelism) may have multiple optimizer
-    instances if different parameter groups use different optimizer types.
+    Each model part gets one optimizer instance per matching configuration.
 
     **Note**
     Users who want to customize the optimizer behavior can inherit from this class and
@@ -101,158 +237,76 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     ``load_state_dict()``.
 
     Args:
-        config (Config): Optimizer configuration with param group definitions.
+        config (Config): Ordered optimizer configurations.
         model_parts (List[nn.Module]): List of model parts to be optimized.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        param_groups: list[ParamGroupConfig] = field(default_factory=list)
-        """Per-parameter-group optimizer configurations. Each entry specifies a
-        regex pattern and a self-contained optimizer setup.
-        Patterns are checked in order; first match wins."""
-
-        implementation: Literal[
-            "for-loop", "foreach", "fused", "fused_opt_states_bf16"
-        ] = "fused"
-        """
-        Optimizer implementation mode applied to all optimizer instances.
-        Per-param-group ``optimizer_kwargs`` can override this (e.g.
-        ``"fused": False`` for optimizers that don't support fused).
-
-        - 'fused': Use fused implementation (CUDA only) for best performance.
-        - 'foreach': Use some horizontal fusion of tensors for better performance.
-        - 'for-loop': Use the default implementation for the optimizer (slowest).
-        - 'fused_opt_states_bf16': Like 'fused', but initialize Adam/AdamW
-          momentum and variance in bfloat16 via a step pre-hook so the fused
-          CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
-          Only supported for Adam/AdamW. See
-          torchtitan/components/optimizer/bf16_optimizer_states.md.
-        - more info: https://pytorch.org/docs/stable/optim.html
-        """
-
-        optimizer_factory_kwargs_by_name: dict[str, dict[str, Any]] = field(
-            default_factory=dict
+        optimizers: Annotated[list[BaseOptimizer.Config], tyro.conf.Suppress] = field(
+            default_factory=list
         )
-        """Arguments passed once per optimizer factory invocation, keyed by name.
+        """Optimizer configurations in first-match-wins pattern order."""
 
-        Use this for instance-wide objects such as per-parameter compute
-        metadata and communication bucket specs. These arguments are not copied
-        into PyTorch parameter groups; group hyperparameters belong in
-        ``ParamGroupConfig.optimizer_kwargs``.
-        """
-
-    optimizers: list[T]
+    optimizers: list[Optimizer]
     model_parts: list[nn.Module]
 
     @staticmethod
-    def _resolve_optimizer_factory(name: str) -> Callable[..., Optimizer]:
-        optimizer_factories: dict[str, Callable[..., Optimizer]] = {
-            "Adam": torch.optim.Adam,
-            "AdamW": torch.optim.AdamW,
-            "DistMuon": build_dist_muon,
-        }
-        if name not in optimizer_factories:
-            raise NotImplementedError(f"Optimizer {name} not added.")
-        return optimizer_factories[name]
-
-    @staticmethod
-    def _build_impl_kwargs(config: Config) -> dict[str, Any]:
-        """Build implementation-related kwargs (fused/foreach) from config."""
-        assert config.implementation in [
-            "fused",
-            "foreach",
-            "for-loop",
-            "fused_opt_states_bf16",
-        ]
-        fused = config.implementation in ("fused", "fused_opt_states_bf16")
-        return {
-            "fused": fused,
-            "foreach": config.implementation == "foreach",
-        }
-
-    @staticmethod
-    def _build_param_groups(
+    def _build_param_group(
         model: nn.Module,
-        param_group_configs: list[ParamGroupConfig],
-        impl_kwargs: dict[str, Any],
-    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[str]]]:
-        """Build PyTorch param groups from model parameters, partitioned by optimizer.
+        optimizer_config: BaseOptimizer.Config,
+        claimed: set[str],
+    ) -> dict[str, Any]:
+        """Build one named PyTorch parameter group from an optimizer config."""
+        try:
+            pattern = re.compile(optimizer_config.pattern)
+        except re.error as error:
+            raise ValueError(
+                f"Invalid optimizer pattern {optimizer_config.pattern!r}: {error}"
+            ) from error
 
-        Each parameter is assigned to the first matching ParamGroupConfig pattern.
+        params: list[nn.Parameter] = []
+        param_names: list[str] = []
+        for name, param in model.named_parameters():
+            if param.requires_grad and name not in claimed and pattern.search(name):
+                params.append(param)
+                param_names.append(canonical_fqn(name))
+                claimed.add(name)
 
-        Returns two dicts keyed by optimizer name and aligned by index: the param
-        group dicts to pass to the optimizer constructor, and the regex pattern of
-        each group. Patterns are returned separately (not stored on the group) so
-        they stay out of the saved optimizer state dict; they are logging-only.
-
-        Each param group dict carries a ``param_names`` list (canonical FQNs
-        aligned with ``params``) so PyTorch records the names on the group; the
-        checkpoint utilities use those names to build FQN-keyed optimizer state.
-        """
-        groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        patterns: dict[str, list[str]] = defaultdict(list)
-        claimed: set[str] = set()  # first-match-wins
-
-        for pg in param_group_configs:
-            pattern = re.compile(pg.pattern)
-            params: list[nn.Parameter] = []
-            param_names: list[str] = []
-            for name, param in model.named_parameters():
-                if param.requires_grad and name not in claimed and pattern.search(name):
-                    params.append(param)
-                    param_names.append(canonical_fqn(name))
-                    claimed.add(name)
-
-            if not params:
-                raise ValueError(
-                    f"Optimizer param_groups pattern '{pg.pattern}' "
-                    f"matched no parameters"
-                )
-
-            groups[pg.optimizer_name].append(
-                {
-                    "params": params,
-                    "param_names": param_names,
-                    **impl_kwargs,
-                    **pg.optimizer_kwargs,
-                }
+        if not params:
+            raise ValueError(
+                f"Optimizer pattern {optimizer_config.pattern!r} matched no parameters"
             )
-            patterns[pg.optimizer_name].append(pg.pattern)
 
-        return groups, patterns
+        return {"params": params, "param_names": param_names}
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
-        impl_kwargs = self._build_impl_kwargs(config)
-        param_group_configs = config.param_groups
-        all_params = []
+        all_params: list[nn.Parameter] = []
         self.optimizers = []
         self.model_parts = model_parts
 
         for part_idx, model in enumerate(self.model_parts):
-            groups_by_opt_name, patterns_by_opt_name = self._build_param_groups(
-                model, param_group_configs, impl_kwargs
-            )
-            for opt_name, opt_param_groups in groups_by_opt_name.items():
-                optimizer = self._resolve_optimizer_factory(opt_name)(
-                    opt_param_groups,
-                    **config.optimizer_factory_kwargs_by_name.get(opt_name, {}),
+            claimed: set[str] = set()
+            for optimizer_config in config.optimizers:
+                param_group = self._build_param_group(
+                    model,
+                    optimizer_config,
+                    claimed,
                 )
-                self.optimizers.append(cast(T, optimizer))
-                self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
-                for group in opt_param_groups:
-                    all_params.extend(group["params"])
+                optimizer = optimizer_config.build(params=[param_group])
+                self.optimizers.append(optimizer)
+                self._log_optimizer(
+                    optimizer,
+                    part_idx,
+                    optimizer_config.pattern,
+                )
+                all_params.extend(param_group["params"])
 
         self._validate_params(all_params)
-
-        if config.implementation == "fused_opt_states_bf16":
-            self._register_bf16_optimizer_state_hook()
         self._post_init(all_params)
 
-    def _log_optimizer(
-        self, optimizer: Optimizer, part_idx: int, patterns: list[str]
-    ) -> None:
-        """Log one optimizer's param-group assignments (patterns are logging-only)."""
+    def _log_optimizer(self, optimizer: Optimizer, part_idx: int, pattern: str) -> None:
+        """Log one optimizer's parameter assignment."""
         _KEY_KWARGS = {
             "lr",
             "weight_decay",
@@ -264,7 +318,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             "foreach",
         }
         opt_name = type(optimizer).__name__
-        for group, pattern in zip(optimizer.param_groups, patterns):
+        for group in optimizer.param_groups:
             num_params = len(group["params"])
             kwargs = {k: v for k, v in group.items() if k in _KEY_KWARGS}
             logger.info(
@@ -281,12 +335,17 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
             if p.requires_grad
         }
         actual = {id(p) for p in all_params}
-        assert expected == actual, (
-            f"Parameter mismatch: {len(expected)} trainable params in model, "
-            f"{len(actual)} in optimizers"
-        )
+        if len(all_params) != len(actual):
+            raise ValueError(
+                "A trainable parameter was assigned to multiple optimizers"
+            )
+        if expected != actual:
+            raise ValueError(
+                f"Parameter mismatch: {len(expected)} trainable params in model, "
+                f"{len(actual)} in optimizers"
+            )
 
-    def __iter__(self) -> Iterator[T]:
+    def __iter__(self) -> Iterator[Optimizer]:
         return iter(self.optimizers)
 
     def __len__(self) -> int:
@@ -336,263 +395,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         # functionality such as hooks (e.g. register_step_pre_hook for MoE load balancing).
         Optimizer.__init__(self, all_params, {})
 
-    def _register_bf16_optimizer_state_hook(self) -> None:
-        """Create and restore Adam optimizer states in bfloat16.
-
-        The hook pre-populates optimizer state before Adam's lazy initialization
-        runs, so that ``_init_group`` finds non-empty state and skips its own
-        fp32 allocation. The fused CUDA kernel then sees the dtype mismatch
-        between fp32 params and bf16 states, dispatching to the mixed-precision
-        kernel (``FusedAdamMathFunctorMP``).
-
-        A load post-hook reapplies the state dtype after PyTorch's
-        ``load_state_dict`` casts floating-point states to the parameter dtype.
-        """
-
-        def _bf16_state_init_hook(
-            optimizer: Optimizer, args: tuple, kwargs: dict
-        ) -> None:
-            for group in optimizer.param_groups:
-                for p in group["params"]:
-                    if p.grad is None:
-                        continue
-                    state = optimizer.state[p]
-                    if len(state) == 0:
-                        state["step"] = (
-                            torch.zeros((), dtype=torch.float32, device=p.device)
-                            if group.get("capturable") or group.get("fused")
-                            else torch.tensor(0.0, dtype=torch.float32)
-                        )
-                        state["exp_avg"] = torch.zeros_like(
-                            p, dtype=torch.bfloat16, memory_format=torch.preserve_format
-                        )
-                        state["exp_avg_sq"] = torch.zeros_like(
-                            p, dtype=torch.bfloat16, memory_format=torch.preserve_format
-                        )
-                        if group.get("amsgrad"):
-                            state["max_exp_avg_sq"] = torch.zeros_like(
-                                p,
-                                dtype=torch.bfloat16,
-                                memory_format=torch.preserve_format,
-                            )
-
-        def _bf16_state_load_hook(optimizer: Optimizer) -> None:
-            for group in optimizer.param_groups:
-                for p in group["params"]:
-                    state = optimizer.state.get(p, {})
-                    # Keep step's dtype/device policy and any other state intact.
-                    for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
-                        if key in state:
-                            state[key] = state[key].to(dtype=torch.bfloat16)
-
-        for optim in self.optimizers:
-            if isinstance(optim, (torch.optim.Adam, torch.optim.AdamW)):
-                optim.register_step_pre_hook(_bf16_state_init_hook)
-                optim.register_load_state_dict_post_hook(_bf16_state_load_hook)
-
     def init_cache_state_dict(self) -> None:
         """Initialize cached state dict for TorchFT. No-op for base class."""
         pass
-
-
-def default_adamw(lr: float = 8e-4, **kwargs: Any) -> OptimizersContainer.Config:
-    """Create an OptimizersContainer.Config with a catch-all AdamW param group.
-
-    Use as a convenience for the common case::
-
-        optimizer=default_adamw(lr=3e-4)
-    """
-    return OptimizersContainer.Config(
-        param_groups=[
-            ParamGroupConfig(
-                pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs={
-                    "lr": lr,
-                    "betas": (0.9, 0.95),
-                    "eps": 1e-8,
-                    "weight_decay": 0.1,
-                    **kwargs,
-                },
-            )
-        ]
-    )
-
-
-def register_moe_load_balancing_hook(
-    optimizers: OptimizersContainer,
-    model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
-) -> None:
-    """Register an optimizer step pre-hook for MoE auxiliary-loss-free load balancing.
-
-    This function checks if MoE load balancing is enabled and, if so, registers
-    a hook that updates expert biases before each optimizer step.
-
-    Args:
-        optimizers: The optimizers container to register the hook on.
-        model_parts: List of model parts that may contain MoE layers.
-        parallel_dims: Parallel dimensions for distributed communication.
-    """
-
-    def _iter_moe_layers(
-        model_parts: list[nn.Module],
-    ) -> Iterator[tuple[nn.Module, _MoELike]]:
-        for model_part in model_parts:
-            # MTP decoder blocks live in ``mtp_layers`` after FSDP wrapping;
-            # they are only temporarily inserted into ``layers`` while FSDP
-            # is applied. Keep both containers in the runtime hook so MTP
-            # expert bias and usage counters receive the same update as the
-            # main decoder layers.
-            layer_containers = [model_part.get_submodule("layers")]
-            mtp_layers = getattr(model_part, "mtp_layers", None)
-            if mtp_layers is not None:
-                layer_containers.append(mtp_layers)
-            for layers in layer_containers:
-                assert isinstance(layers, (nn.ModuleDict, nn.ModuleList))
-                for transformer_block in layers.children():
-                    if getattr(transformer_block, "moe_enabled", False):
-                        yield transformer_block, cast(_MoELike, transformer_block.moe)
-
-    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
-        moe_layers = list(_iter_moe_layers(model_parts))
-        if not moe_layers:
-            return False
-
-        load_balance_enabled = moe_layers[0][1].load_balance_coeff is not None
-        for _transformer_block, moe in moe_layers[1:]:
-            if (moe.load_balance_coeff is not None) != load_balance_enabled:
-                raise ValueError(
-                    "MoE load_balance_coeff must be configured consistently "
-                    "across all MoE layers. Either set it for every MoE layer "
-                    "or leave it unset for all MoE layers."
-                )
-        return load_balance_enabled
-
-    # for MoE auxiliary-loss-free load balancing
-    def _is_recomputation_enabled(module):
-        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
-
-    def _update_expert_bias(
-        model_parts: list[nn.Module],
-        parallel_dims: ParallelDims,
-    ):
-        loss_mesh = parallel_dims.get_optional_mesh("loss")
-        # TODO: Currently this sync is blocking (thus exposed) and happens on the
-        # default compute stream. Need to assess if this is OK performance-wise.
-        tokens_per_expert_E_list = []
-        for transformer_block, moe in _iter_moe_layers(model_parts):
-            tokens_per_expert_E = moe.router.tokens_per_expert_E
-            if _is_recomputation_enabled(transformer_block):
-                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
-                # This does not affect to expert choice, but affects the experts usage metrics.
-                # We divide by 2 to correct for this double-counting due to recomputation
-                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                tokens_per_expert_E = tokens_per_expert_E // 2
-            tokens_per_expert_E_list.append(tokens_per_expert_E)
-
-        if not tokens_per_expert_E_list:
-            return
-
-        tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
-
-        if parallel_dims.ep_enabled and parallel_dims.tp > 1:
-            torch.distributed.all_reduce(
-                tokens_per_expert_E_by_layer,
-                group=parallel_dims.get_dense_tp_mesh().get_group(),
-            )
-        if loss_mesh is not None:
-            torch.distributed.all_reduce(
-                tokens_per_expert_E_by_layer,
-                group=loss_mesh.get_group(),
-                op=torch.distributed.ReduceOp.SUM,
-            )
-        moe_layer_idx = 0
-        with torch.no_grad():
-            for _transformer_block, moe in _iter_moe_layers(model_parts):
-                load_balance_coeff = moe.load_balance_coeff
-                assert load_balance_coeff is not None
-
-                tokens_per_expert_E = tokens_per_expert_E_by_layer[
-                    moe_layer_idx
-                ].float()
-                moe_layer_idx += 1
-
-                # update the expert bias
-                # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                expert_bias_delta_E = load_balance_coeff * torch.sign(
-                    tokens_per_expert_E.mean() - tokens_per_expert_E
-                )
-                expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
-                moe.expert_bias_E.add_(expert_bias_delta_E)
-                moe.router.tokens_per_expert_E.zero_()
-
-    if _should_register_moe_balancing_hook(model_parts):
-        optimizers.register_step_pre_hook(
-            lambda *args, **kwargs: _update_expert_bias(
-                model_parts, parallel_dims=parallel_dims
-            )
-        )
-
-
-def register_moe_quantile_balancing_hook(
-    optimizers: OptimizersContainer,
-    model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
-) -> None:
-    """Update quantile-balanced expert biases before each optimizer step."""
-    from torchtitan.models.common.moe import MoE, QuantileBalancedTopKRouter
-
-    moe_layers: list[tuple[MoE, QuantileBalancedTopKRouter]] = []
-    for model_part in model_parts:
-        for module in model_part.modules():
-            if isinstance(module, MoE) and isinstance(
-                module.router, QuantileBalancedTopKRouter
-            ):
-                moe_layers.append((module, module.router))
-
-    if not moe_layers:
-        return
-
-    @torch.no_grad()
-    def _update_expert_bias() -> None:
-        reduction_groups = []
-        # With EP, the router is token-sharded on the dense TP axis even when
-        # model-wide sequence parallelism is disabled.
-        if parallel_dims.ep_enabled and parallel_dims.tp > 1:
-            reduction_groups.append(parallel_dims.get_dense_tp_mesh().get_group())
-        loss_mesh = parallel_dims.get_optional_mesh("loss")
-        if loss_mesh is not None:
-            reduction_groups.append(loss_mesh.get_group())
-
-        histograms = [
-            router.quantile_balancer.required_bias_histogram_EB
-            for _moe, router in moe_layers
-        ]
-        if reduction_groups:
-            reduced_histograms_LEB = torch.stack(histograms)
-            for group in reduction_groups:
-                torch.distributed.all_reduce(
-                    reduced_histograms_LEB,
-                    group=group,
-                    op=torch.distributed.ReduceOp.SUM,
-                )
-            histograms = list(reduced_histograms_LEB.unbind())
-
-        for histogram_EB, (moe, router) in zip(
-            histograms,
-            moe_layers,
-            strict=True,
-        ):
-            expert_bias_E = moe.expert_bias_E
-            assert expert_bias_E is not None
-            quantile_balancer = router.quantile_balancer
-            next_expert_bias_E = quantile_balancer.estimate_expert_bias(
-                histogram_EB,
-                expert_bias_E,
-            )
-            expert_bias_E.copy_(next_expert_bias_E)
-            quantile_balancer.required_bias_histogram_EB.zero_()
-            router.tokens_per_expert_E.zero_()
-
-    optimizers.register_step_pre_hook(lambda *args, **kwargs: _update_expert_bias())
