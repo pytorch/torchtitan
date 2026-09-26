@@ -23,6 +23,7 @@ def _small_model_config() -> KimiK3Model.Config:
     return _kimi_k3_config(
         max_context_length=128,
         dim=dim,
+        enable_sp=False,
         vocab_size=32,
         num_layers=2,
         full_attention_layers={1},
