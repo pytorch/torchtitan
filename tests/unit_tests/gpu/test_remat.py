@@ -182,14 +182,19 @@ class _CountingKimiMLAAttention(KimiMLAAttention, _CountingModelSpecificAttentio
             Linear(Linear.Config(in_features=4, out_features=4))
         )
         self.gate = self.gate_projection
+        self.q_head_dim = 4
+        self.kv_lora_rank = 2
+        self.qk_rope_head_dim = 2
+        self.qk_nope_head_dim = 2
+        self.v_head_dim = 4
+        self.q_norm = torch.nn.Identity()
+        self.wq_b = torch.nn.Identity()
+        self.kv_norm = torch.nn.Identity()
+        self.wkv_b = _CountingOp(lambda x_TC: x_TC.repeat(1, 3))
 
     def _project_latents(self, x_TD):
         self.projection_forwards += 1
         return x_TD * 1.0, x_TD + 0.0
-
-    def _project_qkv(self, q_latent_TC, compressed_kv_TC):
-        projected_T1D = (q_latent_TC + compressed_kv_TC).unsqueeze(1)
-        return projected_T1D, projected_T1D, projected_T1D
 
     def region_counts(self) -> tuple[int, ...]:
         return (
@@ -259,6 +264,8 @@ class _CountingGatedDeltaNet(GatedDeltaNet, _CountingModelSpecificAttention):
         self.out_proj = self.output_projection
         self.gate_projection = _CountingOp(lambda x_TD: x_TD * 1.0)
         self.in_proj_z = self.gate_projection
+        self.in_proj_a = torch.nn.Identity()
+        self.in_proj_b = torch.nn.Identity()
         self.conv_q = SimpleNamespace(weight=torch.empty(0))
         self.conv_k = SimpleNamespace(weight=torch.empty(0))
         self.conv_v = SimpleNamespace(weight=torch.empty(0))
@@ -269,9 +276,6 @@ class _CountingGatedDeltaNet(GatedDeltaNet, _CountingModelSpecificAttention):
         self.projection_forwards += 1
         projected_TD = x_TD * 1.0
         return projected_TD, projected_TD, projected_TD
-
-    def _compute_recurrence_parameters(self, x_TD):
-        return x_TD, x_TD
 
     def region_counts(self) -> tuple[int, ...]:
         return (
@@ -295,6 +299,9 @@ class _CountingKDA(KDA, _CountingModelSpecificAttention):
         self.output_proj = self.output_projection
         self.gate_projection = _CountingOp(lambda x_TD: x_TD * 1.0)
         self.output_gate = self.gate_projection
+        self.forget_a = torch.nn.Identity()
+        self.forget_b = torch.nn.Identity()
+        self.beta = torch.nn.Identity()
         self.head_dim = 4
         self.q_conv = SimpleNamespace(weight=torch.empty(0))
         self.k_conv = SimpleNamespace(weight=torch.empty(0))
@@ -306,9 +313,6 @@ class _CountingKDA(KDA, _CountingModelSpecificAttention):
         self.projection_forwards += 1
         projected_TD = x_TD * 1.0
         return projected_TD, projected_TD, projected_TD
-
-    def _compute_recurrence_parameters(self, x_TD):
-        return x_TD.unsqueeze(1), x_TD
 
     def region_counts(self) -> tuple[int, ...]:
         return (
