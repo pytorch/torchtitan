@@ -83,9 +83,9 @@ def main() -> None:
         cp_model.to_empty(device=device)
         with torch.no_grad():
             cp_model.init_weights()
-        for param in cp_model.parameters():
-            local = param.to_local() if isinstance(param, DTensor) else param
-            dist.broadcast(local, src=0)
+            for param in cp_model.parameters():
+                local = param.to_local() if isinstance(param, DTensor) else param
+                dist.broadcast(local, src=0)
         cp_model.train()
 
     ref_config = _tiny_config()
