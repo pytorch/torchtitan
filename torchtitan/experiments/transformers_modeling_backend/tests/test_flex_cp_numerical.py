@@ -169,8 +169,8 @@ def main():
         )
         assert isinstance(load_balancer, context_parallel.ContextParallelLoadBalancer)
         permutation = load_balancer.generate_permutation()
-        batch["attention_masks"] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
-            batch["attention_masks"],
+        batch = KVAllGatherCPFlexInnerAttention.prepare_cp_batch_metadata(
+            batch,
             permutation=permutation,
         )
         batch = context_parallel.shard_inputs(

@@ -406,9 +406,9 @@ class Decoder(BaseModel):
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )
-        if "attention_masks" in batch:
-            batch["attention_masks"] = self._prepare_cp_metadata(
-                batch["attention_masks"],
+        if permutation is not None:
+            batch = self._prepare_cp_metadata(
+                batch,
                 permutation=permutation,
             )
         return context_parallel.shard_inputs(
@@ -419,15 +419,13 @@ class Decoder(BaseModel):
 
     def _prepare_cp_metadata(
         self,
-        context_metadata: Any,
+        batch: dict[str, Any],
         *,
         permutation: torch.Tensor | None,
-    ) -> Any:
-        """Apply each configured CP backend's metadata transformation."""
+    ) -> dict[str, Any]:
+        """Let each configured CP backend prepare its model-input metadata."""
         from torchtitan.models.common.cp_attention import CPInnerAttention
 
-        # TODO(acisseJZhong): Delegate metadata selection and preparation to each
-        # attention backend once backend-specific ownership is established.
         prepared_backends: set[type[CPInnerAttention[Any, Any]]] = set()
         for _, backend_config, _, _ in self.config.traverse(
             CPInnerAttention.Config, recurse=True
@@ -438,12 +436,12 @@ class Decoder(BaseModel):
             assert owner is not None and issubclass(owner, CPInnerAttention)
             if owner in prepared_backends:
                 continue
-            context_metadata = owner.prepare_cp_metadata(
-                context_metadata,
+            batch = owner.prepare_cp_batch_metadata(
+                batch,
                 permutation=permutation,
             )
             prepared_backends.add(owner)
-        return context_metadata
+        return batch
 
     def get_attention_masks(
         self,
