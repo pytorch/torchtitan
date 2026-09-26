@@ -44,10 +44,8 @@ def validate_model_training_config(
         FlexInnerAttention,
         VarlenInnerAttention,
     )
-    from torchtitan.models.common.token_dispatcher import (
-        HybridEPTokenDispatcher,
-        LocalTokenDispatcher,
-    )
+    from torchtitan.models.common.moe import RoutedExperts
+    from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 
     if not training.disable_cuda_graphs and cuda_graphs_supported():
         if max_num_documents is None:
@@ -60,9 +58,10 @@ def validate_model_training_config(
                 )
 
         if parallelism.expert_parallel_degree > 1:
-            for _, dispatcher_config, _, _ in model.traverse(
-                LocalTokenDispatcher.Config
-            ):
+            for _, experts_config, _, _ in model.traverse(RoutedExperts.Config):
+                if not experts_config.uses_configured_token_dispatcher:
+                    continue
+                dispatcher_config = experts_config.token_dispatcher
                 if (
                     isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
                     and dispatcher_config.non_blocking_capacity_factor is not None
