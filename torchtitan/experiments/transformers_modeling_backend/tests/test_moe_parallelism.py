@@ -17,15 +17,12 @@ import unittest
 
 import torch
 
-from torchtitan.components.optimizer import (
-    default_adamw,
-    register_moe_load_balancing_hook,
-)
+from torchtitan.components.optimizer import AdamW, OptimizersContainer
 from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
     hf_to_titan_moe_state_dict,
     titan_to_hf_moe_state_dict,
 )
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe import MoE, register_moe_load_balancing_hook
 
 
 def _expert_weights(routed_experts):
@@ -560,8 +557,10 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
             )
 
         # Build optimizer and register hook
-        opt_config = default_adamw(lr=1e-3)
-        opt_config.implementation = "for-loop"
+        opt_config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        )
+        opt_config.optimizers[0].fused = False
         optimizers = opt_config.build(model_parts=[model.model])
         register_moe_load_balancing_hook(
             optimizers,
