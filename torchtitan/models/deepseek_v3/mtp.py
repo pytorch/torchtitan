@@ -176,9 +176,10 @@ class MTPTransformerBlock(TransformerBlock):
         mtp_padding_mask_T = ~mtp_input_valid_mask
         if padding_mask is not None:
             mtp_padding_mask_T = mtp_padding_mask_T | padding_mask
-        # The MTP module boundary already shards prev_embed under SP, while
-        # boolean masks remain replicated. Shard only the mask multiplied with
-        # prev_embed; the MoE owns padding-mask sharding for its routed branch.
+        # Under SP, prev_embed already arrives Shard(0) from the preceding
+        # decoder or MTP block, while the validity mask arrives replicated.
+        # The old module boundary implicitly sharded only this mask; do that
+        # explicitly here. The MoE owns padding-mask sharding for its branch.
         local_mtp_input_valid_mask_T = self._maybe_shard_mtp_valid_mask_across_tp(
             mtp_input_valid_mask
         )
