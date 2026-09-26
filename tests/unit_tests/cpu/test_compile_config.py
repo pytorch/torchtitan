@@ -11,12 +11,7 @@ from torchtitan.config import CompileConfig
 
 def test_compile_config_default() -> None:
     config = CompileConfig()
-    assert config.components == ["model", "loss"]
-
-
-def test_compile_config_model_only() -> None:
-    config = CompileConfig(components=["model"])
-    assert config.components == ["model"]
+    assert config.components == ["loss"]
 
 
 def test_compile_config_loss_only() -> None:
@@ -30,13 +25,10 @@ def test_compile_config_empty_components() -> None:
 
 
 def test_compile_config_rejects_unknown_component() -> None:
-    with pytest.raises(ValueError, match=r"foo.*allowed values are.*loss.*model"):
+    with pytest.raises(ValueError, match=r"foo.*allowed values are.*loss"):
         CompileConfig(components=["foo"])
 
 
-def test_compile_config_async_tp_requires_model_compile() -> None:
-    with pytest.raises(
-        ValueError,
-        match="Async TP requires 'model' in --compile.components",
-    ):
-        CompileConfig(enable_async_tensor_parallel=True, components=["loss"])
+def test_compile_config_rejects_model_component() -> None:
+    with pytest.raises(ValueError, match=r"model.*allowed values are.*loss"):
+        CompileConfig(components=["model"])

@@ -49,7 +49,6 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "comm.train_timeout_seconds",
         "compile.backend",
         "compile.components",
-        "compile.enable_async_tensor_parallel",
         "dataloader.build_mrope_positions",
         "dataloader.dataset",
         "dataloader.dataset_path",

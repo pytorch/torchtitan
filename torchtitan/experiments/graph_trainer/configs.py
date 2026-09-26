@@ -63,6 +63,9 @@ class EpOverlapConfig:
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
+    enable_async_tensor_parallel: bool = False
+    """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
+
     passes: list[str] = field(default_factory=list)
     """
     Additional compiler pass names to apply or prepare inputs for.

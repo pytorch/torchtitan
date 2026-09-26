@@ -26,7 +26,6 @@ from torchtitan.config import (
 )
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
@@ -172,23 +171,10 @@ def parallelize_hf_transformers(
     # 4. Single parallelize call -- handles TP, EP, MoE, everything
     model._parallelize(parallel_dims)
 
-    model_compile_enabled = (
-        compile_config is not None and "model" in compile_config.components
-    )
+    del compile_config
 
     if ac_config is not None:
         ac_config.build(dump_folder=dump_folder).apply(model)
-
-    # Compile after AC wrapping and before FSDP. Compile the whole transformer
-    # block (including Titan MoE) via the shared core helper — the previous
-    # MoE-only ``apply_compile_sparse`` workaround is obsolete now that
-    # whole-block MoE compile works (pytorch/torchtitan#3409 fixed upstream).
-    if model_compile_enabled:
-        apply_compile(
-            model,
-            compile_config=compile_config,
-            parallel_dims=parallel_dims,
-        )
 
     model._apply_fsdp(
         parallel_dims=parallel_dims,

@@ -16,7 +16,6 @@ import pytest
 import tyro
 from torchtitan.components.validate import Validator
 from torchtitan.config import (
-    CompileConfig,
     ConfigManager,
     DebugConfig,
     ParallelismConfig,
@@ -418,9 +417,8 @@ class TestConfigManager(unittest.TestCase):
         )
         config.sdc_replayer = SDCReplayer.Config()
         config.parallelism.fsdp_symm_mem_scope = "all"
-        config.compile = CompileConfig(enable_async_tensor_parallel=True)
         configs = {
-            "symm_mem_async_tp": config,
+            "symm_mem": config,
             "distributed_gemm": llama3_debugmodel_dist_gemm(seq_len=2048),
             "hybrid_ep": deepseek_v3_debugmodel_hybridep(seq_len=2048),
             "deep_ep": qwen3_moe_deepep(seq_len=512),

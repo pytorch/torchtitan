@@ -25,7 +25,6 @@ from torchtitan.components.data import (
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validate import Validator
-from torchtitan.config import CompileConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -174,19 +173,6 @@ def llama3_debugmodel_default() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_compile() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
-    _set_spmd_typechecking(config, typechecking=False)
-    config.compile = CompileConfig()
-    return config
-
-
-def llama3_debugmodel_compile_sac_op() -> Trainer.Config:
-    config = llama3_debugmodel_compile()
-    config.activation_checkpoint = SelectiveAC.Config()
-    return config
-
-
 def llama3_debugmodel_tp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
@@ -205,18 +191,6 @@ def llama3_debugmodel_ce_loss_tp2() -> Trainer.Config:
 def llama3_debugmodel_tp2_no_sp() -> Trainer.Config:
     config = llama3_debugmodel_tp2()
     config.parallelism.enable_sequence_parallel = False
-    return config
-
-
-def llama3_debugmodel_tp2_compile() -> Trainer.Config:
-    config = llama3_debugmodel_compile()
-    config.parallelism.tensor_parallel_degree = 2
-    return config
-
-
-def llama3_debugmodel_tp2_asynctp_compile_spmd_types() -> Trainer.Config:
-    config = llama3_debugmodel_tp2_compile()
-    config.compile.enable_async_tensor_parallel = True
     return config
 
 
@@ -337,19 +311,6 @@ def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_pp2_save()
     config.training.steps = 20
-    return config
-
-
-def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
-    _set_spmd_typechecking(config, typechecking=False)
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.num_pp_microbatches = 8
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.tensor_parallel_degree = 2
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.compile = CompileConfig()
-    config.training.disable_cuda_graphs = True
     return config
 
 
