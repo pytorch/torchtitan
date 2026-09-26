@@ -12,7 +12,6 @@ from typing import Any
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
@@ -84,15 +83,15 @@ class GraphTrainingEngine(TrainingEngine):
         self._pinned_pool_ctx = None
 
     def _initialize_forward_backward(self) -> None:
-        if not self.parallel_dims.pp_enabled:
+        if not self.parallelism_context.pp_enabled:
             num_tokens_per_train_step = self.config.training.num_tokens_per_train_step
             if num_tokens_per_train_step < 0:
                 num_microbatches = 1
             else:
                 num_tokens_per_microbatch = (
                     self.config.training.num_tokens_per_microbatch_per_dp_rank
-                    * self.parallel_dims.dp_replicate
-                    * self.parallel_dims.dp_shard
+                    * self.parallelism_context.dp_replicate
+                    * self.parallelism_context.dp_shard
                 )
                 num_microbatches = (
                     num_tokens_per_train_step // num_tokens_per_microbatch
@@ -100,7 +99,7 @@ class GraphTrainingEngine(TrainingEngine):
             graph_runtime = make_spmd_graph_runtime(
                 self.model_parts[0],
                 gradient_accumulation_steps=num_microbatches,
-                parallel_dims=self.parallel_dims,
+                parallelism_context=self.parallelism_context,
                 parallelism=self.config.parallelism,
                 compile_config=self.config.compile,
                 device=self.device,
@@ -137,7 +136,7 @@ class GraphTrainingEngine(TrainingEngine):
         global_valid_tokens: torch.Tensor,
         accumulation_index: int = 0,
     ) -> torch.Tensor:
-        if self.parallel_dims.pp_enabled:
+        if self.parallelism_context.pp_enabled:
             return super().forward_backward_microbatch(
                 microbatch_group=microbatch_group,
                 global_valid_tokens=global_valid_tokens,
@@ -152,7 +151,7 @@ class GraphTrainingEngine(TrainingEngine):
         if accumulation_index == 0:
             self.loss_is_finite = torch.ones((), dtype=torch.int32, device=self.device)
 
-        if self.parallel_dims.dp_replicate_enabled and (
+        if self.parallelism_context.dp_replicate_enabled and (
             self.num_accumulation_steps == 1 or self.config.training.disable_cuda_graphs
         ):
             is_last = accumulation_index == self.num_accumulation_steps - 1
@@ -170,13 +169,13 @@ class GraphTrainingEngine(TrainingEngine):
                 input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
                 with (
                     sl.log_trace_span("preprocess_inputs"),
-                    dist_utils.get_spmd_context(parallel_dims=self.parallel_dims),
+                    self.parallelism_context.activate_spmd(),
                 ):
                     inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
                         0
                     ].preprocess_inputs(
                         input_dict,
-                        parallel_dims=self.parallel_dims,
+                        parallelism_context=self.parallelism_context,
                         parallelism=self.config.parallelism,
                         max_num_documents=self.max_num_documents,
                         max_context_length=self.config.training.max_context_length,
@@ -186,7 +185,7 @@ class GraphTrainingEngine(TrainingEngine):
                     assert isinstance(labels_mb, torch.Tensor)
                     self.ntokens_seen += (
                         self.config.training.num_tokens_per_microbatch_per_dp_rank
-                        // self.parallel_dims.cp
+                        // self.parallelism_context.cp
                     )
                 arg_mbs.append((inputs_mb,))
                 kwarg_mbs.append(extra_kwargs_mb)
@@ -248,7 +247,7 @@ class GraphTrainer(Trainer):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         if (
-            not self.engine.parallel_dims.pp_enabled
+            not self.engine.parallelism_context.pp_enabled
             and self.engine.pp_schedule.num_microbatches > 1
         ):
             self.num_pp_microbatches = self.engine.pp_schedule.num_microbatches

@@ -25,7 +25,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     enable_sp: bool,
 ) -> None:
     import spmd_types as spmd
-    from torchtitan.distributed.parallel_dims import MeshAxisName
+    from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.linear import Linear, RowParallelLinear
     from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
@@ -76,7 +76,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
 
 def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     import spmd_types as spmd
-    from torchtitan.distributed.parallel_dims import MeshAxisName
+    from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.linear import Linear
     from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config

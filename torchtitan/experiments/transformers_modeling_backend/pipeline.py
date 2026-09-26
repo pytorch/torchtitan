@@ -23,7 +23,7 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
@@ -292,7 +292,7 @@ def pipeline_module_split(
 
 def pipeline_hf_transformers(
     model: BaseModel,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     *,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
@@ -303,7 +303,7 @@ def pipeline_hf_transformers(
     model_config: BaseModel.Config,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
-    pp_mesh = parallel_dims.get_mesh("pp")
+    pp_mesh = parallelism_context.get_mesh("pp")
 
     # Determine the number of virtual stages based on schedule type
     schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
@@ -332,26 +332,24 @@ def pipeline_hf_transformers(
 
         # Validation: check stages per rank based on schedule type
         model_config_info = f"Model has {num_layers} layers with pipeline_parallel_layers_per_stage={layers_per_stage}"
-        stage_distribution_info = (
-            f"resulting in {num_virtual_stages=} across {parallel_dims.pp} PP ranks"
-        )
+        stage_distribution_info = f"resulting in {num_virtual_stages=} across {parallelism_context.pp} PP ranks"
 
-        if num_virtual_stages % parallel_dims.pp != 0:
+        if num_virtual_stages % parallelism_context.pp != 0:
             raise ValueError(
                 f"Number of virtual stages ({num_virtual_stages}) must be divisible by "
-                f"pipeline parallel size ({parallel_dims.pp}). "
+                f"pipeline parallel size ({parallelism_context.pp}). "
                 f"{model_config_info}. "
                 f"Please adjust pipeline_parallel_layers_per_stage to a value that results in a number of stages "
-                f"divisible by {parallel_dims.pp}."
+                f"divisible by {parallelism_context.pp}."
             )
 
-        stages_per_rank = num_virtual_stages // parallel_dims.pp
+        stages_per_rank = num_virtual_stages // parallelism_context.pp
 
         if is_single_stage_schedule and stages_per_rank != 1:
             raise ValueError(
                 f"Single stage schedule requires exactly 1 stage per rank, but got {stages_per_rank} stages per rank. "
                 f"{model_config_info}, {stage_distribution_info}. "
-                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallel_dims.pp} or higher "
+                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallelism_context.pp} or higher "
                 f"to achieve 1 stage per rank."
             )
 
@@ -366,7 +364,7 @@ def pipeline_hf_transformers(
         # For multi-stage schedules, default is 2 virtual stages per rank
         # For single-stage schedules, default is 1 virtual stage per rank
         stages_per_rank = 1 if is_single_stage_schedule else 2
-        num_virtual_stages = parallel_dims.pp * stages_per_rank
+        num_virtual_stages = parallelism_context.pp * stages_per_rank
 
     module_names_per_stage = parallelism.pipeline_parallel_module_fqns_per_model_part
     if module_names_per_stage is None:
@@ -380,7 +378,7 @@ def pipeline_hf_transformers(
         parallelism.pipeline_parallel_schedule,
         device,
         module_names_per_stage,
-        get_mesh=_build_get_mesh_callback(parallel_dims),
+        get_mesh=_build_get_mesh_callback(parallelism_context),
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -389,7 +387,7 @@ def pipeline_hf_transformers(
     for i, m in enumerate(model_parts):
         # apply SPMD-style PT-D techniques
         m = m.parallelize(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,

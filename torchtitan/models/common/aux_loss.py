@@ -41,7 +41,7 @@ from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import device_type
 
@@ -237,7 +237,9 @@ def _zero_aux_losses(model_parts) -> None:
                 module.instance_acc.zero_()
 
 
-def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
+def collect_aux_loss_metrics(
+    parallelism_context: ParallelismContext,
+) -> dict[str, float]:
     """Reduce the current step's ``group_acc`` registers for logging.
 
     Returns ``{metric_name}/mean`` per group, ``{}`` if none configured.  All
@@ -249,7 +251,7 @@ def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
     if not AuxLoss._group_counts:
         return {}
 
-    pp_mesh = parallel_dims.get_optional_mesh("pp")
+    pp_mesh = parallelism_context.get_optional_mesh("pp")
 
     def _group_acc_or_zero(key: tuple[str, str]) -> torch.Tensor:
         group_acc_value = AuxLoss.group_acc.get(key)
@@ -263,7 +265,7 @@ def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
     metrics = {}
     for key, total in sorted(group_accs.items()):
         mesh_name, tag = key
-        reduce_mesh = parallel_dims.get_optional_mesh(mesh_name)
+        reduce_mesh = parallelism_context.get_optional_mesh(mesh_name)
         for mesh in (reduce_mesh, pp_mesh):
             if mesh is None:
                 continue
@@ -280,7 +282,7 @@ def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
 def register_aux_loss_zero_hook(
     optimizers: OptimizersContainer,
     model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Register the step pre-hook that rolls per-instance ``instance_acc``
     into the ``group_acc`` registers and zeroes the instances.

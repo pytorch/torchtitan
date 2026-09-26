@@ -26,7 +26,7 @@ class _FakeMesh:
         return self._size
 
 
-class _FakeParallelDims:
+class _FakeParallelismContext:
     dp_replicate_enabled = False
     cp_enabled = False
     pp_enabled = False
@@ -39,7 +39,7 @@ class _FakeParallelDims:
         self.tp_enabled = not sparse
 
     def get_optional_mesh(self, name):
-        enabled = {"dp_shard", "tp"} if not self.sparse else {"efsdp", "ep"}
+        enabled = {"dp_shard", "tp"} if not self.sparse else {"edp_shard", "ep"}
         return _FakeMesh((name,)) if name in enabled else None
 
     def get_mesh(self, names):
@@ -105,7 +105,7 @@ def test_autoparallel_integration_matrix():
         "autoparallel_llama3_fsdp_tp"
     ]
     assert [test.test_name for test in suites["h100"]] == [
-        "autoparallel_deepseek_v3_efsdp_ep"
+        "autoparallel_deepseek_v3_edp_shard_ep"
     ]
     assert all(test.ngpu == 4 for tests in suites.values() for test in tests)
 
@@ -175,7 +175,7 @@ def test_model_autoparallel_uses_fx_module_path_and_resolved_policy(
         from torchtitan.experiments.graph_trainer.llama3 import parallelize_autoparallel
 
         model = SimpleNamespace(config=SimpleNamespace(vocab_size=16))
-        parallel_dims = _FakeParallelDims()
+        parallelism_context = _FakeParallelismContext()
         call_parallelize = parallelize_autoparallel.parallelize_autoparallel_llama
         extra_patches = ()
     else:
@@ -184,7 +184,7 @@ def test_model_autoparallel_uses_fx_module_path_and_resolved_policy(
         )
 
         model = SimpleNamespace(config=SimpleNamespace())
-        parallel_dims = _FakeParallelDims(sparse=True)
+        parallelism_context = _FakeParallelismContext(sparse=True)
         call_parallelize = parallelize_autoparallel.parallelize_autoparallel_deepseekv3
         extra_patches = (
             patch.object(
@@ -210,7 +210,7 @@ def test_model_autoparallel_uses_fx_module_path_and_resolved_policy(
 
         call_parallelize(
             model,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=_training_config(),
             parallelism=parallelism,
             compile_config=compile_config,

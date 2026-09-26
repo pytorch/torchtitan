@@ -24,7 +24,7 @@ from torch.utils.checkpoint import CheckpointPolicy
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     get_simple_fsdp_mesh,
@@ -570,7 +570,7 @@ class _GraphPPDsv3FSDPTest(FSDPTest):
         return max(1, min(torch.cuda.device_count(), 2))
 
     def _setup(self) -> None:
-        self.parallel_dims = ParallelDims(
+        self.parallelism_context = ParallelismContext(
             dp_shard=-1,
             dp_replicate=1,
             cp=1,
@@ -589,7 +589,7 @@ class GraphPPPartitionFSDPTest(_GraphPPDsv3FSDPTest):
 
         self._setup()
         traced_block = _trace_dsv3_moe_block_stage(
-            fsdp_mesh=get_simple_fsdp_mesh(self.parallel_dims)
+            fsdp_mesh=get_simple_fsdp_mesh(self.parallelism_context)
         )
         all_gathers = traced_block.traced.gm.graph.find_nodes(
             op="call_function",
@@ -980,7 +980,7 @@ def _make_forward_graph_with_dense_and_expert_unshards() -> fx.GraphModule:
         specs = (
             ("dense_param_0", 2, 4, _FAKE_PG, "dp_shard"),
             ("dense_param_1", 3, 4, _FAKE_PG, "dp_shard"),
-            ("expert_param", 4, 2, _FAKE_PG_2, "efsdp"),
+            ("expert_param", 4, 2, _FAKE_PG_2, "edp_shard"),
         )
         for name, size, group_size, group_name, mesh_axis_name in specs:
             param = graph.placeholder(name)
@@ -1885,7 +1885,7 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         cast = reduce_scatter.all_input_nodes[0]
         (wait,) = reduce_scatter.users
         for node in (cast, reduce_scatter, wait):
-            node.meta["custom"] = {FSDP_MESH_AXIS_NAMES_META: ("efsdp",)}
+            node.meta["custom"] = {FSDP_MESH_AXIS_NAMES_META: ("edp_shard",)}
 
         split = extract_fsdp_reduce_grad_graph(gm, num_param_grads=3)
 
@@ -2051,7 +2051,7 @@ class GraphPPFSDPCollectiveSplitDsv3Test(_GraphPPDsv3FSDPTest):
             raise unittest.SkipTest("real FSDP collective trace requires 2 GPUs")
 
         self._setup()
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
         traced_block = _trace_dsv3_moe_block_stage(fsdp_mesh=fsdp_mesh)
         deduplicate_fsdp_unshard_chains_pass(
             traced_block.traced.gm,

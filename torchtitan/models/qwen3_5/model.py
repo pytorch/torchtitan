@@ -16,9 +16,8 @@ from torch import nn
 
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_dense_sp_enabled,
@@ -269,10 +268,12 @@ class Qwen35Model(MultimodalModel):
     multimodal_encoder_fqns = ("vision_encoder",)
 
     @classmethod
-    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
         from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
-        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     pipeline_first_stage_module_fqns = ("vision_encoder",)
 
@@ -406,7 +407,7 @@ class Qwen35Model(MultimodalModel):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: CompileConfig | None,
@@ -414,7 +415,7 @@ class Qwen35Model(MultimodalModel):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Qwen35Model:
-        if parallel_dims.cp_enabled:
+        if parallelism_context.cp_enabled:
             raise NotImplementedError(
                 "Context Parallel is not yet supported for Qwen3.5. "
                 "GatedDeltaNet requires full-sequence allgather, and multimodal "
@@ -422,7 +423,7 @@ class Qwen35Model(MultimodalModel):
             )
 
         return super().parallelize(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,
@@ -435,7 +436,7 @@ class Qwen35Model(MultimodalModel):
         self,
         input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -488,21 +489,21 @@ class Qwen35Model(MultimodalModel):
             "'positions' or 'mrope_positions'."
         )
         input_dict["positions"] = rope_positions
-        if parallel_dims.cp_enabled:
+        if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
                 input_shardings=input_shardings,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 parallelism=parallelism,
             )
         input_dict = annotate_input_spmd_types(
-            parallel_dims, input_dict, input_shardings
+            parallelism_context, input_dict, input_shardings
         )
         # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
         # nested inside attention_masks, must be annotated at its container.
         attention_masks = input_dict.get("attention_masks")
         if attention_masks is not None:
-            with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+            with parallelism_context.activate_spmd():
                 annotate_deltanet_cu_seqlens(attention_masks)
 
         inputs = input_dict.pop("input")

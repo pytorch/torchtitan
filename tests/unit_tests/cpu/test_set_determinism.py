@@ -13,8 +13,8 @@ from torchtitan.config import DebugConfig
 from torchtitan.distributed.utils import set_determinism
 
 
-class FakeParallelDims:
-    """Fake ParallelDims for testing seed uniqueness.
+class FakeParallelismContext:
+    """Fake ParallelismContext for testing seed uniqueness.
 
     Args:
         mesh_dim_names: List of dimension names (e.g., ["dp", "pp", "tp"])
@@ -31,7 +31,7 @@ class FakeParallelDims:
         for size in mesh_sizes:
             self.world_size *= size
 
-        # Add individual parallelism degree attributes to match real ParallelDims interface
+        # Add individual parallelism degree attributes to match real ParallelismContext interface
         self.pp = self.mesh_sizes.get("pp", 1)
         self.tp = self.mesh_sizes.get("tp", 1)
         self.cp = self.mesh_sizes.get("cp", 1)
@@ -75,7 +75,7 @@ class FakeParallelDims:
     def get_optional_mesh(self, key):
         """Return a submesh for the given dimension, or None if not available.
 
-        This is the same as get_mesh() for FakeParallelDims since get_mesh()
+        This is the same as get_mesh() for FakeParallelismContext since get_mesh()
         already returns None for unavailable meshes.
         """
         return self.get_mesh(key)
@@ -127,15 +127,17 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
 
                 # Create fake mesh for this rank
                 rank_coords = (dp_rank, pp_rank)
-                fake_mesh = FakeParallelDims(mesh_dim_names, mesh_sizes, rank_coords)
+                fake_mesh = FakeParallelismContext(
+                    mesh_dim_names, mesh_sizes, rank_coords
+                )
 
                 # Call set_determinism with distinct seeds only on PP dimension
                 debug_config = DebugConfig(seed=base_seed, deterministic=False)
                 set_determinism(
-                    parallel_dims=fake_mesh,
+                    parallelism_context=fake_mesh,
                     device=self.device,
                     debug_config=debug_config,
-                    distinct_seed_mesh_dims=["pp"],
+                    distinct_seed_mesh_axes=["pp"],
                 )
 
                 # Capture the seed that was set
@@ -196,17 +198,17 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
 
                     # Create fake mesh for this rank
                     rank_coords = (dp_shard_rank, dp_replicate_rank, tp_rank)
-                    fake_mesh = FakeParallelDims(
+                    fake_mesh = FakeParallelismContext(
                         mesh_dim_names, mesh_sizes, rank_coords
                     )
 
                     # Call set_determinism with distinct seeds on dp_shard and dp_replicate only
                     debug_config = DebugConfig(seed=base_seed, deterministic=False)
                     set_determinism(
-                        parallel_dims=fake_mesh,
+                        parallelism_context=fake_mesh,
                         device=self.device,
                         debug_config=debug_config,
-                        distinct_seed_mesh_dims=["dp_shard", "dp_replicate"],
+                        distinct_seed_mesh_axes=["dp_shard", "dp_replicate"],
                     )
 
                     # Capture the seed that was set
@@ -270,10 +272,10 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
 
         debug_config = DebugConfig(seed=base_seed, deterministic=False)
         set_determinism(
-            parallel_dims=fake_mesh,
+            parallelism_context=fake_mesh,
             device=self.device,
             debug_config=debug_config,
-            distinct_seed_mesh_dims=["pp"],
+            distinct_seed_mesh_axes=["pp"],
         )
 
     @patch("torch.distributed.distributed_c10d.get_world_size")
@@ -289,10 +291,10 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
         debug_config = DebugConfig(seed=42, detect_anomaly=True)
         with patch("torch.autograd.set_detect_anomaly") as mock_sda:
             set_determinism(
-                parallel_dims=fake_mesh,
+                parallelism_context=fake_mesh,
                 device=self.device,
                 debug_config=debug_config,
-                distinct_seed_mesh_dims=[],
+                distinct_seed_mesh_axes=[],
             )
             mock_sda.assert_called_once_with(True, check_nan=False)
 
@@ -311,10 +313,10 @@ class TestSetDeterminismWithFakeMesh(unittest.TestCase):
         debug_config = DebugConfig(seed=42)
         with patch("torch.autograd.set_detect_anomaly") as mock_sda:
             set_determinism(
-                parallel_dims=fake_mesh,
+                parallelism_context=fake_mesh,
                 device=self.device,
                 debug_config=debug_config,
-                distinct_seed_mesh_dims=[],
+                distinct_seed_mesh_axes=[],
             )
             mock_sda.assert_not_called()
 

@@ -24,7 +24,7 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.config import CompileConfig
-from torchtitan.distributed import context_parallel, ParallelDims, utils as dist_utils
+from torchtitan.distributed import context_parallel, ParallelismContext
 from torchtitan.distributed.context_parallel import (
     HeadTailCPLoadBalancer,
     PTRRFlexAttentionCPLoadBalancer,
@@ -65,7 +65,7 @@ def main():
     torch.set_default_dtype(torch.float32)
 
     cp = world  # cp = world_size (dp=tp=pp=1)
-    parallel_dims = ParallelDims(
+    parallelism_context = ParallelismContext(
         dp_replicate=1,
         dp_shard=1,
         cp=cp,
@@ -108,7 +108,7 @@ def main():
                 build_and_swap_native_moe,
             )
 
-            build_and_swap_native_moe(m, parallel_dims)
+            build_and_swap_native_moe(m, parallelism_context)
             m.to(device)  # swap builds Titan MoE experts on CPU; move them back
         return m, model_config
 
@@ -136,7 +136,7 @@ def main():
 
     parallelize_hf_transformers(
         cp_model,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         training=cfg.training,
         parallelism=cfg.parallelism,
         compile_config=CompileConfig(),
@@ -160,7 +160,7 @@ def main():
         "global_indices": gidx,
         "attention_masks": full_mask_cp,
     }
-    with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+    with parallelism_context.activate_spmd():
         load_balancer_config = load_balancer_configs[args.balancer]
         load_balancer = (
             load_balancer_config.build(
@@ -191,7 +191,7 @@ def main():
     from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 
     annotated = annotate_input_spmd_types(
-        parallel_dims,
+        parallelism_context,
         {"input": loc_input, "positions": loc_pos},
         decoder_input_sharding(),
     )
@@ -204,7 +204,7 @@ def main():
         f"full_mask={_fm} loc_mask={_lm}"
     )
 
-    with torch.no_grad(), dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+    with torch.no_grad(), parallelism_context.activate_spmd():
         loc_logits = cp_model(loc_input, positions=loc_pos, attention_masks=loc_mask)
 
     # Reconstruct full logits in global order via all-gather + index scatter.
