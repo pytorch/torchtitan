@@ -200,6 +200,7 @@ class FluxModel(BaseModel):
         """Apply Flux's AC-before-SPMD parallelization lifecycle."""
         from torchtitan.distributed.utils import get_spmd_context
 
+        del compile_config
         with get_spmd_context(parallel_dims=parallel_dims):
             if ac_config is not None:
                 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -215,10 +216,6 @@ class FluxModel(BaseModel):
 
             self._parallelize(parallel_dims)
             annotate_replicated_parameters(self, parallel_dims)
-
-            if compile_config is not None and "model" in compile_config.components:
-                for block in (*self.double_blocks, *self.single_blocks):
-                    block.compile(backend=compile_config.backend, fullgraph=True)
 
             if not skip_dp:
                 self._apply_fsdp(

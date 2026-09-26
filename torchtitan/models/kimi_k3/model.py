@@ -411,9 +411,6 @@ class KimiK3Model(MultimodalModel):
                 "Kimi K3 currently supports FSDP2 data parallelism only; "
                 f"disable {', '.join(unsupported)}."
             )
-        if compile_config is not None and "model" in compile_config.components:
-            raise NotImplementedError("Kimi K3 does not support model compilation yet.")
-
         from torchtitan.distributed.utils import get_spmd_context
 
         with get_spmd_context(parallel_dims=parallel_dims):

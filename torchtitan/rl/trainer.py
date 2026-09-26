@@ -98,7 +98,6 @@ class Trainer(Configurable):
             training=config.training,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
-            compile_config=compile_config,
             max_num_documents=max_num_documents,
         )
 

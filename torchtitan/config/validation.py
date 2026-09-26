@@ -13,12 +13,7 @@ from typing import TYPE_CHECKING
 from torchtitan.models.common.attention import BaseAttention
 
 if TYPE_CHECKING:
-    from torchtitan.config import (
-        CompileConfig,
-        DebugConfig,
-        ParallelismConfig,
-        TrainingConfig,
-    )
+    from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )
@@ -34,11 +29,10 @@ def validate_model_training_config(
     training: TrainingConfig,
     debug: DebugConfig,
     activation_checkpoint: ActivationCheckpointingConfig,
-    compile_config: CompileConfig | None,
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
-    from torchtitan.distributed.activation_checkpoint import MemoryBudgetAC, SelectiveAC
+    from torchtitan.distributed.activation_checkpoint import SelectiveAC
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
     from torchtitan.models.common.attention import (
         FlexInnerAttention,
@@ -88,15 +82,6 @@ def validate_model_training_config(
             "with FlexInnerAttention while SPMD typechecking is enabled. "
             "Use full activation checkpointing, disable activation "
             "checkpointing, or switch to a non-Flex attention backend."
-        )
-
-    if isinstance(activation_checkpoint, MemoryBudgetAC.Config) and not (
-        compile_config is not None and "model" in compile_config.components
-    ):
-        raise ValueError(
-            "Memory budget activation checkpointing requires the model to be "
-            "compiled: configure CompileConfig and include 'model' in "
-            "compile.components."
         )
 
     validate_context_parallel(model, parallelism)

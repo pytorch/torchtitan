@@ -37,11 +37,6 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
             use_real_pg=True,
         ),
-        OverrideDefinitions(
-            configs=[recipes.flux_debugmodel_compile],
-            test_descr="Flux FSDP+compile",
-            test_name="flux_fsdp+compile",
-        ),
     ]
 
 

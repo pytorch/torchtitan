@@ -106,7 +106,6 @@ class Trainer(Configurable):
                     training=self.training,
                     debug=self.debug,
                     activation_checkpoint=self.activation_checkpoint,
-                    compile_config=self.compile,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
 

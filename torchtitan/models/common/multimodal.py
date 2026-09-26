@@ -47,6 +47,7 @@ class MultimodalModel(Decoder):
     ) -> Self:
         from torchtitan.distributed.utils import get_spmd_context
 
+        del compile_config
         with get_spmd_context(parallel_dims=parallel_dims):
             self._parallelize(parallel_dims)
             encoders = [
@@ -59,21 +60,6 @@ class MultimodalModel(Decoder):
                 policy.apply(self)
                 for encoder in encoders:
                     policy.apply(encoder)
-
-            if compile_config is not None and "model" in compile_config.components:
-                from torchtitan.distributed.compile import apply_compile
-
-                apply_compile(
-                    self,
-                    compile_config=compile_config,
-                    parallel_dims=parallel_dims,
-                )
-                for encoder in encoders:
-                    apply_compile(
-                        encoder,
-                        compile_config=compile_config,
-                        parallel_dims=parallel_dims,
-                    )
 
             if not skip_dp:
                 self._apply_fsdp(

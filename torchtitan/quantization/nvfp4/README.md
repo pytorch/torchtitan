@@ -22,8 +22,7 @@ normal parameter lifecycle.
 - NVIDIA Blackwell SM100 or later GPU with CUDA.
 - A PyTorch and TorchAO build that provides
   `torchao.prototype.moe_training.nvfp4_training`.
-- `torch.compile` for competitive performance. The provided
-  `llama3_8b_first_85_pct_layers_nvfp4` recipe enables model compilation automatically.
+- `torch.compile` is recommended for competitive performance.
 - Local GEMM dimensions divisible by 128. A Linear whose local in/out features
   are not a multiple of 128 (after TP sharding) is rejected by the NVFP4 kernels
   and must be excluded from the converter. The mixed recipe converts only

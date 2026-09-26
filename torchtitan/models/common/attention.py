@@ -40,7 +40,6 @@ from torch.nn.attention.varlen import (
     varlen_attn as _varlen_attn,
 )
 
-from torchtitan.distributed.compile import maybe_regional_inductor
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -358,22 +357,17 @@ class FlexInnerAttention(InnerAttention):
         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
         #    as the first argument, which will cause an error.
         #    `FlexInnerAttention._compiled_flex_attn` is correct.
-        # Mark the flex region so that, when the enclosing model is compiled with
-        # a non-inductor backend, regional_inductor scoops just this region into
-        # an inductor sub-compile (see distributed/compile.py). A null context on
-        # the default inductor / eager paths, so no dead metadata is emitted.
-        with maybe_regional_inductor(FlexInnerAttention.inductor_configs):
-            out_1HTV, aux = FlexInnerAttention.compiled_flex_attn(
-                q_1HTK,
-                k_1HTK,
-                v_1HTV,
-                score_mod=score_mod,
-                block_mask=attention_masks,
-                scale=scale,
-                enable_gqa=enable_gqa,
-                return_aux=aux_request,
-                kernel_options=self.kernel_options,
-            )
+        out_1HTV, aux = FlexInnerAttention.compiled_flex_attn(
+            q_1HTK,
+            k_1HTK,
+            v_1HTV,
+            score_mod=score_mod,
+            block_mask=attention_masks,
+            scale=scale,
+            enable_gqa=enable_gqa,
+            return_aux=aux_request,
+            kernel_options=self.kernel_options,
+        )
         self._process_aux(aux)
         out_THV = out_1HTV.squeeze(0).transpose(0, 1)
         if out_transform is None:

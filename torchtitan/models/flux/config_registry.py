@@ -16,7 +16,7 @@ from torchtitan.components.checkpointer import (
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
@@ -188,18 +188,14 @@ def flux_schnell() -> FluxTrainer.Config:
 
 
 def flux_schnell_mxfp8() -> FluxTrainer.Config:
-    """Flux schnell with MXFP8 quantization and torch.compile.
+    """Flux schnell with MXFP8 quantization.
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_schnell()
-    config.compile = CompileConfig()
-    model_compile_enabled = (
-        config.compile is not None and "model" in config.compile.components
-    )
     config.model = model_registry(
         "flux-schnell",
         converters=[
             MXFP8LinearConverter.Config(
-                model_compile_enabled=model_compile_enabled,
+                model_compile_enabled=False,
                 fqns=[
                     "double_blocks",
                     "single_blocks",
@@ -216,18 +212,14 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
 
 
 def flux_dev_mxfp8() -> FluxTrainer.Config:
-    """Flux dev with MXFP8 quantization and torch.compile.
+    """Flux dev with MXFP8 quantization.
     Requires SM100+ (B200/B100) and torchao nightly."""
     config = flux_dev()
-    config.compile = CompileConfig()
-    model_compile_enabled = (
-        config.compile is not None and "model" in config.compile.components
-    )
     config.model = model_registry(
         "flux-dev",
         converters=[
             MXFP8LinearConverter.Config(
-                model_compile_enabled=model_compile_enabled,
+                model_compile_enabled=False,
                 fqns=[
                     "double_blocks",
                     "single_blocks",

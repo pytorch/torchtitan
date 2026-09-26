@@ -40,16 +40,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="default",
         ),
         OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_compile],
-            test_descr="1D compile",
-            test_name="1d_compile",
-        ),
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_compile_sac_op],
-            test_descr="1D compile with selective op AC",
-            test_name="1d_compile_sac_op",
-        ),
-        OverrideDefinitions(
             configs=[
                 recipes.llama3_debugmodel_tp2,
                 recipes.llama3_debugmodel_ce_loss_tp2,
@@ -63,18 +53,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             configs=[recipes.llama3_debugmodel_tp2_no_sp],
             test_descr="2D eager (SP disabled)",
             test_name="2d_eager_no_sp",
-        ),
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_tp2_compile],
-            test_descr="2D compile",
-            test_name="2d_compile",
-        ),
-        # TODO: re-enable this test once the async TP CI issue is fixed
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_tp2_asynctp_compile_spmd_types],
-            test_descr="2D async TP compile",
-            test_name="2d_asynctp_compile",
-            disabled=True,
         ),
         OverrideDefinitions(
             configs=[
@@ -132,13 +110,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ],
             test_descr="PP+DP+TP 3D test with save/load resume ckpt",
             test_name="pp_dp_tp",
-            ngpu=8,
-            use_real_pg=True,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2_compile],
-            test_descr="PP+DP+TP 3D test with torch.compile",
-            test_name="3d_compile",
             ngpu=8,
             use_real_pg=True,
         ),
