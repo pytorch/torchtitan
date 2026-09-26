@@ -6,6 +6,7 @@
 
 """Configurations for the ``b200`` integration test suite."""
 
+from dist_moe import VmmConfig
 from torchtitan.components.optimizer import default_adamw
 from torchtitan.trainer import Trainer
 
@@ -66,7 +67,7 @@ def deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
 
     config = deepseek_v3_debugmodel_dist_moe_bf16(
         seq_len=128,
-        max_routing_imbalance_factor=2.0,
+        device_scratch_capacity_factor=2.0,
     )
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.expert_parallel_degree = 2
@@ -82,7 +83,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
 
     config = deepseek_v3_debugmodel_dist_moe_mxfp8(
         seq_len=128,
-        max_routing_imbalance_factor=2.0,
+        device_scratch_capacity_factor=2.0,
     )
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.expert_parallel_degree = 2
@@ -100,6 +101,5 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     assert experts, "the VMM integration recipe requires routed experts"
     for _, expert, _, _ in experts:
         assert isinstance(expert, DistMoeRoutedExperts.Config)
-        expert.vmm_host_scratch_imbalance_factor = 4.0
-        expert.prefetch_vmm = True
+        expert.vmm = VmmConfig(total_scratch_capacity_factor=4.0, prefetch=True)
     return config

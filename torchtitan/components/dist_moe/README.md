@@ -35,7 +35,7 @@ policy is visible.
 Let `T` be the maximum tokens local to a rank after CP and sequence-parallel
 sharding, `K` be top-k, and `P` be the expert-parallel degree. The EP group
 creates `P * T * K` routed rows in total, so balanced routing receives `T * K`
-rows per rank. `max_routing_imbalance_factor=f` reserves device scratch for
+rows per rank. `device_scratch_capacity_factor=f` reserves device scratch for
 approximately `f * T * K` receive rows. Block-scaled kernels pad each local
 expert to their M-tile size, so the exact planned capacity can be slightly
 larger.
@@ -56,15 +56,15 @@ A factor of `1.0` is appropriate for forced-balanced routing. Real routing
 needs measured headroom; `4.0` is a common deliberate choice, not a universal
 default. Without VMM, exceeding the device factor is an error. With VMM, the
 device factor remains the fast-HBM boundary and
-`vmm_host_scratch_imbalance_factor` is the larger device-plus-host correctness
+`vmm.total_scratch_capacity_factor` is the larger device-plus-host correctness
 boundary. Exceeding that total factor is still an error.
 
 ### Device-only example
 
 This BF16 configuration supports real-routing imbalance up to factor four in
-HBM. `device_memory_budget_bytes=None` selects the minimum correct device
-budget: one complete factor-four scratch frame plus the inputs required to
-recompute every local MoE layer in backward.
+HBM. `saved_activation_buffer_bytes=None` selects the minimum correct saved
+state: the inputs required to recompute every local MoE layer in backward.
+Device scratch is planned separately from this value.
 
 ```python
 from torchtitan.config.transform import DistMoeTransform, apply_transforms
@@ -75,11 +75,10 @@ config = apply_transforms(
     config,
     [
         DistMoeTransform(
-            max_routing_imbalance_factor=4.0,
-            device_memory_budget_bytes=None,
+            device_scratch_capacity_factor=4.0,
+            saved_activation_buffer_bytes=None,
             activation_slot_policy="auto",
-            vmm_host_scratch_imbalance_factor=None,
-            prefetch_vmm=False,
+            vmm=None,
         )
     ],
 )
@@ -118,17 +117,20 @@ from torchtitan.config.transform import (
     apply_transforms,
 )
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_16b
+from dist_moe import VmmConfig
 
 config = deepseek_v3_16b()
 config = apply_transforms(
     config,
     [
         DistMoeTransform(
-            max_routing_imbalance_factor=1.0,
-            device_memory_budget_bytes=None,
+            device_scratch_capacity_factor=1.0,
+            saved_activation_buffer_bytes=None,
             activation_slot_policy="auto",
-            vmm_host_scratch_imbalance_factor=4.0,
-            prefetch_vmm=True,
+            vmm=VmmConfig(
+                total_scratch_capacity_factor=4.0,
+                prefetch=True,
+            ),
         ),
         MXFP8DistMoeTransform(pipeline="staged", fast_math=False),
     ],
@@ -139,32 +141,32 @@ The activation arena remains in HBM. Scratch for receive factors in `(1, 4]`
 addresses the host-backed middle section through the same stable CUDA virtual
 range; pages do not migrate, and the CPU does not copy data during execution.
 This preserves correctness but is slower than keeping the same rows in HBM.
-`prefetch_vmm=True` constructs the exact mapping concurrently with other setup
-work and consumes it once during context creation. It is not an execution-time
-prefetch and does not change kernel behavior.
+`VmmConfig(prefetch=True)` constructs the exact mapping concurrently with
+communication-buffer initialization inside `dist_moe.create_context()`. It is
+not an execution-time prefetch and does not change kernel behavior.
 
-### Choosing the device budget
+### Choosing the saved-activation budget
 
-The device budget contains two rank-local regions:
+The complete device allocation contains two rank-local regions:
 
 ```text
-device budget = saved-activation bytes + device scratch bytes
+total device buffer = saved-activation bytes + device scratch bytes
 ```
 
 Device scratch is fixed by shape, precision, kernel pipeline, and
-`max_routing_imbalance_factor`. The remaining bytes are split evenly across the
-selected activation stacks. At the minimum budget, every stack can save the
-input of every assigned MoE layer and backward recomputes the other expert
-intermediates. Increasing the budget lets the device planner retain more
-intermediates and skip corresponding recompute. At the maximum useful budget,
-all saveable intermediates fit; additional bytes do not remove more work.
+`device_scratch_capacity_factor`. `saved_activation_buffer_bytes` controls only
+the saved-activation region and is split evenly across the selected activation
+slots. At the minimum, every slot can save the input of every assigned MoE
+layer and backward recomputes the other expert intermediates. Increasing the
+budget lets the device planner retain more intermediates and skip corresponding
+recompute. At the maximum useful budget, all saveable intermediates fit;
+additional bytes do not remove more work.
 
-Start with `device_memory_budget_bytes=None`, inspect the logged
+Start with `saved_activation_buffer_bytes=None`, inspect the logged
 `Distributed MoE memory plan`, and use its exact minimum and maximum-useful
-values to choose an explicit budget. Do not estimate only the activation bytes:
-the value is the complete device arena and must include hot scratch. VMM adds
-host overflow outside this device budget and never moves saved activations out
-of HBM.
+values to choose an explicit saved-state budget. The logged total device buffer
+adds mandatory hot scratch to this value. VMM adds host overflow scratch and
+never moves saved activations out of HBM.
 
 ### Transform settings
 
@@ -172,14 +174,13 @@ Common `DistMoeTransform` settings:
 
 | Setting | Meaning and selection guidance |
 | --- | --- |
-| `max_routing_imbalance_factor` | HBM receive-row and scratch capacity relative to balanced routing. Use `1.0` for forced balance or a measured real-routing bound. |
-| `device_memory_budget_bytes` | Complete device activation-plus-scratch budget. `None` selects the minimum all-recompute plan; choose a logged value up to the maximum useful budget to retain more activations. |
+| `device_scratch_capacity_factor` | HBM receive-row and scratch capacity relative to balanced routing. Use `1.0` for forced balance or a measured real-routing bound. |
+| `saved_activation_buffer_bytes` | Aggregate saved-activation budget, excluding device scratch. `None` selects the minimum all-recompute plan; choose a logged value up to the maximum useful budget to retain more activations. |
 | `activation_slot_policy` | PP lifetime granularity: `microbatch`, `stage_microbatch`, or `auto`. `auto` evaluates both finalized schedule plans and chooses the smaller `slots * layer_depth` allocation. |
 | `num_activation_slots` | Optional lower bound on the schedule-derived slot count. Leave unset unless an external lifetime requires additional simultaneously live stacks. |
-| `vmm_host_scratch_imbalance_factor` | Total device-plus-host receive factor. `None` uses device-only memory. A value must cover at least the device factor after EP-size clamping. |
-| `prefetch_vmm` | Prepare an enabled VMM mapping before context creation. Requires `vmm_host_scratch_imbalance_factor`; it does not alter capacity or placement. |
+| `vmm` | Optional annex `VmmConfig`. Its total scratch factor must cover at least the device factor after EP-size clamping; `prefetch` controls initialization overlap, not capacity or placement. |
 | `num_sms` | Expert override for SMs assigned to each DistMoE launch. `None` uses the annex default; tune only with shape-specific measurements. |
-| `kernel_config` | Expert BF16 CuTe schedule override. `None` uses the annex's shape-aware production configuration. |
+| `bf16_grouped_gemm_preset` | Expert BF16 CuTe schedule override. `None` uses the annex's shape-aware production configuration. |
 | `wgrad_dtype` | Dtype of the W13/W2 gradient output: `"bfloat16"` or `"float32"`. It does not change tensor-core accumulation, which remains FP32. |
 | `inplace_wgrad_accum` | Ask the annex WGRAD kernels to accumulate into the owned parameter-gradient destination. Enable only when the optimizer/FSDP lifecycle provides a stable compatible destination. |
 
@@ -189,7 +190,7 @@ MXFP8-only `MXFP8DistMoeTransform` settings:
 | --- | --- |
 | `pipeline` | `"staged"` for separate projections or `"mega"` for fused chunk pipelines. Both support training and dynamic recompute. |
 | `fast_math` | Use the approximate sigmoid in fused MXFP8 SwiGLU. This is an explicit numerical/performance choice and defaults to `False`. |
-| `kernel_config` | Fully resolved `DistMoeBlockScaledKernelConfig`. `None` selects the original shape-aware production presets. |
+| `kernel_config` | Fully resolved `BlockScaledKernelConfig`. `None` selects the original shape-aware production presets. |
 
 The MXFP8 transform inherits every common memory and WGRAD setting from the
 BF16 transform it upgrades. It does not independently resize the arena.
@@ -203,7 +204,7 @@ the state it owns:
 
 - `w13.weight`: structured `[E, 2, F, D]` gate/up weights.
 - `w2.weight`: `[E, D, F]` down-projection weights.
-- An optional expert-output postprocess module.
+- An optional `output_postprocess` module.
 
 DistMoE does not construct the stock activation or token dispatcher because
 its kernels own those operations. The common config still supplies shape,
@@ -245,20 +246,19 @@ explicit instead of relying on implicit process-global state.
 
 The standard trainer performs two explicit setup steps:
 
-1. After model parallelization and PP schedule construction, but before model
-   state initialization, `prepare_dist_moe_runtime()` resolves one memory plan,
-   starts optional VMM preparation, and attaches the resulting shared runtime
-   to every local DistMoE layer.
+1. After model parallelization and PP schedule construction,
+   `prepare_dist_moe_runtime()` derives the schedule-aware activation plan,
+   resolves one shared runtime configuration, attaches it to every local
+   DistMoE layer, and registers PP stage-forward contexts.
 2. After parameters and buffers have been materialized, the trainer calls
-   `DistMoeRuntime.initialize()` to construct the annex context and consume any
-   prepared VMM mapping.
+   `DistMoeRuntime.initialize()` to construct the annex context. The annex
+   plans memory and owns any configured VMM prefetch, allocation, and cleanup.
 
-Starting VMM preparation before model state initialization preserves overlap
-without giving layers independent contexts or ownership. All modes attach the
-same runtime reference to their local DistMoE modules. PP additionally
-registers one forward context on each participating ``PipelineStage`` to select
-its immutable stage/microbatch activation slot. Recipe authors configure
-transforms; they do not call either runtime setup method.
+All modes attach the same runtime reference to their local DistMoE modules. PP
+additionally registers one forward context on each participating
+``PipelineStage`` to select its immutable stage/microbatch activation slot.
+Recipe authors configure transforms; they do not call either runtime setup
+method.
 
 The annex owns four distinct allocations:
 
@@ -275,9 +275,8 @@ save an intermediate or recompute it in backward according to available
 capacity; this does not change CUDA-graph topology.
 
 VMM prefetch is resource preparation, not CPU/GPU synchronization or demand
-paging. A prefetched mapping is single-use and must exactly match context
-creation. Failed, closed, consumed, or mismatched mappings are errors and do
-not silently allocate a second arena. See the annex
+paging. The annex owns the single-use mapping and closes it if context creation
+fails; TorchTitan never holds or transfers the private prefetch handle. See the annex
 [memory-planner guide](https://github.com/meta-pytorch/dist_moe/blob/main/docs/memory_planner.md)
 for the byte-level layout, offset protocol, and dynamic-recompute algorithm.
 

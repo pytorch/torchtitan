@@ -67,7 +67,7 @@ def _enable_dist_moe(
     flavor: str,
     seq_len: int | None,
     dtype: Literal["bf16", "mxfp8"],
-    max_routing_imbalance_factor: float,
+    device_scratch_capacity_factor: float,
 ) -> Trainer.Config:
     """Replace routed experts while preserving the base training recipe."""
     model_compile_enabled = (
@@ -90,7 +90,7 @@ def _enable_dist_moe(
     config.dataloader.max_num_documents = 512
     transforms: list[ModelConfigTransform] = [
         DistMoeTransform(
-            max_routing_imbalance_factor=max_routing_imbalance_factor,
+            device_scratch_capacity_factor=device_scratch_capacity_factor,
         )
     ]
     if dtype == "mxfp8":
@@ -194,7 +194,7 @@ def deepseek_v3_debugmodel_float8_grouped(
 def deepseek_v3_debugmodel_dist_moe_bf16(
     seq_len: int | None = None,
     *,
-    max_routing_imbalance_factor: float = 1.0,
+    device_scratch_capacity_factor: float = 1.0,
 ) -> Trainer.Config:
     """Build the debug DSV3 recipe with BF16 Dist-MoE experts."""
     return _enable_dist_moe(
@@ -202,14 +202,14 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
         flavor="debugmodel",
         seq_len=seq_len,
         dtype="bf16",
-        max_routing_imbalance_factor=max_routing_imbalance_factor,
+        device_scratch_capacity_factor=device_scratch_capacity_factor,
     )
 
 
 def deepseek_v3_debugmodel_dist_moe_mxfp8(
     seq_len: int | None = None,
     *,
-    max_routing_imbalance_factor: float = 1.0,
+    device_scratch_capacity_factor: float = 1.0,
 ) -> Trainer.Config:
     """Build the debug DSV3 recipe with MXFP8 Dist-MoE experts and linears."""
     return _enable_dist_moe(
@@ -217,7 +217,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
         flavor="debugmodel",
         seq_len=seq_len,
         dtype="mxfp8",
-        max_routing_imbalance_factor=max_routing_imbalance_factor,
+        device_scratch_capacity_factor=device_scratch_capacity_factor,
     )
 
 
@@ -289,7 +289,7 @@ def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
         flavor="16B",
         seq_len=seq_len,
         dtype="bf16",
-        max_routing_imbalance_factor=4.0,
+        device_scratch_capacity_factor=4.0,
     )
 
 
@@ -300,7 +300,7 @@ def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config
         flavor="16B",
         seq_len=seq_len,
         dtype="mxfp8",
-        max_routing_imbalance_factor=4.0,
+        device_scratch_capacity_factor=4.0,
     )
 
 
@@ -377,7 +377,7 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config
         flavor="671B",
         seq_len=seq_len,
         dtype="bf16",
-        max_routing_imbalance_factor=4.0,
+        device_scratch_capacity_factor=4.0,
     )
 
 
@@ -388,5 +388,5 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Confi
         flavor="671B",
         seq_len=seq_len,
         dtype="mxfp8",
-        max_routing_imbalance_factor=4.0,
+        device_scratch_capacity_factor=4.0,
     )
