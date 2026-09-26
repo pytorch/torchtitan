@@ -20,7 +20,6 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.moe_sharding import (
     expert_param_placement_sparse,
-    set_moe_block_padding_mask_sharding,
     set_moe_sharding_config,
 )
 from torchtitan.models.gpt_oss.model import Attention
@@ -92,7 +91,6 @@ def _set_gpt_oss_layer_sharding(
 
     # MoE FFN (all GPT-OSS blocks are MoE).
     if layer_cfg.moe is not None:
-        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,

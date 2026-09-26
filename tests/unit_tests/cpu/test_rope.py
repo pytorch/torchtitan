@@ -277,7 +277,9 @@ class TestYaRNScaling(unittest.TestCase):
         from torchtitan.models.deepseek_v3.model import Attention
 
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
-        model_config = build_config("flex", "standard", seq_len=max_context_length)
+        model_config = build_config(
+            "flex", "standard", enable_sp=True, seq_len=max_context_length
+        )
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, Attention.Config)
         attention_config.rope = dataclasses.replace(

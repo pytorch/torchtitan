@@ -317,6 +317,7 @@ def _make_v4_moe_config(
     *,
     layer_id: int,
     dim: int,
+    enable_sp: bool,
     moe_inter_dim: int,
     num_experts: int,
     num_shared_experts: int,
@@ -360,6 +361,7 @@ def _make_v4_moe_config(
             make_shared_expert_ffn_config(
                 dim=dim,
                 hidden_dim=moe_inter_dim * num_shared_experts,
+                enable_sp=enable_sp,
                 w1_param_init=_LINEAR_INIT,
                 w2w3_param_init=_depth_init(layer_id),
             )
@@ -389,6 +391,7 @@ def _build_v4_layers(
     n_layers: int,
     layer_offset: int = 0,
     dim: int,
+    enable_sp: bool,
     n_heads: int,
     head_dim: int,
     rope_head_dim: int,
@@ -461,6 +464,7 @@ def _build_v4_layers(
             moe_cfg = _make_v4_moe_config(
                 layer_id=actual_layer_id,
                 dim=dim,
+                enable_sp=enable_sp,
                 moe_inter_dim=moe_inter_dim,
                 num_experts=num_experts,
                 num_shared_experts=num_shared_experts,
@@ -620,6 +624,7 @@ def _debugmodel(
     non_blocking_capacity_factor: float | None = None,
     n_mtp_layers: int = 0,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> DeepSeekV4Model.Config:
     dim = 256
@@ -670,6 +675,7 @@ def _debugmodel(
     )
 
     layers = _build_v4_layers(
+        enable_sp=enable_sp,
         n_layers=n_layers,
         dim=dim,
         n_heads=n_heads,
@@ -753,6 +759,7 @@ def _deepseek_v4_flash(
     non_blocking_capacity_factor: float | None = None,
     n_mtp_layers: int = 0,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> DeepSeekV4Model.Config:
     dim = 4096
@@ -803,6 +810,7 @@ def _deepseek_v4_flash(
     )
 
     layers = _build_v4_layers(
+        enable_sp=enable_sp,
         n_layers=n_layers,
         dim=dim,
         n_heads=n_heads,
@@ -886,6 +894,7 @@ def _deepseek_v4_pro(
     non_blocking_capacity_factor: float | None = None,
     n_mtp_layers: int = 0,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> DeepSeekV4Model.Config:
     dim = 7168
@@ -936,6 +945,7 @@ def _deepseek_v4_pro(
     )
 
     layers = _build_v4_layers(
+        enable_sp=enable_sp,
         n_layers=n_layers,
         dim=dim,
         n_heads=n_heads,
@@ -1024,6 +1034,7 @@ deepseek_v4_configs = {
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool,
     seq_len: int | None = None,
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
@@ -1043,6 +1054,7 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     config = get_config(
+        enable_sp=enable_sp,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         n_mtp_layers=n_mtp_layers,

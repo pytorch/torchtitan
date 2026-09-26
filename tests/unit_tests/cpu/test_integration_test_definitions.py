@@ -127,7 +127,8 @@ def test_parse_multiple_integration_test_suites() -> None:
 
 
 def test_h100_tests_are_registered_in_separate_suite() -> None:
-    assert {test.test_name for test in build_h100_tests_list()} == {
+    h100_tests = build_h100_tests_list()
+    assert {test.test_name for test in h100_tests} == {
         "2d_asynctp_compile",
         "deepseek_v3_fsdp+hybridep+compile",
         "dist_gemm",
@@ -137,7 +138,12 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "fsdp_symm_mem",
         "hsdp+cp+compile+float8",
         "qwen3_fsdp+deepep",
+        "qwen3_5_moe_float8_lora",
     }
+    qwen35_lora_test = next(
+        test for test in h100_tests if test.test_name == "qwen3_5_moe_float8_lora"
+    )
+    assert qwen35_lora_test.configs[0].__module__ == "torchtitan_recipes.tests.h100"
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
     assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
 
