@@ -20,6 +20,48 @@ For now, we sidestep all these problems with a simple but brutal solution: Initi
 
 One issue with seed checkpoints is that we rely on initializing _every_ model state from the checkpoint, which means the model can't have any non-persistent buffers, or else we have to specially initialize those in [train.py](../torchtitan/train.py) after pipeline splitting.  `freqs_cis` was originally a non-persistent buffer, and we changed this to persistent in order to load it from the seed checkpoint.
 
+## Controlling FSDP residency and unshard lookahead in pipeline schedules
+
+Looped pipeline schedules can have several local stages backed by FSDP. Two
+separate policies control their parameter lifetime:
+
+- `pp_max_unsharded_active_stages` bounds how many local stages
+  may remain resident. Lowering this value can reduce parameter memory, but it
+  can also introduce additional reshard and later unshard cycles.
+- `pp_num_unshard_lookahead_factor` controls how many upcoming distinct
+  stages may issue their asynchronous all-gathers. It changes only where
+  existing `UNSHARD` actions are issued; it does not change stage residency,
+  `RESHARD` placement, collective counts, or the wait immediately before a
+  stage first consumes its parameters.
+
+The lookahead policy accepts three forms:
+
+| Value | Resolved lookahead on PP rank `r` | Intended use |
+| --- | --- | --- |
+| `"full"` | `max_unsharded_stages` | Preserve PyTorch's full-window behavior by issuing every eligible unshard as early as the residency window permits. |
+| `"auto"` | `min(r + 2, max_unsharded_stages)` | Avoid a full all-gather burst on early PP ranks while leaving progressively more lookahead on ranks with a pipeline warmup window. |
+| `(k0, ..., kN)` | `kr` | Expert control for asymmetric stage cost, parameter size, or network behavior. |
+
+An explicit tuple must contain one positive integer per PP rank. Every value
+must be no larger than the resolved
+`pp_max_unsharded_active_stages`. A lookahead of one issues an
+unshard immediately before that stage; a lookahead of two keeps one future
+stage in flight while the current stage computes.
+
+PyTorch pipeline schedules default to `"full"` for backward compatibility.
+TorchTitan defaults to `"auto"` because it owns the complete pipeline topology
+and can select the rank-aware policy without recipe-specific tuning. Use
+`"full"` when reproducing the original eager all-gather issue pattern, or an
+explicit tuple when profiling establishes a better rank-specific distance:
+
+```python
+config.parallelism.pp_max_unsharded_active_stages = 4
+config.parallelism.pp_num_unshard_lookahead_factor = "auto"
+
+# Equivalent to "full" for a four-rank pipeline with a residency bound of four.
+config.parallelism.pp_num_unshard_lookahead_factor = (4, 4, 4, 4)
+```
+
 ## On upcasting the final output to fp32
 We intentionally upcast the final output tensor to fp32 inside the loss function rather in the `Transformer.forward()` so that forward and backward casts can be fused with the loss forward and backward respectively when we `torch.compile()` the loss function. This can improve both throughput and memory usage.
 
