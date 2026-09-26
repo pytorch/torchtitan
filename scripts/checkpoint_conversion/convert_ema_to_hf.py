@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-import importlib
 import logging
 import re
 from pathlib import Path
@@ -16,6 +15,13 @@ from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpointer import EMA, ModelWrapper
 from torchtitan.components.optimizer import EMA as EMAContainer  # noqa: N811
 from torchtitan.config import TORCH_DTYPE_MAP
+
+if __package__:
+    from scripts.checkpoint_conversion.utils import build_model_config_for_conversion
+else:
+    from utils import (  # pyrefly: ignore [missing-import]
+        build_model_config_for_conversion,
+    )
 
 # CheckpointManager keeps the EMA container under the EMA state key, so DCP
 # flattens its per-tensor state to "ema.state.<fqn>.ema_params".
@@ -56,8 +62,7 @@ def convert_ema_to_hf(
     export_dtype,
 ):
     # load model and model args so that we can get the state dict shape
-    model_module = importlib.import_module(f"torchtitan.models.{model_name}")
-    model_config = model_module.model_registry(model_flavor)
+    model_config = build_model_config_for_conversion(model_name, model_flavor)
 
     with torch.device("cpu"):
         model = model_config.build()

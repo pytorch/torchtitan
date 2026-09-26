@@ -37,6 +37,7 @@ qwen3_6_configs = {
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
@@ -51,6 +52,7 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
+        enable_sp=enable_sp,
         seq_len=context_len,
         **(
             {"moe_comm_backend": moe_comm_backend}
