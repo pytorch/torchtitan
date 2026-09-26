@@ -9,7 +9,7 @@
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from dist_moe import DistMoeBlockScaledKernelConfig
+from dist_moe import Bf16GroupedGemmPreset, BlockScaledKernelConfig, VmmConfig
 
 from torchtitan.components.dist_moe import (
     DistMoeRoutedExperts,
@@ -54,14 +54,13 @@ def _replace_traversed_config(model, entry, replacement):
 class DistMoeTransform(ModelConfigTransform):
     """Replace standard routed experts with the BF16 DistMoE backend."""
 
-    max_routing_imbalance_factor: float = 1.0
-    device_memory_budget_bytes: int | None = None
+    device_scratch_capacity_factor: float = 1.0
+    saved_activation_buffer_bytes: int | None = None
     activation_slot_policy: Literal["auto", "microbatch", "stage_microbatch"] = "auto"
     num_activation_slots: int | None = None
-    vmm_host_scratch_imbalance_factor: float | None = None
-    prefetch_vmm: bool = False
+    vmm: VmmConfig | None = None
     num_sms: int | None = None
-    kernel_config: str | None = None
+    bf16_grouped_gemm_preset: Bf16GroupedGemmPreset | None = None
     wgrad_dtype: Literal["bfloat16", "float32"] = "bfloat16"
     inplace_wgrad_accum: bool = False
 
@@ -81,16 +80,13 @@ class DistMoeTransform(ModelConfigTransform):
             assert isinstance(converted, DistMoeRoutedExperts.Config)
             replacement = replace(
                 converted,
-                max_routing_imbalance_factor=self.max_routing_imbalance_factor,
-                device_memory_budget_bytes=self.device_memory_budget_bytes,
+                device_scratch_capacity_factor=self.device_scratch_capacity_factor,
+                saved_activation_buffer_bytes=self.saved_activation_buffer_bytes,
                 activation_slot_policy=self.activation_slot_policy,
                 num_activation_slots=self.num_activation_slots,
-                vmm_host_scratch_imbalance_factor=(
-                    self.vmm_host_scratch_imbalance_factor
-                ),
-                prefetch_vmm=self.prefetch_vmm,
+                vmm=self.vmm,
                 num_sms=self.num_sms,
-                kernel_config=self.kernel_config,
+                bf16_grouped_gemm_preset=self.bf16_grouped_gemm_preset,
                 wgrad_dtype=self.wgrad_dtype,
                 inplace_wgrad_accum=self.inplace_wgrad_accum,
             )
@@ -107,7 +103,7 @@ class MXFP8DistMoeTransform(ModelConfigTransform):
 
     pipeline: Literal["staged", "mega"] = "staged"
     fast_math: bool = False
-    kernel_config: DistMoeBlockScaledKernelConfig | None = None
+    kernel_config: BlockScaledKernelConfig | None = None
 
     def transform(self, model: Module.Config) -> Module.Config:
         """Upgrade each BF16 DistMoE config to asynchronous MXFP8."""
