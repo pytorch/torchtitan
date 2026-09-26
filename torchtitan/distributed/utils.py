@@ -25,7 +25,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.tools.utils import device_module, device_type
+from torchtitan.distributed.parallel_dims import DistributedTopology
+from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 logger = logging.getLogger(__name__)
 
@@ -402,12 +403,115 @@ def init_fake_mode(
     )
 
 
+def _env_int(name: str, *, default: int | None = None) -> int:
+    """Read an integer environment variable with an actionable error."""
+    value = os.environ.get(name)
+    if value is None:
+        if default is not None:
+            return default
+        raise ValueError(f"{name} environment variable must be set")
+    try:
+        return int(value)
+    except ValueError as error:
+        raise ValueError(
+            f"{name} environment variable must be a valid integer, got: {value}"
+        ) from error
+
+
+def _fake_logical_rank(logical_world_size: int, pp_degree: int) -> int:
+    """Resolve a pure-fake logical rank with SPMD coordinate zero."""
+    if logical_world_size % pp_degree != 0:
+        raise ValueError(
+            f"Logical world size {logical_world_size} must be divisible by PP "
+            f"degree {pp_degree}"
+        )
+    pp_rank = _env_int("FAKE_PP_RANK", default=0 if pp_degree == 1 else None)
+    spmd_world_size = logical_world_size // pp_degree
+    if not 0 <= pp_rank < pp_degree:
+        raise ValueError(f"FAKE_PP_RANK must be in [0, {pp_degree}), got {pp_rank}")
+    return pp_rank * spmd_world_size
+
+
+def _init_real_pp_fake_spmd(
+    logical_world_size: int,
+    pp_degree: int,
+    timeout: timedelta,
+) -> DistributedTopology:
+    """Initialize real PP communication inside a fake logical SPMD world."""
+    physical_world_size = _env_int("WORLD_SIZE")
+    physical_rank = _env_int("RANK")
+    if physical_world_size != pp_degree:
+        raise ValueError(
+            "real-PP/fake-SPMD mode requires one physical process per PP rank: "
+            f"WORLD_SIZE={physical_world_size}, PP={pp_degree}"
+        )
+    if not 0 <= physical_rank < physical_world_size:
+        raise ValueError(
+            f"RANK must be in [0, {physical_world_size}), got {physical_rank}"
+        )
+    if logical_world_size % pp_degree != 0:
+        raise ValueError(
+            f"Logical world size {logical_world_size} must be divisible by PP "
+            f"degree {pp_degree}"
+        )
+
+    if "FAKE_PP_RANK" in os.environ:
+        raise ValueError(
+            "FAKE_PP_RANK is invalid with the real_pp_fake_spmd backend; "
+            "physical RANK selects the PP coordinate"
+        )
+    spmd_world_size = logical_world_size // pp_degree
+    logical_rank = physical_rank * spmd_world_size
+    logical_pp_ranks = [pp_rank * spmd_world_size for pp_rank in range(pp_degree)]
+    init_fake_mode(logical_world_size, rank=logical_rank)
+
+    rendezvous = dist.rendezvous(
+        "env://",
+        rank=physical_rank,
+        world_size=physical_world_size,
+        timeout=timeout,
+    )
+    store, rendezvous_rank, rendezvous_world_size = next(rendezvous)
+    if (rendezvous_rank, rendezvous_world_size) != (
+        physical_rank,
+        physical_world_size,
+    ):
+        raise RuntimeError("Physical PP rendezvous returned inconsistent topology")
+
+    group_name = c10d.GroupName("torchtitan_real_pp")
+    pp_group, _ = c10d._new_process_group_helper(
+        group_size=physical_world_size,
+        group_rank=physical_rank,
+        global_ranks_in_group=logical_pp_ranks,
+        backend="nccl",
+        store=store,
+        group_name=group_name,
+        timeout=timeout,
+        pg_tag=group_name,
+        device_id=get_local_device(),
+        group_desc="TorchTitan real pipeline group",
+    )
+    if not isinstance(pp_group, dist.ProcessGroup):
+        raise RuntimeError("Failed to construct the real PP process group")
+    c10d._world.pg_group_ranks[pp_group] = {
+        logical_rank: group_rank
+        for group_rank, logical_rank in enumerate(logical_pp_ranks)
+    }
+    return DistributedTopology(
+        world_size=logical_world_size,
+        real_pp_group_for_fake_spmd=pp_group,
+    )
+
+
 def init_distributed(
     comm_config: CommConfig,
     enable_cpu_backend: bool = False,
     base_folder: str = "",
     ranks: list[int] | None = None,
-) -> int:
+    *,
+    pipeline_parallel_degree: int = 1,
+) -> DistributedTopology:
+    """Initialize communication and return the logical distributed topology."""
     enable_fp32_matmul_emulation_with_bf16x9()
 
     # Skip initialization if already initialized
@@ -416,38 +520,28 @@ def init_distributed(
             "torch.distributed is already initialized. Skipping init_distributed. "
             "The provided comm_config and other settings will not take effect."
         )
-        return torch.distributed.get_world_size()
+        return DistributedTopology(torch.distributed.get_world_size())
 
     # disable autograd multithreading, to enable TLS DeviceMesh stack for spmd_types backend.
     # this is needed for AC functionality; multi-threaded autograd means BWD threads performing recompute,
     # cannot access PGs, e.g. current_spmd_mesh().get_group("tp") to perform the collectives they need.
     torch.autograd.set_multithreading_enabled(False)
 
-    if comm_config.mode == "fake_backend":
-        ngpu_str = os.environ.get("NGPU")
-        if ngpu_str is None:
-            raise ValueError(
-                f"NGPU environment variable must be set when using comm_mode={comm_config.mode}"
+    if comm_config.backend in {"fake", "real_pp_fake_spmd"}:
+        logical_world_size = _env_int("NGPU")
+        if comm_config.backend == "real_pp_fake_spmd":
+            return _init_real_pp_fake_spmd(
+                logical_world_size,
+                pipeline_parallel_degree,
+                timedelta(seconds=comm_config.init_timeout_seconds),
             )
-        try:
-            world_size = int(ngpu_str)
-        except ValueError as e:
+        rank = _fake_logical_rank(logical_world_size, pipeline_parallel_degree)
+        if not 0 <= rank < logical_world_size:
             raise ValueError(
-                f"NGPU environment variable must be a valid integer, got: {ngpu_str}"
-            ) from e
-        rank_str = os.environ.get("RANK", "0")
-        try:
-            rank = int(rank_str)
-        except ValueError as e:
-            raise ValueError(
-                f"RANK environment variable must be a valid integer, got: {rank_str}"
-            ) from e
-        if not 0 <= rank < world_size:
-            raise ValueError(
-                f"RANK must be in [0, {world_size}) for fake mode, got: {rank}"
+                f"Fake rank must be in [0, {logical_world_size}), got {rank}"
             )
-        init_fake_mode(world_size, rank=rank)
-        return world_size
+        init_fake_mode(logical_world_size, rank=rank)
+        return DistributedTopology(logical_world_size)
 
     def _warn_overwrite_env(env, val):
         if env in os.environ:
@@ -494,7 +588,7 @@ def init_distributed(
         _ranks=ranks if ranks is not None else [],
     )
 
-    return torch.distributed.get_world_size()
+    return DistributedTopology(torch.distributed.get_world_size())
 
 
 def set_pg_timeouts(

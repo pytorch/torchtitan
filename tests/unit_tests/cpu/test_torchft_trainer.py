@@ -15,7 +15,7 @@ import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import override
 from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import DistributedTopology, ParallelDims
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import model_registry
 from torchtitan.training_engine import TrainingEngine
@@ -41,7 +41,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     def initialize_distributed_runtime(engine):
         engine.device = torch.device("cpu")
         engine.parallel_dims = ParallelDims.from_config(
-            config.parallelism, world_size=1
+            config.parallelism, DistributedTopology(world_size=1)
         )
         engine.ft_manager = config.fault_tolerance.build()
         engine.gc_handler = None
