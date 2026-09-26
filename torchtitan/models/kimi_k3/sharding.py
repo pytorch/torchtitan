@@ -65,9 +65,7 @@ def set_kimi_k3_sharding_config(
         else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     if config.vision_encoder is not None:
-        _set_multimodal_decoder_boundary_sharding(
-            config, layer_input_layout, enable_sp=enable_sp
-        )
+        _set_multimodal_decoder_boundary_sharding(config, layer_input_layout)
         set_moonvit_sharding_config(config.vision_encoder, projector_norm="post_norm")
     for layer_cfg in config.layers:
         _set_kimi_k3_layer_sharding(
@@ -269,23 +267,11 @@ def _tp_unsharded_weight_config(*, token_sharded: bool) -> ShardingConfig:
     )
 
 
-def _block_residual_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdType:
-    """Placement of the ``(tokens, entries, hidden)`` block-residual stack."""
-    if isinstance(tp, spmd.Shard):
-        return SpmdType(
-            {DP: spmd.V, TP: spmd.V},
-            partition_spec=spmd.PartitionSpec((DP, TP), None, None),
-        )
-    return SpmdType(
-        {DP: spmd.V, TP: tp}, partition_spec=spmd.PartitionSpec(DP, None, None)
-    )
-
-
 def _set_multimodal_decoder_boundary_sharding(
-    config: "KimiK3Model.Config", layer_input_layout: SpmdType, *, enable_sp: bool
+    config: "KimiK3Model.Config", layer_input_layout: SpmdType
 ) -> None:
     """Keep the output of ``tok_embeddings`` TP-replicated for the vision scatter;
-    Decoder's layer 0's input boundary restores the decoder's layout for the stream and the stack.
+    Decoder's layer 0's input boundary restores the decoder's layout for the stream.
     """
     replicated = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     config.tok_embeddings.sharding_config = ShardingConfig(
@@ -297,14 +283,6 @@ def _set_multimodal_decoder_boundary_sharding(
         local_spmd=True,
     )
     config.layers[0].sharding_config = ShardingConfig(
-        in_src_shardings={
-            "x_TD": replicated,
-            "block_residual_TND": _block_residual_placement(tp=spmd.R),
-        },
-        in_dst_shardings={
-            "x_TD": layer_input_layout,
-            "block_residual_TND": _block_residual_placement(
-                tp=spmd.S(0) if enable_sp else spmd.I
-            ),
-        },
+        in_src_shardings={"x_TD": replicated},
+        in_dst_shardings={"x_TD": layer_input_layout},
     )

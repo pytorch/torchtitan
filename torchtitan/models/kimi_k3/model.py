@@ -46,6 +46,7 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
+from torchtitan.models.kimi_k3.pipeline_parallel.activations import PPMemoryConfig
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
@@ -174,15 +175,18 @@ class KimiMLAAttention(BaseAttention):
 
 
 def _apply_attention_residual(
-    prefix_sum_TD: torch.Tensor,
-    block_residual_TND: torch.Tensor,
+    partial_block_TD: torch.Tensor | None,
+    blocks_TD: list[torch.Tensor],
     projection: Linear,
     norm: RMSNorm,
 ) -> torch.Tensor:
     """Apply Kimi's block-level attention residual in FP32."""
     assert norm.eps is not None
 
-    values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
+    values_TND = torch.stack(
+        blocks_TD if partial_block_TD is None else [*blocks_TD, partial_block_TD],
+        dim=1,
+    )
     values_float = values_TND.float()
     variance = values_float.pow(2).mean(dim=-1, keepdim=True)
     keys_TND = values_float * torch.rsqrt(variance + norm.eps)
@@ -221,6 +225,8 @@ class KimiK3TransformerBlock(Module):
             raise ValueError("Exactly one of feed_forward or moe must be configured.")
         self.layer_id = config.layer_id
         self.attn_res_block_size = config.attn_res_block_size
+        # A block's first layer closes the previous block and joins the stack.
+        self.first_layer_in_block = self.layer_id % self.attn_res_block_size == 0
         self.attention = (
             config.attention.build() if config.attention is not None else None
         )
@@ -255,35 +261,29 @@ class KimiK3TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        block_residual_TND: torch.Tensor,
+        blocks_TD: list[torch.Tensor],
         attention_masks: KimiK3AttentionMaskDict | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        prefix_sum_TD = x_TD
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        if self.first_layer_in_block:
+            blocks_TD = [*blocks_TD, x_TD]
+            partial_block_TD = None
+        else:
+            partial_block_TD = x_TD
 
-        if block_residual_TND.shape[1] > 0:
-            assert self.attention_res_proj is not None
+        if self.attention_res_proj is None:
+            h_TD = x_TD
+        else:
             assert self.attention_res_norm is not None
-            x_TD = _apply_attention_residual(
-                prefix_sum_TD,
-                block_residual_TND,
+            h_TD = _apply_attention_residual(
+                partial_block_TD,
+                blocks_TD,
                 self.attention_res_proj,
                 self.attention_res_norm,
             )
-
-        opens_block = self.layer_id % self.attn_res_block_size == 0
-        if opens_block:
-            block_residual_TND = torch.cat(
-                (
-                    block_residual_TND,
-                    prefix_sum_TD.unsqueeze(1),
-                ),
-                dim=1,
-            )
-
-        h_TD = self.attention_norm(x_TD)
+        h_TD = self.attention_norm(h_TD)
         layer_mask = (
             attention_masks[self.attn_mask_key] if attention_masks is not None else None
         )
@@ -292,11 +292,11 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.delta_attention is not None
             h_TD = self.delta_attention(h_TD, layer_mask, positions)
-        prefix_sum_TD = h_TD if opens_block else prefix_sum_TD + h_TD
+        prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
 
         h_TD = _apply_attention_residual(
             prefix_sum_TD,
-            block_residual_TND,
+            blocks_TD,
             self.ffn_res_proj,
             self.ffn_res_norm,
         )
@@ -306,7 +306,7 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
-        return prefix_sum_TD + h_TD, block_residual_TND
+        return prefix_sum_TD + h_TD, blocks_TD
 
 
 class KimiK3Model(MultimodalModel):
@@ -319,7 +319,14 @@ class KimiK3Model(MultimodalModel):
 
         register_moe_quantile_balancing_hook(optimizers, model_parts, parallel_dims)
 
-    supports_pipeline_parallel = False
+    pipeline_first_stage_module_fqns = ("vision_encoder",)
+    pipeline_last_stage_module_fqns = ("output_res_proj", "output_res_norm")
+
+    def pipeline(self, **kwargs):
+        """Partition the model, then route the attention-residual blocks along the split."""
+        from .pipeline_parallel import pipeline_kimi_k3
+
+        return pipeline_kimi_k3(self, **kwargs)
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
@@ -327,6 +334,8 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        pp_memory: PPMemoryConfig = field(default_factory=PPMemoryConfig)
+        """How each pipeline rank stores the tensors its backward reads."""
 
         def update_from_config(self, *, config, **kwargs) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
@@ -399,18 +408,9 @@ class KimiK3Model(MultimodalModel):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> KimiK3Model:
-        unsupported = [
-            name
-            for name, enabled in (
-                ("pipeline parallel", parallel_dims.pp_enabled),
-                ("context parallel", parallel_dims.cp_enabled),
-            )
-            if enabled
-        ]
-        if unsupported:
+        if parallel_dims.cp_enabled:
             raise NotImplementedError(
-                "Kimi K3 currently supports FSDP2 data parallelism only; "
-                f"disable {', '.join(unsupported)}."
+                "Kimi K3 does not support context parallelism yet."
             )
         if compile_config is not None and "model" in compile_config.components:
             raise NotImplementedError("Kimi K3 does not support model compilation yet.")
@@ -560,9 +560,10 @@ class KimiK3Model(MultimodalModel):
             vision_positions=vision_positions,
         )
 
-    def forward(  # pyrefly: ignore [bad-override]
+    def forward(  # pyrefly: ignore[bad-param-name-override, bad-override]
         self,
         tokens: torch.Tensor,
+        blocks_TD: list[torch.Tensor] | None = None,
         *,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
@@ -572,9 +573,10 @@ class KimiK3Model(MultimodalModel):
         positions: torch.Tensor | None = None,
         attention_masks: KimiK3AttentionMaskDict | None = None,
         padding_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
+
         if self.tok_embeddings is not None:
             with spmd_local_context("dp"):
                 h_TD = self._prepare_multimodal_embeds(
@@ -589,19 +591,22 @@ class KimiK3Model(MultimodalModel):
         if spmd.is_type_checking():
             spmd.assert_type(h_TD, {MeshAxisName.DP: spmd.S(0)})
 
-        block_residual_TND = h_TD.unsqueeze(1)[:, :0]
+        if blocks_TD is None:
+            blocks_TD = []
         for layer in self.layers.values():
-            h_TD, block_residual_TND = layer(
+            h_TD, blocks_TD = layer(
                 h_TD,
-                block_residual_TND,
+                blocks_TD,
                 attention_masks,
                 positions,
                 padding_mask=padding_mask,
             )
 
+        if self.output_res_proj is None:
+            return h_TD, blocks_TD
         h_TD = _apply_attention_residual(
             h_TD,
-            block_residual_TND,
+            blocks_TD,
             self.output_res_proj,
             self.output_res_norm,
         )
