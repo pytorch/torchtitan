@@ -58,7 +58,6 @@ __all__ = [
     "ScaledDotProductInnerAttention",
     "VarlenInnerAttention",
     "VarlenMetadata",
-    "annotate_varlen_metadata_spmd_types",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "get_causal_mask_mod",
@@ -81,19 +80,18 @@ class VarlenMetadata(NamedTuple):
     max_q: int
     max_k: int
 
-
-def annotate_varlen_metadata_spmd_types(metadata: VarlenMetadata) -> None:
-    """Annotate nested variable-length offsets for dense model parallelism."""
-    placements = spmd.SpmdType(
-        {
-            MeshAxisName.DP: spmd.V,
-            MeshAxisName.TP: spmd.R,
-        },
-        partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
-    )
-    spmd.assert_type(metadata.cu_seq_q, placements)
-    if metadata.cu_seq_k is not metadata.cu_seq_q:
-        spmd.assert_type(metadata.cu_seq_k, placements)
+    def annotate_spmd_types(self) -> None:
+        """Annotate offsets under the active dense model-parallel mesh."""
+        placements = spmd.SpmdType(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.TP: spmd.R,
+            },
+            partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
+        )
+        spmd.assert_type(self.cu_seq_q, placements)
+        if self.cu_seq_k is not self.cu_seq_q:
+            spmd.assert_type(self.cu_seq_k, placements)
 
 
 # Mapping (not dict) lets covariant value types accept both BlockMask-only
