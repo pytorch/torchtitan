@@ -8,8 +8,8 @@ import logging
 from dataclasses import dataclass, fields
 from typing import Any, cast, ClassVar, Protocol
 
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.lora import get_lora_linear
+from torchtitan.models.common.linear import GroupedLinear, Linear
+from torchtitan.models.common.lora import get_lora_grouped_linear, get_lora_linear
 from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform
@@ -85,14 +85,39 @@ class LinearLoRAHandler:
         )
 
 
+class GroupedLinearLoRAHandler:
+    """Convert ``GroupedLinear.Config`` instances to LoRA-enabled configs."""
+
+    config_type = GroupedLinear.Config
+
+    def make_config(
+        self,
+        cfg: Module.Config,
+        *,
+        rank: int,
+        alpha: float,
+    ) -> Module.Config:
+        if rank % 8:
+            raise ValueError(f"Grouped LoRA rank must be divisible by 8, got {rank}")
+        assert cfg._owner is not None
+        lora_cls = get_lora_grouped_linear(cast(type[Module], cfg._owner))
+        lora_config_cls = cast(Any, lora_cls.Config)
+        return lora_config_cls(
+            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
+            rank=rank,
+            alpha=alpha,
+        )
+
+
 @dataclass(kw_only=True, slots=True)
 class LoRATransform(ModelConfigTransform):
     """Apply LoRA adapters to supported projection layers in a model.
 
     ``handlers`` defines the projection config types supported by this
-    transform. Include ``LinearLoRAHandler`` to adapt ``Linear.Config``
-    instances. Non-target modules are replaced with dynamic frozen config
-    subclasses that freeze direct parameters at build time.
+    transform. Include ``LinearLoRAHandler`` or ``GroupedLinearLoRAHandler``
+    to adapt their respective projection configs. Non-target modules are
+    replaced with dynamic frozen config subclasses that freeze direct
+    parameters at build time.
 
     When ``target_modules`` is None (default), every supported projection is
     converted. When specified, only configs whose FQN's last segment matches

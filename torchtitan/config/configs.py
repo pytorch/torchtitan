@@ -87,10 +87,11 @@ class TrainingConfig:
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
-    with the host during dispatch. Pipeline parallelism
-    is supported with single-stage schedules such as GPipe and 1F1B. CUDA graphs
-    are independent of ``torch.compile(mode="reduce-overhead")``, which performs
-    its own CUDA graph capture.
+    with the host during dispatch. For pipeline parallelism, TorchTitan
+    configures the schedule-derived directed-edge process groups required by
+    looped and split-backward schedule replay. CUDA graphs are independent of
+    ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
+    capture.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
@@ -252,6 +253,24 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
+    pp_max_unsharded_active_stages: int | None = None
+    """Maximum local pipeline stages whose parameters may remain unsharded.
+
+    ``None`` keeps all stages owned by the local pipeline rank resident. A
+    smaller value reduces peak unsharded-parameter memory, but may expose more
+    FSDP communication because evicted stages must be unsharded again.
+    """
+
+    pp_num_unshard_lookahead_factor: Literal["auto", "full"] | tuple[int, ...] = "auto"
+    """FSDP unshard issue distance for multi-stage pipeline schedules.
+
+    This setting does not change parameter residency, collective count, or
+    reshard placement. ``"auto"`` uses ``min(pp_rank + 2,
+    pp_max_unsharded_active_stages)``. ``"full"`` uses the complete residency
+    window. A tuple supplies one positive value per pipeline rank for expert
+    tuning. See ``docs/composability.md`` for the detailed contract.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -284,6 +303,33 @@ class ParallelismConfig:
                 "parallelism.context_parallel_load_balancer must be one of: "
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
+            )
+        if (
+            self.pp_max_unsharded_active_stages is not None
+            and self.pp_max_unsharded_active_stages < 1
+        ):
+            raise ValueError("pp_max_unsharded_active_stages must be positive")
+        lookahead = self.pp_num_unshard_lookahead_factor
+        if isinstance(lookahead, str):
+            valid_lookahead = lookahead in {"full", "auto"}
+        elif isinstance(lookahead, tuple):
+            valid_lookahead = len(lookahead) == self.pipeline_parallel_degree and all(
+                not isinstance(value, bool) and isinstance(value, int) and value >= 1
+                for value in lookahead
+            )
+            if valid_lookahead and self.pp_max_unsharded_active_stages is not None:
+                valid_lookahead = all(
+                    value <= self.pp_max_unsharded_active_stages for value in lookahead
+                )
+        else:
+            valid_lookahead = False
+        if not valid_lookahead:
+            raise ValueError(
+                "pp_num_unshard_lookahead_factor must be 'full', 'auto', or "
+                "a tuple with one positive integer per pipeline rank. Tuple "
+                "values may not exceed pp_max_unsharded_active_stages when "
+                f"that limit is set; got {lookahead!r} for pipeline degree "
+                f"{self.pipeline_parallel_degree}"
             )
         if self.fsdp_symm_mem_scope not in _FSDP_SYMM_MEM_SCOPES:
             raise ValueError(
@@ -367,13 +413,22 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    mode: Literal["default", "fake_backend"] = "default"
-    """
-    Communication mode for distributed training.
+    backend: Literal["default", "fake", "real_pp_fake_spmd"] = "default"
+    """Communication topology used for training or distributed debugging.
 
     Options:
-    - "default": Normal distributed training with real communication
-    - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
+    - ``"default"`` uses real process groups for every configured mesh axis.
+    - ``"fake"`` represents PP coordinate ``FAKE_PP_RANK`` and SPMD coordinate
+      zero in a completely fake logical mesh. It validates configuration,
+      shapes, ownership, and PyTorch-managed memory without real transport.
+    - ``"real_pp_fake_spmd"`` runs one physical process per PP rank and
+      uses a real NCCL PP group while DP, TP, CP, and EP remain fake. It
+      exercises pipeline transport, buffers, and CUDA graphs without allocating
+      the complete logical world.
+
+    ``NGPU`` is the complete logical world size. ``FAKE_PP_RANK`` applies only
+    to ``"fake"``; ``"real_pp_fake_spmd"`` uses physical ``RANK`` as its PP
+    coordinate. See ``docs/debugging.md`` for launch examples and limitations.
     """
 
 

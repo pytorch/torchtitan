@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib
 import importlib.util
 import shutil
 import tempfile
@@ -14,6 +13,7 @@ from unittest import mock
 
 import torch
 import torch.distributed.checkpoint as dcp
+from scripts.checkpoint_conversion.utils import build_model_config_for_conversion
 
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.optimizer import EMA
@@ -31,7 +31,9 @@ AVERAGED = -999.0
 
 
 def _load_script():
-    spec = importlib.util.spec_from_file_location("convert_ema_to_hf", _SCRIPT)
+    spec = importlib.util.spec_from_file_location(
+        "scripts.checkpoint_conversion.convert_ema_to_hf", _SCRIPT
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -80,9 +82,9 @@ class TestConvertEmaToHf(unittest.TestCase):
     def _write_checkpoint(self):
         """Save a checkpoint laid out the way CheckpointManager writes one:
         model tensors flattened at the top level, EMA nested under "ema"."""
-        model_config = importlib.import_module(
-            f"torchtitan.models.{self.model_name}"
-        ).model_registry(self.model_flavor)
+        model_config = build_model_config_for_conversion(
+            self.model_name, self.model_flavor
+        )
         with torch.device("cpu"):
             model = model_config.build()
         ema = EMA.Config(buffer_patterns=self.buffer_patterns).build(
@@ -253,9 +255,9 @@ class TestConvertEmaToHf(unittest.TestCase):
         self.assertIn("no matching key", str(caught.exception))
 
     def test_checkpoint_without_ema_is_rejected(self):
-        model_config = importlib.import_module(
-            f"torchtitan.models.{self.model_name}"
-        ).model_registry(self.model_flavor)
+        model_config = build_model_config_for_conversion(
+            self.model_name, self.model_flavor
+        )
         with torch.device("cpu"):
             model = model_config.build()
         ckpt = str(Path(self.tmp) / "no-ema")
@@ -359,9 +361,9 @@ class TestConvertEmaToHfFrozenParameters(unittest.TestCase):
     def test_frozen_parameter_exports_the_trained_weights(self):
         from safetensors.torch import load_file
 
-        model_config = importlib.import_module(
-            f"torchtitan.models.{self.model_name}"
-        ).model_registry(self.model_flavor)
+        model_config = build_model_config_for_conversion(
+            self.model_name, self.model_flavor
+        )
         with torch.device("cpu"):
             model = model_config.build()
         params = dict(model.named_parameters())
