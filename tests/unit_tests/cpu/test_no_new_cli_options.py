@@ -42,7 +42,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "checkpointer.load_only",
         "checkpointer.load_step",
         "comm.init_timeout_seconds",
-        "comm.mode",
+        "comm.backend",
         "comm.save_traces_file_prefix",
         "comm.save_traces_folder",
         "comm.trace_buf_size",

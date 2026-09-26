@@ -216,12 +216,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         dist_utils.set_batch_invariance(config.debug.batch_invariant)
         with sl.log_trace_span("torch_distributed_init"):
-            world_size = dist_utils.init_distributed(
+            topology = dist_utils.init_distributed(
                 config.comm,
                 enable_cpu_backend=config.training.enable_cpu_offload,
                 base_folder=self.output_dir,
+                pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
-        self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, topology)
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq,
             debug=config.training.gc_debug,
