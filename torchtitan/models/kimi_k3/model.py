@@ -139,13 +139,21 @@ class KimiMLAAttention(BaseAttention):
     def _project_latents(self, x_TD: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return self.wq_a(x_TD), self.wkv_a(x_TD)
 
-    def _project_qkv(
+    def forward(
         self,
-        q_latent_TC: torch.Tensor,
-        compressed_kv_TC: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        x_TD: torch.Tensor,
+        attention_masks: AttentionMasksType | None = None,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        del positions
+        x_TD = self._maybe_gather_tp_input(x_TD)
+        q_latent_TC, compressed_kv_TC = remat.region(
+            self._project_latents,
+            self.remat_region_name("latent_projections"),
+            recompute=self.remat_should_recompute("latent_projections"),
+        )(x_TD)
+        remat.recompute_needs_tensor(q_latent_TC, compressed_kv_TC)
         q_THK = local_head_split(self.wq_b(self.q_norm(q_latent_TC)), self.q_head_dim)
-
         kv_latent_TC, k_rope_TK = torch.split(
             compressed_kv_TC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
@@ -167,26 +175,6 @@ class KimiMLAAttention(BaseAttention):
             if spmd.is_type_checking():
                 spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
 
-        return q_THK, k_THK, v_THV
-
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        del positions
-        x_TD = self._maybe_gather_tp_input(x_TD)
-        q_latent_TC, compressed_kv_TC = remat.region(
-            self._project_latents,
-            self.remat_region_name("latent_projections"),
-            recompute=self.remat_should_recompute("latent_projections"),
-        )(x_TD)
-        remat.recompute_needs_tensor(q_latent_TC, compressed_kv_TC)
-        q_THK, k_THK, v_THV = self._project_qkv(
-            q_latent_TC,
-            compressed_kv_TC,
-        )
         gate_TD = remat.region(
             self.gate,
             self.remat_region_name("gate"),

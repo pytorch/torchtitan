@@ -430,11 +430,6 @@ class GatedDeltaNet(Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.in_proj_q(x_TD), self.in_proj_k(x_TD), self.in_proj_v(x_TD)
 
-    def _compute_recurrence_parameters(
-        self, x_TD: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.in_proj_a(x_TD), self.in_proj_b(x_TD)
-
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -446,7 +441,8 @@ class GatedDeltaNet(Module):
             self.remat_region_name("qkv"),
             recompute=self.remat_should_recompute("qkv"),
         )(x_TD)
-        a_TH, b_TH = self._compute_recurrence_parameters(x_TD)
+        a_TH = self.in_proj_a(x_TD)
+        b_TH = self.in_proj_b(x_TD)
         gate_TC = remat.region(
             self.in_proj_z,
             self.remat_region_name("gate"),
