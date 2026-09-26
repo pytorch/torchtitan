@@ -73,6 +73,7 @@ from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     _ScheduledRegion,
 )
 from torchtitan.experiments.graph_trainer.ep_pass_utils import (
+    _chunk_owner,
     CHUNK_SYMBOL_HINTS_META,
     ChunkBody,
     ChunkedRegion,
@@ -263,6 +264,44 @@ class TestFSDPUnshardDedupPass(TestCase):
             1,
         )
         gm.graph.lint()
+
+    def test_unshard_shared_by_chunks_has_no_chunk_owner(self) -> None:
+        gm = self._duplicate_unshard_graph()
+        fsdp_nodes = [
+            node
+            for node in gm.graph.nodes
+            if node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+        ]
+        self.assertEqual(len(fsdp_nodes), 6)
+        for chunk_id, nodes in enumerate((fsdp_nodes[:3], fsdp_nodes[3:])):
+            for node in nodes:
+                custom = dict(node.meta["custom"])
+                custom.update(
+                    {
+                        "chunk_id": chunk_id,
+                        "chunked_region_fqn": "layers.0.moe",
+                        "chunked_region_role": "body",
+                    }
+                )
+                node.meta["custom"] = custom
+
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        all_gathers = [node for node in gm.graph.nodes if is_all_gather(node)]
+        self.assertEqual(len(all_gathers), 1)
+        all_gather = all_gathers[0]
+        self.assertIsNone(_chunk_owner(all_gather))
+
+        self.assertEqual(len(all_gather.users), 1)
+        wait = next(iter(all_gather.users))
+        self.assertIsNone(_chunk_owner(wait))
+        self.assertEqual(
+            {_chunk_owner(node) for node in wait.users},
+            {
+                ChunkOwner("layers.0.moe", False, 0),
+                ChunkOwner("layers.0.moe", False, 1),
+            },
+        )
 
 
 class ToyModel(Module):
