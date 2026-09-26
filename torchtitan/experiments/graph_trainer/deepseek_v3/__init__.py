@@ -15,6 +15,7 @@ from .model import GraphTrainerDeepSeekV3Model
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
@@ -30,6 +31,7 @@ def model_registry(
     base = build_decoder_config_for_backend(
         get_config,
         attn_backend,
+        enable_sp=enable_sp,
         seq_len=context_len,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
