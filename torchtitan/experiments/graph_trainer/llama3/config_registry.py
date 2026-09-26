@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.experiments.graph_trainer.configs import (
@@ -43,33 +42,6 @@ def graph_trainer_llama3_debugmodel_sdc_replay() -> GraphTrainer.Config:
     config.training.disable_cuda_graphs = True
     config.training.steps = 2
     config.sdc_replayer = SDCReplayer.Config()
-    return config
-
-
-def graph_trainer_llama3_debugmodel_jit_checkpoint_save() -> GraphTrainer.Config:
-    config = graph_trainer_llama3_debugmodel()
-    config.compile.mode = "jit"
-    config.checkpointer = CheckpointManager.Config()
-    config.training.steps = 10
-    return config
-
-
-def graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp2() -> GraphTrainer.Config:
-    config = graph_trainer_llama3_debugmodel_jit_checkpoint_save()
-    config.checkpointer.exclude_from_loading = [
-        "lr_scheduler",
-        "dataloader",
-        "optimizer",
-    ]
-    config.parallelism.tensor_parallel_degree = 2
-    config.training.steps = 20
-    return config
-
-
-def graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp4() -> GraphTrainer.Config:
-    config = graph_trainer_llama3_debugmodel_jit_checkpoint_load_tp2()
-    config.parallelism.tensor_parallel_degree = 4
-    config.training.steps = 30
     return config
 
 
@@ -131,20 +103,6 @@ def graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss() -> GraphTrainer.Co
     config.loss = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model),
     )
-    return config
-
-
-def graph_trainer_llama3_debugmodel_sdpa_eager() -> GraphTrainer.Config:
-    """SDPA debug model run eagerly (no graph tracing).
-
-    Serves as the eager reference for the AutoParallel SDPA loss-compare test:
-    with ``mode=None`` GraphTrainingEngine delegates to the core eager engine
-    path, so this is a plain eager FSDP+TP run of the same SDPA
-    model the AutoParallel test traces. The default FlexInnerAttention backend can't
-    fill this role — flex + AutoParallel is unsupported (BlockMask flattening).
-    """
-    config = graph_trainer_llama3_debugmodel_sdpa()
-    config.compile = GraphTrainerCompileConfig(mode=None)
     return config
 
 
