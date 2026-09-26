@@ -75,39 +75,40 @@ repeated region names from different transformer blocks. This diagnostic is
 explicitly controlled by the caller, so it can be scoped to the model input,
 batch, or block under investigation without changing the training config.
 
-The main attention region families are:
+## Regions by model
 
-| Transformer block | Input projections | Inner compute | Output projection |
-| --- | --- | --- | --- |
-| Common, Muse Glimmer | `attention.qkv` | `attention.inner_attention` | `attention.wo` |
-| DeepSeek V3 | `attention.latent_projections` | `attention.inner_attention` | `attention.wo` |
-| Qwen3.5 full attention | `attn.qkv` | `attn.inner_attention` | `attn.wo` |
-| Qwen3.5 DeltaNet | `attn.qkv` | `attn.inner_attention` | `attn.wo` |
-| Kimi K3 MLA | `attention.latent_projections` | `attention.inner_attention` | `attention.wo` |
-| Kimi K3 KDA | `delta_attention.qkv` | `delta_attention.inner_attention` | `delta_attention.wo` |
+Attention region names use the same meanings across models: `qkv` covers the
+query, key, and value input projections; `latent_projections` covers the MLA
+down-projections; `gate` covers a separate output-gate projection;
+`inner_attention` covers the attention kernel; and `wo` covers the output
+projection. `input_redistribution` is the TP gather shared by multiple input
+branches and is exercised only when a TP group exists. `routed_down` and
+`routed_up` cover the Kimi K3 latent-MoE projections around its routed experts.
 
-DeepSeek V3 also exposes `attention.input_redistribution` when TP gathers its
-shared MLA input. Its QKV up-projections are intentionally outside a region and
-are therefore recomputed. Qwen3.6 and Qwen3.8 reuse the Qwen3.5
-implementations. Kimi K2.7 reuses DeepSeek V3 attention. Kimi K3 latent MoE
-additionally exposes `moe.routed_down` and `moe.routed_up`.
+Each row below lists the complete region set for that model component. Names
+are relative to a transformer block and can be used directly in
+`RegionAC.save_regions`.
 
-Kimi K3 MLA additionally exposes `attention.input_redistribution` and
-`attention.gate`. Like DeepSeek V3, its QKV up-projections are intentionally
-outside a region.
+| Model component | Regions |
+| --- | --- |
+| Llama 3 attention | `attention.qkv`, `attention.inner_attention`, `attention.wo` |
+| Qwen 3 attention | `attention.qkv`, `attention.inner_attention`, `attention.wo` |
+| DeepSeek V3 attention | `attention.input_redistribution`, `attention.latent_projections`, `attention.inner_attention`, `attention.wo` |
+| Kimi K2.7 attention | `attention.input_redistribution`, `attention.latent_projections`, `attention.inner_attention`, `attention.wo` |
+| Muse Glimmer attention | `attention.input_redistribution`, `attention.qkv`, `attention.gate` (when configured), `attention.inner_attention`, `attention.wo` |
+| Qwen3.5 full attention | `attn.input_redistribution`, `attn.qkv`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.5 DeltaNet | `attn.input_redistribution`, `attn.qkv`, `attn.gate`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.6 full attention | `attn.input_redistribution`, `attn.qkv`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.6 DeltaNet | `attn.input_redistribution`, `attn.qkv`, `attn.gate`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.8 full attention | `attn.input_redistribution`, `attn.qkv`, `attn.inner_attention`, `attn.wo` |
+| Qwen3.8 DeltaNet | `attn.input_redistribution`, `attn.qkv`, `attn.gate`, `attn.inner_attention`, `attn.wo` |
+| Kimi K3 MLA | `attention.input_redistribution`, `attention.latent_projections`, `attention.gate`, `attention.inner_attention`, `attention.wo` |
+| Kimi K3 KDA | `delta_attention.input_redistribution`, `delta_attention.qkv`, `delta_attention.gate`, `delta_attention.inner_attention`, `delta_attention.wo` |
+| Kimi K3 latent MoE | `moe.routed_down`, `moe.routed_up` |
 
-Kimi K3 KDA additionally exposes `delta_attention.input_redistribution` and
-`delta_attention.gate`.
-
-Qwen3.5 DeltaNet additionally exposes `attn.input_redistribution` and
-`attn.gate`.
-
-Qwen3.5 full attention additionally exposes `attn.input_redistribution`. Its
-output gate is fused into the query projection and is therefore covered by
-`attn.qkv`.
-
-Muse Glimmer attention additionally exposes `attention.input_redistribution`
-and `attention.gate` when its output gate is configured.
+The DeepSeek V3 and Kimi K3 MLA QKV up-projections are intentionally outside a
+region and are therefore recomputed. The Qwen3.5-family full-attention output
+gate is fused into the query projection and is covered by `attn.qkv`.
 
 ## Adding regions to model code
 
