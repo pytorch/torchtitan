@@ -80,8 +80,6 @@ class TestDiskStorageAdapter(unittest.TestCase):
 
 @dataclass
 class _StubCompileConfig:
-    mode: str = "aot_fx_trace"
-    backend: str = "aot_eager"
     passes: list = field(default_factory=list)
     memory_policy: str = "default"
     full_recompute_save_ops: str = ""
@@ -126,7 +124,7 @@ class TestPrecompileMain(unittest.TestCase):
         from torchtitan.experiments.graph_trainer import precompile_main
 
         events = []
-        compile_config = SimpleNamespace(mode="aot_fx_trace")
+        compile_config = SimpleNamespace()
         config = SimpleNamespace(compile=compile_config)
         config_manager = MagicMock()
         config_manager.parse_args.return_value = config

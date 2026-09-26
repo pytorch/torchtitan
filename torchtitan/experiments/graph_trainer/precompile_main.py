@@ -12,11 +12,10 @@ artifact from a single process, which can then be loaded by all ranks
 during torchrun training. This avoids the need to run torchrun with N
 GPUs just for precompilation.
 
-Usage (aot_fx_trace mode):
+Usage:
     python -m torchtitan.experiments.graph_trainer.precompile_main \
         --module graph_trainer.llama3 \
         --config graph_trainer_llama3_debugmodel \
-        --compile.mode aot_fx_trace \
         --compile.precompile_artifact_dir /tmp/fx_trace_artifacts
 """
 
@@ -358,13 +357,6 @@ def main():
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
-
-    mode = config.compile.mode
-    if mode != "aot_fx_trace":
-        raise ValueError(
-            f"precompile_main only supports --compile.mode aot_fx_trace, "
-            f"got '{mode}'."
-        )
 
     (
         model,
