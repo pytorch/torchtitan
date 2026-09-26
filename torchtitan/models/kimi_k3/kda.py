@@ -269,15 +269,6 @@ class KDA(Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return self.q_proj(x_TD), self.k_proj(x_TD), self.v_proj(x_TD)
 
-    def _compute_recurrence_parameters(
-        self, x_TD: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        raw_gate_THK = local_head_split(
-            self.forget_b(self.forget_a(x_TD)), self.head_dim
-        )
-        raw_beta_TH = self.beta(x_TD)
-        return raw_gate_THK, raw_beta_TH
-
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -296,7 +287,10 @@ class KDA(Module):
             self.remat_region_name("qkv"),
             recompute=self.remat_should_recompute("qkv"),
         )(x_TD)
-        raw_gate_THK, raw_beta_TH = self._compute_recurrence_parameters(x_TD)
+        raw_gate_THK = local_head_split(
+            self.forget_b(self.forget_a(x_TD)), self.head_dim
+        )
+        raw_beta_TH = self.beta(x_TD)
         output_gate_TC = remat.region(
             self.output_gate,
             self.remat_region_name("gate"),
