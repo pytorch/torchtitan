@@ -68,8 +68,8 @@ class SigmoidGatedFeedForward(FeedForward):
             self.remat_region_name("input_projections"),
             recompute=self.remat_should_recompute("input_projections"),
         )(x)
+        remat.recompute_needs_tensor(gate_up_T2F)
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
-        remat.recompute_needs_tensor(gate_TF, up_TF)
         out_TD = remat.region(
             self.w2,
             self.remat_region_name("w2"),
