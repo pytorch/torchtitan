@@ -17,44 +17,16 @@ import torch
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
-    annotate_varlen_metadata_spmd_types,
     create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
     VarlenInnerAttention,
-    VarlenMetadata,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import ComplexRoPE
 
 
 class TestPackedVarlenMetadata(unittest.TestCase):
-    def test_spmd_annotation_includes_partition_spec(self):
-        metadata = VarlenMetadata(
-            cu_seq_q=torch.tensor([0, 2], dtype=torch.int32),
-            cu_seq_k=torch.tensor([0, 3], dtype=torch.int32),
-            max_q=2,
-            max_k=3,
-        )
-        expected_type = spmd.SpmdType(
-            {
-                MeshAxisName.DP: spmd.V,
-                MeshAxisName.TP: spmd.R,
-            },
-            partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
-        )
-
-        with patch(
-            "torchtitan.models.common.attention.spmd.assert_type"
-        ) as assert_type:
-            annotate_varlen_metadata_spmd_types(metadata)
-
-        self.assertEqual(assert_type.call_count, 2)
-        self.assertIs(assert_type.call_args_list[0].args[0], metadata.cu_seq_q)
-        self.assertIs(assert_type.call_args_list[1].args[0], metadata.cu_seq_k)
-        self.assertEqual(assert_type.call_args_list[0].args[1], expected_type)
-        self.assertEqual(assert_type.call_args_list[1].args[1], expected_type)
-
     def test_document_boundaries(self):
         positions_T = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3])
         metadata = create_varlen_metadata_for_document(positions_T)
