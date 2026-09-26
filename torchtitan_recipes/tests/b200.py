@@ -57,3 +57,40 @@ def llama3_debugmodel_nvfp4_fsdp2() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     return config
+
+
+def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
+    from torchtitan.distributed.pipeline_parallel import (
+        _generate_llm_fqn_per_model_part,
+    )
+    from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+    from torchtitan.models.kimi_k3.model import KimiK3Model
+
+    config = kimi_k3_debugmodel()
+    # Type checking stays off under pipeline parallelism, as the other pipeline
+    # recipes have it.
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.enable_sequence_parallel = True
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 4
+    # Four stages per rank (the default is two), the shape where a hop can carry
+    # no new block and a block has three later readers on its rank: core's split
+    # for that many stages, with the model's end modules pinned.
+    parallelism = config.parallelism
+    split = _generate_llm_fqn_per_model_part(
+        4 * parallelism.pipeline_parallel_degree,
+        len(config.model.layers),
+        parallelism.pipeline_parallel_first_stage_less_layers,
+        parallelism.pipeline_parallel_last_stage_less_layers,
+    )
+    split[0][:0] = KimiK3Model.pipeline_first_stage_module_fqns
+    split[-1].extend(KimiK3Model.pipeline_last_stage_module_fqns)
+    parallelism.pipeline_parallel_module_fqns_per_model_part = split
+    # DistMuon does not support tensor parallelism yet (#3353), so this cell
+    # keeps AdamW the way kimi_k3_debugmodel_mm does.
+    config.optimizer = default_adamw(lr=8e-4)
+    return config
