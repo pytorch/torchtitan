@@ -70,11 +70,12 @@ class TestKernelSelection(unittest.TestCase):
             "_shard_block_mask",
             side_effect=(sharded_block_mask, sharded_sliding_block_mask),
         ) as shard_block_mask:
-            result = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
-                context_metadata,
+            batch = KVAllGatherCPFlexInnerAttention.prepare_cp_batch_metadata(
+                {"attention_masks": context_metadata},
                 permutation=permutation,
             )
 
+        result = batch["attention_masks"]
         assert isinstance(result, dict)
         self.assertIs(result["quadratic_attention"], sharded_block_mask)
         self.assertIs(result["sliding_attention"], sharded_sliding_block_mask)

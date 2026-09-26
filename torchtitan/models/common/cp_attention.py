@@ -10,9 +10,8 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 import spmd_types as spmd
 
@@ -59,8 +58,17 @@ class CPInnerAttention(ABC, Generic[_GlobalContextMetadataT, _LocalContextMetada
     class Config(Configurable.Config):
         pass
 
-    # TODO(acisseJZhong): Let each attention backend own and prepare only its
-    # corresponding metadata instead of receiving the model-level container.
+    @classmethod
+    @abstractmethod
+    def prepare_cp_batch_metadata(
+        cls,
+        input_dict: dict[str, Any],
+        *,
+        permutation: torch.Tensor | None,
+    ) -> dict[str, Any]:
+        """Find and prepare the metadata owned by this backend."""
+        raise NotImplementedError
+
     @staticmethod
     @abstractmethod
     def prepare_cp_metadata(
@@ -73,7 +81,7 @@ class CPInnerAttention(ABC, Generic[_GlobalContextMetadataT, _LocalContextMetada
 
 
 class KVAllGatherCPFlexInnerAttention(
-    CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata],
+    CPInnerAttention[BlockMask, BlockMask],
     FlexInnerAttention,
 ):
     """FlexInnerAttention with sharded Q and all-gathered K/V."""
@@ -87,19 +95,18 @@ class KVAllGatherCPFlexInnerAttention(
         super().__init__(config)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
-    @staticmethod
-    def prepare_cp_metadata(
-        context_metadata: FlexAttentionMetadata,
+    @classmethod
+    def prepare_cp_batch_metadata(
+        cls,
+        input_dict: dict[str, Any],
         *,
         permutation: torch.Tensor | None,
-    ) -> FlexAttentionMetadata:
-        """Shard global BlockMask metadata to match the model-input partition."""
-        if not isinstance(context_metadata, (BlockMask, Mapping)):
-            raise ValueError(
-                "K/V all-gather context parallelism requires BlockMask metadata, "
-                f"but got {type(context_metadata).__name__}."
-            )
+    ) -> dict[str, Any]:
+        """Prepare every FlexAttention BlockMask in the model inputs."""
+        if "attention_masks" not in input_dict:
+            return input_dict
 
+        context_metadata = input_dict["attention_masks"]
         flat_metadata, spec = pytree.tree_flatten(
             context_metadata,
             is_leaf=lambda value: isinstance(value, BlockMask),
@@ -111,18 +118,30 @@ class KVAllGatherCPFlexInnerAttention(
 
         flat_local_metadata = [
             (
-                KVAllGatherCPFlexInnerAttention._shard_block_mask(
-                    value,
-                    permutation=permutation,
-                )
+                cls.prepare_cp_metadata(value, permutation=permutation)
                 if isinstance(value, BlockMask)
                 else value
             )
             for value in flat_metadata
         ]
-        return cast(
-            FlexAttentionMetadata,
-            pytree.tree_unflatten(flat_local_metadata, spec),
+        input_dict["attention_masks"] = pytree.tree_unflatten(flat_local_metadata, spec)
+        return input_dict
+
+    @staticmethod
+    def prepare_cp_metadata(
+        context_metadata: BlockMask,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> BlockMask:
+        """Shard one global BlockMask to match the model-input partition."""
+        if not isinstance(context_metadata, BlockMask):
+            raise ValueError(
+                "K/V all-gather context parallelism requires BlockMask metadata, "
+                f"but got {type(context_metadata).__name__}."
+            )
+        return KVAllGatherCPFlexInnerAttention._shard_block_mask(
+            context_metadata,
+            permutation=permutation,
         )
 
     @staticmethod
@@ -264,6 +283,19 @@ class UlyssesCPInnerAttention(
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config):
         pass
+
+    @classmethod
+    def prepare_cp_batch_metadata(
+        cls,
+        input_dict: dict[str, Any],
+        *,
+        permutation: torch.Tensor | None,
+    ) -> dict[str, Any]:
+        del cls, input_dict, permutation
+        raise RuntimeError(
+            "Ulysses CP keeps context metadata global; "
+            "prepare_cp_batch_metadata must not be called."
+        )
 
     @staticmethod
     def prepare_cp_metadata(

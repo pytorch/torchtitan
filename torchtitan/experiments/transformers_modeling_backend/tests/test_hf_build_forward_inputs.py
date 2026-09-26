@@ -94,10 +94,10 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         calls.append("cp_input")
         return input_dict
 
-    def prepare_cp_metadata(context_metadata, *, permutation):
+    def prepare_cp_batch_metadata(batch, *, permutation):
         assert permutation is expected_permutation
         calls.append("cp_metadata")
-        return context_metadata
+        return batch
 
     def annotate(_parallel_dims, batch, input_sharding):
         assert calls == ["permutation", "cp_metadata", "cp_input"]
@@ -114,8 +114,8 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     )
     monkeypatch.setattr(
         KVAllGatherCPFlexInnerAttention,
-        "prepare_cp_metadata",
-        staticmethod(prepare_cp_metadata),
+        "prepare_cp_batch_metadata",
+        staticmethod(prepare_cp_batch_metadata),
     )
     monkeypatch.setattr(
         "torchtitan.distributed.spmd_types.annotate_input_spmd_types", annotate
