@@ -398,13 +398,22 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    mode: Literal["default", "fake_backend"] = "default"
-    """
-    Communication mode for distributed training.
+    backend: Literal["default", "fake", "real_pp_fake_spmd"] = "default"
+    """Communication topology used for training or distributed debugging.
 
     Options:
-    - "default": Normal distributed training with real communication
-    - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
+    - ``"default"`` uses real process groups for every configured mesh axis.
+    - ``"fake"`` represents PP coordinate ``FAKE_PP_RANK`` and SPMD coordinate
+      zero in a completely fake logical mesh. It validates configuration,
+      shapes, ownership, and PyTorch-managed memory without real transport.
+    - ``"real_pp_fake_spmd"`` runs one physical process per PP rank and
+      uses a real NCCL PP group while DP, TP, CP, and EP remain fake. It
+      exercises pipeline transport, buffers, and CUDA graphs without allocating
+      the complete logical world.
+
+    ``NGPU`` is the complete logical world size. ``FAKE_PP_RANK`` applies only
+    to ``"fake"``; ``"real_pp_fake_spmd"`` uses physical ``RANK`` as its PP
+    coordinate. See ``docs/debugging.md`` for launch examples and limitations.
     """
 
 
