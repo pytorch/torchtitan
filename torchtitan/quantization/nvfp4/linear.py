@@ -33,7 +33,6 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
@@ -372,13 +371,9 @@ class NVFP4Linear(Linear):
                 }
                 if isinstance(
                     instance,
-                    (
-                        ColumnParallelLinear,
-                        RowParallelLinear,
-                        SharedExpertRowParallelLinear,
-                    ),
+                    (ColumnParallelLinear, RowParallelLinear),
                 ):
-                    # The explicit TP class owns its TP behavior in forward.
+                    # The explicit TP class owns its collective in forward.
                     # Making the entire module local would hide that boundary.
                     instance._sharding_config = replace(
                         sc,
