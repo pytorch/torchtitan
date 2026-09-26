@@ -76,4 +76,11 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             ngpu=4,
             skip_rocm_test=True,
         ),
+        OverrideDefinitions(
+            configs=[recipes.qwen35_debugmodel_moe_float8_lora],
+            test_descr="Qwen3.5 MoE Float8 + LoRA",
+            test_name="qwen3_5_moe_float8_lora",
+            ngpu=8,
+            use_real_pg=True,
+        ),
     ]
