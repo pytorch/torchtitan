@@ -417,11 +417,35 @@ class Qwen35Model(MultimodalModel):
         skip_dp: bool = False,
     ) -> Qwen35Model:
         if parallel_dims.cp_enabled:
-            raise NotImplementedError(
-                "Context Parallel is not yet supported for Qwen3.5. "
-                "GatedDeltaNet requires full-sequence allgather, and multimodal "
-                "CP needs vision scatter before CP sharding."
-            )
+            if parallelism.context_parallel_load_balancer is not None:
+                raise ValueError(
+                    "Qwen3.5 context parallel keeps contiguous sequence shards "
+                    "so GatedDeltaNet can all-to-all onto heads. Set "
+                    "parallelism.context_parallel_load_balancer to None."
+                )
+            if self.vision_encoder is not None:
+                raise NotImplementedError(
+                    "Qwen3.5 context parallel does not cover the vision encoder."
+                )
+            head_degree = parallel_dims.cp * parallel_dims.tp
+            for layer_cfg in self.config.layers:
+                if layer_cfg.delta_net is not None:
+                    delta_net = layer_cfg.delta_net
+                    n_key_heads = (
+                        delta_net.in_proj_q.out_features // delta_net.key_head_dim
+                    )
+                    n_value_heads = (
+                        delta_net.in_proj_v.out_features // delta_net.value_head_dim
+                    )
+                    if (
+                        n_key_heads % head_degree != 0
+                        or n_value_heads % head_degree != 0
+                    ):
+                        raise ValueError(
+                            "context_parallel_degree * tensor_parallel_degree "
+                            f"({head_degree}) must divide n_key_heads "
+                            f"({n_key_heads}) and n_value_heads ({n_value_heads})."
+                        )
 
         return super().parallelize(
             parallel_dims=parallel_dims,
@@ -494,13 +518,19 @@ class Qwen35Model(MultimodalModel):
         )
         batch["positions"] = rope_positions
         if parallel_dims.cp_enabled:
+            # GatedDeltaNet and Ulysses attention share one contiguous token
+            # shard. Keep the full-sequence masks: the all-to-all restores the
+            # timeline before either kernel reads them.
+            attention_masks = batch.pop("attention_masks", None)
             batch = prepare_context_parallel_input(
                 batch,
                 input_sharding,
                 parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+                None,
+                None,
             )
+            if attention_masks is not None:
+                batch["attention_masks"] = attention_masks
         batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
         # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
         # nested inside attention_masks, must be annotated at its container.

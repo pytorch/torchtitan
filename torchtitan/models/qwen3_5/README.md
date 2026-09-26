@@ -64,6 +64,7 @@ pip install -r .ci/docker/requirements-vlm.txt
 | Tensor Parallelism (TP) | With Sequence Parallel; head-sharded TP on GatedDeltaNet projections |
 | Expert Parallelism (EP) | For MoE variants |
 | Pipeline Parallel (PP) | Vision encoder assigned to first stage; 1F1B and Interleaved1F1B schedules |
+| Context Parallel (CP) | Ulysses all-to-all. Full attention and GatedDeltaNet both see contiguous sequence shards (`context_parallel_load_balancer=None`); GDN exchanges those shards for head shards so the conv and recurrence run on the full timeline. The vision encoder is not covered. |
 | Sample Packing | Opt-in via `MMSamplePackingConfig` |
 
 ## Numerical Parity
@@ -79,4 +80,4 @@ Test scripts:
 ## TODO
 
 - Add video dataset training configs
-- Add Context Parallel (CP) support
+- Context parallel with the vision encoder
