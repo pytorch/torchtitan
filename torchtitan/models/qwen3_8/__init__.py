@@ -9,7 +9,6 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import Embedding, Linear
-from torchtitan.models.common.config_utils import configure_shared_expert_w2_for_sp
 from torchtitan.models.qwen3_5 import (
     _27b,
     _build_qwen35_moe_layers,
@@ -37,6 +36,7 @@ def _qwen3_8_2_4t_a95b(
     attn_backend: str,
     moe_comm_backend: str = "standard",
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> Qwen35Model.Config:
     """Qwen3.8-2.4T-A95B text-only MoE config."""
@@ -62,6 +62,7 @@ def _qwen3_8_2_4t_a95b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_qwen35_moe_layers(
+            enable_sp=enable_sp,
             rope=MRoPE.Config(
                 dim=rotary_dim,
                 max_context_length=seq_len,
@@ -114,6 +115,7 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
+        enable_sp=enable_sp,
         seq_len=context_len,
         **(
             {"moe_comm_backend": moe_comm_backend}
@@ -121,7 +123,6 @@ def model_registry(
             else {}
         ),
     )
-    configure_shared_expert_w2_for_sp(config, enable_sp=enable_sp)
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter_config in converters:

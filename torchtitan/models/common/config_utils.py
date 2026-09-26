@@ -292,10 +292,12 @@ def make_shared_expert_ffn_config(
     *,
     dim: int,
     hidden_dim: int,
+    enable_sp: bool,
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
 ) -> FeedForward.Config:
-    """Build a shared FFN before selecting its TP implementation."""
+    """Build a shared FFN with an SP-aware output projection."""
+    w2_cls = RowParallelLinear if enable_sp else Linear
     return FeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
@@ -303,39 +305,12 @@ def make_shared_expert_ffn_config(
             num_linears=2,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
-        w2=Linear.Config(
+        w2=w2_cls.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=w2w3_param_init,
         ),
     )
-
-
-def configure_shared_expert_w2_for_sp(
-    model_config: Module.Config, *, enable_sp: bool
-) -> None:
-    """Select the shared-expert w2 implementation before config transforms."""
-    if not enable_sp:
-        return
-
-    if isinstance(model_config, FeedForward.Config):
-        shared_expert_configs = [model_config]
-    else:
-        shared_expert_configs = [
-            moe_config.shared_experts
-            for _, moe_config, _, _ in model_config.traverse(MoE.Config)
-            if moe_config.shared_experts is not None
-        ]
-
-    for shared_experts in shared_expert_configs:
-        assert shared_experts is not None
-        w2 = shared_experts.w2
-        assert (
-            type(w2) is Linear.Config
-        ), "shared-expert w2 selection must run before model config transforms"
-        shared_experts.w2 = RowParallelLinear.Config(
-            **{field.name: getattr(w2, field.name) for field in dataclasses.fields(w2)}
-        )
 
 
 def make_moe_config(

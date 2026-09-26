@@ -26,7 +26,6 @@ from torchtitan.models.common import (
     SiTUGLU,
 )
 from torchtitan.models.common.config_utils import (
-    configure_shared_expert_w2_for_sp,
     get_attention_config,
     make_ffn_config,
     make_routed_experts_config,
@@ -238,6 +237,7 @@ def _latent_moe_config(
     *,
     dim: int,
     latent_dim: int,
+    enable_sp: bool,
     expert_hidden_dim: int,
     num_experts: int,
     top_k: int,
@@ -282,6 +282,7 @@ def _latent_moe_config(
             make_shared_expert_ffn_config(
                 dim=dim,
                 hidden_dim=num_shared_experts * expert_hidden_dim,
+                enable_sp=enable_sp,
                 w1_param_init=_LINEAR_INIT,
                 w2w3_param_init=_LINEAR_INIT,
             ),
@@ -371,6 +372,7 @@ def _kimi_k3_config(
     *,
     max_context_length: int,
     dim: int,
+    enable_sp: bool,
     vocab_size: int,
     num_layers: int,
     full_attention_layers: set[int],
@@ -441,6 +443,7 @@ def _kimi_k3_config(
                     else _latent_moe_config(
                         dim=dim,
                         latent_dim=latent_dim,
+                        enable_sp=enable_sp,
                         expert_hidden_dim=expert_hidden_dim,
                         num_experts=num_experts,
                         top_k=top_k,
@@ -483,12 +486,14 @@ def _debugmodel(
     attn_backend: str,
     moe_comm_backend: str,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK3Model.Config:
     dim = 1024
     return _kimi_k3_config(
         max_context_length=seq_len,
         dim=dim,
+        enable_sp=enable_sp,
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=24,
@@ -526,12 +531,14 @@ def _kimi_k3(
     attn_backend: str,
     moe_comm_backend: str,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK3Model.Config:
     dim = 7168
     return _kimi_k3_config(
         max_context_length=seq_len,
         dim=dim,
+        enable_sp=enable_sp,
         moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=93,
@@ -589,10 +596,10 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
+        enable_sp=enable_sp,
         moe_comm_backend=moe_comm_backend,
         seq_len=context_len,
     )
-    configure_shared_expert_w2_for_sp(config, enable_sp=enable_sp)
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter in converters:
