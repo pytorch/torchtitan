@@ -152,16 +152,16 @@ class TestMoE(unittest.TestCase):
                 param_init={},
                 comm_backend="standard",
             ),
-            expert_output_postprocess=RMSNorm.Config(normalized_shape=4),
+            output_postprocess=RMSNorm.Config(normalized_shape=4),
         )
         routed_experts = config.build()
         routed_experts.w13 = _AddOneW13()
         routed_experts.activation_fn = _SelectGate()
         routed_experts.w2 = _IdentityW2()
         routed_experts.token_dispatcher = _IdentityDispatcher()
-        assert isinstance(routed_experts.expert_output_postprocess, RMSNorm)
+        assert isinstance(routed_experts.output_postprocess, RMSNorm)
         with torch.no_grad():
-            routed_experts.expert_output_postprocess.weight.fill_(3.0)
+            routed_experts.output_postprocess.weight.fill_(3.0)
         x_TD = torch.arange(8, dtype=torch.float32).reshape(2, 4).requires_grad_()
 
         output_TD = routed_experts(
@@ -173,15 +173,15 @@ class TestMoE(unittest.TestCase):
         expected_TD = F.rms_norm(
             x_TD + 1,
             (4,),
-            routed_experts.expert_output_postprocess.weight,
-            routed_experts.expert_output_postprocess.eps,
+            routed_experts.output_postprocess.weight,
+            routed_experts.output_postprocess.eps,
         )
         torch.testing.assert_close(output_TD, expected_TD)
-        self.assertIn("expert_output_postprocess.weight", routed_experts.state_dict())
+        self.assertIn("output_postprocess.weight", routed_experts.state_dict())
 
         output_TD.sum().backward()
         self.assertIsNotNone(x_TD.grad)
-        self.assertIsNotNone(routed_experts.expert_output_postprocess.weight.grad)
+        self.assertIsNotNone(routed_experts.output_postprocess.weight.grad)
 
     def test_token_choice_router_uses_normalization_epsilon(self):
         x_TD = torch.zeros(1, 4)
