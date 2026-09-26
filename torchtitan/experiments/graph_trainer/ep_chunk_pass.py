@@ -1849,6 +1849,19 @@ def _split_live_ins(
 # Step 5: Route per-chunk provenance or materialize full live-outs.
 
 
+def _is_dim0_all_to_all_size_user(user: fx.Node) -> bool:
+    """Return whether a node queries dim 0 of an all-to-all result directly."""
+    return (
+        user.op == "call_function"
+        and user.target is aten.sym_size.int
+        and len(user.args) == 2
+        and user.args[1] == 0
+        and isinstance(user.args[0], fx.Node)
+        and user.args[0].op == "call_function"
+        and user.args[0].target is torch.ops._c10d_functional.all_to_all_single.default
+    )
+
+
 def _split_live_out_users(
     users: tuple[fx.Node, ...],
     plans: list[_Plan],
@@ -1891,7 +1904,16 @@ def _split_live_out_users(
             chunked.append(user)
         else:
             full.append(user)
-    return tuple(chunked), tuple(full)
+    moved = tuple(
+        user
+        for user in full
+        if _is_dim0_all_to_all_size_user(user)
+        and is_module_fqn_inside_root(_get_module_fqn(user), producer_region.root_fqn)
+    )
+    if not moved:
+        return tuple(chunked), tuple(full)
+    moved_set = set(moved)
+    return (*chunked, *moved), tuple(user for user in full if user not in moved_set)
 
 
 def _add_materialization_proof(

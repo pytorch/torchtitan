@@ -3896,6 +3896,62 @@ class TestChunkPasses(TestCase):
         self.assertEqual(actual[0], expected[0])
         self.assertEqual(actual[1], expected[1])
 
+    def test_ep_all_to_all_shape_live_out_stays_chunk_local(self):
+        fake_mode, tokens = self._symbolic_batch_fake_mode()
+        with fake_mode:
+            received = tokens.node.shape_env.create_unbacked_symint()
+            input_val = torch.empty(tokens, 3)
+            received_val = torch.empty(received, 3)
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        c10d = torch.ops._c10d_functional
+        dispatch = graph.call_function(
+            c10d.all_to_all_single.default, args=(x, [], [], "ep")
+        )
+        size = graph.call_function(torch.ops.aten.sym_size.int, args=(dispatch, 0))
+        nonnegative = graph.call_function(operator.ge, args=(size, 0))
+        graph.call_function(
+            torch.ops.aten._assert_scalar.default,
+            args=(nonnegative, "received token count must be nonnegative"),
+        )
+        wait = graph.call_function(c10d.wait_tensor.default, args=(dispatch,))
+        combine = graph.call_function(
+            c10d.all_to_all_single.default, args=(wait, [], [], "ep")
+        )
+        output = graph.call_function(c10d.wait_tensor.default, args=(combine,))
+        graph.output(output)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        x.meta["val"] = input_val
+        for node, val in (
+            (dispatch, received_val),
+            (size, received),
+            (wait, received_val),
+            (combine, input_val),
+            (output, input_val),
+        ):
+            self._set_fake_tensor_meta(node, val, fqn="layers.0.moe.dispatcher")
+        dispatch.meta["custom"][_EP_TOKEN_EXCHANGE] = "dispatch"
+        combine.meta["custom"][_EP_TOKEN_EXCHANGE] = "combine"
+
+        # The size query feeds a guard outside the chunk body, while the receive
+        # dimension is independent of the selected token-grid symbol. Treating
+        # it as a full consumer would try to materialize a tensor with no chunk dim.
+        ep_overlap_chunk_pass(gm, mode="seq", module_pattern="layers.*.moe")
+
+        launches = self._nodes_by_target(gm, c10d.all_to_all_single.default)
+        self.assertEqual(len(launches), 4)
+        self.assertIs(size.args[0], dispatch)
+        self.assertEqual(dispatch.meta["chunk_id"], 0)
+        self.assertNotIn("chunk_id", size.meta)
+        materializations = self._nodes_by_target(gm, torch.ops.aten.cat.default)
+        self.assertEqual(len(materializations), 1)
+        self.assertEqual(
+            materializations[0].args[0][0].target, c10d.wait_tensor.default
+        )
+        gm.graph.lint()
+
     def test_chunk_batch_rejects_invalid_region_boundaries(self):
         with self.assertRaisesRegex(ValueError, "Cannot split selected chunk"):
             self._chunk_batch(
