@@ -191,13 +191,6 @@ def resolve_graph_runtime_gradient_accumulation_policy(
     )
 
 
-def _validate_spmd_graph_runtime_config(
-    compile_config: GraphTrainerCompileConfig,
-) -> None:
-    if compile_config.mode != "aot_fx_trace":
-        raise ValueError("GraphRuntime requires --compile.mode aot_fx_trace")
-
-
 def _new_spmd_runtime_schedule(
     stage: GraphPipelineStage,
     *,
@@ -335,8 +328,6 @@ def _validate_graph_pp_config(
     compile_config: GraphTrainerCompileConfig,
     parallelism: ParallelismConfig,
 ) -> None:
-    if compile_config.mode != "aot_fx_trace":
-        raise ValueError("GraphPP requires --compile.mode aot_fx_trace")
     if compile_config.precompile_artifact_dir:
         raise ValueError(
             "GraphPP does not support --compile.precompile_artifact_dir yet. "
@@ -697,10 +688,8 @@ def make_graph_runtime(
             compile_config=compile_config,
             parallelism=parallelism,
         )
-    else:
-        _validate_spmd_graph_runtime_config(compile_config)
-        if len(stages) != 1:
-            raise ValueError(f"PP=1 requires one local stage, got {len(stages)}")
+    elif len(stages) != 1:
+        raise ValueError(f"PP=1 requires one local stage, got {len(stages)}")
 
     fsdp_policy = resolve_graph_runtime_fsdp_policy(
         compile_config,
