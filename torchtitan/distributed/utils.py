@@ -499,7 +499,7 @@ def _init_real_pp_fake_spmd(
     }
     return DistributedTopology(
         world_size=logical_world_size,
-        real_pp_group=pp_group,
+        real_pp_group_for_fake_spmd=pp_group,
     )
 
 

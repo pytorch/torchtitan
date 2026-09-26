@@ -166,14 +166,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=2,
             use_real_pg=True,
         ),
-        # TODO: This custom split-backward recipe still uses FlexAttention,
-        # whose compiled backward does not support retain_graph=True.
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_pp2_custom_csv],
             test_descr="PP with custom pipeline schedule loaded from CSV file",
             test_name="pp_custom_csv",
             ngpu=2,
-            disabled=True,
             use_real_pg=True,
         ),
         OverrideDefinitions(
