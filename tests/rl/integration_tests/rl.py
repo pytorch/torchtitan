@@ -13,7 +13,7 @@ test infrastructure but with a custom runner since train.py is
 a Monarch script (run with ``python``, not ``torchrun``).
 
 Usage:
-    python -m tests.integration_tests.rl \
+    python -m tests.rl.integration_tests.rl \
         $OUTPUT_DIR --ngpu 4
 """
 

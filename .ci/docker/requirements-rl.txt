@@ -1,0 +1,15 @@
+# Shared RL dependencies for local installs and CI images.
+torchmonarch
+# The opt-in vLLM metrics logger uses the SDK for JSONL and the HTTP exporter
+# for OTLP; both are included so enabling that logger needs no extra install.
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+pygtrie
+portpicker
+
+# Test workflows install nightly torch, torchvision, and vLLM together.
+# The RL test image also needs the inference runtime's other dependencies.
+xformers
+# Match torchtitan's dataset bound when resolving CUDA nightlies.
+datasets>=3.6.0,<4.8.0
+uv

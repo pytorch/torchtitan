@@ -24,10 +24,10 @@ By transitivity of test 2 and test 3: trainer == vLLM decode.
 
 Run each backend in a separate torchrun invocation:
     torchrun --nproc_per_node=2 -m pytest \
-        tests/unit_tests/rl/test_bitwise_parity.py::TestBitwiseParityVarlen -v
+        tests/rl/integration_tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
 
     torchrun --nproc_per_node=2 -m pytest \
-        tests/unit_tests/rl/test_bitwise_parity.py::TestBitwiseParityFlex -v
+        tests/rl/integration_tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
 import dataclasses

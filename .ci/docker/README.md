@@ -19,4 +19,13 @@ It also uses the same directory structure as PyTorch.
 
 # Build a specific image
 ./build.sh torchtitan-ubuntu-22.04-clang12 -t myimage:latest
+
+# Build the CUDA image with RL dependencies (Monarch, TorchStore, and test extras)
+./build.sh torchtitan-ubuntu-22.04-clang12:rl -t my-rl-image:latest
 ```
+
+CI publishes the RL variant to the existing CUDA ECR repository with an
+`rl-<docker-hash>` tag so it does not replace the standard CUDA image.
+The RL unit and integration test workflows install torch, torchvision, and vLLM
+together from the CUDA nightly index. The optional Verifiers example is installed
+only by RL unit tests, with MCP 1.x to select a compatible nightly cohort.

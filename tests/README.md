@@ -7,6 +7,8 @@ This directory contains tests for the torchtitan project, including unit tests a
 - `unit_tests/cpu/`: Unit tests that run without a GPU
 - `unit_tests/gpu/`: Tests that require GPUs; multi-GPU tests use the
   `multi_gpu` pytest marker
+- `rl/unit_tests/`: RL unit tests (run on a single CUDA GPU)
+- `rl/integration_tests/`: RL distributed parity tests and the end-to-end runner
 - `integration_tests/`: Contains integration tests that test multiple components together
   - `features.py`: Tests for torchtitan features and composability
   - `flux.py`: Tests for the FLUX model
@@ -140,6 +142,9 @@ hardware-specific workflows.
 - GPU tests that require multiple physical devices use the `multi_gpu` pytest
   marker. The 1-GPU lane selects `not multi_gpu`, while the multi-GPU lane
   selects `multi_gpu` from the same GPU directory.
+- RL unit tests run in a separate 1-GPU CUDA lane with the RL image, which
+  includes vLLM, Monarch, TorchStore, and the example dependencies. Multi-GPU
+  RL parity tests and the RL training loop run in the RL integration lane.
 
 ## Running Tests
 
@@ -210,7 +215,15 @@ pytest -s tests/unit_tests/gpu/ -m "not multi_gpu"
 
 # Multi-GPU tests
 pytest -s tests/unit_tests/gpu/ -m multi_gpu
+
+# RL unit tests (requires the RL dependencies and one CUDA GPU)
+pytest -s tests/rl/unit_tests/
 ```
+
+To run the RL lane on a draft PR before its workflow exists on `main`, push a
+`ciflow/rl-image/<PR>` tag to build the RL image, then push a
+`ciflow/rl-unit-tests/<PR>` tag after the image is available. Both tags should
+point to the PR commit.
 
 ### Running Specific Unit Test Files
 
@@ -218,6 +231,9 @@ To run a specific test file:
 
 ```bash
 pytest -s tests/unit_tests/cpu/test_config_manager.py
+
+# RL distributed parity tests run in the RL integration workflow
+torchrun --nproc-per-node=2 -m pytest tests/rl/integration_tests/test_bitwise_parity.py::TestBitwiseParityVarlen
 ```
 
 ### Running Specific Test Functions in Unit Tests

@@ -21,6 +21,11 @@ on:
         required: false
         type: boolean
         default: false
+      run-on-draft:
+        description: 'Run the matrix on draft pull requests'
+        required: false
+        type: boolean
+        default: false
     outputs:
       matrix:
         description: dynamically set matrix, narrowed to the gpu-arch input (both CUDA and ROCm when 'all')
@@ -31,7 +36,7 @@ on:
 
 jobs:
   set:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false || inputs.run-on-draft
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}

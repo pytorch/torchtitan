@@ -10,9 +10,15 @@ Together, the unified model, batch-invariant mode, and single training stack pro
 
 Note: Unified-model performance varies by model, input shape, and parallelism: it can trail native vLLM in inference-only workloads but outperform it end to end in some RL configurations. Batch invariance trades throughput for exact numerics and can be used for debugging or controlled on-policy studies.
 
-[Model support](#model-support) · [Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Verifiers](./examples/verifiers/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
+[Test status](#test-status) · [Model support](#model-support) · [Architecture](#architecture) · [Write an experiment](#write-an-experiment) · [DAPO Math](./examples/dapo_math) · [Verifiers](./examples/verifiers/dapo_math) · [Observability](#observability) · [Quick Start](#quick-start)
 
 > **Note:** TitanRL is under active development. APIs and configurations may change.
+
+## Test status
+
+| Hardware | Integration Tests | Unit Tests |
+| --- | --- | --- |
+| NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) | [![RL Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_tests_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_tests_rl.yaml?query=branch%3Amain) |
 
 ## Model support
 

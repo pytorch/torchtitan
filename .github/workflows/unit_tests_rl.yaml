@@ -1,0 +1,84 @@
+name: RL Unit Tests
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - ciflow/rl-unit-tests/*
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  pull_request:
+    paths-ignore:
+      - 'torchtitan/experiments/**'
+  workflow_dispatch:
+
+concurrency:
+  group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      runner-cuda: mt-l-x86aavx2-11-41-a10g
+      gpu-arch: cuda
+      run-on-draft: true
+
+  rl-unit-tests:
+    name: RL Unit Tests (1 GPU)
+    needs: set-matrix
+    if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:rl-${{ needs.set-matrix.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      timeout: 60
+      script: |
+        set -eux
+
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        pip config --user set global.progress_bar off
+
+        # Cover the optional Verifiers example without installing it for all RL jobs.
+        uv pip install -r torchtitan/rl/examples/verifiers/dapo_math/requirements.txt
+
+        # Install matching torch, torchvision, and vLLM CUDA nightlies here.
+        uv pip install --upgrade torch torchvision vllm xformers --pre \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+          --index-strategy unsafe-best-match \
+          --constraint .ci/docker/requirements-rl.txt \
+          --constraint torchtitan/rl/examples/verifiers/dapo_math/requirements.txt
+        python -c '
+        from importlib.metadata import version
+        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
+        print(wheels)
+        assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
+        '
+
+        # The shared HF cache is read-only and does not contain this tokenizer.
+        # Fetch only tokenizer files into a writable cache (no model weights).
+        export MUSE_GLIMMER_TOKENIZER="$(python -c '
+        import os
+        from huggingface_hub import snapshot_download
+
+        print(snapshot_download(
+            "meta-models/Muse-Glimmer-30B",
+            cache_dir=os.path.join(os.environ["RUNNER_TEMP"], "rl-hf-cache"),
+            allow_patterns=["config.json", "tokenizer*.json", "chat_template.jinja"],
+        ))
+        ')"
+
+        export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+        pytest tests/rl/unit_tests --strict-markers --durations=20 -vv
