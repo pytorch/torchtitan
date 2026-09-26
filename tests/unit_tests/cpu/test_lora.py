@@ -29,7 +29,6 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.llama3 import model_registry
@@ -281,11 +280,8 @@ def test_lora_handler_matches_linear_config_subclass():
     assert model.lora_b.weight.requires_grad
 
 
-@pytest.mark.parametrize(
-    "parallel_cls", [InvariantRowParallelLinear, SharedExpertRowParallelLinear]
-)
-def test_lora_preserves_specialized_row_parallel_linear(parallel_cls):
-    config = parallel_cls.Config(
+def test_lora_preserves_invariant_row_parallel_linear():
+    config = InvariantRowParallelLinear.Config(
         in_features=4,
         out_features=3,
         bias=True,
@@ -297,7 +293,7 @@ def test_lora_preserves_specialized_row_parallel_linear(parallel_cls):
     ).transform(config)
     linear = transformed.build()
 
-    assert isinstance(linear, parallel_cls)
+    assert isinstance(linear, InvariantRowParallelLinear)
     x = torch.randn(5, 4)
     expected = F.linear(x, linear.weight, linear.bias)
     expected += 2 * linear.lora_b(linear.lora_a(x))

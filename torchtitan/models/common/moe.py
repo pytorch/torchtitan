@@ -130,8 +130,8 @@ class RoutedExperts(Module):
                 self.remat_region_name("w13"),
                 recompute=self.remat_should_recompute("w13"),
             )(routed_input_RD.bfloat16(), offsets_E)
+            remat.recompute_needs_tensor(gate_up_R2F)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
-            remat.recompute_needs_tensor(gate_RF, up_RF)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = remat.region(
                 self.w2,
@@ -261,11 +261,13 @@ class TokenChoiceTopKRouter(Module):
                 )
 
         if self._debug_force_load_balance:
-            topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
-                scores_TE
-            )
+            topk_expert_ids_TK, topk_scores_TK = remat.region(
+                self._debug_force_load_balance_routing,
+                "routing_decision",
+                recompute=False,
+            )(scores_TE)
+            remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
         else:
-            # Routing choices must remain identical between forward and replay.
             topk_expert_ids_TK = remat.region(
                 self._select_experts,
                 "routing_decision",
@@ -276,10 +278,9 @@ class TokenChoiceTopKRouter(Module):
                 padding_mask_T=padding_mask_T,
                 **router_kwargs,
             )
-
+            remat.recompute_needs_tensor(topk_expert_ids_TK)
             # The expert bias is only used for routing. The gating value is
             # still derived from the original scores.
-            remat.recompute_needs_tensor(topk_expert_ids_TK)
             topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
@@ -307,11 +308,9 @@ class TokenChoiceTopKRouter(Module):
                 if padding_mask_T is None
                 else routing_map_TE & ~padding_mask_T.unsqueeze(-1)
             )
-            # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert_E --
-            #       first in the forward pass, and then in the backward pass. However, this has no
-            #       effect on the expert bias update thanks to the torch.sign() operator.
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
+            if not remat.is_recomputing():
+                with torch.no_grad():
+                    self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
             if self.aux_loss is not None:
                 topk_scores_TK = self.aux_loss(
                     scores_TE,
@@ -370,12 +369,13 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             dim=-1,
             sorted=True,
         )
-        self.quantile_balancer.observe(
-            scores_TE,
-            topk_plus_one_scores[:, self.top_k :],
-            expert_bias_E,
-            padding_mask_T,
-        )
+        if not remat.is_recomputing():
+            self.quantile_balancer.observe(
+                scores_TE,
+                topk_plus_one_scores[:, self.top_k :],
+                expert_bias_E,
+                padding_mask_T,
+            )
         return topk_plus_one_expert_ids[:, : self.top_k].contiguous()
 
 
@@ -731,6 +731,9 @@ class MoE(Module):
         either case and is explicitly sharded here to follow the routed tokens.
         """
         if spmd_sparse_mesh() is None:
+            assert (
+                spmd_mesh_group(MeshAxisName.TP) is None
+            ), "MoE requires expert parallelism when tensor parallelism is enabled"
             return x_TD, padding_mask_T
 
         tp_group = spmd_mesh_group(MeshAxisName.TP)
@@ -745,6 +748,7 @@ class MoE(Module):
                 dst=spmd.S(0),
                 backward_options={"op_dtype": x_TD.dtype},
             )
+        # The padding mask is replicated even when SP has already sharded x_TD.
         if padding_mask_T is not None:
             padding_mask_T = spmd.redistribute(
                 padding_mask_T,

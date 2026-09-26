@@ -26,9 +26,13 @@ from torchtitan.models.common.linear import (
     Linear,
     RouterGateLinear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
-from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
+from torchtitan.models.common.moe import (
+    MoE,
+    QuantileBalancedTopKRouter,
+    RoutedExperts,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
@@ -515,7 +519,7 @@ class TestRematRegions(unittest.TestCase):
                         out_features=8,
                         num_linears=2,
                     ),
-                    w2=SharedExpertRowParallelLinear.Config(
+                    w2=RowParallelLinear.Config(
                         in_features=8,
                         out_features=4,
                     ),
@@ -676,6 +680,61 @@ class TestRematRegions(unittest.TestCase):
             output.backward()
 
         self.assertEqual(select_experts.call_count, 1)
+        self.assertEqual(router.tokens_per_expert_E.sum().item(), 3)
+
+    def test_quantile_router_statistics_are_recorded_once(self):
+        router = QuantileBalancedTopKRouter.Config(
+            num_experts=4,
+            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            score_func=Sigmoid.Config(),
+            top_k=1,
+            num_bins=8,
+        ).build()
+        router.train()
+        expert_bias_E = torch.zeros(4)
+
+        def forward(x_TD: torch.Tensor) -> torch.Tensor:
+            topk_scores_TK, _, _ = router(x_TD, expert_bias_E)
+            return topk_scores_TK.sum()
+
+        checkpointed_forward = remat.checkpoint(
+            region_name="transformer_block", preserve_rng_state=False
+        )(forward)
+        x_TD = torch.randn(3, 4, requires_grad=True)
+        checkpointed_forward(x_TD).backward()
+
+        self.assertEqual(router.tokens_per_expert_E.sum().item(), 3)
+        self.assertEqual(
+            router.quantile_balancer.required_bias_histogram_EB.sum().item(),
+            12,
+        )
+        self.assertIsNotNone(x_TD.grad)
+
+    def test_forced_router_statistics_are_recorded_once(self):
+        router = TokenChoiceTopKRouter.Config(
+            num_experts=4,
+            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            score_func=Sigmoid.Config(),
+            top_k=1,
+            _debug_force_load_balance=True,
+        ).build()
+        router.train()
+
+        def forward(x_TD: torch.Tensor) -> torch.Tensor:
+            topk_scores_TK, _, _ = router(x_TD)
+            return topk_scores_TK.sum()
+
+        checkpointed_forward = remat.checkpoint(
+            region_name="transformer_block", preserve_rng_state=False
+        )(forward)
+        x_TD = torch.randn(3, 4, requires_grad=True)
+        checkpointed_forward(x_TD).backward()
+
+        torch.testing.assert_close(
+            router.tokens_per_expert_E,
+            torch.tensor([1.0, 1.0, 1.0, 0.0]),
+        )
+        self.assertIsNotNone(x_TD.grad)
 
 
 if __name__ == "__main__":
