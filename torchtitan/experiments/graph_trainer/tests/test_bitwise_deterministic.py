@@ -297,9 +297,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         if enable_passes:
             config = SimpleNamespace(
                 model=self.model_config,
-                compile=GraphTrainerCompileConfig(
-                    mode="aot_fx_trace",
-                ),
+                compile=GraphTrainerCompileConfig(),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
                     fsdp_reshard_after_forward="default",
@@ -333,7 +331,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             load_config = SimpleNamespace(
                 model=self.model_config,
                 compile=GraphTrainerCompileConfig(
-                    mode="aot_fx_trace",
                     precompile_artifact_dir="precompiled",
                 ),
             )

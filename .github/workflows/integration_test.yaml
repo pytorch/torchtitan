@@ -62,7 +62,7 @@ jobs:
       (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
     uses: ./.github/workflows/set-matrix.yaml
     with:
-      runner-cuda: linux.g5.4xlarge.nvidia.gpu
+      runner-cuda: mt-l-x86aavx2-11-41-a10g
       gpu-arch: ${{ inputs.gpu-arch || 'cuda' }}
 
   # A ciflow/fake-pg tag also runs tests marked real_pg_required so every
@@ -87,7 +87,7 @@ jobs:
     name: 1 GPU Integration (Fake PG)
     needs: set-matrix-fake-pg
     if: ${{ needs.set-matrix-fake-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-fake-pg.outputs.matrix).include[0] != null }}
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.set-matrix-fake-pg.outputs.matrix) }}
@@ -95,7 +95,7 @@ jobs:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
-      docker-image: ${{ matrix.docker-image }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-matrix-fake-pg.outputs.docker-hash }}
       repository: pytorch/torchtitan
       upload-artifact: integration-1gpu-outputs
       timeout: 60
@@ -158,7 +158,7 @@ jobs:
     name: 8 GPU Integration (Real PG - ${{ startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') && 'required subset' || 'full suite' }} - ${{ matrix.test_suite }})
     needs: set-matrix-real-pg
     if: ${{ (github.event_name != 'workflow_call' || inputs.execution_mode == 'real_pg') && needs.set-matrix-real-pg.outputs.matrix != '' && fromJSON(needs.set-matrix-real-pg.outputs.matrix).include[0] != null }}
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
       matrix:
@@ -168,7 +168,7 @@ jobs:
       runner: ${{ matrix.runner_config.runner }}
       gpu-arch-type: ${{ matrix.runner_config['gpu-arch-type'] }}
       gpu-arch-version: ${{ matrix.runner_config['gpu-arch-version'] }}
-      docker-image: ${{ matrix.runner_config['docker-image'] }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.runner_config['docker-image'] }}:${{ needs.set-matrix-real-pg.outputs.docker-hash }}
       repository: pytorch/torchtitan
       upload-artifact: integration-8gpu-${{ matrix.test_suite }}-outputs
       timeout: 60

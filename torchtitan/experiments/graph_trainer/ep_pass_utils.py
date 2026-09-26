@@ -25,6 +25,7 @@ import logging
 
 import operator
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -160,19 +161,47 @@ class ChunkedRegion:
 
 
 def _chunk_owner(node: fx.Node) -> ChunkOwner | None:
-    if node.meta.get("chunked_region_role") != "body":
+    custom = node.meta.get("custom", {})
+    if not isinstance(custom, dict):
+        custom = {}
+
+    def get_meta(key: str) -> object:
+        return node.meta.get(key, custom.get(key))
+
+    if get_meta("chunked_region_role") != "body":
         return None
-    chunk_id = node.meta.get("chunk_id")
-    root = node.meta.get("chunked_region_fqn")
+    chunk_id = get_meta("chunk_id")
+    root = get_meta("chunked_region_fqn")
+    is_backward = get_meta("chunked_region_is_backward")
     if chunk_id not in (0, 1) or not isinstance(root, str):
         raise ValueError(f"Chunk body node {node.name} has incomplete chunk metadata.")
     return ChunkOwner(
         root_fqn=root,
         is_backward=bool(
-            node.meta.get("chunked_region_is_backward", _is_backward_node(node))
+            is_backward if is_backward is not None else _is_backward_node(node)
         ),
         chunk_id=chunk_id,
     )
+
+
+def _clear_chunk_ownership(nodes: Iterable[fx.Node]) -> None:
+    """Mark nodes shared by multiple chunks as outside every chunk body."""
+    keys = (
+        "chunk_id",
+        "chunked_region_fqn",
+        "chunked_region_is_backward",
+        "chunked_region_producer",
+        "chunked_region_role",
+    )
+    for node in nodes:
+        for key in keys:
+            node.meta.pop(key, None)
+        custom = node.meta.get("custom")
+        if isinstance(custom, dict):
+            custom = dict(custom)
+            for key in keys:
+                custom.pop(key, None)
+            node.meta["custom"] = custom
 
 
 def collect_chunked_regions(
