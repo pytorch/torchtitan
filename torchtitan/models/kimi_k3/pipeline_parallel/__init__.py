@@ -18,12 +18,19 @@ from torch.distributed.pipelining.schedules import (
 )
 from torch.distributed.pipelining.stage import _PipelineStageBase, PipelineStage
 
+from torchtitan.distributed.activation_storage import (
+    ActivationStorage,
+    cpu_offload_all,
+    HostBackend,
+)
+
 from torchtitan.distributed.pipeline_parallel import (
     get_module_fqns_per_model_part,
     pipeline_llm,
 )
 from torchtitan.protocols.model import BaseModel
 
+from .activations import BackwardPrefetch, compute_actions
 from .cache import PPRankLocalCache
 from .layout import infer_block_layout_tables, layer_to_stage_from_split
 from .stage import _grad_send_wait_points, _GradSendWaits, AttnResPipelineStage
@@ -119,9 +126,29 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
         layer_to_stage=layer_to_stage,
         cache=attn_res_cache,
     )
-    store = PPRankLocalCache()
     # The action-list runtime issues each send as its own action, never fused with a receive.
     wait_sends_at_backward = isinstance(pp_schedule, _PipelineScheduleRuntime)
+    memory = model_config.pp_memory
+    storage = prefetch = None
+    if memory.cpu_offload == "all":
+        if not wait_sends_at_backward:
+            raise ValueError(
+                "pp_memory.cpu_offload reads saves back along the schedule's action "
+                "order, which needs an action-list schedule such as Interleaved1F1B."
+            )
+        budget = memory.cpu_offload_budget_gib
+        storage = ActivationStorage(
+            stages[0].device,
+            cpu_offload_all(skip_layers={n_layers - 1}),
+            {"host": HostBackend(None if budget is None else int(budget * 2**30))},
+            min_tensor_bytes=memory.min_tensor_mib << 20,
+            prefetch_n_layers=memory.cpu_offload_prefetch_n_layers,
+        )
+        prefetch = BackwardPrefetch(
+            storage,
+            compute_actions(pp_schedule.pipeline_order[stages[0].group_rank]),
+        )
+    store = PPRankLocalCache(storage)
     grad_send_waits = None
     if wait_sends_at_backward:
         grad_send_waits = _GradSendWaits(
@@ -136,6 +163,11 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
             wait_sends_at_backward=wait_sends_at_backward,
             grad_send_waits=grad_send_waits,
         )
+        if storage is not None:
+            storage.register_stage(
+                stage.stage_index, stage.submod.get_submodule("layers")
+            )
+            stage.set_activation_storage(storage, prefetch)
     logger.info(
         "Kimi K3 pipeline: %d stage(s) on this rank %s, block transport %s",
         len(stages),

@@ -11,6 +11,7 @@ Suffixes: T tokens, D model dim.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import torch
@@ -18,6 +19,9 @@ from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining._utils import flatten_args
 from torch.distributed.pipelining.schedules import _batch_p2p, _ComputationType
 
+from torchtitan.distributed.activation_storage import ActivationStorage
+
+from .activations import BackwardPrefetch
 from .cache import PPRankLocalCache
 from .layout import BlockLayoutTables
 
@@ -109,6 +113,8 @@ class AttnResPipelineStage(PipelineStage):
         self._held_in: dict[int, list[int]] = {}
         self._fwd_send_works: dict[int, list] = {}
         self._input_grads: tuple[torch.Tensor | None, ...] = ()
+        self._activations: ActivationStorage | None = None
+        self._memory: BackwardPrefetch | None = None
 
     def set_routing(
         self,
@@ -122,6 +128,22 @@ class AttnResPipelineStage(PipelineStage):
         self._store = store
         self._wait_sends_at_backward = wait_sends_at_backward
         self._grad_send_waits = grad_send_waits
+
+    def set_activation_storage(
+        self, storage: ActivationStorage, memory: BackwardPrefetch | None = None
+    ) -> None:
+        """Route the tensors this stage's forward saves through ``storage``; ``memory`` sees each
+        compute action begin and end."""
+        self._activations = storage
+        self._memory = memory
+
+    def _begin(self, kind: str, mb: int) -> None:
+        if self._memory is not None and self.has_backward:
+            self._memory.begin((kind, self.stage_index, mb))
+
+    def _end(self, kind: str, mb: int) -> None:
+        if self._memory is not None and self.has_backward:
+            self._memory.end((kind, self.stage_index, mb))
 
     def layout(self) -> BlockLayoutTables:
         if self._layout is None:
@@ -219,6 +241,7 @@ class AttnResPipelineStage(PipelineStage):
         kwargs: dict[str, Any] | None = None,
         save_forward_output: bool = True,
     ):
+        self._begin("F", fwd_chunk_id)
         if self._grad_send_waits is not None:
             self._grad_send_waits.wait(self.stage_index, fwd_chunk_id)
         composite_kwargs = kwargs or {}
@@ -235,25 +258,28 @@ class AttnResPipelineStage(PipelineStage):
             )
             # The received tensors lead, in wire order, where core reads their gradients.
             input_tensors = [hidden_TD, *delta_TD, *held_TD]
-        output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
-        if self.is_last:
-            output_tuple = (
-                (output,) if isinstance(output, torch.Tensor) else tuple(output)
-            )
-            if save_forward_output:
-                self.output_chunks.append(output)
-        else:
-            hidden_out_TD, blocks_out_TD = output
-            payload_TD = self._commit_and_route(fwd_chunk_id, blocks_out_TD, order_in)
-            output_tuple = (hidden_out_TD, *payload_TD)
-            output = output_tuple
         # flatten_args returns a list with detach=False; lists keep the checker on that overload.
-        self.fwd_cache[fwd_chunk_id] = (
-            output_tuple,
-            input_tensors + list(flatten_args(composite_kwargs)),
-        )
+        kwarg_tensors = list(flatten_args(composite_kwargs))
+        saves = contextlib.nullcontext()
+        if self._activations is not None and self.has_backward:
+            saves = self._activations.forward(
+                self.stage_index, fwd_chunk_id, keep=input_tensors + kwarg_tensors
+            )
+        with saves:
+            output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
+            if not self.is_last:
+                hidden_out_TD, blocks_out_TD = output
+                payload_TD = self._commit_and_route(
+                    fwd_chunk_id, blocks_out_TD, order_in
+                )
+                output = (hidden_out_TD, *payload_TD)
+        output_tuple = (output,) if isinstance(output, torch.Tensor) else tuple(output)
+        if self.is_last and save_forward_output:
+            self.output_chunks.append(output)
+        self.fwd_cache[fwd_chunk_id] = (output_tuple, input_tensors + kwarg_tensors)
         if not self.has_backward and self._is_last_on_rank():
             self.store().release(fwd_chunk_id)
+        self._end("F", fwd_chunk_id)
         return output
 
     def _retrieve_recv_grads(self, bwd_chunk_id: int):
@@ -312,6 +338,7 @@ class AttnResPipelineStage(PipelineStage):
         full_backward: bool = True,
         last_backward=False,
     ):
+        self._begin("B", bwd_chunk_id)
         for work in self._fwd_send_works.pop(bwd_chunk_id, []):
             work.wait()
         self._input_grads = ()
@@ -321,6 +348,8 @@ class AttnResPipelineStage(PipelineStage):
             full_backward=full_backward,
             last_backward=last_backward,
         )
+        if self._activations is not None and full_backward:
+            self._activations.finish(self.stage_index, bwd_chunk_id)
         if not self.has_backward:
             # Forward-only pass (schedule.eval): no backward ran; drop the forward's bookkeeping.
             self.fwd_cache.pop(bwd_chunk_id, None)
@@ -339,6 +368,15 @@ class AttnResPipelineStage(PipelineStage):
                     f"{sorted(store.blocks(bwd_chunk_id))} or their gradient deposits "
                     "outlived the rank's last backward"
                 )
+        self._end("B", bwd_chunk_id)
+
+    def backward_weight_one_chunk(self, bwd_chunk_id: int, last_backward=False):
+        self._begin("W", bwd_chunk_id)
+        super().backward_weight_one_chunk(bwd_chunk_id, last_backward=last_backward)
+        # The weight half of a split backward reads the saves again.
+        if self._activations is not None:
+            self._activations.finish(self.stage_index, bwd_chunk_id)
+        self._end("W", bwd_chunk_id)
 
     def _route_input_grads(self, mb: int) -> None:
         store = self.store()
