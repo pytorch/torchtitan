@@ -17,7 +17,6 @@ import torch
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
-    annotate_varlen_metadata_spmd_types,
     create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
@@ -47,7 +46,7 @@ class TestPackedVarlenMetadata(unittest.TestCase):
         with patch(
             "torchtitan.models.common.attention.spmd.assert_type"
         ) as assert_type:
-            annotate_varlen_metadata_spmd_types(metadata)
+            metadata.annotate_spmd_types()
 
         self.assertEqual(assert_type.call_count, 2)
         self.assertIs(assert_type.call_args_list[0].args[0], metadata.cu_seq_q)

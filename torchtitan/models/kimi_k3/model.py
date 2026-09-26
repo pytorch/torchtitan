@@ -28,7 +28,6 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
-    annotate_varlen_metadata_spmd_types,
     AttentionMasksType,
     BaseAttention,
     create_varlen_metadata_for_document,
@@ -497,7 +496,7 @@ class KimiK3Model(MultimodalModel):
             kda_metadata = attention_masks.get("kda")
             if isinstance(kda_metadata, VarlenMetadata):
                 with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
-                    annotate_varlen_metadata_spmd_types(kda_metadata)
+                    kda_metadata.annotate_spmd_types()
 
         inputs = batch.pop("input")
         labels = batch.pop("labels")

@@ -22,10 +22,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import (
-    annotate_varlen_metadata_spmd_types,
-    VarlenMetadata,
-)
+from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -80,7 +77,7 @@ def annotate_deltanet_cu_seqlens(attention_masks: "Qwen35AttentionMaskDict") -> 
     deltanet_metadata = attention_masks.get("deltanet")
     if not isinstance(deltanet_metadata, VarlenMetadata):
         return
-    annotate_varlen_metadata_spmd_types(deltanet_metadata)
+    deltanet_metadata.annotate_spmd_types()
 
 
 def _qk_norm_sharding() -> ShardingConfig:
