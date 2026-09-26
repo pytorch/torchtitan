@@ -114,6 +114,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         config = build_config(
             attn_backend="flex",
             moe_comm_backend="standard",
+            enable_sp=True,
             seq_len=128,
         )
 

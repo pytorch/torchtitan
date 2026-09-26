@@ -32,7 +32,6 @@ from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
 )
 from torchtitan.models.common import Sigmoid, Softmax
 from torchtitan.models.common.config_utils import (
-    configure_shared_expert_w2_for_sp,
     fused_gate_up_param_init,
     make_moe_config,
     make_routed_experts_config,
@@ -539,12 +538,9 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         ffn_config = make_shared_expert_ffn_config(
             dim=shared_info["dim"],
             hidden_dim=shared_info["hidden_dim"],
+            enable_sp=config.parallelism.enable_sequence_parallel,
             w1_param_init=_LINEAR_INIT,
             w2w3_param_init=_LINEAR_INIT,
-        )
-        configure_shared_expert_w2_for_sp(
-            ffn_config,
-            enable_sp=config.parallelism.enable_sequence_parallel,
         )
         if shared_info["has_sigmoid_gate"]:
             # Import only for the Qwen3.5 topology so unrelated HF models do
