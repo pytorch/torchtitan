@@ -76,7 +76,6 @@ import triton
 import triton.language as tl
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -960,21 +959,22 @@ class FusedMLAAttention(Attention):
                 f"{type(self.rope).__name__}."
             )
 
-    def forward(
+    def _project_qkv(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        q: torch.Tensor | None,
+        kv: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if not x.is_cuda:
-            return super().forward(x, attention_masks, positions)
+            return super()._project_qkv(x, q, kv, positions)
 
-        x = self._gather_tp_input(x)
         num_tokens = x.shape[0]
         if self.q_lora_rank == 0:
             q = self.wq(x)
         else:
-            q = self.wq_b(self.q_norm(self.wq_a(x)))
+            assert q is not None
+            q = self.wq_b(self.q_norm(q))
 
         with spmd.local():
             q = q.view(num_tokens, -1, self.qk_head_dim)
@@ -997,14 +997,13 @@ class FusedMLAAttention(Attention):
             self.qk_nope_head_dim,
         ).squeeze(0)
 
-        kv_down = self.wkv_a(x)
-        kv_latent, k_pe = torch.split(
-            kv_down,
+        kv, k_pe = torch.split(
+            kv,
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
 
-        kv = self.wkv_b(self.kv_norm(kv_latent))
+        kv = self.wkv_b(self.kv_norm(kv))
         with spmd.local():
             kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
             k, v = fused_mla_kv(
@@ -1023,15 +1022,7 @@ class FusedMLAAttention(Attention):
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
 
-        output = self.inner_attention(
-            q,
-            k,
-            v,
-            attention_masks=attention_masks,
-            scale=self.softmax_scale,
-        ).contiguous()
-        output = output.view(num_tokens, -1)
-        return self.wo(output)
+        return q, k, v
 
 
 @override(

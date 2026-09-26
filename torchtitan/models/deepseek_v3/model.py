@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -100,34 +101,46 @@ class Attention(BaseAttention):
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
-    def _gather_tp_input(self, x: torch.Tensor) -> torch.Tensor:
+    def _maybe_gather_tp_input(self, x: torch.Tensor) -> torch.Tensor:
         """Gather the shared MLA input before its projection branches."""
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return x
-        return spmd.redistribute(
+
+        x = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("input_redistribution"),
+            recompute=self.remat_should_recompute("input_redistribution"),
+        )(
             x,
             tp_group,
             src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
             dst=spmd.R,
             backward_options={"op_dtype": x.dtype},
         )
+        remat.recompute_needs_tensor(x)
+        return x
 
-    def forward(
+    def _project_latents(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        q = None if self.q_lora_rank == 0 else self.wq_a(x)
+        kv = self.wkv_a(x)
+        return q, kv
+
+    def _project_qkv(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
-        positions: torch.Tensor | None = None,
-    ):
-        x = self._gather_tp_input(x)
-
+        q: torch.Tensor | None,
+        kv: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_tokens = x.shape[0]
 
-        # Query projection
         if self.q_lora_rank == 0:
             q = self.wq(x)
         else:
-            q = self.wq_a(x)
+            assert q is not None
             q = self.wq_b(self.q_norm(q))
 
         # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
@@ -144,8 +157,6 @@ class Attention(BaseAttention):
             q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
         )
 
-        # Key-value projection
-        kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
@@ -169,11 +180,45 @@ class Attention(BaseAttention):
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
 
-        output = self.inner_attention(
-            q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
-        ).contiguous()
-        output = output.view(num_tokens, -1)
-        return self.wo(output)
+        return q, k, v
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_masks: AttentionMasksType,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        x = self._maybe_gather_tp_input(x)
+        num_tokens = x.shape[0]
+        q, kv = remat.region(
+            self._project_latents,
+            self.remat_region_name("latent_projections"),
+            recompute=self.remat_should_recompute("latent_projections"),
+        )(x)
+        if q is not None:
+            remat.recompute_needs_tensor(q)
+        remat.recompute_needs_tensor(kv)
+        q, k, v = self._project_qkv(x, q, kv, positions)
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
+            q,
+            k,
+            v,
+            attention_masks=attention_masks,
+            scale=self.softmax_scale,
+        )
+        remat.recompute_needs_tensor(output)
+        output = output.contiguous().view(num_tokens, -1)
+        output = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(output)
+        remat.recompute_needs_tensor(output)
+        return output
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):

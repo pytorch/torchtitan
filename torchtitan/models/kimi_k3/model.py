@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
@@ -115,6 +116,28 @@ class KimiMLAAttention(BaseAttention):
         self.wo = config.wo.build()
         self.inner_attention = config.inner_attention.build()
 
+    def _maybe_gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x_TD
+
+        x_TD = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("input_redistribution"),
+            recompute=self.remat_should_recompute("input_redistribution"),
+        )(
+            x_TD,
+            tp_group,
+            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            dst=spmd.R,
+            backward_options={"op_dtype": x_TD.dtype},
+        )
+        remat.recompute_needs_tensor(x_TD)
+        return x_TD
+
+    def _project_latents(self, x_TD: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.wq_a(x_TD), self.wkv_a(x_TD)
+
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -122,24 +145,14 @@ class KimiMLAAttention(BaseAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
-
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # The MLA and gate projections all consume x. Gather once at their
-            # common attention boundary.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
-
-        q_THK = local_head_split(
-            self.wq_b(self.q_norm(self.wq_a(x_TD))), self.q_head_dim
-        )
-
-        compressed_kv_TC = self.wkv_a(x_TD)
+        x_TD = self._maybe_gather_tp_input(x_TD)
+        q_latent_TC, compressed_kv_TC = remat.region(
+            self._project_latents,
+            self.remat_region_name("latent_projections"),
+            recompute=self.remat_should_recompute("latent_projections"),
+        )(x_TD)
+        remat.recompute_needs_tensor(q_latent_TC, compressed_kv_TC)
+        q_THK = local_head_split(self.wq_b(self.q_norm(q_latent_TC)), self.q_head_dim)
         kv_latent_TC, k_rope_TK = torch.split(
             compressed_kv_TC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
@@ -161,16 +174,32 @@ class KimiMLAAttention(BaseAttention):
             if spmd.is_type_checking():
                 spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
 
-        out_THV = self.inner_attention(
+        gate_TD = remat.region(
+            self.gate,
+            self.remat_region_name("gate"),
+            recompute=self.remat_should_recompute("gate"),
+        )(x_TD)
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             q_THK,
             k_THK,
             v_THV,
             attention_masks=attention_masks,
             scale=self.scale,
         )
+        remat.recompute_needs_tensor(out_THV, gate_TD)
         out_TD = out_THV.flatten(-2)
-        out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
-        return self.wo(out_TD)
+        out_TD = out_TD * torch.sigmoid(gate_TD)
+        out_TD = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(out_TD)
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 def _apply_attention_residual(
