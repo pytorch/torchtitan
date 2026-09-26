@@ -777,31 +777,26 @@ class FusedMLAAttention(Attention):
 
     def _project_qkv(
         self,
-        x_TD: torch.Tensor,
-        q_latent_TC: torch.Tensor | None,
-        compressed_kv_TC: torch.Tensor,
+        x: torch.Tensor,
+        q: torch.Tensor | None,
+        kv: torch.Tensor,
         positions: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if not x_TD.is_cuda:
-            return super()._project_qkv(
-                x_TD,
-                q_latent_TC,
-                compressed_kv_TC,
-                positions,
-            )
+        if not x.is_cuda:
+            return super()._project_qkv(x, q, kv, positions)
 
-        num_tokens = x_TD.shape[0]
+        num_tokens = x.shape[0]
         if self.q_lora_rank == 0:
-            q_THK = self.wq(x_TD)
+            q = self.wq(x)
         else:
-            assert q_latent_TC is not None
-            q_THK = self.wq_b(self.q_norm(q_latent_TC))
+            assert q is not None
+            q = self.wq_b(self.q_norm(q))
 
         with spmd.local():
-            q_THK = q_THK.view(num_tokens, -1, self.qk_head_dim)
+            q = q.view(num_tokens, -1, self.qk_head_dim)
             if spmd.is_type_checking():
                 spmd.assert_type(
-                    q_THK,
+                    q,
                     spmd.V,
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
                 )
@@ -811,41 +806,39 @@ class FusedMLAAttention(Attention):
                 positions,
                 max_valid_pos=self.rope.cache.shape[0] - 1,
             )
-        q_THK = fused_mla_q(
-            q_THK.unsqueeze(0),
+        q = fused_mla_q(
+            q.unsqueeze(0),
             self.rope.cache,
             positions,
             self.qk_nope_head_dim,
         ).squeeze(0)
 
-        kv_latent_TC, k_pe_TK = torch.split(
-            compressed_kv_TC,
+        kv, k_pe = torch.split(
+            kv,
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
 
-        kv_THC = self.wkv_b(self.kv_norm(kv_latent_TC))
+        kv = self.wkv_b(self.kv_norm(kv))
         with spmd.local():
-            kv_THC = kv_THC.view(
-                num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim
-            )
-            k_THK, v_THV = fused_mla_kv(
-                kv_THC.unsqueeze(0),
-                k_pe_TK.unsqueeze(0),
+            kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
+            k, v = fused_mla_kv(
+                kv.unsqueeze(0),
+                k_pe.unsqueeze(0),
                 self.rope.cache,
                 positions,
                 self.qk_nope_head_dim,
             )
-            k_THK, v_THV = k_THK.squeeze(0), v_THV.squeeze(0)
+            k, v = k.squeeze(0), v.squeeze(0)
             if spmd.is_type_checking() and not torch.compiler.is_compiling():
-                for tensor in (k_THK, v_THV):
+                for tensor in (k, v):
                     spmd.assert_type(
                         tensor,
                         spmd.V,
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
 
-        return q_THK, k_THK, v_THV
+        return q, k, v
 
 
 @override(
