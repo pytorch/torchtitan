@@ -22,6 +22,7 @@ from torch.distributed.pipelining.stage import _make_tensor_from_meta
 
 from torchtitan.distributed.activation_storage import ActivationStorage
 
+from .activations import PPMemoryController
 from .cache import PPRankLocalCache
 from .layout import BlockLayoutTables
 
@@ -119,6 +120,7 @@ class AttnResPipelineStage(PipelineStage):
         self._fwd_send_works: dict[int, list] = {}
         self._input_grads: tuple[torch.Tensor | None, ...] = ()
         self._activations: ActivationStorage | None = None
+        self._memory: PPMemoryController | None = None
 
     def set_routing(
         self,
@@ -133,9 +135,20 @@ class AttnResPipelineStage(PipelineStage):
         self._wait_sends_at_backward = wait_sends_at_backward
         self._grad_send_waits = grad_send_waits
 
-    def set_activation_storage(self, storage: ActivationStorage) -> None:
-        """Route the tensors this stage's forward saves through ``storage``."""
+    def set_activation_storage(
+        self, storage: ActivationStorage, memory: PPMemoryController | None = None
+    ) -> None:
+        """Route the tensors this stage's forward saves through ``storage``, moved as ``memory`` plans."""
         self._activations = storage
+        self._memory = memory
+
+    def _begin(self, kind: str, mb: int) -> None:
+        if self._memory is not None and self.has_backward:
+            self._memory.begin((kind, self.stage_index, mb))
+
+    def _end(self, kind: str, mb: int) -> None:
+        if self._memory is not None and self.has_backward:
+            self._memory.end((kind, self.stage_index, mb))
 
     def layout(self) -> BlockLayoutTables:
         if self._layout is None:
@@ -271,6 +284,7 @@ class AttnResPipelineStage(PipelineStage):
         kwargs: dict[str, Any] | None = None,
         save_forward_output: bool = True,
     ):
+        self._begin("F", fwd_chunk_id)
         if self._grad_send_waits is not None:
             self._grad_send_waits.wait(self.stage_index, fwd_chunk_id)
         composite_kwargs = kwargs or {}
@@ -310,6 +324,7 @@ class AttnResPipelineStage(PipelineStage):
         self.fwd_cache[fwd_chunk_id] = (output_tuple, input_tensors + kwarg_tensors)
         if not self.has_backward and self._is_last_on_rank():
             self.store().release(fwd_chunk_id)
+        self._end("F", fwd_chunk_id)
         return output
 
     def _retrieve_recv_grads(self, bwd_chunk_id: int):
@@ -372,6 +387,7 @@ class AttnResPipelineStage(PipelineStage):
         full_backward: bool = True,
         last_backward=False,
     ):
+        self._begin("B", bwd_chunk_id)
         for work in self._fwd_send_works.pop(bwd_chunk_id, []):
             work.wait()
         self._input_grads = ()
@@ -401,12 +417,15 @@ class AttnResPipelineStage(PipelineStage):
                     f"{sorted(store.blocks(bwd_chunk_id))} or their gradient deposits "
                     "outlived the rank's last backward"
                 )
+        self._end("B", bwd_chunk_id)
 
     def backward_weight_one_chunk(self, bwd_chunk_id: int, last_backward=False):
+        self._begin("W", bwd_chunk_id)
         super().backward_weight_one_chunk(bwd_chunk_id, last_backward=last_backward)
         # The weight half of a split backward reads the saves again.
         if self._activations is not None:
             self._activations.finish(self.stage_index, bwd_chunk_id)
+        self._end("W", bwd_chunk_id)
 
     def _route_input_grads(self, mb: int) -> None:
         """Deposit the stored blocks' gradients and send the received ones back with their deposits."""
