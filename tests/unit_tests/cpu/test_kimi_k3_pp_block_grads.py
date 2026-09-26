@@ -10,7 +10,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.pipelining.schedules import (
+    _ComputationType,
     _PipelineScheduleRuntime,
+    Schedule1F1B,
     ScheduleInterleaved1F1B,
 )
 from torch.distributed.pipelining.stage import _PipelineStageBase
@@ -19,13 +21,13 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
+
+from torchtitan.models.kimi_k3.pipeline_parallel.layout import infer_block_layout_tables
 from torchtitan.models.kimi_k3.pipeline_parallel.stage import (
     _grad_send_wait_points,
     _GradSendWaits,
+    AttnResPipelineStage,
 )
-
-from torchtitan.models.kimi_k3.pipeline_parallel.layout import infer_block_layout_tables
-from torchtitan.models.kimi_k3.pipeline_parallel.stage import AttnResPipelineStage
 
 NUM_LAYERS, LAYERS_PER_BLOCK = 16, 4
 NUM_BLOCKS = NUM_LAYERS // LAYERS_PER_BLOCK
@@ -46,6 +48,12 @@ SPLITS = {
         [11, 12, 13],
         [14],
         [15],
+    ],
+    "pp4 x vp1 under 1F1B, blocks open inside stages": [
+        [0, 1, 2],
+        [3, 4, 5, 6, 7],
+        [8, 9, 10],
+        [11, 12, 13, 14, 15],
     ],
 }
 
@@ -68,26 +76,49 @@ class _ExactStage(nn.Module):
             }
         )
 
-    def forward(self, hidden: torch.Tensor, stack: torch.Tensor | None = None):
+    def forward(self, hidden: torch.Tensor, blocks: list[torch.Tensor] | None = None):
         if self.first:
             hidden = F.pad(hidden, (INPUT, 0))
-            stack = hidden.new_zeros(hidden.shape[0], 0, DIM)
-        assert stack is not None
+            blocks = []
+        assert blocks is not None
         for layer in self.layers:
             if layer % LAYERS_PER_BLOCK == 0:
                 block = self.blocks[str(layer // LAYERS_PER_BLOCK)] * hidden[:, INPUT:]
-                stack = torch.cat((stack, block.unsqueeze(1)), dim=1)
+                blocks = [*blocks, block]
             for _ in range(2):
-                read = _read(stack, layer).unsqueeze(1)
+                read = _read(blocks, layer).unsqueeze(1)
                 hidden = hidden + F.pad(read, (READOUT, DIM - READOUT - 1))
         if self.last:
-            return hidden[:, READOUT] + _read(stack, HEAD)
-        return hidden, stack
+            return hidden[:, READOUT] + _read(blocks, HEAD)
+        return hidden, blocks
 
 
-def _read(stack: torch.Tensor, channel: int) -> torch.Tensor:
+def _read(blocks: list[torch.Tensor], channel: int) -> torch.Tensor:
+    stack = torch.stack(blocks, dim=1)
     weights = torch.arange(1, stack.shape[1] + 1, dtype=stack.dtype)
     return (stack[:, :, channel] * weights).sum(1)
+
+
+class _LoggedStore(PPRankLocalCache):
+    """The rank store, recording which stage's backward released which blocks."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stage: int | None = None
+        self.releases: list[tuple[int | None, int, tuple[int, ...]]] = []
+
+    def release(self, mb: int, block_idxs: list[int] | None = None) -> None:
+        if block_idxs is not None:
+            self.releases.append((self.stage, mb, tuple(block_idxs)))
+        super().release(mb, block_idxs)
+
+
+class _LoggedStage(AttnResPipelineStage):
+    def backward_one_chunk(self, bwd_chunk_id: int, *args, **kwargs):
+        store = self.store()
+        assert isinstance(store, _LoggedStore)
+        store.stage = self.stage_index
+        return super().backward_one_chunk(bwd_chunk_id, *args, **kwargs)
 
 
 def _loss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -160,13 +191,7 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
     def world_size(self) -> int:
         return 4
 
-    def _run_pipeline(
-        self,
-        split: list[list[int]],
-        dtype: torch.dtype,
-        cache: bool,
-        eval_losses: list | None = None,
-    ):
+    def _build(self, split: list[list[int]], dtype: torch.dtype, cache: bool):
         num_stages, last = len(split), len(split) - 1
         mine = range(self.rank, num_stages, self.world_size)
         modules = [
@@ -174,18 +199,27 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
             for s in mine
         ]
         stages = [
-            AttnResPipelineStage(module, s, num_stages, torch.device("cpu"))
+            _LoggedStage(module, s, num_stages, torch.device("cpu"))
             for module, s in zip(modules, mine, strict=True)
         ]
-        schedule_stages: list[_PipelineStageBase] = list(stages)
-        schedule = ScheduleInterleaved1F1B(
-            schedule_stages,
-            n_microbatches=MICROBATCHES,
-            loss_fn=_loss,
-            scale_grads=False,
-        )
+        if num_stages == self.world_size:
+            schedule = Schedule1F1B(
+                stages[0],
+                n_microbatches=MICROBATCHES,
+                loss_fn=_loss,
+                scale_grads=False,
+            )
+        else:
+            schedule_stages: list[_PipelineStageBase] = list(stages)
+            schedule = ScheduleInterleaved1F1B(
+                schedule_stages,
+                n_microbatches=MICROBATCHES,
+                loss_fn=_loss,
+                scale_grads=False,
+            )
+        stage_to_rank = dict(stages[0].stage_index_to_group_rank)
         layout = infer_block_layout_tables(
-            stage_to_rank=dict(stages[0].stage_index_to_group_rank),
+            stage_to_rank=stage_to_rank,
             n_layers=NUM_LAYERS,
             layers_per_block=LAYERS_PER_BLOCK,
             layer_to_stage={
@@ -193,20 +227,31 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
             },
             cache=cache,
         )
-        store = PPRankLocalCache()
-        waits = _GradSendWaits(
-            _grad_send_wait_points(
-                schedule.pipeline_order, dict(stages[0].stage_index_to_group_rank), self.rank
+        store = _LoggedStore()
+        runtime = isinstance(schedule, _PipelineScheduleRuntime)
+        waits = None
+        if runtime:
+            waits = _GradSendWaits(
+                _grad_send_wait_points(
+                    schedule.pipeline_order, stage_to_rank, self.rank
+                )
             )
-        )
         for stage in stages:
-            runtime = isinstance(schedule, _PipelineScheduleRuntime)
             stage.set_routing(
-                layout,
-                store,
-                wait_sends_at_backward=runtime,
-                grad_send_waits=waits if runtime else None,
+                layout, store, wait_sends_at_backward=runtime, grad_send_waits=waits
             )
+        return modules, stages, schedule, layout, store, mine, last
+
+    def _run_pipeline(
+        self,
+        split: list[list[int]],
+        dtype: torch.dtype,
+        cache: bool,
+        eval_losses: list | None = None,
+    ):
+        modules, stages, schedule, layout, store, mine, last = self._build(
+            split, dtype, cache
+        )
 
         def step(inputs, targets):
             losses: list[torch.Tensor] = []
@@ -215,6 +260,10 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
                 schedule.step(*args, target=targets, losses=losses)
             else:
                 schedule.step(*args)
+            if store.has_deposits(0) or any(
+                store.blocks(mb) for mb in range(MICROBATCHES)
+            ):
+                raise AssertionError("a training step left blocks in the rank store")
             if eval_losses is not None:
                 evaluated: list[torch.Tensor] = []
                 with torch.no_grad():
@@ -222,20 +271,18 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
                         schedule.eval(*args, target=targets, losses=evaluated)
                     else:
                         schedule.eval(*args)
-                if store.blocks(0) or any(
-                    store.blocks(mb) for mb in range(MICROBATCHES)
-                ):
+                if any(store.blocks(mb) for mb in range(MICROBATCHES)):
                     raise AssertionError("eval left blocks in the rank store")
                 eval_losses.append(
                     (
                         [loss.detach() for loss in evaluated],
-                        sum(len(s._order) + len(s._delta_in) for s in stages),
+                        sum(len(s._held_in) + len(s._delta_in) for s in stages),
                     )
                 )
             return [loss.detach() for loss in losses]
 
-        sent = sum(len(layout.delta_to_send(s)) for s in range(num_stages))
-        return _train(modules, step, dtype), sent
+        sent = sum(len(layout.delta_to_send(s)) for s in range(len(split)))
+        return _train(modules, step, dtype), sent, (layout, store, mine)
 
     @with_comms
     def test_rank_cache_matches_whole_stack_and_single_device(self):
@@ -243,9 +290,14 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
             for name, split in SPLITS.items():
                 with self.subTest(dtype=dtype, split=name):
                     reference = _run_single_device(split, dtype)
-                    cached, cached_sent = self._run_pipeline(split, dtype, cache=True)
-                    naive, naive_sent = self._run_pipeline(split, dtype, cache=False)
-                    self.assertLess(cached_sent, naive_sent)
+                    cached, cached_sent, _ = self._run_pipeline(
+                        split, dtype, cache=True
+                    )
+                    naive, naive_sent, _ = self._run_pipeline(split, dtype, cache=False)
+                    if len(split) > self.world_size:
+                        self.assertLess(cached_sent, naive_sent)
+                    else:
+                        self.assertEqual(cached_sent, naive_sent)
                     for step in range(STEPS):
                         ref_grads, ref_losses = reference[step]
                         for grads, losses in (cached[step], naive[step]):
@@ -263,12 +315,69 @@ class TestKimiK3PipelineExactBlockGradients(DTensorTestBase):
                                 )
 
     @with_comms
+    def test_each_block_goes_at_the_backward_of_the_stage_that_brought_it(self):
+        for name, split in SPLITS.items():
+            with self.subTest(split=name):
+                _, _, (layout, store, mine) = self._run_pipeline(
+                    split, torch.float32, cache=True
+                )
+                brought = {
+                    s: set(layout.delta_to_send(s - 1) if s else [])
+                    | set(layout.commits_at(s))
+                    for s in mine
+                }
+                released: dict[tuple[int, int], list[int | None]] = {}
+                for stage, mb, blocks in store.releases:
+                    self.assertIn(stage, brought)
+                    self.assertEqual(set(blocks), brought[stage])
+                    for b in blocks:
+                        released.setdefault((mb, b), []).append(stage)
+                for mb in range(MICROBATCHES):
+                    for s in mine:
+                        for b in brought[s]:
+                            self.assertEqual(released[(mb, b)], [s] * STEPS)
+
+    @with_comms
+    def test_grad_send_wait_points_follow_the_receivers_use(self):
+        _, stages, schedule, _, _, _, _ = self._build(
+            SPLITS["pp4 x vpp2"], torch.float32, cache=True
+        )
+        order = schedule.pipeline_order
+        stage_to_rank = dict(stages[0].stage_index_to_group_rank)
+
+        def index(r, kind, s, mb):
+            return next(
+                i
+                for i, a in enumerate(order[r])
+                if a is not None
+                and (a.computation_type, a.stage_index, a.microbatch_index)
+                == (kind, s, mb)
+            )
+
+        forward, backward = _ComputationType.FORWARD, _ComputationType.FULL_BACKWARD
+        covered = 0
+        for rank in range(self.world_size):
+            points = _grad_send_wait_points(order, stage_to_rank, rank)
+            for (s, mb), (fed, mb2) in points.items():
+                receiver = stage_to_rank[s - 1]
+                self.assertEqual(stage_to_rank[fed], rank)
+                self.assertGreater(
+                    index(rank, forward, fed, mb2), index(rank, backward, s, mb)
+                )
+                self.assertGreater(
+                    index(receiver, forward, fed - 1, mb2),
+                    index(receiver, backward, s - 1, mb),
+                )
+                covered += 1
+        self.assertGreater(covered, 0)
+
+    @with_comms
     def test_forward_only_eval_between_steps(self):
         for name, split in SPLITS.items():
             with self.subTest(split=name):
                 reference = _run_single_device(split, torch.float32)
                 evaluated: list = []
-                history, _ = self._run_pipeline(
+                history, _, _ = self._run_pipeline(
                     split, torch.float32, cache=True, eval_losses=evaluated
                 )
                 for step in range(STEPS):

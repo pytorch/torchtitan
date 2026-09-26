@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The stage's carrier handling, on CPU: assembly, routing, the gradient split, and
-the swap of core's stages for AttnRes ones."""
+"""The stage's carrier handling, on CPU: routing, the rank store, and the swap of
+core's stages for AttnRes ones."""
 
 import unittest
 
@@ -21,72 +21,53 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.models.kimi_k3.pipeline_parallel import _swap_in_attn_res_stages
 from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
 from torchtitan.models.kimi_k3.pipeline_parallel.stage import (
-    _assemble_stack,
-    _outgoing_delta,
-    _split_stack_grad,
+    _outgoing_blocks,
     AttnResPipelineStage,
 )
 
 
 class TestCarrier(unittest.TestCase):
-    def test_assembly_orders_blocks_and_hands_back_a_leaf(self):
-        T, D = 4, 8
-        hidden = torch.randn(T, D)
-        delta = torch.randn(1, T, D, requires_grad=True)  # block 2 on the wire
-        store = {0: torch.randn(T, D), 1: torch.randn(T, D)}
-        stack, order = _assemble_stack(hidden, delta, [2], store)
-        self.assertEqual(order, [0, 1, 2])
-        self.assertTrue(stack.is_leaf and stack.requires_grad)
-        self.assertTrue(torch.equal(stack[:, 0], store[0]))
-        self.assertTrue(torch.equal(stack[:, 2], delta[0]))
-        empty, order = _assemble_stack(hidden, hidden.new_zeros(0, T, D), [], {})
-        self.assertEqual((tuple(empty.shape), order), ((T, 0, D), []))
+    def test_payload_is_the_routed_blocks_of_the_model_list(self):
+        blocks = [torch.randn(4, 8, requires_grad=True) for _ in range(3)]
+        payload = _outgoing_blocks(blocks, [0, 1, 2], [1, 2])
+        self.assertEqual(len(payload), 2)
+        self.assertIs(payload[0], blocks[1])
+        self.assertIs(payload[1], blocks[2])
+        self.assertEqual(_outgoing_blocks(blocks, [0, 1, 2], []), [])
         with self.assertRaisesRegex(ValueError, "routing expects"):
-            _assemble_stack(hidden, delta, [2, 3], store)
+            _outgoing_blocks(blocks, [0, 1], [1])
+        with self.assertRaisesRegex(ValueError, "not among"):
+            _outgoing_blocks(blocks, [0, 1, 2], [3])
 
-    def test_payload_is_a_view_of_the_routed_tail_of_the_model_stack(self):
-        T, D = 4, 8
-        stack_out = torch.randn(T, 3, D, requires_grad=True)
-        payload = _outgoing_delta(stack_out, [0, 1, 2], [1, 2])
-        self.assertEqual(tuple(payload.shape), (2, T, D))
-        self.assertTrue(torch.equal(payload[0], stack_out[:, 1]))
-        self.assertEqual(payload.data_ptr(), stack_out[:, 1].data_ptr())
-        self.assertTrue(payload.requires_grad)
-        self.assertEqual(
-            tuple(_outgoing_delta(stack_out, [0, 1, 2], []).shape), (0, T, D)
-        )
-        with self.assertRaisesRegex(ValueError, "not the tail"):
-            _outgoing_delta(stack_out, [0, 1, 2], [0, 2])
-
-    def test_gradient_split_sends_the_received_and_deposits_the_stored(self):
-        T, D = 4, 8
-        grad_stack = torch.randn(T, 3, D)
-        like = torch.zeros(T, D)
-        grad_delta, deposits = _split_stack_grad(grad_stack, [0, 1, 2], [2], like)
-        self.assertEqual(tuple(grad_delta.shape), (1, T, D))
-        self.assertTrue(grad_delta.is_contiguous())
-        self.assertTrue(torch.equal(grad_delta[0], grad_stack[:, 2]))
-        self.assertEqual(set(deposits), {0, 1})
-        self.assertTrue(torch.equal(deposits[1], grad_stack[:, 1]))
-        grad_delta, deposits = _split_stack_grad(None, [0], [0], like)
-        self.assertTrue(torch.equal(grad_delta, torch.zeros(1, T, D)))
-        self.assertEqual(deposits, {})
-
-    def test_store_accumulates_deposits_and_releases_blocks_separately(self):
+    def test_store_releases_blocks_one_at_a_time(self):
         store = PPRankLocalCache()
-        store.allocate(0, 1, torch.zeros(4, 2))
-        store.put(0, 0, torch.zeros(4, 2))
-        store.deposit(0, 0, torch.ones(4, 2))
-        store.deposit(0, 0, torch.ones(4, 2))
-        store.release(0)
+        for b in range(3):
+            store.put(0, b, torch.full((4, 2), float(b)))
+        store.release(0, [1])
+        self.assertEqual(sorted(store.blocks(0)), [0, 2])
+        store.release(0, [0, 2])
         self.assertEqual(store.blocks(0), {})
+        store.put(1, 0, torch.zeros(4, 2))
+        store.release(1)
+        self.assertEqual(store.blocks(1), {})
+
+    def test_store_accumulates_deposits_and_counts_empty_ones(self):
+        store = PPRankLocalCache()
+        first = torch.ones(4, 2)
+        store.deposit(0, 0, first)
+        store.deposit(0, 0, torch.ones(4, 2))
+        store.deposit(0, 0, None)
+        self.assertTrue(torch.equal(first, torch.ones(4, 2)))
         self.assertTrue(store.has_deposits(0))
         grad, count = store.collect(0, 0)
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 3)
         assert grad is not None
         self.assertTrue(torch.equal(grad, torch.full((4, 2), 2.0)))
         self.assertFalse(store.has_deposits(0))
         self.assertEqual(store.collect(0, 0), (None, 0))
+        store.deposit(0, 1, None)
+        self.assertTrue(store.has_deposits(0))
+        self.assertEqual(store.collect(0, 1), (None, 1))
 
 
 class TestForwardOnly(unittest.TestCase):
@@ -95,11 +76,13 @@ class TestForwardOnly(unittest.TestCase):
         stage._has_backward = False
         stage.fwd_cache = {0: ((torch.zeros(1),), [])}
         stage.bwd_cache = {}
-        stage._order = {0: [0, 1]}
+        stage._held_in = {0: [0]}
         stage._delta_in = {0: [1]}
         stage._fwd_send_works = {}
         AttnResPipelineStage.backward_one_chunk(stage, 0)
-        self.assertEqual((stage.fwd_cache, stage._order, stage._delta_in), ({}, {}, {}))
+        self.assertEqual(
+            (stage.fwd_cache, stage._held_in, stage._delta_in), ({}, {}, {})
+        )
 
 
 def _loss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -165,35 +148,3 @@ class TestStageSwap(DTensorTestBase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestGradSendWaitPoints(unittest.TestCase):
-    def test_a_wait_point_follows_the_send_and_the_receivers_use(self):
-        from torch.distributed.pipelining.schedules import _ComputationType
-
-        from torchtitan.models.kimi_k3.pipeline_parallel.stage import _grad_send_wait_points
-
-        pp, vp, m = 4, 2, 8
-        schedule = ScheduleInterleaved1F1B.__new__(ScheduleInterleaved1F1B)
-        schedule.pp_group_size, schedule.n_local_stages, schedule._n_microbatches = pp, vp, m
-        schedule.number_of_rounds = max(1, m // pp)
-        schedule.microbatches_per_round = m // schedule.number_of_rounds
-        order = {r: schedule._calculate_single_rank_operations(r) for r in range(pp)}
-        stage_to_rank = {s: s % pp for s in range(pp * vp)}
-
-        def index(r, kind, s, mb):
-            return next(
-                i for i, a in enumerate(order[r])
-                if a is not None and (a.computation_type, a.stage_index, a.microbatch_index) == (kind, s, mb)
-            )
-
-        F, B = _ComputationType.FORWARD, _ComputationType.FULL_BACKWARD
-        covered = 0
-        for rank in range(pp):
-            for (s, mb), (fed, mb2) in _grad_send_wait_points(order, stage_to_rank, rank).items():
-                receiver = stage_to_rank[s - 1]
-                self.assertEqual(stage_to_rank[fed], rank)
-                self.assertGreater(index(rank, F, fed, mb2), index(rank, B, s, mb))
-                self.assertGreater(index(receiver, F, fed - 1, mb2), index(receiver, B, s - 1, mb))
-                covered += 1
-        self.assertGreater(covered, 0)
