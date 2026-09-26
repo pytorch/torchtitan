@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import logging
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -14,26 +15,91 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.checkpoint import checkpoint
 
-from torchtitan.config import CommConfig
+from torchtitan.config import CommConfig, FP32MatmulPrecision
 from torchtitan.distributed import DistributedTopology, utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_enabled
 from torchtitan.distributed.utils import init_distributed
+from torchtitan.tools import utils as tools_utils
 
 
-def test_bf16x9_is_enabled_on_future_nvidia_gpus(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _fake_nvidia_gpu(
+    monkeypatch: pytest.MonkeyPatch, capability: tuple[int, int]
+) -> SimpleNamespace:
+    """Point the FP32 matmul backend at a stub for the given device capability."""
     matmul = SimpleNamespace(fp32_precision="ieee")
-    monkeypatch.setattr(dist_utils, "device_type", "cuda")
+    # is_nvidia_cuda and has_cuda_capability both read from tools.utils.
+    monkeypatch.setattr(tools_utils, "device_type", "cuda")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (12, 0))
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
     monkeypatch.setattr(torch.version, "hip", None)
     monkeypatch.setattr(torch.backends.cuda, "matmul", matmul)
+    return matmul
 
-    dist_utils.enable_fp32_matmul_emulation_with_bf16x9()
+
+def test_default_enables_bf16x9_on_future_nvidia_gpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matmul = _fake_nvidia_gpu(monkeypatch, (12, 0))
+
+    dist_utils.set_fp32_matmul_precision("default")
 
     assert matmul.fp32_precision == "bfx9"
+
+
+def test_default_leaves_older_nvidia_gpus_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matmul = _fake_nvidia_gpu(monkeypatch, (9, 0))
+
+    dist_utils.set_fp32_matmul_precision("default")
+
+    assert matmul.fp32_precision == "ieee"
+
+
+@pytest.mark.parametrize("precision", ["ieee", "tf32", "bfx9"])
+def test_explicit_precision_overrides_default(
+    monkeypatch: pytest.MonkeyPatch, precision: str
+) -> None:
+    matmul = _fake_nvidia_gpu(monkeypatch, (10, 0))
+
+    dist_utils.set_fp32_matmul_precision(cast(FP32MatmulPrecision, precision))
+
+    assert matmul.fp32_precision == precision
+
+
+@pytest.mark.parametrize(
+    "precision, capability",
+    [("bfx9", (9, 0)), ("tf32", (7, 5))],
+)
+def test_explicit_precision_rejects_unsupported_hardware(
+    monkeypatch: pytest.MonkeyPatch, precision: str, capability: tuple[int, int]
+) -> None:
+    _fake_nvidia_gpu(monkeypatch, capability)
+
+    with pytest.raises(ValueError, match=f"fp32_matmul_precision='{precision}'"):
+        dist_utils.set_fp32_matmul_precision(cast(FP32MatmulPrecision, precision))
+
+
+def test_tf32_conflicts_with_batch_invariant_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake_nvidia_gpu(monkeypatch, (10, 0))
+    monkeypatch.setattr(dist_utils, "_batch_invariant_enabled", True)
+
+    with pytest.raises(ValueError, match="batch-invariant mode"):
+        dist_utils.set_fp32_matmul_precision("tf32")
+
+
+def test_non_cuda_warns_for_explicit_precision(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(tools_utils, "device_type", "cpu")
+
+    with caplog.at_level(logging.WARNING, logger=dist_utils.logger.name):
+        dist_utils.set_fp32_matmul_precision("tf32")
+
+    assert "only applies to NVIDIA CUDA devices" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -53,6 +119,7 @@ def test_init_distributed_configures_pipeline_per_edge_p2p(
     ):
         init_distributed(
             CommConfig(backend="fake"),
+            fp32_matmul_precision="default",
             pipeline_parallel_degree=pipeline_parallel_degree,
         )
         assert dist_utils.dist_config.pipeline_per_edge_p2p is expected
@@ -64,7 +131,9 @@ def test_fake_pg_defaults_to_spmd_rank_zero(monkeypatch: pytest.MonkeyPatch) -> 
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torchtitan.distributed.utils.init_fake_mode") as init_fake_mode,
     ):
-        topology = init_distributed(CommConfig(backend="fake"))
+        topology = init_distributed(
+            CommConfig(backend="fake"), fp32_matmul_precision="default"
+        )
     assert topology == DistributedTopology(world_size=8)
     init_fake_mode.assert_called_once_with(8, rank=0)
 
@@ -78,7 +147,11 @@ def test_fake_pg_rejects_out_of_range_rank(
         patch("torch.distributed.is_initialized", return_value=False),
         pytest.raises(ValueError, match=r"FAKE_PP_RANK must be in \[0, 4\)"),
     ):
-        init_distributed(CommConfig(backend="fake"), pipeline_parallel_degree=4)
+        init_distributed(
+            CommConfig(backend="fake"),
+            fp32_matmul_precision="default",
+            pipeline_parallel_degree=4,
+        )
 
 
 def test_fake_pp_uses_explicit_pipeline_coordinate(
@@ -91,7 +164,9 @@ def test_fake_pp_uses_explicit_pipeline_coordinate(
         patch("torchtitan.distributed.utils.init_fake_mode") as init_fake_mode,
     ):
         topology = init_distributed(
-            CommConfig(backend="fake"), pipeline_parallel_degree=4
+            CommConfig(backend="fake"),
+            fp32_matmul_precision="default",
+            pipeline_parallel_degree=4,
         )
 
     assert topology == DistributedTopology(world_size=16)
@@ -108,7 +183,11 @@ def test_fake_pp_requires_pipeline_coordinate(
         patch("torch.distributed.is_initialized", return_value=False),
         pytest.raises(ValueError, match="FAKE_PP_RANK environment variable"),
     ):
-        init_distributed(CommConfig(backend="fake"), pipeline_parallel_degree=4)
+        init_distributed(
+            CommConfig(backend="fake"),
+            fp32_matmul_precision="default",
+            pipeline_parallel_degree=4,
+        )
 
 
 def test_real_pp_fake_spmd_returns_real_pp_group(
@@ -138,6 +217,7 @@ def test_real_pp_fake_spmd_returns_real_pp_group(
     ):
         topology = init_distributed(
             CommConfig(backend="real_pp_fake_spmd"),
+            fp32_matmul_precision="default",
             pipeline_parallel_degree=4,
         )
 
@@ -159,6 +239,7 @@ def test_real_pp_fake_spmd_requires_one_process_per_pp_rank(
     ):
         init_distributed(
             CommConfig(backend="real_pp_fake_spmd"),
+            fp32_matmul_precision="default",
             pipeline_parallel_degree=2,
         )
 
@@ -176,6 +257,7 @@ def test_real_pp_fake_spmd_rejects_fake_pp_rank(
     ):
         init_distributed(
             CommConfig(backend="real_pp_fake_spmd"),
+            fp32_matmul_precision="default",
             pipeline_parallel_degree=4,
         )
 

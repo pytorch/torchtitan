@@ -36,6 +36,8 @@ import tyro
 FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
 _FSDP_SYMM_MEM_SCOPES = get_args(FSDPSymmMemScope)
 
+FP32MatmulPrecision: TypeAlias = Literal["default", "ieee", "tf32", "bfx9"]
+
 
 @dataclass(kw_only=True, slots=True)
 class TrainingConfig:
@@ -111,6 +113,19 @@ class TrainingConfig:
     """
     torch dtype to use for reductions when applying mixed precision via FSDP.
     This feature only takes effect when data_parallel_shard_degree > 1
+    """
+
+    fp32_matmul_precision: Annotated[
+        FP32MatmulPrecision, tyro.conf.Suppress
+    ] = "default"
+    """
+    CUDA backend math mode for FP32 matmuls. Under BF16 mixed precision the
+    model's only FP32 GEMM is the MoE router gate, so this is in practice the
+    router's precision knob.
+    "default" uses BF16x9 emulation on compute capability 10.0 or later and the
+    PyTorch default elsewhere. "ieee" is true FP32. "tf32" trades mantissa bits
+    for speed and needs compute capability 8.0 or later; it cannot be combined
+    with debug.batch_invariant. "bfx9" forces BF16x9 emulation.
     """
 
     gc_freq: int = 50

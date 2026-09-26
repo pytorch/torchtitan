@@ -104,7 +104,7 @@ def _common_setup(config):
 
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
-    dist_utils.enable_fp32_matmul_emulation_with_bf16x9()
+    dist_utils.set_fp32_matmul_precision(config.training.fp32_matmul_precision)
 
     parallel_dims = ParallelDims(
         dp_shard=dp_shard,

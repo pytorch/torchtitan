@@ -575,6 +575,7 @@ def test_vllm_uneven_decode_tp_padding():
         dist_utils.init_distributed(
             CommConfig(),
             base_folder=temporary_dump_folder,
+            fp32_matmul_precision="default",
         )
 
     register_to_vllm(

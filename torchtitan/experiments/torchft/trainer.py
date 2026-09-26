@@ -78,6 +78,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=self.output_dir,
             ranks=global_ranks,
+            fp32_matmul_precision=config.training.fp32_matmul_precision,
             pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
         self.ft_manager = self.fault_tolerance.build()

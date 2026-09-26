@@ -213,6 +213,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 config.comm,
                 enable_cpu_backend=config.training.enable_cpu_offload,
                 base_folder=self.output_dir,
+                fp32_matmul_precision=config.training.fp32_matmul_precision,
                 pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
         self.parallel_dims = ParallelDims.from_config(config.parallelism, topology)

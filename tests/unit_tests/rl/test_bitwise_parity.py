@@ -658,7 +658,11 @@ class BitwiseParityTestBase(unittest.TestCase):
             else:
                 base_folder = tempfile.mkdtemp(prefix="rl_bitwise_")
                 cls.addClassCleanup(shutil.rmtree, base_folder, ignore_errors=True)
-            dist_utils.init_distributed(CommConfig(), base_folder=base_folder)
+            dist_utils.init_distributed(
+                CommConfig(),
+                base_folder=base_folder,
+                fp32_matmul_precision=config.trainer.training.fp32_matmul_precision,
+            )
 
         if cls.sync_weights_from_trainer:
             generator_checkpointer = None
