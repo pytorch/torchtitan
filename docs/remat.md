@@ -40,6 +40,37 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
+## Diagnosing the effective policy
+
+After applying an activation-checkpointing policy, use `torch_remat`'s trace
+collector around the forward that you want to inspect:
+
+```python
+import torch_remat as remat
+
+with remat.collect_trace() as trace:
+    output = model(inputs, **model_kwargs)
+
+print(trace.format())
+```
+
+For example, a trace may look like:
+
+```text
+torch_remat trace
+attention.qkv: save
+attention.inner_attention: recompute
+attention.wo: save
+feed_forward.w13: recompute
+feed_forward.w2: save
+```
+
+The trace lists the regions actually exercised, in execution order, and
+whether each region was saved or recomputed. A full-model forward may contain
+repeated region names from different transformer blocks. This diagnostic is
+explicitly controlled by the caller, so it can be scoped to the model input,
+batch, or block under investigation without changing the training config.
+
 ## Adding regions to model code
 
 Model code defines a region at the operation being controlled:
@@ -104,3 +135,48 @@ boundary permits.
 `RegionAC` requires `preserve_rng_state=False`. Random state that can advance
 inside a saved region must instead be managed with an explicit
 `torch_remat.RecomputeStateHook`.
+
+## Forward side effects
+
+State accumulated for logging or optimizer-step updates must advance only on
+the original forward. The always-retained MoE `routing_decision` region owns
+expert selection and quantile-histogram observation, while token-count
+accumulation explicitly ignores checkpoint replay. Both reuse the routing map
+built for dispatch and auxiliary loss. Kimi K2.7 QK-clipping statistics also
+ignore replay. Auxiliary-loss accumulation uses an always-retained region.
+
+The currently supported RegionAC transformer blocks do not advance RNG state
+inside their forwards, so they do not require a `RecomputeStateHook`. Any future
+dropout, stochastic rounding counter, or other external RNG state must add a
+hook before it can be used safely with RegionAC.
+
+## Saving expensive MoE work
+
+Avoiding replay of expensive MoE work requires retaining both its compute and
+communication regions:
+
+- Routed-expert `w13` and `w2` grouped projections.
+- Token-dispatcher `ep_communication`, which controls the token-count exchange,
+  dispatch, and combine collectives together.
+- Shared-expert projection regions. The shared `w2` region includes its
+  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled.
+- `tp_output_reduction`, which controls the final TP all-reduce when sequence
+  parallelism is disabled.
+
+For a common MoE module named `moe`, the corresponding policy is:
+
+```python
+RegionAC.Config(
+    save_regions=[
+        "moe.routed_experts.w13",
+        "moe.routed_experts.w2",
+        "moe.routed_experts.token_dispatcher.ep_communication",
+        "moe.shared_experts.*",
+        "moe.tp_output_reduction",
+    ]
+)
+```
+
+Operations outside these regions, including local permutation, token-shard
+zero-fill, and branch addition, are recomputed. Routing decisions are retained
+separately to keep expert selection identical during replay.
