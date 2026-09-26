@@ -185,6 +185,34 @@ class TestDecoderCpSharding(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             ContextParallelLoadBalancer.Config().build()
 
+    def test_contiguous_token_fragments(self):
+        self.assertEqual(
+            context_parallel.get_token_fragments(
+                8,
+                cp_size=2,
+                permutation=None,
+            ),
+            [[(0, 4)], [(4, 8)]],
+        )
+
+    def test_headtail_token_fragments(self):
+        self.assertEqual(
+            context_parallel.get_token_fragments(
+                8,
+                cp_size=2,
+                permutation=torch.tensor([[0, 1, 6, 7, 2, 3, 4, 5]]),
+            ),
+            [[(0, 2), (6, 8)], [(2, 6)]],
+        )
+
+    def test_token_fragments_reject_uneven_partition(self):
+        with self.assertRaisesRegex(ValueError, "divisible by the CP degree"):
+            context_parallel.get_token_fragments(
+                7,
+                cp_size=2,
+                permutation=None,
+            )
+
     def test_no_shardable_inputs_is_a_noop(self):
         batch = {"attention_masks": object()}
         result = context_parallel.shard_inputs(

@@ -19,11 +19,7 @@ from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    local_head_split,
-    VarlenMetadata,
-)
+from torchtitan.models.common.attention import local_head_split, VarlenMetadata
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.protocols.module import Module
@@ -124,17 +120,6 @@ class KDAKernel(Module):
         dt_bias_HK: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Apply the preprocessing shared by local and CP KDA cores."""
-        if not q_1THK.is_cuda:
-            raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
-        capability = torch.cuda.get_device_capability(q_1THK.device)
-        # The fused bounded gate needs TMA (SM90+). chunk_kda runs its CuTe
-        # kernels on SM100/SM103 and its Triton kernels on other NVIDIA GPUs.
-        if capability < (9, 0):
-            raise RuntimeError(
-                "Attention Gym KDA requires CUDA capability 9.0 or newer; "
-                f"got CUDA capability {capability}."
-            )
-
         gate_1THK = bound_gate(
             raw_gate_1THK,
             # TODO: The long-term solution is to specify mixed precision per FQN
@@ -361,7 +346,7 @@ class KDA(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | KDAAttentionMetadata | None = None,
+        attention_masks: KDAAttentionMetadata | VarlenMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
@@ -384,20 +369,12 @@ class KDA(Module):
 
         if isinstance(attention_masks, KDAAttentionMetadata):
             varlen = attention_masks.varlen
-            routing = attention_masks.cp_routing
+            cp_routing = attention_masks.cp_routing
         else:
             varlen = attention_masks
-            routing = None
+            cp_routing = None
 
-        if varlen is None:
-            cu_seqlens = None
-        elif isinstance(varlen, VarlenMetadata):
-            cu_seqlens = varlen.cu_seq_q
-        else:
-            raise ValueError(
-                "KDA attention_masks must be VarlenMetadata or None, "
-                f"got {type(varlen).__name__}."
-            )
+        cu_seqlens = varlen.cu_seq_q if varlen is not None else None
         raw_gate_THK = local_head_split(
             self.forget_b(self.forget_a(x_TD)), self.head_dim
         )
@@ -414,7 +391,7 @@ class KDA(Module):
             self.A_log,
             self.dt_bias,
             cu_seqlens=cu_seqlens,
-            routing=routing,
+            routing=cp_routing,
         )
 
         output_gate_THV = local_head_split(self.output_gate(x_TD), self.head_dim)

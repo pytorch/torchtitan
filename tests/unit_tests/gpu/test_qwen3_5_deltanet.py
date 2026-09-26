@@ -5,17 +5,22 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
+from typing import cast
 from unittest import mock
 
 import torch
 import torch.nn.functional as F
 from attn_gym.linear import l2norm, recurrent_gdn
+from attn_gym.linear.context_parallel import ContextParallelRouting
 from torch import nn
 
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     VarlenMetadata,
 )
+from torchtitan.models.qwen3_5.cp_gdn import ContextParallelInnerGatedDeltaNet
+from torchtitan.models.qwen3_5.gdn import GatedDeltaNetMetadata
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -105,8 +110,7 @@ def _reference_causal_conv1d_varlen(
     cu_seqlens: torch.Tensor,
 ) -> torch.Tensor:
     """Per-document depthwise causal conv + silu, matching the model's Attention
-    Gym varlen conv (which is CUDA-only). Patched over
-    ``gdn._causal_conv1d_varlen`` for CPU runs.
+    Gym convolution (which is CUDA-only).
     """
     conv_kernel_size = weight.shape[-1]
     out_segments_BTD: list[torch.Tensor] = []
@@ -124,6 +128,28 @@ def _reference_causal_conv1d_varlen(
         ).transpose(1, 2)
         out_segments_BTD.append(out_segment_BTD)
     return F.silu(torch.cat(out_segments_BTD, dim=1)).squeeze(0)
+
+
+def _reference_attention_gym_causal_conv1d(
+    x_BTD: torch.Tensor,
+    weight_CW: torch.Tensor,
+    *,
+    activation: str | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    initial_state: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """CPU reference matching the Attention Gym convolution interface."""
+    assert x_BTD.shape[0] == 1
+    assert activation == "silu"
+    assert initial_state is None
+    if cu_seqlens is None:
+        cu_seqlens = torch.tensor(
+            [0, x_BTD.shape[1]], dtype=torch.int32, device=x_BTD.device
+        )
+    output_TD = _reference_causal_conv1d_varlen(
+        x_BTD.squeeze(0), weight_CW.unsqueeze(1), cu_seqlens
+    )
+    return output_TD.unsqueeze(0)
 
 
 class ReferenceGatedDeltaKernel(nn.Module):
@@ -166,6 +192,121 @@ class ReferenceGatedDeltaKernel(nn.Module):
         ).squeeze(0)
 
 
+class TestGatedDeltaNetContextParallel(unittest.TestCase):
+    def test_backend_builds_routing_from_varlen_metadata(self):
+        config = ContextParallelInnerGatedDeltaNet.Config(
+            conv_kernel_size=4,
+            kernel=mock.MagicMock(),
+        )
+        varlen = create_varlen_metadata_for_document(
+            torch.tensor([0, 1, 0, 1], dtype=torch.int32)
+        )
+        context_metadata = {
+            "quadratic_attention": None,
+            "deltanet": GatedDeltaNetMetadata(varlen=varlen),
+        }
+        cp_group = SimpleNamespace(size=lambda: 2)
+        partition = [[(0, 2)], [(2, 4)]]
+        routing = object()
+
+        with (
+            mock.patch.object(
+                ContextParallelRouting,
+                "from_fragments",
+                return_value=routing,
+            ) as from_fragments,
+            mock.patch(
+                "torchtitan.models.qwen3_5.cp_gdn.dist.get_rank", return_value=0
+            ),
+            mock.patch(
+                "torchtitan.models.qwen3_5.cp_gdn.spmd_mesh_group",
+                return_value=cp_group,
+            ),
+        ):
+            batch = ContextParallelInnerGatedDeltaNet.prepare_cp_batch_metadata(
+                {"attention_masks": context_metadata},
+                permutation=None,
+                config=config,
+            )
+
+        result = cast(dict, batch["attention_masks"])
+        metadata = result["deltanet"]
+        self.assertIsInstance(metadata, GatedDeltaNetMetadata)
+        self.assertIs(metadata.cp_routing, routing)
+        from_fragments.assert_called_once_with(
+            cu_seqlens_global=[0, 2, 4],
+            fragments=partition,
+            cp_rank=0,
+            device=varlen.cu_seq_q.device,
+            conv_history=3,
+        )
+
+    def test_inner_gdn_uses_cp_convolution_history_and_routing(self):
+        num_tokens = 4
+        num_heads = 2
+        head_dim = 128
+        channels = num_heads * head_dim
+        local_offsets = torch.tensor([0, 2, 4], dtype=torch.int32)
+        routing = cast(
+            object,
+            SimpleNamespace(
+                cu_seqlens=local_offsets,
+                tail_sources=torch.zeros(1, 3, dtype=torch.int64),
+            ),
+        )
+        initial_state = torch.randn(2, 3, channels)
+        output_1THV = torch.randn(1, num_tokens, num_heads, head_dim)
+        cp_group = object()
+        inner_gdn = ContextParallelInnerGatedDeltaNet.Config(
+            conv_kernel_size=4,
+            kernel=mock.MagicMock(),
+        ).build()
+
+        with (
+            mock.patch(
+                "torchtitan.models.qwen3_5.cp_gdn.context_parallel_conv_history",
+                return_value=initial_state,
+            ) as conv_history,
+            mock.patch(
+                "torchtitan.models.qwen3_5.gdn.causal_conv1d",
+                side_effect=lambda x, _weight, **_kwargs: x,
+            ),
+            mock.patch(
+                "torchtitan.models.qwen3_5.cp_gdn.l2norm",
+                side_effect=lambda x, **_kwargs: x,
+            ),
+            mock.patch(
+                "torchtitan.models.qwen3_5.cp_gdn.context_parallel_gdn",
+                return_value=(output_1THV, None),
+            ) as cp_gdn,
+            mock.patch(
+                "torchtitan.models.qwen3_5.cp_gdn.spmd_mesh_group",
+                return_value=cp_group,
+            ),
+        ):
+            output_THV = inner_gdn(
+                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, channels),
+                torch.randn(num_tokens, num_heads),
+                torch.randn(num_tokens, num_heads),
+                torch.randn(channels, 1, 4),
+                torch.randn(channels, 1, 4),
+                torch.randn(channels, 1, 4),
+                torch.randn(num_heads),
+                torch.randn(num_heads),
+                local_offsets,
+                key_head_dim=head_dim,
+                value_head_dim=head_dim,
+                routing=routing,
+            )
+
+        self.assertEqual(output_THV.shape, (num_tokens, num_heads, head_dim))
+        self.assertEqual(conv_history.call_count, 3)
+        self.assertIs(cp_gdn.call_args.kwargs["routing"], routing)
+        self.assertIs(cp_gdn.call_args.kwargs["group"], cp_group)
+
+
 class TestQwen35DeltaNetVarlen(unittest.TestCase):
     def test_flex_masks_ignore_padding_position_resets(self):
         try:
@@ -184,7 +325,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         with mock.patch.object(Decoder, "get_attention_masks", return_value=None):
             attention_masks = model.get_attention_masks(positions)
 
-        self.assertIsNone(attention_masks["deltanet"])
+        self.assertIsInstance(attention_masks["deltanet"], GatedDeltaNetMetadata)
+        self.assertIsNone(attention_masks["deltanet"].varlen)
 
     def test_flex_masks_include_delta_net_varlen_metadata(self):
         try:
@@ -210,7 +352,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         self.assertIs(attention_masks["quadratic_attention"], full_attention_mask)
         torch.testing.assert_close(
-            attention_masks["deltanet"].cu_seq_q,
+            attention_masks["deltanet"].varlen.cu_seq_q,
             torch.tensor([0, 2, 5], dtype=torch.int32),
         )
 
@@ -273,6 +415,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             conv_k=conv(key_dim),
             conv_v=conv(value_dim),
             inner_gated_delta_net=InnerGatedDeltaNet.Config(
+                conv_kernel_size=conv_kernel_size,
                 kernel=GatedDeltaKernel.Config(),
             ),
             norm=RMSNormGated.Config(dim=value_head_dim),
@@ -371,31 +514,32 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         for masks in (None, attention_masks):
             with mock.patch(
-                "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
-                _reference_causal_conv1d_varlen,
+                "torchtitan.models.qwen3_5.gdn.causal_conv1d",
+                _reference_attention_gym_causal_conv1d,
             ):
-                actual = model(x_TD, masks)
+                metadata = (
+                    GatedDeltaNetMetadata(varlen=masks) if masks is not None else None
+                )
+                actual = model(x_TD, metadata)
             expected = self._main_forward_reference(model, x_TD, masks)
             self.assertTrue(torch.equal(actual, expected))
 
     def _assert_packed_run_matches_per_document(self, model, x, positions, masks):
         """Packed forward under ``masks`` must equal stitched per-doc forwards.
 
-        The model's varlen conv is Attention Gym (CUDA-only); substitute the
-        per-document torch reference for these CPU runs. The per-document
-        forwards below take the non-varlen conv path, which runs on CPU.
+        Attention Gym's convolution is CUDA-only; substitute the per-document
+        torch reference for these CPU runs.
         """
         with mock.patch(
-            "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
-            _reference_causal_conv1d_varlen,
+            "torchtitan.models.qwen3_5.gdn.causal_conv1d",
+            _reference_attention_gym_causal_conv1d,
         ):
-            actual = model(x, masks)
-
-        expected = torch.empty_like(actual)
-        starts = (positions == 0).nonzero(as_tuple=True)[0].tolist()
-        ends = starts[1:] + [positions.shape[0]]
-        for start, end in zip(starts, ends, strict=False):
-            expected[start:end] = model(x[start:end])
+            actual = model(x, GatedDeltaNetMetadata(varlen=masks))
+            expected = torch.empty_like(actual)
+            starts = (positions == 0).nonzero(as_tuple=True)[0].tolist()
+            ends = starts[1:] + [positions.shape[0]]
+            for start, end in zip(starts, ends, strict=False):
+                expected[start:end] = model(x[start:end])
 
         self.assertTrue(torch.allclose(actual, expected, rtol=0.0, atol=1e-6))
 
@@ -440,10 +584,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         self.assertIsInstance(masks, dict)
         self.assertEqual(set(masks.keys()), {"quadratic_attention", "deltanet"})
         self.assertIsInstance(masks["quadratic_attention"], BlockMask)
-        self.assertIsInstance(masks["deltanet"], VarlenMetadata)
+        self.assertIsInstance(masks["deltanet"], GatedDeltaNetMetadata)
+        self.assertIsInstance(masks["deltanet"].varlen, VarlenMetadata)
         # Three packed documents have lengths 3, 2, and 5.
         torch.testing.assert_close(
-            masks["deltanet"].cu_seq_q,
+            masks["deltanet"].varlen.cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
@@ -459,10 +604,13 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         varlen_model = model_registry("debugmodel", attn_backend="varlen").build()
         varlen_masks = varlen_model.get_attention_masks(positions)
         self.assertIsInstance(varlen_masks, dict)
-        self.assertIs(varlen_masks["quadratic_attention"], varlen_masks["deltanet"])
-        self.assertIsInstance(varlen_masks["deltanet"], VarlenMetadata)
+        self.assertIs(
+            varlen_masks["quadratic_attention"], varlen_masks["deltanet"].varlen
+        )
+        self.assertIsInstance(varlen_masks["deltanet"], GatedDeltaNetMetadata)
+        self.assertIsInstance(varlen_masks["deltanet"].varlen, VarlenMetadata)
         torch.testing.assert_close(
-            varlen_masks["deltanet"].cu_seq_q,
+            varlen_masks["deltanet"].varlen.cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
@@ -479,9 +627,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             {"quadratic_attention", "deltanet"},
         )
         self.assertIsNone(deltanet_only_masks["quadratic_attention"])
-        self.assertIsInstance(deltanet_only_masks["deltanet"], VarlenMetadata)
+        self.assertIsInstance(deltanet_only_masks["deltanet"], GatedDeltaNetMetadata)
+        self.assertIsInstance(deltanet_only_masks["deltanet"].varlen, VarlenMetadata)
         torch.testing.assert_close(
-            deltanet_only_masks["deltanet"].cu_seq_q,
+            deltanet_only_masks["deltanet"].varlen.cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
@@ -549,7 +698,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
         attention_masks = create_varlen_metadata_for_document(positions)
-        actual = model(x_TD, attention_masks)
+        actual = model(x_TD, GatedDeltaNetMetadata(varlen=attention_masks))
 
         # Reference: run each document on its own and stitch the outputs back.
         # Matching proves packed execution resets state at document boundaries.

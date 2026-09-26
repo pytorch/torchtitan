@@ -112,3 +112,58 @@ def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
             ),
         ],
     )
+
+
+def qwen35_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
+    from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+    from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
+    from torchtitan.models.common.attention import FlexInnerAttention
+    from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+    from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel
+    from torchtitan.models.qwen3_5.cp_gdn import ContextParallelInnerGatedDeltaNet
+    from torchtitan.models.qwen3_5.gdn import InnerGatedDeltaNet
+
+    config = qwen35_debugmodel()
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention,
+                    InnerGatedDeltaNet.Config: ContextParallelInnerGatedDeltaNet,
+                }
+            ),
+        ],
+    )
+
+
+def qwen35_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
+    from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+    from torchtitan.models.common.attention import FlexInnerAttention
+    from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+    from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel
+    from torchtitan.models.qwen3_5.cp_gdn import ContextParallelInnerGatedDeltaNet
+    from torchtitan.models.qwen3_5.gdn import InnerGatedDeltaNet
+
+    config = qwen35_debugmodel()
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = None
+    config.training.disable_cuda_graphs = True
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention={
+                    FlexInnerAttention.Config: UlyssesCPFlexInnerAttention,
+                    InnerGatedDeltaNet.Config: ContextParallelInnerGatedDeltaNet,
+                }
+            ),
+        ],
+    )
