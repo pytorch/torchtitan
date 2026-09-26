@@ -40,6 +40,37 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
+## Diagnosing the effective policy
+
+After applying an activation-checkpointing policy, use `torch_remat`'s trace
+collector around the forward that you want to inspect:
+
+```python
+import torch_remat as remat
+
+with remat.collect_trace() as trace:
+    output = model(inputs, **model_kwargs)
+
+print(trace.format())
+```
+
+For example, a trace may look like:
+
+```text
+torch_remat trace
+attention.qkv: save
+attention.inner_attention: recompute
+attention.wo: save
+feed_forward.w13: recompute
+feed_forward.w2: save
+```
+
+The trace lists the regions actually exercised, in execution order, and
+whether each region was saved or recomputed. A full-model forward may contain
+repeated region names from different transformer blocks. This diagnostic is
+explicitly controlled by the caller, so it can be scoped to the model input,
+batch, or block under investigation without changing the training config.
+
 ## Adding regions to model code
 
 Model code defines a region at the operation being controlled:
