@@ -65,12 +65,13 @@ class DistributedTopology:
 
     Args:
         world_size: Logical world size used to construct model meshes.
-        real_pp_group: Real PP process group in an otherwise fake logical
-            world. ``None`` means all mesh axes use the default group backend.
+        real_pp_group_for_fake_spmd: Real PP process group in an otherwise fake
+            logical world. ``None`` means all mesh axes use the default group
+            backend.
     """
 
     world_size: int
-    real_pp_group: dist.ProcessGroup | None = None
+    real_pp_group_for_fake_spmd: dist.ProcessGroup | None = None
 
 
 def unfold_dp_axis(axis: MeshAxisName | str) -> tuple[MeshAxisName, ...]:
@@ -98,7 +99,7 @@ class ParallelDims:
     ep: int
     world_size: int
     enable_sequence_parallel: bool
-    _real_pp_group: dist.ProcessGroup | None = None
+    _real_pp_group_for_fake_spmd: dist.ProcessGroup | None = None
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse the
     # same object instead of re-slicing a submesh on every lookup.
     _single_axis_meshes: dict[str, DeviceMesh] = field(default_factory=dict)
@@ -121,7 +122,7 @@ class ParallelDims:
             ep=parallelism_config.expert_parallel_degree,
             world_size=topology.world_size,
             enable_sequence_parallel=parallelism_config.enable_sequence_parallel,
-            _real_pp_group=topology.real_pp_group,
+            _real_pp_group_for_fake_spmd=topology.real_pp_group_for_fake_spmd,
         )
 
     def __post_init__(self):
@@ -272,7 +273,7 @@ class ParallelDims:
                 "dp_replicate", "efsdp", "ep"
             ]
         pp_mesh = full_dense_mesh_for_fwdbwd["pp"]
-        pp_group = self._real_pp_group
+        pp_group = self._real_pp_group_for_fake_spmd
         if pp_group is not None:
             if dist.get_world_size(pp_group) != self.pp:
                 raise ValueError(
