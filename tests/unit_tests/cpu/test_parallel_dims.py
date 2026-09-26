@@ -22,6 +22,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.config.configs import ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import (
+    DistributedTopology,
     MeshAxisName,
     ParallelDims,
     unfold_dp_axes,
@@ -79,7 +80,9 @@ class TestParallelDimsValidation(unittest.TestCase):
             expert_parallel_degree=1,
             enable_sequence_parallel=False,
         )
-        parallel_dims = ParallelDims.from_config(config, world_size=8)
+        parallel_dims = ParallelDims.from_config(
+            config, DistributedTopology(world_size=8)
+        )
         self.assertEqual(parallel_dims.dp_replicate, 2)
         self.assertEqual(parallel_dims.dp_shard, 2)  # auto-calculated: 8 / (2*1*2*1)
         self.assertEqual(parallel_dims.cp, 1)
@@ -517,6 +520,21 @@ class TestParallelDimsMeshOperations(unittest.TestCase):
         """Clean up distributed environment."""
         if dist.is_initialized():
             dist.destroy_process_group()
+
+    @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
+    def test_real_pp_group_for_fake_spmd_is_used_during_mesh_construction(self):
+        group = dist.distributed_c10d._get_default_group()
+        topology = DistributedTopology(
+            world_size=1,
+            real_pp_group_for_fake_spmd=group,
+        )
+        parallel_dims = ParallelDims.from_config(ParallelismConfig(), topology)
+
+        parallel_dims.build_mesh()
+
+        pp_mesh = parallel_dims.get_optional_mesh("pp", include_singleton_axes=True)
+        assert pp_mesh is not None
+        self.assertIs(pp_mesh.get_group(), group)
 
     @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
     def test_get_mesh_invalid_name(self):
