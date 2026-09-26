@@ -78,6 +78,9 @@ jobs:
         assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
         '
 
+        # TorchStore is not on PyPI; do not let its dependencies change torch.
+        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+
         # 3. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
