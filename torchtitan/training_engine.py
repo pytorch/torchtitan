@@ -12,6 +12,7 @@ from typing import Annotated, Any, cast
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
+import torch.distributed.config as dist_config
 import tyro
 from torch.distributed.pipelining.schedules import (
     _PipelineScheduleRuntime,
@@ -228,6 +229,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
         config = self.config
+        # Give each directed physical PP edge its own preinitialized
+        # communicator. This keeps NCCL operation ordering deterministic across
+        # ranks during eager execution and whole-step CUDA graph replay.
+        dist_config.pipeline_per_edge_p2p = (
+            config.parallelism.pipeline_parallel_degree > 1
+        )
         dist_utils.set_batch_invariance(config.debug.batch_invariant)
         with sl.log_trace_span("torch_distributed_init"):
             world_size = dist_utils.init_distributed(
