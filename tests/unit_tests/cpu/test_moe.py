@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import call, patch
 
@@ -42,6 +43,7 @@ from torchtitan.models.common.moe_sharding import (
     _shared_experts_sharding_configs,
     set_moe_sharding_config,
 )
+from torchtitan.models.common.nn_modules import RMSNorm
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -69,6 +71,40 @@ class _CapturingAuxLoss(nn.Module):
         del scores_TE, padding_mask_T
         self.routing_map_TE = routing_map_TE
         return carrier
+
+
+class _IdentityDispatcher(nn.Module):
+    def dispatch(
+        self,
+        x_TD,
+        topk_scores_TK,
+        topk_expert_ids_TK,
+        num_local_tokens_per_expert_E,
+    ):
+        del topk_scores_TK, topk_expert_ids_TK
+        return x_TD, num_local_tokens_per_expert_E, None
+
+    def combine(self, routed_output_RD, metadata, x_TD):
+        del metadata, x_TD
+        return routed_output_RD
+
+
+class _AddOneW13(nn.Module):
+    def forward(self, x_RD, offsets_E):
+        del offsets_E
+        return torch.stack((x_RD + 1, x_RD), dim=-2)
+
+
+class _SelectGate(nn.Module):
+    def forward(self, gate_RD, up_RD, *, offsets):
+        del up_RD, offsets
+        return gate_RD
+
+
+class _IdentityW2(nn.Module):
+    def forward(self, hidden_RD, offsets_E):
+        del offsets_E
+        return hidden_RD
 
 
 class TestMoE(unittest.TestCase):
@@ -106,6 +142,47 @@ class TestMoE(unittest.TestCase):
         expected_RF = activation_fn.build()(gate_RF, up_RF)
         actual_RF = experts.activation_fn(gate_RF, up_RF)
         torch.testing.assert_close(actual_RF, expected_RF)
+
+    def test_routed_experts_own_postprocess_before_combine(self):
+        config = replace(
+            make_routed_experts_config(
+                dim=4,
+                hidden_dim=4,
+                num_experts=2,
+                top_k=1,
+                param_init={},
+                comm_backend="standard",
+            ),
+            output_postprocess=RMSNorm.Config(normalized_shape=4),
+        )
+        routed_experts = config.build()
+        routed_experts.w13 = _AddOneW13()
+        routed_experts.activation_fn = _SelectGate()
+        routed_experts.w2 = _IdentityW2()
+        routed_experts.token_dispatcher = _IdentityDispatcher()
+        assert isinstance(routed_experts.output_postprocess, RMSNorm)
+        with torch.no_grad():
+            routed_experts.output_postprocess.weight.fill_(3.0)
+        x_TD = torch.arange(8, dtype=torch.float32).reshape(2, 4).requires_grad_()
+
+        output_TD = routed_experts(
+            x_TD,
+            torch.ones(2, 1),
+            torch.zeros(2, 1, dtype=torch.int64),
+            torch.tensor([2, 0]),
+        )
+        expected_TD = F.rms_norm(
+            x_TD + 1,
+            (4,),
+            routed_experts.output_postprocess.weight,
+            routed_experts.output_postprocess.eps,
+        )
+        torch.testing.assert_close(output_TD, expected_TD)
+        self.assertIn("output_postprocess.weight", routed_experts.state_dict())
+
+        output_TD.sum().backward()
+        self.assertIsNotNone(x_TD.grad)
+        self.assertIsNotNone(routed_experts.output_postprocess.weight.grad)
 
     def test_token_choice_router_uses_normalization_epsilon(self):
         x_TD = torch.zeros(1, 4)
