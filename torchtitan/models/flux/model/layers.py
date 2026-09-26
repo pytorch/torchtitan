@@ -13,9 +13,10 @@ import torch
 from einops import rearrange
 from torch import nn, Tensor
 
+from torchtitan.models.common.activation import SiLU
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm, SiLU
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.protocols.module import Module, Sequential
 
 

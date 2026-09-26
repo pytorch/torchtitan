@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import CompileConfig, OverrideConfig
+from torchtitan.config import LocalCompileConfig, OverrideConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 
@@ -195,7 +195,7 @@ def register_to_vllm(
     model_config: Decoder.Config,
     *,
     parallelism: InferenceParallelismConfig,
-    compile_config: CompileConfig | None,
+    compile_config: LocalCompileConfig | None,
     checkpointer_config: CheckpointManager.Config | None,
     override: OverrideConfig,
 ) -> None:
@@ -213,7 +213,7 @@ def register_to_vllm(
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
          produces the HF-shaped ``PretrainedConfig`` from ``model_config``.
 
-    Per-engine torchtitan config (parallelism, compile, and checkpoint) is
+    Per-engine torchtitan config (parallelism, local compile, and checkpoint) is
     delivered to the wrapper via closure rather than via vLLM's
     ``hf_overrides`` channel. This keeps the parser scope strictly HF-shaped
     and isolates vLLM-specific plumbing from torchtitan-specific config.
@@ -225,7 +225,7 @@ def register_to_vllm(
             ``ParallelismContext``; the caller is responsible for translating the
             relevant fields (TP, EP) to ``EngineArgs`` so vLLM's own world
             layout matches.
-        compile_config: Compile configuration shared with the trainer.
+        compile_config: Local compile configuration shared with the trainer.
         checkpointer_config: Optional CheckpointManager configuration for
             initial weight loading. Pass ``None`` for the RL loop, where
             weights arrive from TorchStore.

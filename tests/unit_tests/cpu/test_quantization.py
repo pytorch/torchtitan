@@ -19,7 +19,7 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
-from torchtitan.config import ConfigLoader
+from torchtitan.config import ConfigLoader, LocalCompileConfig
 from torchtitan.config.transform import (
     Float8LinearConverter,
     MXFP8LinearConverter,
@@ -586,7 +586,7 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert isinstance(dataset.source, HuggingFaceRandomAccessSource.Config)
         assert dataset.source.path == "openai/gsm8k"
         assert config.checkpointer.initial_load_in_hf
-        assert config.compile is None
+        assert config.compile == LocalCompileConfig()
 
 
 def test_nvfp4_module_buffers_and_native_checkpoint():

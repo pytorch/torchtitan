@@ -14,7 +14,12 @@ import torch
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
-from torchtitan.config import CompileConfig, Configurable, DebugConfig, TrainingConfig
+from torchtitan.config import (
+    Configurable,
+    DebugConfig,
+    LocalCompileConfig,
+    TrainingConfig,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
@@ -68,7 +73,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
             Trainer(
                 config,
                 model_config=model_config,
-                compile_config=CompileConfig(),
+                compile_config=LocalCompileConfig(),
                 max_num_documents=None,
                 output_dir="",
             )

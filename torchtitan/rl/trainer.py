@@ -16,8 +16,8 @@ import torchstore as ts
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import (
     apply_overrides,
-    CompileConfig,
     Configurable,
+    LocalCompileConfig,
     TORCH_DTYPE_MAP,
 )
 from torchtitan.config.validation import validate_model_training_config
@@ -69,7 +69,7 @@ class Trainer(Configurable):
         config: Config,
         *,
         model_config: BaseModel.Config,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig | None,
         max_num_documents: int | None,
         hf_assets_path: str = "",
         generator_dtype: str = "",

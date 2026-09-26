@@ -12,8 +12,9 @@ from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import LocalCompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
 
 from .module import Module
@@ -130,12 +131,14 @@ class BaseModel(Module, ABC):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Self:
         """Apply the ordered model-level parallelization lifecycle."""
+        # Bind local implementations early; torch.compile traces on first use.
+        apply_local_compile(compile_config)
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             if ac_config is not None:

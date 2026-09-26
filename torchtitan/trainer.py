@@ -23,7 +23,7 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import apply_overrides, Configurable
-from torchtitan.config.configs import CompileConfig
+from torchtitan.config.configs import LocalCompileConfig
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
@@ -66,7 +66,7 @@ class Trainer(Configurable):
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
-        compile: CompileConfig | None = None
+        compile: LocalCompileConfig | None = field(default_factory=LocalCompileConfig)
         validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
 

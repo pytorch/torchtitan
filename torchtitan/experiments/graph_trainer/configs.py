@@ -8,7 +8,6 @@ from dataclasses import dataclass, field, fields
 from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
@@ -46,7 +45,7 @@ class EpOverlapConfig:
 
 
 @dataclass(kw_only=True, slots=True)
-class GraphTrainerCompileConfig(CompileConfig):
+class GraphTrainerCompileConfig:
     enable_async_tensor_parallel: bool = False
     """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
 

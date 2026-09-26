@@ -221,7 +221,7 @@ def _precompile_aot_fx_trace(
         precompile_fx_trace_save,
     )
 
-    loss_fn = config.loss.build(compile_config=compile_config)
+    loss_fn = config.loss.build()
     _prepare_loss_for_precompile(model, loss_fn)
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)

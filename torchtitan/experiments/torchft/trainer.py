@@ -17,7 +17,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.config import apply_overrides, CompileConfig, Configurable
+from torchtitan.config import apply_overrides, Configurable, LocalCompileConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
@@ -102,7 +102,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
     def _initialize_model(
         self,
         *,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig | None,
         hf_assets_path: str,
         create_seed_checkpoint: bool = False,
     ) -> None:

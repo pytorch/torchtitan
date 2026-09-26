@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
 
-from torchtitan.config import CompileConfig
+from torchtitan.config import LocalCompileConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
 from torchtitan.rl.types import Completion
@@ -23,7 +23,7 @@ class _GeneratorActorEndpoints:
         *,
         model_config: Decoder.Config,
         model_path: str,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig | None,
         max_num_seqs: int,
         output_dir: str,
     ) -> None:

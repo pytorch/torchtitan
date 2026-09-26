@@ -20,7 +20,7 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
-from torchtitan.config import CompileConfig, DebugConfig, TrainingConfig
+from torchtitan.config import DebugConfig, LocalCompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
@@ -90,7 +90,7 @@ def transformers_modeling_backend_debugmodel_compile(
         seq_len=seq_len,
         deterministic=deterministic,
     )
-    config.compile = CompileConfig()
+    config.compile = LocalCompileConfig()
     return config
 
 

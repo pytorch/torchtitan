@@ -28,7 +28,12 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
+from torchtitan.config import (
+    Configurable,
+    DebugConfig,
+    LocalCompileConfig,
+    OverrideConfig,
+)
 from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
@@ -227,7 +232,8 @@ class VLLMCudaGraphConfig:
         ``enable_sequence_parallel`` is forwarded to vLLM's sequence parallelism
         pass. vLLM filters dense-SP CUDA graph sizes using its own TP size.
 
-        All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
+        All modes capture with ``mode=CompilationMode.NONE`` to avoid nesting
+        vLLM's Inductor compile with TorchTitan local compile.
         """
         if self.mode == "NONE":
             return CompilationConfig(
@@ -670,7 +676,7 @@ class VLLMGenerator(Configurable):
         config: Generator-specific configuration.
         model_config: TorchTitan model configuration.
         model_path: Path to the HF model checkpoint.
-        compile_config: Compile configuration shared with the trainer.
+        compile_config: Local compile configuration shared with the trainer.
         max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
             is tight); also sets the CUDA-graph capture sizes.
         output_dir: Structured-logger output directory.
@@ -805,7 +811,7 @@ class VLLMGenerator(Configurable):
         *,
         model_config: Decoder.Config,
         model_path: str,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig | None,
         max_num_seqs: int,
         output_dir: str,
         rank: int | None = None,
