@@ -161,14 +161,20 @@ def main():
         "attention_masks": full_mask_cp,
     }
     with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
-        load_balancer = load_balancer_configs[args.balancer].build(
-            seq_len=context_parallel.get_cp_input_seq_len(
-                batch, input_shardings=input_shardings
-            ),
-            attention_metadata=batch["attention_masks"],
+        load_balancer_config = load_balancer_configs[args.balancer]
+        load_balancer = (
+            load_balancer_config.build(
+                seq_len=context_parallel.get_cp_input_seq_len(
+                    batch, input_shardings=input_shardings
+                ),
+                attention_metadata=batch["attention_masks"],
+            )
+            if load_balancer_config is not None
+            else None
         )
-        assert isinstance(load_balancer, context_parallel.ContextParallelLoadBalancer)
-        permutation = load_balancer.generate_permutation()
+        permutation = (
+            load_balancer.generate_permutation() if load_balancer is not None else None
+        )
         batch["attention_masks"] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
             batch["attention_masks"],
             permutation=permutation,

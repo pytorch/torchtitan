@@ -13,6 +13,10 @@ import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
+from torchtitan.distributed.context_parallel import (
+    HeadTailCPLoadBalancer,
+    PTRRFlexAttentionCPLoadBalancer,
+)
 from torchtitan.distributed.pipeline_parallel import (
     _build_decoder_stage_io,
     _generate_llm_fqn_per_model_part,
@@ -284,9 +288,9 @@ def test_get_pipeline_metadata_requires_layers_attribute():
     [
         (1, 1, False, False, None, 128, 128),
         (2, 1, False, False, None, 64, 64),
-        (2, 1, False, False, "ptrr", 64, 64),
-        (2, 1, False, False, "headtail", 32, 32),
-        (2, 2, True, True, "ptrr", 64, 32),
+        (2, 1, False, False, PTRRFlexAttentionCPLoadBalancer.Config(), 64, 64),
+        (2, 1, False, False, HeadTailCPLoadBalancer.Config(), 64, 64),
+        (2, 2, True, True, PTRRFlexAttentionCPLoadBalancer.Config(), 64, 32),
     ],
 )
 def test_static_decoder_stage_metadata_is_complete(

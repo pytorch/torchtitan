@@ -176,6 +176,18 @@ class TestDecoderCpSharding(unittest.TestCase):
 
         self.assertIs(result, batch)
 
+    def test_sharded_sequence_length_must_be_divisible_by_cp_size(self):
+        cp_group = SimpleNamespace(size=lambda: 2)
+        with mock.patch(
+            "torchtitan.distributed.context_parallel.spmd_mesh_group",
+            return_value=cp_group,
+        ), self.assertRaisesRegex(ValueError, r"sequence length \(5\)"):
+            context_parallel.shard_tensors(
+                {"input": torch.arange(5)},
+                input_shardings=decoder_input_sharding(),
+                permutation=None,
+            )
+
     def test_common_input_sharding_does_not_modify_metadata(self):
         input_T = torch.arange(8)
         labels_T = torch.arange(8)
@@ -247,6 +259,24 @@ class TestDecoderCpSharding(unittest.TestCase):
             load_balancer.generate_permutation()
 
         create_load_balancer.assert_called_once_with(8, 2, "cuda")
+
+    def test_headtail_requires_two_chunks_per_cp_rank(self):
+        cp_group = SimpleNamespace(size=lambda: 2)
+        spmd_mesh = SimpleNamespace(device_type="cuda")
+
+        with mock.patch(
+            "torchtitan.distributed.context_parallel.spmd_mesh_group",
+            return_value=cp_group,
+        ), mock.patch(
+            "torchtitan.distributed.context_parallel.current_spmd_mesh",
+            return_value=spmd_mesh,
+        ), self.assertRaisesRegex(
+            ValueError, r"divisible by 2 \* CP size \(4\)"
+        ):
+            HeadTailCPLoadBalancer.Config().build(
+                seq_len=6,
+                attention_metadata=None,
+            )
 
     def test_ptrr_is_rebuilt_from_each_batch_mask(self):
         input_T = torch.arange(8)

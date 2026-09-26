@@ -688,11 +688,6 @@ def _build_decoder_stage_io(
 ) -> _DecoderStageIO:
     """Build static metadata for tensors crossing decoder stage boundaries."""
     cp_shards = parallel_dims.cp
-    if (
-        parallel_dims.cp > 1
-        and parallelism.context_parallel_load_balancer == "headtail"
-    ):
-        cp_shards *= 2
     num_tokens, cp_remainder = divmod(
         training.num_tokens_per_microbatch_per_dp_rank, cp_shards
     )

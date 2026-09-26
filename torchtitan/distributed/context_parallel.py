@@ -81,6 +81,11 @@ class HeadTailCPLoadBalancer(ContextParallelLoadBalancer):
         self.seq_len = seq_len
         self.cp_size = cp_group.size()
         self.device = spmd_mesh.device_type
+        if seq_len % (2 * self.cp_size) != 0:
+            raise ValueError(
+                f"Head-tail load balancing requires sequence length ({seq_len}) "
+                f"to be divisible by 2 * CP size ({2 * self.cp_size})."
+            )
 
     def generate_permutation(self) -> torch.Tensor:
         """Generate a head-tail token permutation."""
@@ -275,9 +280,16 @@ def shard_tensors(
     cp_group = spmd_mesh_group(MeshAxisName.CP)
     if cp_group is None:
         raise RuntimeError("CP sharding requires an active multi-rank CP mesh axis.")
+    cp_size = cp_group.size()
 
     for name, tensor in zip(shard_names, tensors, strict=True):
         seq_dim = shard_dims[name]
+        if tensor.shape[seq_dim] % cp_size != 0:
+            raise ValueError(
+                f"CP-sharded input '{name}' sequence length "
+                f"({tensor.shape[seq_dim]}) must be divisible by CP size "
+                f"({cp_size})."
+            )
         if permutation is not None:
             tensor = _permute_tensor(
                 tensor,

@@ -122,9 +122,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 else 1
             )
             context_parallel_degree = self.parallelism.context_parallel_degree
-            activation_shard_degree = sequence_parallel_degree * (
-                2 * context_parallel_degree if context_parallel_degree > 1 else 1
-            )
+            activation_shard_degree = sequence_parallel_degree * context_parallel_degree
             if num_tokens % activation_shard_degree != 0:
                 raise ValueError(
                     "The number of tokens per pipeline microbatch "
