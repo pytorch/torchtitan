@@ -19,7 +19,6 @@ from torchtitan.models.common import (  # noqa: F401
     Embedding,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
     Softmax,
 )
 from torchtitan.models.common.config_utils import (
@@ -131,7 +130,7 @@ def _shared_experts_config(
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
     depth_init = _depth_init(layer_id)
     return SigmoidGatedFeedForward.Config(
-        # The shared expert gathers once because w13 and the sigmoid gate
+        # The enclosing MoE gathers once because w13 and the sigmoid gate
         # consume the same input.
         w13=Linear.Config(
             in_features=dim,
@@ -139,7 +138,7 @@ def _shared_experts_config(
             num_linears=2,
             param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
         ),
-        w2=SharedExpertRowParallelLinear.Config(
+        w2=Linear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=depth_init,

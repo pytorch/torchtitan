@@ -21,7 +21,6 @@ from torchtitan.models.common.linear import (
     GroupedLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
@@ -49,7 +48,6 @@ _QUANTIZABLE_LINEAR_CLASSES = (
     Linear,
     ColumnParallelLinear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
     InvariantRowParallelLinear,
 )
 
