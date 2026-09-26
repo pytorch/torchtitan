@@ -23,10 +23,12 @@ from torchtitan.config import (
     TrainingConfig,
 )
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     current_spmd_mesh,
+    spmd_dense_sp_enabled,
+    spmd_mesh_group,
 )
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -174,7 +176,14 @@ class MTPTransformerBlock(TransformerBlock):
         mtp_padding_mask_T = ~mtp_input_valid_mask
         if padding_mask is not None:
             mtp_padding_mask_T = mtp_padding_mask_T | padding_mask
-        prev_embed = prev_embed * mtp_input_valid_mask.unsqueeze(-1).to(
+        # Under SP, prev_embed already arrives Shard(0) from the preceding
+        # decoder or MTP block, while the validity mask arrives replicated.
+        # The old module boundary implicitly sharded only this mask; do that
+        # explicitly here. The MoE owns padding-mask sharding for its branch.
+        local_mtp_input_valid_mask_T = self._maybe_shard_mtp_valid_mask_across_tp(
+            mtp_input_valid_mask
+        )
+        prev_embed = prev_embed * local_mtp_input_valid_mask_T.unsqueeze(-1).to(
             dtype=prev_embed.dtype
         )
         h = self.eh_proj(
@@ -189,6 +198,23 @@ class MTPTransformerBlock(TransformerBlock):
         else:
             h = h + self.feed_forward(self.ffn_norm(h))
         return self.mtp_norm(h)
+
+    def _maybe_shard_mtp_valid_mask_across_tp(
+        self, mtp_input_valid_mask_T: torch.Tensor
+    ) -> torch.Tensor:
+        """Shard the validity mask to match sequence-parallel MTP activations."""
+        if not spmd_dense_sp_enabled():
+            return mtp_input_valid_mask_T
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return mtp_input_valid_mask_T
+        return spmd.redistribute(
+            mtp_input_valid_mask_T,
+            tp_group,
+            src=spmd.R,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": mtp_input_valid_mask_T.dtype},
+        )
 
 
 class MTPDecoder(Decoder):
