@@ -470,6 +470,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         global_valid_tokens: int | torch.Tensor,
         *,
         num_accumulation_steps: int = 1,
+        microbatch_groups: list[list[TrainingMicrobatch]] | None = None,
     ) -> torch.Tensor:
         """Prepare one optimizer step and record its accumulation plan."""
         if num_accumulation_steps < 1:
@@ -483,9 +484,22 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 dtype=torch.int64,
                 device=self.device,
             )
-        # TODO(sdmyzlp): Each MTP depth can have a different valid-token count
-        # after shifting and should use its own auxiliary-loss denominator.
         AuxLoss.set_step_denominator(global_valid_tokens)
+        if microbatch_groups is not None:
+            # Function-local import keeps the shared engine independent of the
+            # DeepSeek model until it is actually used.
+            from torchtitan.models.deepseek_v3.mtp import MTPDecoder
+
+            for part in self.model_parts:
+                if isinstance(part, MTPDecoder) and part.mtp_layers is not None:
+                    counts = part.count_mtp_aux_loss_tokens(microbatch_groups).to(
+                        self.device
+                    )
+                    if self.parallel_dims.dp_enabled:
+                        counts = dist_utils.dist_sum_tensor(
+                            counts, self.parallel_dims.get_mesh("dp")
+                        )
+                    part.set_mtp_aux_loss_denominators(counts)
         return global_valid_tokens
 
     @sl.log_trace_span("forward_backward_microbatch")

@@ -103,6 +103,54 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
     )
 
 
+def test_prepare_step_sets_dp_global_mtp_denominators() -> None:
+    class FakeMTPDecoder:
+        mtp_layers = [object(), object()]
+
+        def __init__(self) -> None:
+            self.denominators = None
+            self.groups = None
+
+        def count_mtp_aux_loss_tokens(self, groups):
+            self.groups = groups
+            return torch.tensor([4, 2])
+
+        def set_mtp_aux_loss_denominators(self, denominators):
+            self.denominators = denominators
+
+    model = FakeMTPDecoder()
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            num_completed_steps=0,
+            gc_handler=SimpleNamespace(run=MagicMock()),
+            optimizers=SimpleNamespace(zero_grad=MagicMock()),
+            config=SimpleNamespace(training=SimpleNamespace(disable_cuda_graphs=True)),
+            device=torch.device("cpu"),
+            model_parts=[model],
+            parallel_dims=SimpleNamespace(
+                dp_enabled=True, get_mesh=lambda name: "dp_mesh"
+            ),
+        ),
+    )
+    groups = [[_batch()]]
+    with (
+        patch("torchtitan.models.deepseek_v3.mtp.MTPDecoder", FakeMTPDecoder),
+        patch(
+            "torchtitan.training_engine.dist_utils.dist_sum_tensor",
+            side_effect=lambda counts, mesh: counts + 3,
+        ) as reduce,
+    ):
+        TrainingEngine.prepare_step(engine, 10, microbatch_groups=groups)
+
+    self_count = model.denominators
+    assert self_count is not None
+    torch.testing.assert_close(self_count, torch.tensor([7, 5]))
+    assert model.groups is groups
+    reduce.assert_called_once()
+    assert reduce.call_args.args[1] == "dp_mesh"
+
+
 def test_microbatch_generator_preserves_labels() -> None:
     labels = torch.ones(1, dtype=torch.long)
     microbatch = TokenizedTrainingMicrobatch(
