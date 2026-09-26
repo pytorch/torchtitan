@@ -250,7 +250,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     setattr(gdn, kernel_name, recurrent)
     model = os.environ[MODEL_ENV]
     registry.register_to_vllm(
-        model_registry("0.8B", seq_len=256, attn_backend="varlen"),
+        model_registry("0.8B", enable_sp=True, seq_len=256, attn_backend="varlen"),
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
         compile_config=None,
         checkpointer_config=CheckpointManager.Config(
