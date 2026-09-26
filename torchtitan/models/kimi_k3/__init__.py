@@ -19,6 +19,7 @@ from torchtitan.models.common import (
     Conv1d,
     Embedding,
     FeedForward,
+    GatedRMSNorm,
     Linear,
     RouterGateLinear,
     RowParallelLinear,
@@ -39,7 +40,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from .kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
+from .kda import InnerKDA, KDA, KDAKernel
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
@@ -216,9 +217,10 @@ def _kda_config(
             head_dim=head_dim,
             kernel=KDAKernel.Config(),
         ),
-        output_norm=KimiRMSNormGated.Config(
+        output_norm=GatedRMSNorm.Config(
             dim=head_dim,
             eps=1e-5,
+            activation_fn=Sigmoid.Config(),
             param_init=_NORM_INIT,
         ),
         output_proj=RowParallelLinear.Config(

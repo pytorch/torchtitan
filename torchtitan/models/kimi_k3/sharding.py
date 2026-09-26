@@ -173,15 +173,27 @@ def _set_kda_sharding(
         getattr(kda_cfg, name).sharding_config = colwise_config(
             input_layout=replicated_input_layout
         )
+    head_placement = attention_activation_placement()
+    weight_placement = dense_param_placement(tp=spmd.R)
     replicate_weight = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        state_shardings={"weight": weight_placement},
     )
     kda_cfg.forget_a.sharding_config = replicate_weight
-    kda_cfg.output_norm.sharding_config = replicate_weight
+    norm_inputs = {
+        "x": head_placement,
+        "gate": head_placement,
+    }
+    kda_cfg.output_norm.sharding_config = ShardingConfig(
+        state_shardings={"weight": weight_placement},
+        in_src_shardings=norm_inputs,
+        in_dst_shardings=norm_inputs,
+        out_src_shardings=head_placement,
+        out_dst_shardings=head_placement,
+        local_spmd=True,
+    )
     kda_cfg.output_proj.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
     projected_placement = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
-    head_placement = attention_activation_placement()
     parameter_placement = dense_param_placement(tp=spmd.S(0))
     for name in ("q_conv", "k_conv", "v_conv"):
         getattr(kda_cfg, name).sharding_config = ShardingConfig(

@@ -381,6 +381,7 @@ def _set_deltanet_sharding(
         },
         out_src_shardings=head_placement,
         out_dst_shardings=head_placement,
+        local_spmd=True,
     )
 
     # The inner GDN is the local SPMD boundary for the head-parallel
