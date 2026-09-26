@@ -162,7 +162,13 @@ class TestAtomicApplication(unittest.TestCase):
         config = _llama3_cp_ready()
         result = apply_transforms(
             config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention={
+                        FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
         )
         self.assertIsNot(result, config)
         original = config.model.layers[0].attention.inner_attention
@@ -182,7 +188,13 @@ class TestTransformModel(unittest.TestCase):
         model_config = self._spec()
         model_config = transform_model_config_(
             model_config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention={
+                        FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
         )
         inner = model_config.layers[0].attention.inner_attention
         self.assertIsInstance(inner, KVAllGatherCPFlexInnerAttention.Config)
@@ -196,7 +208,13 @@ class TestTransformModel(unittest.TestCase):
         model_config = self._spec()
         transform_model_config_(
             model_config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention={
+                        FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
         )
 
     def test_orders_transforms(self):
@@ -221,7 +239,13 @@ class TestContextParallelTransform(unittest.TestCase):
 
         result = apply_transforms(
             config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention={
+                        FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
         )
 
         swapped = result.model.layers[0].attention.inner_attention
@@ -231,7 +255,9 @@ class TestContextParallelTransform(unittest.TestCase):
 
     def test_rejects_a_kernel_that_is_not_context_parallel(self):
         with self.assertRaisesRegex(ValueError, "must inherit CPInnerAttention"):
-            ContextParallelTransform(inner_attention=FlexInnerAttention)
+            ContextParallelTransform(
+                inner_attention={FlexInnerAttention.Config: FlexInnerAttention}
+            )
 
     def test_lora_runs_after_context_parallelism(self):
         transform_cls = getattr(transform_api, "LoRATransform", None)
@@ -250,7 +276,9 @@ class TestContextParallelTransform(unittest.TestCase):
                     target_modules=["wqkv", "wo"],
                 ),
                 ContextParallelTransform(
-                    inner_attention=KVAllGatherCPFlexInnerAttention
+                    inner_attention={
+                        FlexInnerAttention.Config: KVAllGatherCPFlexInnerAttention
+                    }
                 ),
             ],
         )

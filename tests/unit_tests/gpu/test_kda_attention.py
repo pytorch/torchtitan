@@ -8,12 +8,24 @@
 
 import importlib.util
 import unittest
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import patch
 
 import torch
+from attn_gym.linear.context_parallel import ContextParallelRouting
 
+from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
-from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
+from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
+from torchtitan.models.kimi_k3.kda import (
+    InnerKDA,
+    KDA,
+    KDAAttentionMetadata,
+    KDAKernel,
+    KimiRMSNormGated,
+)
 
 _HAS_ATTENTION_GYM_KDA = (
     importlib.util.find_spec("attn_gym") is not None
@@ -57,11 +69,63 @@ def _kda_config() -> KDA.Config:
         output_gate=linear(32, projection_dim),
         inner_kda=InnerKDA.Config(
             head_dim=128,
+            conv_kernel_size=4,
             kernel=KDAKernel.Config(),
         ),
         output_norm=KimiRMSNormGated.Config(dim=128),
         output_proj=linear(projection_dim, 32),
     )
+
+
+class TestKDAContextParallelMetadata(unittest.TestCase):
+    def test_fragments_follow_the_explicit_permutation(self):
+        permutation = torch.tensor([[0, 1, 6, 7, 2, 3, 4, 5]])
+
+        self.assertEqual(
+            get_token_fragments(8, cp_size=2, permutation=permutation),
+            [[(0, 2), (6, 8)], [(2, 6)]],
+        )
+
+    def test_backend_builds_routing_from_global_varlen_metadata(self):
+        config = ContextParallelInnerKDA.Config(
+            head_dim=128,
+            conv_kernel_size=4,
+            kernel=KDAKernel.Config(),
+        )
+        varlen = create_varlen_metadata_for_document(torch.tensor([0, 1, 0, 1]))
+        context_metadata = {
+            "quadratic_attention": None,
+            "kda": KDAAttentionMetadata(varlen=varlen),
+        }
+        group = SimpleNamespace(size=lambda: 2)
+        permutation = torch.tensor([[0, 3, 1, 2]])
+        routing = cast(ContextParallelRouting, object())
+
+        with patch(
+            "torchtitan.models.kimi_k3.cp_kda.ContextParallelRouting.from_fragments",
+            return_value=routing,
+        ) as build_routing, patch(
+            "torchtitan.models.kimi_k3.cp_kda.spmd_mesh_group",
+            return_value=group,
+        ), patch(
+            "torchtitan.models.kimi_k3.cp_kda.dist.get_rank", return_value=0
+        ):
+            batch = ContextParallelInnerKDA.prepare_cp_batch_metadata(
+                {"attention_masks": context_metadata},
+                permutation=permutation,
+                config=config,
+            )
+
+        result = cast(dict, batch["attention_masks"])
+        kda_metadata = cast(KDAAttentionMetadata, result["kda"])
+        self.assertIs(kda_metadata.cp_routing, routing)
+        build_routing.assert_called_once_with(
+            cu_seqlens_global=[0, 2, 4],
+            fragments=[[(0, 1), (3, 4)], [(1, 3)]],
+            cp_rank=0,
+            device=varlen.cu_seq_q.device,
+            conv_history=3,
+        )
 
 
 @unittest.skipUnless(

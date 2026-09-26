@@ -73,6 +73,7 @@ class TestKernelSelection(unittest.TestCase):
             batch = KVAllGatherCPFlexInnerAttention.prepare_cp_batch_metadata(
                 {"attention_masks": context_metadata},
                 permutation=permutation,
+                config=KVAllGatherCPFlexInnerAttention.Config(),
             )
 
         result = batch["attention_masks"]
@@ -106,6 +107,7 @@ class TestKernelSelection(unittest.TestCase):
             result = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
                 block_mask,
                 permutation=permutation,
+                config=KVAllGatherCPFlexInnerAttention.Config(),
             )
 
         self.assertIs(result, sharded_block_mask)
