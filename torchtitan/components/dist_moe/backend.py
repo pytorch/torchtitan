@@ -12,7 +12,7 @@ import logging
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Literal, TYPE_CHECKING
+from typing import ClassVar, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -36,20 +36,18 @@ from torchtitan.quantization.mxfp8.dist_moe import (
 )
 
 from dist_moe import (
+    Bf16GroupedGemmPreset,
+    BlockScaledConfig,
     BlockScaledFormat,
+    BlockScaledKernelConfig,
+    Config as DistMoeConfig,
+    Context as DistMoeContext,
     create_context,
-    dist_moe as run_dist_moe,
-    DistMoeBlockScaledConfig,
-    DistMoeBlockScaledKernelConfig,
-    DistMoeConfig,
-    DistMoeContext,
-    DistMoeExecutionOptions,
-    DistMoeInputScaledRMSNorm,
-    DistMoePreparedWeight,
-    DistMoeVmmConfig,
-    DistMoeVmmPrefetch,
-    plan_dist_moe_memory,
-    prefetch_dist_moe_vmm,
+    ExecutionOptions,
+    PreparedWeight,
+    RMSNormPostprocess,
+    routed_experts as run_dist_moe,
+    VmmConfig,
 )
 
 
@@ -72,7 +70,7 @@ __all__ = [
 ]
 
 ActivationSlotPolicy = Literal["auto", "microbatch", "stage_microbatch"]
-_DistMoeWeightOperand = torch.Tensor | DistMoePreparedWeight
+_DistMoeWeightOperand = torch.Tensor | PreparedWeight
 
 
 @dataclass(eq=False)
@@ -87,8 +85,6 @@ class DistMoeRuntime:
         config: Fully resolved configuration for the standalone DistMoE runtime.
         group: Expert-parallel process group used by dispatch and combine.
         device: CUDA device on which the context will be created.
-        prefetch: Optional host-backed VMM mapping prepared before model-state
-            initialization.
         slots: Immutable mapping from ``(stage, microbatch)`` to activation slot
             and local layer depth. Empty when pipeline parallelism is disabled.
     """
@@ -96,7 +92,6 @@ class DistMoeRuntime:
     config: DistMoeConfig
     group: dist.ProcessGroup
     device: torch.device
-    prefetch: DistMoeVmmPrefetch | None
     slots: dict[tuple[int, int], tuple[int, int]] = field(default_factory=dict)
     context: DistMoeContext | None = None
     _selected: tuple[int, int] | None = None
@@ -105,23 +100,15 @@ class DistMoeRuntime:
     def initialize(self) -> None:
         """Create the shared context after model parameters and buffers exist.
 
-        A prepared VMM mapping is consumed at most once. If context creation
-        fails, the mapping is closed before the exception is propagated.
-        Repeated successful calls are no-ops.
+        Context construction owns optional VMM prefetch and cleanup according
+        to ``config.vmm``. Repeated successful calls are no-ops.
         """
         if self.context is None:
-            prefetch = self.prefetch
-            try:
-                self.context = create_context(
-                    group=self.group,
-                    config=self.config,
-                    device=self.device,
-                    prefetched_vmm=prefetch,
-                )
-            finally:
-                self.prefetch = None
-                if self.context is None and prefetch is not None:
-                    prefetch.close()
+            self.context = create_context(
+                group=self.group,
+                config=self.config,
+                device=self.device,
+            )
 
     @contextmanager
     def pipeline_slot_context(self, info: PipelineStageInfo) -> Iterator[None]:
@@ -155,10 +142,6 @@ class DistMoeRuntime:
         for handle in self._pipeline_context_handles:
             handle.remove()
         self._pipeline_context_handles.clear()
-        prefetch = self.prefetch
-        self.prefetch = None
-        if prefetch is not None:
-            prefetch.close()
         context = self.context
         if context is not None:
             context.close()
@@ -179,31 +162,31 @@ class DistMoeRoutedExperts(RoutedExperts):
         """Configure BF16 DistMoE execution, memory, and kernel policy.
 
         Args:
-            max_routing_imbalance_factor: Maximum receive-row capacity relative
-                to balanced routing.
-            device_memory_budget_bytes: Optional total device arena budget.
+            device_scratch_capacity_factor: Maximum device-resident scratch
+                capacity relative to balanced routing.
+            saved_activation_buffer_bytes: Optional aggregate device budget for
+                saved forward state, excluding device scratch.
             activation_slot_policy: Pipeline activation-lifetime granularity.
                 ``auto`` selects the smaller exact schedule-derived plan.
             num_activation_slots: Optional lower bound on activation slots.
-            vmm_host_scratch_imbalance_factor: Total device and host-backed VMM
-                scratch capacity, or ``None`` to disable VMM.
-            prefetch_vmm: Prepare host-backed VMM mappings during model setup.
+            vmm: Optional host-backed overflow-scratch policy.
             num_sms: Optional number of SMs assigned to DistMoE kernels.
             wgrad_dtype: Weight-gradient output dtype.
             inplace_wgrad_accum: Accumulate WGRAD into parameter gradients.
-            kernel_config: Optional named BF16 CuTe kernel schedule.
+            bf16_grouped_gemm_preset: Optional named BF16 CuTe kernel schedule.
         """
 
-        max_routing_imbalance_factor: float = 1.0
-        device_memory_budget_bytes: int | None = None
+        uses_configured_token_dispatcher: ClassVar[bool] = False
+
+        device_scratch_capacity_factor: float = 1.0
+        saved_activation_buffer_bytes: int | None = None
         activation_slot_policy: ActivationSlotPolicy = "auto"
         num_activation_slots: int | None = None
-        vmm_host_scratch_imbalance_factor: float | None = None
-        prefetch_vmm: bool = False
+        vmm: VmmConfig | None = None
         num_sms: int | None = None
         wgrad_dtype: Literal["bfloat16", "float32"] = "bfloat16"
         inplace_wgrad_accum: bool = False
-        kernel_config: str | None = None
+        bf16_grouped_gemm_preset: Bf16GroupedGemmPreset | None = None
 
         def __post_init__(self) -> None:
             """Validate module structure and values before construction."""
@@ -222,7 +205,7 @@ class DistMoeRoutedExperts(RoutedExperts):
                     "DistMoE owns expert communication and requires the standard "
                     "all-to-all routed-expert config"
                 )
-            postprocess = self.expert_output_postprocess
+            postprocess = self.output_postprocess
             owner = None if postprocess is None else postprocess._owner
             if postprocess is not None and not callable(
                 getattr(owner, "to_dist_moe_postprocess", None)
@@ -231,17 +214,15 @@ class DistMoeRoutedExperts(RoutedExperts):
                     f"{type(postprocess).__qualname__} cannot run inside DistMoE; "
                     "its module must define to_dist_moe_postprocess()"
                 )
-            if self.max_routing_imbalance_factor <= 0:
-                raise ValueError("max_routing_imbalance_factor must be positive")
+            if self.device_scratch_capacity_factor <= 0:
+                raise ValueError("device_scratch_capacity_factor must be positive")
+            if (
+                self.saved_activation_buffer_bytes is not None
+                and self.saved_activation_buffer_bytes < 0
+            ):
+                raise ValueError("saved_activation_buffer_bytes cannot be negative")
             if self.num_activation_slots is not None and self.num_activation_slots <= 0:
                 raise ValueError("num_activation_slots must be positive")
-            if (
-                self.vmm_host_scratch_imbalance_factor is not None
-                and self.vmm_host_scratch_imbalance_factor <= 0
-            ):
-                raise ValueError("vmm_host_scratch_imbalance_factor must be positive")
-            if self.prefetch_vmm and self.vmm_host_scratch_imbalance_factor is None:
-                raise ValueError("prefetch_vmm requires VMM to be enabled")
             if self.num_sms is not None and self.num_sms <= 0:
                 raise ValueError("num_sms must be positive")
             if self.activation_slot_policy not in (
@@ -259,9 +240,9 @@ class DistMoeRoutedExperts(RoutedExperts):
         Module.__init__(self)
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
-        self.expert_output_postprocess = (
-            config.expert_output_postprocess.build()
-            if config.expert_output_postprocess is not None
+        self.output_postprocess = (
+            config.output_postprocess.build()
+            if config.output_postprocess is not None
             else None
         )
         self.hidden_dim = config.w13.in_features
@@ -270,6 +251,10 @@ class DistMoeRoutedExperts(RoutedExperts):
         self.top_k = config.token_dispatcher.top_k
         self._dist_moe_config = config
         self._runtime: DistMoeRuntime | None = None
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        """Leave communication-buffer initialization to the shared runtime."""
+        del buffer_device
 
     def _dist_moe_weight_operands(
         self,
@@ -280,9 +265,9 @@ class DistMoeRoutedExperts(RoutedExperts):
         w13_EFD = w13_E2FD.flatten(1, 2)
         return w13_EFD, w2_EDF
 
-    def _build_dist_moe_postprocess(self) -> DistMoeInputScaledRMSNorm | None:
+    def _build_dist_moe_postprocess(self) -> RMSNormPostprocess | None:
         """Translate the current postprocess parameters to a kernel descriptor."""
-        module = self.expert_output_postprocess
+        module = self.output_postprocess
         if module is None:
             return None
         factory = getattr(module, "to_dist_moe_postprocess", None)
@@ -292,10 +277,8 @@ class DistMoeRoutedExperts(RoutedExperts):
                 "define to_dist_moe_postprocess()"
             )
         postprocess = factory()
-        if not isinstance(postprocess, DistMoeInputScaledRMSNorm):
-            raise TypeError(
-                "to_dist_moe_postprocess() must return DistMoeInputScaledRMSNorm"
-            )
+        if not isinstance(postprocess, RMSNormPostprocess):
+            raise TypeError("to_dist_moe_postprocess() must return RMSNormPostprocess")
         return postprocess
 
     def forward(
@@ -325,7 +308,7 @@ class DistMoeRoutedExperts(RoutedExperts):
         # FSDP replaces module-visible weights for each unshard lifetime, and
         # the postprocess descriptor captures its current parameter. Build the
         # options here so neither reference survives a reshard.
-        options = DistMoeExecutionOptions(
+        options = ExecutionOptions(
             inplace_wgrad_accum=self._dist_moe_config.inplace_wgrad_accum,
             wgrad_parameter_owners=(self.w13.weight, self.w2.weight)
             if self._dist_moe_config.inplace_wgrad_accum
@@ -356,7 +339,7 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
 
         pipeline: Literal["staged", "mega"] = "staged"
         fast_math: bool = False
-        kernel_config: DistMoeBlockScaledKernelConfig | None = None
+        kernel_config: BlockScaledKernelConfig | None = None
 
         def __post_init__(self) -> None:
             """Validate the selected asynchronous block-scaled pipeline."""
@@ -417,38 +400,29 @@ def _build_dist_moe_runtime_config(
     is_mxfp8 = isinstance(module, MXFP8DistMoeRoutedExperts)
     if is_mxfp8:
         assert isinstance(policy, MXFP8DistMoeRoutedExperts.Config)
-        blockscaled = DistMoeBlockScaledConfig(
+        block_scaled = BlockScaledConfig(
             format=BlockScaledFormat.MXFP8_E4M3,
             fast_math=policy.fast_math,
             pipeline=policy.pipeline,
-            kernel=policy.kernel_config,
+            kernel_config=policy.kernel_config,
         )
-        kernel_config = None
     else:
         assert isinstance(policy, DistMoeRoutedExperts.Config)
-        blockscaled = None
-        kernel_config = policy.kernel_config
-    vmm = (
-        None
-        if policy.vmm_host_scratch_imbalance_factor is None
-        else DistMoeVmmConfig(
-            host_scratch_imbalance_factor=policy.vmm_host_scratch_imbalance_factor
-        )
-    )
+        block_scaled = None
     return DistMoeConfig(
-        max_num_tokens=max_num_tokens,
+        max_local_input_tokens=max_num_tokens,
         hidden_dim=module.hidden_dim,
         intermediate_dim=module.intermediate_dim,
         top_k=module.top_k,
         num_experts=module.num_experts,
-        num_moe_layers=num_moe_layers,
-        max_routing_imbalance_factor=policy.max_routing_imbalance_factor,
-        device_memory_budget_bytes=policy.device_memory_budget_bytes,
-        num_microbatch_stacks=num_activation_slots,
-        vmm=vmm,
+        max_moe_layers_per_activation_slot=num_moe_layers,
+        device_scratch_capacity_factor=policy.device_scratch_capacity_factor,
+        saved_activation_buffer_bytes=policy.saved_activation_buffer_bytes,
+        num_activation_slots=num_activation_slots,
+        vmm=policy.vmm,
         num_sms=policy.num_sms,
-        kernel_config=kernel_config,
-        blockscaled=blockscaled,
+        bf16_grouped_gemm_preset=policy.bf16_grouped_gemm_preset,
+        block_scaled=block_scaled,
         wgrad_dtype=(
             torch.bfloat16 if policy.wgrad_dtype == "bfloat16" else torch.float32
         ),
@@ -598,20 +572,19 @@ def prepare_dist_moe_runtime(
     shared_policy = (
         policy.activation_slot_policy,
         policy.num_activation_slots,
-        policy.prefetch_vmm,
+        policy.vmm,
     )
     if any(
         (
             module._dist_moe_config.activation_slot_policy,
             module._dist_moe_config.num_activation_slots,
-            module._dist_moe_config.prefetch_vmm,
+            module._dist_moe_config.vmm,
         )
         != shared_policy
         for module in modules[1:]
     ):
         raise ValueError(
-            "All local DistMoE layers must share activation-slot and VMM-prefetch "
-            "policy"
+            "All local DistMoE layers must share activation-slot and VMM policy"
         )
 
     ep_mesh = parallel_dims.get_optional_mesh("ep", include_singleton_axes=True)
@@ -664,26 +637,12 @@ def prepare_dist_moe_runtime(
     ):
         raise ValueError("All local DistMoE layers must resolve one runtime config")
 
-    ep_size = dist.get_world_size(group)
-    memory_plan = plan_dist_moe_memory(
-        runtime_config,
-        ep_size=ep_size,
-        device=device,
-    )
-    prefetch = None
     runtime = None
     try:
-        if memory_plan.uses_host_scratch and policy.prefetch_vmm:
-            prefetch = prefetch_dist_moe_vmm(
-                config=runtime_config,
-                ep_size=ep_size,
-                device=device,
-            )
         runtime = DistMoeRuntime(
             config=runtime_config,
             group=group,
             device=device,
-            prefetch=prefetch,
             slots=assignments,
         )
         for module in modules:
@@ -702,11 +661,8 @@ def prepare_dist_moe_runtime(
             runtime.close()
             for module in modules:
                 module._runtime = None
-        elif prefetch is not None:
-            prefetch.close()
         raise
 
-    logger.info("%s", memory_plan.explain())
     if pipeline_plan is not None:
         logger.info(
             "DistMoE pipeline activation slots: policy=%s slots=%d depth=%d",
