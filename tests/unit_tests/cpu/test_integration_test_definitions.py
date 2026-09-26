@@ -99,7 +99,7 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
 def test_split_backward_pp_cases_exercise_varlen_cuda_graphs() -> None:
     tests_by_name = {test.test_name: test for test in build_features_test_list()}
 
-    for test_name in ("pp_looped_zero_bubble", "pp_zbv"):
+    for test_name in ("pp_looped_zero_bubble", "pp_zbv", "pp_custom_csv"):
         test = tests_by_name[test_name]
         config = test.configs[0]()
         assert not test.disabled

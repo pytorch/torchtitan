@@ -12,10 +12,10 @@ from dataclasses import dataclass
 
 import torch
 from dist_moe import (
+    BlockScaledConfig,
     BlockScaledFormat,
-    DistMoeBlockScaledConfig,
-    DistMoePreparedWeight,
-    prepare_blockscaled_weight,
+    prepare_block_scaled_weight,
+    PreparedWeight,
 )
 
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -31,18 +31,16 @@ class _DistMoeMXFP8Operands:
     qdata: torch.Tensor
     fprop_scale: torch.Tensor
     dgrad_scale: torch.Tensor
-    quantization_workspace: torch.Tensor
 
-    def prepared(self, source: torch.Tensor) -> DistMoePreparedWeight:
+    def prepared(self, source: torch.Tensor) -> PreparedWeight:
         """Return the annex facade consumed by one DistMoE invocation."""
-        return DistMoePreparedWeight(
+        return PreparedWeight._create(
             source=source,
             format=BlockScaledFormat.MXFP8_E4M3,
             fprop_data=self.qdata,
             fprop_scale=self.fprop_scale,
             dgrad_data=self.qdata,
             dgrad_scale=self.dgrad_scale,
-            _quantization_workspace=self.quantization_workspace,
         )
 
 
@@ -52,20 +50,19 @@ def _prepare_mxfp8_weight(
 ) -> _DistMoeMXFP8Operands:
     """Allocate or refill the annex's grouped 32x32 MXFP8 weight operands."""
     prepared_out = None if out is None else out.prepared(weight_EOI)
-    prepared = prepare_blockscaled_weight(
+    prepared = prepare_block_scaled_weight(
         weight_EOI,
-        DistMoeBlockScaledConfig(),
+        BlockScaledConfig(),
         out=prepared_out,
     )
     if prepared.dgrad_data is not prepared.fprop_data:
         raise RuntimeError("MXFP8 DistMoE FPROP and DGRAD must share qdata")
-    if prepared.dgrad_scale is None or prepared._quantization_workspace is None:
+    if prepared.dgrad_scale is None:
         raise RuntimeError("MXFP8 DistMoE preparation returned incomplete operands")
     return _DistMoeMXFP8Operands(
         qdata=prepared.fprop_data,
         fprop_scale=prepared.fprop_scale,
         dgrad_scale=prepared.dgrad_scale,
-        quantization_workspace=prepared._quantization_workspace,
     )
 
 
@@ -95,7 +92,7 @@ def _dynamic_prepared_weight(
     logical_weight: torch.Tensor,
     *,
     gate_up: bool,
-) -> DistMoePreparedWeight:
+) -> PreparedWeight:
     """Prepare a weight when FSDP does not own its unshard lifetime."""
     source = logical_weight.flatten(1, 2) if gate_up else logical_weight
     storage = (
