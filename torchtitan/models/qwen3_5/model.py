@@ -414,7 +414,6 @@ class Qwen35Model(MultimodalModel):
         compile_config: CompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> Qwen35Model:
         if parallel_dims.cp_enabled:
             raise NotImplementedError(
@@ -430,7 +429,6 @@ class Qwen35Model(MultimodalModel):
             compile_config=compile_config,
             ac_config=ac_config,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )
 
     def preprocess_inputs(

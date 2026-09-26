@@ -37,11 +37,8 @@ class GraphTrainerModel:
         compile_config: GraphTrainerCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ):
         del ac_config
-        if skip_dp:
-            raise ValueError("GraphTrainer models do not support skip_dp=True.")
         if (
             training.num_tokens_per_microbatch_per_dp_rank
             % parallel_dims.seq_len_divisor

@@ -30,10 +30,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
-from torchtitan.distributed.spmd_types import (
-    dtensor_to_plain_tensor_state_dict,
-    plain_tensor_to_dtensor_state_dict,
-)
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
@@ -1335,13 +1331,20 @@ class VLLMGenerator(Configurable):
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
+        model.prepare_weight_sync()
         model_sd = model.model.state_dict()
-        await self._get_spmd_state_dict(model_sd, model=model)
+        await ts.get_state_dict(
+            "model_state_dict",
+            user_state_dict=model_sd,
+            strict=False,
+            direct_rdma=False,
+        )
         # Fused grouped experts still expose hook-produced w1/w3 copies, so the
         # in-place fill above does not reach their physical w13 parameter.
         # Re-apply the state dict to run that module's merge hook. Other params,
         # including native QKVLinear.wqkv, share storage with model_sd.
         model.model.load_state_dict(model_sd, strict=False)
+        model.finish_weight_sync()
         self.policy_version = version
         if self.config.reset_prefix_cache_on_weight_sync:
             # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
@@ -1359,30 +1362,6 @@ class VLLMGenerator(Configurable):
             self._pull_model_state_dict_future.set_result(version)
             self._pull_model_state_dict_future = None
             self._model_state_dict_pull_request = None
-
-    async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
-        """Fetch trainer-pushed weights into a spmd_types generator state dict.
-
-        spmd_types generators hold plain local tensors, but TorchStore already
-        knows how to fill DTensor state-dict entries. Wrap each local tensor as
-        a DTensor using its declared SPMD layout, fetch through the normal
-        state-dict path, then put the local tensors back before load_state_dict.
-        """
-
-        dtensor_model_sd = plain_tensor_to_dtensor_state_dict(
-            model_sd,
-            state_dict_layouts=model.get_state_dict_layouts(),
-            parallel_dims=model.parallel_dims,
-        )
-
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=dtensor_model_sd,
-            strict=False,
-            direct_rdma=False,
-        )
-
-        model_sd.update(dtensor_to_plain_tensor_state_dict(dtensor_model_sd))
 
     async def close(self) -> None:
         """Stop the engine loop, then release the vLLM engine.

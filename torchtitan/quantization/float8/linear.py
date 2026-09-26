@@ -320,6 +320,25 @@ class Float8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
+    def _parallelize(self, parallel_dims) -> None:
+        # spmd_types returns a plain tensor when TP shards the weight. Restore
+        # the FSDP extension wrapper before fully_shard() consumes it.
+        super()._parallelize(parallel_dims)
+        wrapper_cls = (
+            _LinearShardedTensorWithFloat8HighPrecisionWeightGradient
+            if self.recipe_name == "rowwise_with_gw_hp"
+            else _LinearShardedTensorWithFloat8Compute
+        )
+        if isinstance(self.weight, wrapper_cls):
+            return
+        distributed_weight = self.weight
+        wrapped_weight = nn.Parameter(
+            wrapper_cls(distributed_weight.data),
+            requires_grad=distributed_weight.requires_grad,
+        )
+        spmd.assert_type_like(wrapped_weight, distributed_weight)
+        self.weight = wrapped_weight
+
     def _linear(
         self,
         input: torch.Tensor,

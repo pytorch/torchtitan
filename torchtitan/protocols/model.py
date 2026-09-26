@@ -134,7 +134,6 @@ class BaseModel(Module, ABC):
         compile_config: CompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> Self:
         """Apply the ordered model-level parallelization lifecycle."""
         from torchtitan.distributed.utils import get_spmd_context
@@ -151,12 +150,11 @@ class BaseModel(Module, ABC):
                     compile_config=compile_config,
                     parallel_dims=parallel_dims,
                 )
-            if not skip_dp:
-                self._apply_fsdp(
-                    parallel_dims=parallel_dims,
-                    training=training,
-                    parallelism=parallelism,
-                )
+            self._apply_fsdp(
+                parallel_dims=parallel_dims,
+                training=training,
+                parallelism=parallelism,
+            )
         return self
 
     @abstractmethod
