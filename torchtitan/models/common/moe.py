@@ -14,10 +14,14 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 
+from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
+    spmd_dense_sp_enabled,
     spmd_local_context,
+    spmd_mesh_group,
     spmd_mesh_size,
+    spmd_sparse_mesh,
 )
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
@@ -121,10 +125,21 @@ class RoutedExperts(Module):
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         with maybe_set_sparse_mesh():
-            gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
+            gate_up_R2F = remat.region(
+                self.w13,
+                self.remat_region_name("w13"),
+                recompute=self.remat_should_recompute("w13"),
+            )(routed_input_RD.bfloat16(), offsets_E)
+            remat.recompute_needs_tensor(gate_up_R2F)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
-            routed_output_RD = self.w2(hidden_RF, offsets_E).type_as(routed_input_RD)
+            routed_output_RD = remat.region(
+                self.w2,
+                self.remat_region_name("w2"),
+                recompute=self.remat_should_recompute("w2"),
+            )(hidden_RF, offsets_E)
+            remat.recompute_needs_tensor(routed_output_RD)
+            routed_output_RD = routed_output_RD.type_as(routed_input_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
@@ -672,36 +687,127 @@ class MoE(Module):
         Returns:
             Output ``(T, D)``.
 
-        Under TP, the MoE wrapper's ``sharding_config`` (set by
-        ``set_moe_sharding_config``) handles input/output redistribution:
-        input is redistributed from sp_layout to desired_input_layouts;
-        output is redistributed to sp_layout. Routed expert computation runs
-        in a local SPMD region. When EP internally sequence-shards tokens across
-        TP, the caller must provide a TP-divisible token count.
+        The MoE wrapper owns the TP transitions shared across its router,
+        routed-expert, and shared-expert branches. Routed expert computation
+        runs in a local SPMD region. When EP internally sequence-shards tokens
+        across TP, the caller must provide a TP-divisible token count.
         """
+        (
+            routed_x_TD,
+            routed_padding_mask_T,
+        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
         (topk_scores_TK, topk_expert_ids_TK, routing_map_TE,) = self.router(
-            x_TD,
+            routed_x_TD,
             self.expert_bias_E,
-            padding_mask_T=padding_mask_T,
+            padding_mask_T=routed_padding_mask_T,
             **router_kwargs,
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
         out_TD = self.routed_experts(
-            x_TD,
+            routed_x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
+        out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
+        if self.shared_experts is not None:
+            out_TD = out_TD + self.shared_experts(x_TD)
+        return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
-        shared_out_TD = (
-            self.shared_experts(x_TD) if self.shared_experts is not None else None
+    def _maybe_shard_routed_branch_inputs_across_tp(
+        self,
+        x_TD: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Prepare the router and routed-expert inputs for TP token sharding.
+
+        With EP, the routed branch consumes ``Shard(0)`` tokens across TP. Dense
+        SP already provides that layout for ``x_TD``; otherwise this boundary
+        explicitly shards it. The padding mask enters the MoE replicated in
+        either case and is explicitly sharded here to follow the routed tokens.
+        """
+        if spmd_sparse_mesh() is None:
+            assert (
+                spmd_mesh_group(MeshAxisName.TP) is None
+            ), "MoE requires expert parallelism when tensor parallelism is enabled on dense modules"
+            return x_TD, padding_mask_T
+
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x_TD, padding_mask_T
+
+        if not spmd_dense_sp_enabled():
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+        # The padding mask is replicated even when SP has already sharded x_TD.
+        if padding_mask_T is not None:
+            padding_mask_T = spmd.redistribute(
+                padding_mask_T,
+                tp_group,
+                src=spmd.R,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": padding_mask_T.dtype},
+            )
+        return x_TD, padding_mask_T
+
+    def _maybe_zero_fill_routed_output_to_tp_partial(
+        self, routed_output_TD: torch.Tensor
+    ) -> torch.Tensor:
+        """Convert the routed token shard to a TP partial without communication.
+
+        With EP enabled and dense SP disabled, each TP rank computes only its
+        ``Shard(0)`` of routed tokens, while the shared expert produces a
+        ``Partial`` contribution over all tokens. Zero-filling positions owned
+        by other TP ranks converts the routed output to the same ``Partial``
+        representation. The two branches can then be added locally and kept
+        partial until one final all-reduce materializes the complete MoE output.
+        """
+        if spmd_sparse_mesh() is None or spmd_dense_sp_enabled():
+            return routed_output_TD
+
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return routed_output_TD
+        return spmd.redistribute(
+            routed_output_TD,
+            tp_group,
+            src=spmd.S(0),
+            dst=spmd.P,
+            backward_options={"op_dtype": routed_output_TD.dtype},
         )
 
-        if shared_out_TD is not None:
-            out_TD = out_TD + shared_out_TD
+    def _maybe_all_reduce_moe_output_across_tp(
+        self, out_TD: torch.Tensor
+    ) -> torch.Tensor:
+        """Reduce the combined partial output when dense SP is disabled."""
+        if spmd_dense_sp_enabled():
+            return out_TD
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return out_TD
+        # This reduction needs a standalone region: routed token combine and
+        # shared/routed branch addition separate it from either w2 computation.
+        out_TD = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("tp_output_reduction"),
+            recompute=self.remat_should_recompute("tp_output_reduction"),
+        )(
+            out_TD,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.I,
+            backward_options={"op_dtype": out_TD.dtype},
+        )
+        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
