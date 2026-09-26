@@ -121,7 +121,7 @@ def test_real_pp_fake_spmd_returns_real_pp_group(
 
     init_fake_mode.assert_called_once_with(16, rank=8)
     assert topology.world_size == 16
-    assert topology.real_pp_group is process_group
+    assert topology.real_pp_group_for_fake_spmd is process_group
     assert new_process_group.call_args.kwargs["global_ranks_in_group"] == [0, 4, 8, 12]
 
 
