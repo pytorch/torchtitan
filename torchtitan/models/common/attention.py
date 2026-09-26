@@ -41,6 +41,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.compile import maybe_regional_inductor
+from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -78,6 +79,20 @@ class VarlenMetadata(NamedTuple):
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+
+    _OFFSETS_SPMD_TYPE = spmd.SpmdType(
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.TP: spmd.R,
+        },
+        partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
+    )
+
+    def annotate_spmd_types(self) -> None:
+        """Annotate offsets under the active dense model-parallel mesh."""
+        spmd.assert_type(self.cu_seq_q, self._OFFSETS_SPMD_TYPE)
+        if self.cu_seq_k is not self.cu_seq_q:
+            spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
 
 
 # Mapping (not dict) lets covariant value types accept both BlockMask-only

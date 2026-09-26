@@ -78,10 +78,7 @@ def annotate_deltanet_cu_seqlens(attention_masks: "Qwen35AttentionMaskDict") -> 
     deltanet_metadata = attention_masks.get("deltanet")
     if not isinstance(deltanet_metadata, VarlenMetadata):
         return
-    spmd.assert_type(
-        deltanet_metadata.cu_seq_q,
-        {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.R},
-    )
+    deltanet_metadata.annotate_spmd_types()
 
 
 def _qk_norm_sharding() -> ShardingConfig:
