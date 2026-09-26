@@ -11,7 +11,6 @@ on:
     # image builder for each one.
     tags:
       - ciflow/docker/*
-      - ciflow/rl-image/*
     paths:
       - .ci/docker/**
       - .github/workflows/docker-builds.yml
@@ -36,7 +35,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(startsWith(github.ref, 'refs/tags/ciflow/rl-image/') && '[{"docker-image-name":"torchtitan-ubuntu-22.04-clang12","image-tag-prefix":"rl"}]' || '[{"docker-image-name":"torchtitan-ubuntu-22.04-clang12"},{"docker-image-name":"torchtitan-ubuntu-22.04-clang12","image-tag-prefix":"rl"},{"docker-image-name":"torchtitan-rocm-ubuntu-22.04-clang12"}]') }}
+        include:
+          - docker-image-name: torchtitan-ubuntu-22.04-clang12
+          - docker-image-name: torchtitan-ubuntu-22.04-clang12
+            image-tag-prefix: rl
+          - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
     # BuildKit runs out of cluster on the OSDC BuildKit pool, so this runner only
     # streams the (small) .ci/docker context and waits.
     runs-on: mt-l-x86iavx512-8-64

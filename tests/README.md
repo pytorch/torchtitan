@@ -220,10 +220,9 @@ pytest -s tests/unit_tests/gpu/ -m multi_gpu
 pytest -s tests/rl/unit_tests/
 ```
 
-To run the RL lane on a draft PR before its workflow exists on `main`, push a
-`ciflow/rl-image/<PR>` tag to build the RL image, then push a
-`ciflow/rl-unit-tests/<PR>` tag after the image is available. Both tags should
-point to the PR commit.
+The RL unit workflow runs automatically on pull requests and `main`. When a PR
+changes `.ci/docker/`, use the existing `ciflow/docker` label to build its image;
+rerun the RL unit job after that image is available.
 
 ### Running Specific Unit Test Files
 
