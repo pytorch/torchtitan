@@ -36,7 +36,16 @@ case "${IMAGE_NAME}" in
     exit 1
 esac
 
-docker build \
+# On OSDC the image is built by the out-of-cluster BuildKit pool through a
+# remote buildx builder. That builder has nowhere to load an image into, so the
+# result has to go straight to the registry.
+if [[ -n "${REMOTE_BUILDKIT:-}" ]]; then
+  BUILD_CMD=(docker buildx build --push)
+else
+  BUILD_CMD=(docker build)
+fi
+
+"${BUILD_CMD[@]}" \
   --no-cache \
   --progress=plain \
   --build-arg "BASE_IMAGE=${BASE_IMAGE}" \

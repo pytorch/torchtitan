@@ -21,10 +21,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_gqa_inner_attention_local_spmd,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import (
-    set_moe_block_padding_mask_sharding,
-    set_moe_sharding_config,
-)
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.deepseek_v3.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -142,7 +139,6 @@ def _set_deepseek_v3_layer_sharding(
 
     # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
-        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
@@ -168,9 +164,6 @@ def _set_deepseek_v3_mtp_sharding(
             mtp_layer_cfg.sharding_config = ShardingConfig(
                 in_src_shardings={
                     "mtp_input_valid_mask": token_id_placement(),
-                },
-                in_dst_shardings={
-                    "mtp_input_valid_mask": token_id_placement(enable_sp=enable_sp),
                 },
             )
         _set_deepseek_v3_layer_sharding(

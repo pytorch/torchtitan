@@ -292,10 +292,12 @@ def make_shared_expert_ffn_config(
     *,
     dim: int,
     hidden_dim: int,
+    enable_sp: bool,
     w1_param_init: dict[str, Callable],
     w2w3_param_init: dict[str, Callable],
 ) -> FeedForward.Config:
-    """Build a shared FFN whose output reduction is owned by its sharding config."""
+    """Build a shared FFN with an SP-aware output projection."""
+    w2_cls = RowParallelLinear if enable_sp else Linear
     return FeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
@@ -303,10 +305,7 @@ def make_shared_expert_ffn_config(
             num_linears=2,
             param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
         ),
-        # Shared w2 must remain Partial when EP is enabled without SP so the
-        # outer MoE boundary performs the only all-reduce. RowParallelLinear
-        # would reduce P -> I here and reduce the shared output a second time.
-        w2=Linear.Config(
+        w2=w2_cls.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=w2w3_param_init,
