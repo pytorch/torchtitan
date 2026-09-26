@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed._functional_collectives as funcol
+import torch.distributed.config as dist_config
 import torch.distributed.distributed_c10d as c10d
 import torch.distributed.tensor._random
 import torch.distributed.tensor.parallel
@@ -407,6 +408,8 @@ def init_distributed(
     enable_cpu_backend: bool = False,
     base_folder: str = "",
     ranks: list[int] | None = None,
+    *,
+    pipeline_parallel_degree: int = 1,
 ) -> int:
     enable_fp32_matmul_emulation_with_bf16x9()
 
@@ -417,6 +420,10 @@ def init_distributed(
             "The provided comm_config and other settings will not take effect."
         )
         return torch.distributed.get_world_size()
+
+    # Directed physical PP edges need independent, preinitialized communicator
+    # FIFOs so eager execution and CUDA graph replay use deterministic ordering.
+    dist_config.pipeline_per_edge_p2p = pipeline_parallel_degree > 1
 
     # disable autograd multithreading, to enable TLS DeviceMesh stack for spmd_types backend.
     # this is needed for AC functionality; multi-threaded autograd means BWD threads performing recompute,

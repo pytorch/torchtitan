@@ -7,15 +7,20 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 import torch.nn as nn
 
 from torchtitan.config import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.pipeline_parallel import (
+    _build_decoder_stage_io,
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
+    _static_stage_metadata,
+    _unsupported_static_split,
 )
+from torchtitan.models.llama3.config_registry import model_registry
 
 
 def test_pipeline_with_first_stage_modules_prepends_present_modules(monkeypatch):
@@ -220,3 +225,97 @@ def test_pp_rank_to_stage_mapping_requires_even_division():
 def test_get_pipeline_metadata_requires_layers_attribute():
     with pytest.raises(ValueError, match="Model does not have layers attribute."):
         _get_pipeline_metadata(object(), ParallelismConfig(), object())
+
+
+@pytest.mark.parametrize(
+    (
+        "cp",
+        "tp",
+        "tp_enabled",
+        "enable_sequence_parallel",
+        "load_balancer",
+        "expected_decoder_tokens",
+        "expected_hidden_tokens",
+    ),
+    [
+        (1, 1, False, False, None, 128, 128),
+        (2, 1, False, False, None, 64, 64),
+        (2, 1, False, False, "ptrr", 64, 64),
+        (2, 1, False, False, "headtail", 32, 32),
+        (2, 2, True, True, "ptrr", 64, 32),
+    ],
+)
+def test_static_decoder_stage_metadata_is_complete(
+    cp,
+    tp,
+    tp_enabled,
+    enable_sequence_parallel,
+    load_balancer,
+    expected_decoder_tokens,
+    expected_hidden_tokens,
+):
+    model_config = model_registry("debugmodel")
+    parallel_dims = SimpleNamespace(cp=cp, tp=tp, tp_enabled=tp_enabled)
+    stage_io = _build_decoder_stage_io(
+        parallel_dims=parallel_dims,
+        parallelism=ParallelismConfig(
+            enable_sequence_parallel=enable_sequence_parallel,
+            context_parallel_load_balancer=load_balancer,
+        ),
+        training=pipeline_parallel.TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=128
+        ),
+        model_config=model_config,
+        lm_head_in_loss=True,
+    )
+
+    first = _static_stage_metadata(stage_io, 0, 3)
+    middle = _static_stage_metadata(stage_io, 1, 3)
+    last = _static_stage_metadata(stage_io, 2, 3)
+
+    assert first["input_args"][0].shape == torch.Size([expected_decoder_tokens])
+    assert first["input_args"][0].dtype == torch.int64
+    assert first["input_grads"] == (None,)
+    assert middle["input_args"][0].shape == torch.Size(
+        [expected_hidden_tokens, model_config.dim]
+    )
+    assert middle["input_args"][0].requires_grad
+    assert not middle["input_grads"][0].requires_grad
+    assert last["output_args"][0].shape == torch.Size(
+        [expected_decoder_tokens, model_config.dim]
+    )
+    assert last["output_grads"] == (None,)
+
+
+def test_static_decoder_stage_metadata_describes_logits_output():
+    model_config = model_registry("debugmodel")
+    stage_io = _build_decoder_stage_io(
+        parallel_dims=SimpleNamespace(cp=1, tp=1, tp_enabled=False),
+        parallelism=ParallelismConfig(),
+        training=pipeline_parallel.TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=128
+        ),
+        model_config=model_config,
+        lm_head_in_loss=False,
+    )
+
+    last = _static_stage_metadata(stage_io, 2, 3)
+    assert last["output_args"][0].shape == torch.Size([128, model_config.vocab_size])
+
+
+def test_static_decoder_metadata_accepts_standard_decoder_boundaries():
+    assert (
+        _unsupported_static_split(
+            [["tok_embeddings"], ["layers.0", "norm"], ["lm_head"]]
+        )
+        is None
+    )
+
+
+def test_static_decoder_metadata_rejects_custom_boundary():
+    assert (
+        _unsupported_static_split(
+            [["vision_encoder"], ["tok_embeddings", "layers.0", "norm", "lm_head"]]
+        )
+        == "stage 0 does not produce decoder hidden states"
+    )

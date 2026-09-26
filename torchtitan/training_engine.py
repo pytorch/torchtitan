@@ -234,6 +234,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 config.comm,
                 enable_cpu_backend=config.training.enable_cpu_offload,
                 base_folder=self.output_dir,
+                pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
         self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
         self.gc_handler = utils.GarbageCollection(
