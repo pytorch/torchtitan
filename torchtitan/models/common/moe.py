@@ -19,8 +19,8 @@ import torch_remat as remat
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.optim import Optimizer
 
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
     spmd_dense_sp_enabled,
@@ -851,7 +851,7 @@ class _MoELike(Protocol):
 def register_moe_load_balancing_hook(
     optimizers: Optimizer,
     model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Register an optimizer step pre-hook for MoE auxiliary-loss-free load balancing.
 
@@ -861,7 +861,7 @@ def register_moe_load_balancing_hook(
     Args:
         optimizers: The optimizers container to register the hook on.
         model_parts: List of model parts that may contain MoE layers.
-        parallel_dims: Parallel dimensions for distributed communication.
+        parallelism_context: Parallel dimensions for distributed communication.
     """
 
     def _iter_moe_layers(
@@ -904,9 +904,9 @@ def register_moe_load_balancing_hook(
 
     def _update_expert_bias(
         model_parts: list[nn.Module],
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
     ):
-        loss_mesh = parallel_dims.get_optional_mesh("loss")
+        loss_mesh = parallelism_context.get_optional_mesh("loss")
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
@@ -925,10 +925,10 @@ def register_moe_load_balancing_hook(
 
         tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
 
-        if parallel_dims.ep_enabled and parallel_dims.tp > 1:
+        if parallelism_context.ep_enabled and parallelism_context.tp > 1:
             torch.distributed.all_reduce(
                 tokens_per_expert_E_by_layer,
-                group=parallel_dims.get_dense_tp_mesh().get_group(),
+                group=parallelism_context.get_dense_tp_mesh().get_group(),
             )
         if loss_mesh is not None:
             torch.distributed.all_reduce(
@@ -959,7 +959,7 @@ def register_moe_load_balancing_hook(
     if _should_register_moe_balancing_hook(model_parts):
         optimizers.register_step_pre_hook(
             lambda *args, **kwargs: _update_expert_bias(
-                model_parts, parallel_dims=parallel_dims
+                model_parts, parallelism_context=parallelism_context
             )
         )
 
@@ -967,7 +967,7 @@ def register_moe_load_balancing_hook(
 def register_moe_quantile_balancing_hook(
     optimizers: Optimizer,
     model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Update quantile-balanced expert biases before each optimizer step."""
     moe_layers: list[tuple[MoE, QuantileBalancedTopKRouter]] = []
@@ -986,9 +986,9 @@ def register_moe_quantile_balancing_hook(
         reduction_groups = []
         # With EP, the router is token-sharded on the dense TP axis even when
         # model-wide sequence parallelism is disabled.
-        if parallel_dims.ep_enabled and parallel_dims.tp > 1:
-            reduction_groups.append(parallel_dims.get_dense_tp_mesh().get_group())
-        loss_mesh = parallel_dims.get_optional_mesh("loss")
+        if parallelism_context.ep_enabled and parallelism_context.tp > 1:
+            reduction_groups.append(parallelism_context.get_dense_tp_mesh().get_group())
+        loss_mesh = parallelism_context.get_optional_mesh("loss")
         if loss_mesh is not None:
             reduction_groups.append(loss_mesh.get_group())
 

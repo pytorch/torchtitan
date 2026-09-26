@@ -6,11 +6,10 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import math
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -20,20 +19,19 @@ import torch.distributed.config as dist_config
 import torch.distributed.distributed_c10d as c10d
 import torch.distributed.tensor._random
 import torch.distributed.tensor.parallel
-from spmd_types.checker import typecheck as spmd_typecheck
 from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.parallel_dims import DistributedTopology
+from torchtitan.distributed.parallelism_context import DistributedTopology
 from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 logger = logging.getLogger(__name__)
 
 
 if TYPE_CHECKING:
-    from torchtitan.distributed.parallel_dims import ParallelDims
+    from torchtitan.distributed.parallelism_context import ParallelismContext
 
 
 def _dist_reduce(
@@ -116,14 +114,14 @@ def dist_mean(
 
 
 def set_determinism(
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     device: torch.device,
     debug_config: DebugConfig,
-    distinct_seed_mesh_dims: list[str],
+    distinct_seed_mesh_axes: list[str],
 ) -> None:
     """
     Set the same distributed RNG seed for all axes in the world mesh, but use
-    different seeds across axes named by ``distinct_seed_mesh_dims``. For
+    different seeds across axes named by ``distinct_seed_mesh_axes``. For
     example, pipeline stages should use different seeds while ranks within an
     SPMD group use the same seed.
 
@@ -133,10 +131,10 @@ def set_determinism(
     Set Determinism flags for increased reproducibility with loss of performance.
 
     Args:
-        world_mesh: Device mesh for distributed training
+        parallelism_context: Parallelism context for distributed training.
         device: Device to use
         debug_config: Debug config to use
-        distinct_seed_mesh_dims: List of mesh dimension names to have distinct seeds across.
+        distinct_seed_mesh_axes: Mesh axis names that receive distinct seeds.
     """
     if debug_config.deterministic:
         logger.info("Deterministic algorithm enabled (expect perf degradation).")
@@ -189,7 +187,7 @@ def set_determinism(
         torch.autograd.set_detect_anomaly(True, check_nan=False)
 
     seed = debug_config.seed
-    if parallel_dims.world_size == 1:
+    if parallelism_context.world_size == 1:
         if seed is not None:
             torch.manual_seed(seed)
             os.environ["PYTHONHASHSEED"] = str(seed % 2**32)
@@ -206,34 +204,34 @@ def set_determinism(
         seed = seed_tensor.to("cpu").view(torch.uint64).item()
     assert isinstance(seed, int)
 
-    # Set distinct seed for each rank in mesh dimensions, with dimension names provided by `distinct_seed_mesh_dims`
+    # Set distinct seeds across the requested mesh axes.
     # For PP + SPMD cases, we want to separate the world into the SPMD mesh and the PP mesh,
     # and choose a unique seed for each rank on the PP mesh.
     # We support multiple distinct dimensions by adding each distinct dimension's local rank to the seed.
     distinct_seed_meshes = [
-        parallel_dims.get_optional_mesh(dim) for dim in distinct_seed_mesh_dims
+        parallelism_context.get_optional_mesh(axis) for axis in distinct_seed_mesh_axes
     ]
     distinct_seed_meshes = [mesh for mesh in distinct_seed_meshes if mesh is not None]
     assert all(mesh is not None for mesh in distinct_seed_meshes)
 
     if distinct_seed_meshes:
-        # Each dimension contributes: local_rank * (product of all previous dimension sizes)
+        # Each axis contributes: local_rank * (product of all previous axis sizes).
         # This guarantees uniqueness like multi-dimensional array indexing
         seed_offset = 0
         cumulative_size = 1
 
         for distinct_mesh in distinct_seed_meshes:
             local_rank = distinct_mesh.get_local_rank()
-            # Add contribution from this dimension
+            # Add this axis's contribution.
             seed_offset += local_rank * cumulative_size
-            # Update cumulative size for next dimension
+            # Update cumulative size for the next axis.
             cumulative_size *= distinct_mesh.size()
 
         seed += seed_offset
         seed %= 2**64
 
         logger.debug(
-            f"Distinct dims {distinct_seed_mesh_dims}, Global rank {c10d.get_rank()} using seed: {seed}"
+            f"Distinct axes {distinct_seed_mesh_axes}, Global rank {c10d.get_rank()} using seed: {seed}"
         )
 
     else:
@@ -248,10 +246,12 @@ def set_determinism(
     # all ranks of the SPMD mesh. If PP is also used, this seed is unique per PP rank.
     # TODO: remove the need of passing in a mesh once
     # torch.distributed.tensor._random.manual_seed doesn't require a mesh input.
-    if parallel_dims.world_size > parallel_dims.pp:
+    if parallelism_context.world_size > parallelism_context.pp:
         # We just need to pass the world_mesh as the device_id is the only information
         # this API uses.
-        torch.distributed.tensor._random.manual_seed(seed, parallel_dims.world_mesh)
+        torch.distributed.tensor._random.manual_seed(
+            seed, parallelism_context.world_mesh
+        )
 
 
 _batch_invariant_enabled: bool = False
@@ -355,35 +355,6 @@ def set_batch_invariance(enable: bool) -> None:
         "overridden with Triton kernels (via batch_invariant_ops); "
         "reduced-precision reductions and TF32 disabled"
     )
-
-
-@contextlib.contextmanager
-def get_spmd_context(
-    *,
-    parallel_dims: "ParallelDims | None" = None,
-    spmd_typechecking: bool = False,
-) -> Iterator[None]:
-    with contextlib.ExitStack() as stack:
-        if parallel_dims is not None:
-            if not parallel_dims._single_axis_meshes:
-                parallel_dims.build_mesh()
-            from torchtitan.distributed.spmd_types import (
-                set_current_spmd_mesh,
-                set_spmd_meshes,
-            )
-
-            dense_mesh = parallel_dims.spmd_dense_mesh()
-            set_spmd_meshes(
-                dense_mesh=dense_mesh,
-                sparse_mesh=parallel_dims.spmd_sparse_mesh(),
-                dense_sp_enabled=parallel_dims.sp_enabled,
-            )
-
-            stack.enter_context(set_current_spmd_mesh(dense_mesh))
-        if spmd_typechecking:
-            stack.enter_context(spmd_typecheck(local=False))
-
-        yield
 
 
 def init_fake_mode(
@@ -601,7 +572,7 @@ def init_distributed(
 
 def set_pg_timeouts(
     timeout: timedelta,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ):
     """
     Sets the timeout for all PGs in the provided mesh, and the default (world) group.
@@ -624,7 +595,7 @@ def set_pg_timeouts(
     # None represents the 'default' PG, not part of the mesh
     groups: list[torch.distributed.ProcessGroup | None] = [
         mesh.get_group()
-        for mesh in parallel_dims.get_all_one_dimensional_meshes().values()
+        for mesh in parallelism_context.get_all_one_dimensional_meshes().values()
     ] + [None]
     for group in groups:
         torch.distributed.set_timeout(timeout, group)

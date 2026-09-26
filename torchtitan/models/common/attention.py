@@ -41,7 +41,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.compile import maybe_regional_inductor
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm

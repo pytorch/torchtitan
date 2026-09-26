@@ -27,7 +27,7 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     Owned,
 )
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,

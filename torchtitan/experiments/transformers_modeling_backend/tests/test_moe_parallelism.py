@@ -181,8 +181,8 @@ def _prepare_layers(model):
         layer.moe_enabled = has_gate and hasattr(layer.mlp, "experts")
 
 
-class _FakeParallelDims:
-    """Minimal ParallelDims stub for tests that don't use full distributed setup."""
+class _FakeParallelismContext:
+    """Minimal ParallelismContext stub for tests that don't use full distributed setup."""
 
     tp_enabled = False
     ep_enabled = False
@@ -324,8 +324,8 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
             build_and_swap_native_moe,
         )
 
-        parallel_dims = _FakeParallelDims(tp_enabled=True, ep_enabled=False)
-        parallel_dims.tp = 2
+        parallelism_context = _FakeParallelismContext(tp_enabled=True, ep_enabled=False)
+        parallelism_context.tp = 2
 
         with self.assertRaisesRegex(
             ValueError,
@@ -333,7 +333,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         ):
             build_and_swap_native_moe(
                 torch.nn.Module(),
-                parallel_dims,
+                parallelism_context,
             )
 
     def test_build_produces_native_moe(self):
@@ -565,7 +565,7 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         register_moe_load_balancing_hook(
             optimizers,
             [model.model],
-            _FakeParallelDims(),
+            _FakeParallelismContext(),
         )
 
         optimizers.step()

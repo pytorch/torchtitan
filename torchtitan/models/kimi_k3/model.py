@@ -15,9 +15,8 @@ from torch import nn
 
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
@@ -315,10 +314,14 @@ class KimiK3Model(MultimodalModel):
     multimodal_encoder_fqns = ("vision_encoder",)
 
     @classmethod
-    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
         from torchtitan.models.common.moe import register_moe_quantile_balancing_hook
 
-        register_moe_quantile_balancing_hook(optimizers, model_parts, parallel_dims)
+        register_moe_quantile_balancing_hook(
+            optimizers, model_parts, parallelism_context
+        )
 
     pipeline_first_stage_module_fqns = ("vision_encoder",)
     pipeline_last_stage_module_fqns = ("output_res_proj", "output_res_norm")
@@ -399,7 +402,7 @@ class KimiK3Model(MultimodalModel):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: CompileConfig | None,
@@ -407,18 +410,16 @@ class KimiK3Model(MultimodalModel):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> KimiK3Model:
-        if parallel_dims.cp_enabled:
+        if parallelism_context.cp_enabled:
             raise NotImplementedError(
                 "Kimi K3 does not support context parallelism yet."
             )
         if compile_config is not None and "model" in compile_config.components:
             raise NotImplementedError("Kimi K3 does not support model compilation yet.")
 
-        from torchtitan.distributed.utils import get_spmd_context
-
-        with get_spmd_context(parallel_dims=parallel_dims):
-            annotate_replicated_parameters(self, parallel_dims)
-            self._parallelize(parallel_dims)
+        with parallelism_context.activate_spmd():
+            annotate_replicated_parameters(self, parallelism_context)
+            self._parallelize(parallelism_context)
             if ac_config is not None:
                 policy = ac_config.build(dump_folder=dump_folder)
                 policy.apply(self)
@@ -426,7 +427,7 @@ class KimiK3Model(MultimodalModel):
                     policy.apply(self.vision_encoder)
             if not skip_dp:
                 self._apply_fsdp(
-                    parallel_dims=parallel_dims,
+                    parallelism_context=parallelism_context,
                     training=training,
                     parallelism=parallelism,
                 )
@@ -436,7 +437,7 @@ class KimiK3Model(MultimodalModel):
         self,
         input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -460,13 +461,13 @@ class KimiK3Model(MultimodalModel):
 
         input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
         input_dict = annotate_input_spmd_types(
-            parallel_dims, input_dict, input_sharding
+            parallelism_context, input_dict, input_sharding
         )
         attention_masks = input_dict.get("attention_masks")
         if attention_masks is not None:
             kda_metadata = attention_masks.get("kda")
             if isinstance(kda_metadata, VarlenMetadata):
-                with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+                with parallelism_context.activate_spmd():
                     kda_metadata.annotate_spmd_types()
 
         inputs = input_dict.pop("input")

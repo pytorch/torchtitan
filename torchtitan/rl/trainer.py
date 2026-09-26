@@ -143,8 +143,8 @@ class Trainer(Configurable):
         engine.device_memory_monitor.reset_peak_stats()
 
         # Data parallelism: mesh is available after model construction builds it.
-        self.dp_enabled = engine.parallel_dims.dp_enabled
-        dp_mesh = engine.parallel_dims.get_optional_mesh("dp")
+        self.dp_enabled = engine.parallelism_context.dp_enabled
+        dp_mesh = engine.parallelism_context.get_optional_mesh("dp")
         if dp_mesh is not None:
             self.dp_size = dp_mesh.size()
             self.dp_rank = dp_mesh.get_local_rank()
@@ -197,7 +197,7 @@ class Trainer(Configurable):
         # TODO: switch from plain tensors to DTensor / spmd_types so the
         # reduction op is encoded in the placement instead of split across
         # `sum_reduced_metrics` / `max_reduced_metrics` dicts.
-        loss_mesh = self.engine.parallel_dims.get_optional_mesh("loss")
+        loss_mesh = self.engine.parallelism_context.get_optional_mesh("loss")
 
         out: dict[str, float] = {
             key: dist_utils.dist_sum(value.detach(), loss_mesh)
@@ -287,7 +287,7 @@ class Trainer(Configurable):
         performance = compute_training_performance_metrics(
             num_tokens=self._step_num_tokens_per_dp_rank,
             elapsed_time=time.perf_counter() - self._step_compute_start,
-            non_data_parallel_size=engine.parallel_dims.non_data_parallel_size,
+            non_data_parallel_size=engine.parallelism_context.non_data_parallel_size,
             num_flops_per_token=engine.num_flops_per_token,
             gpu_peak_flops=self.gpu_peak_flops,
             has_quantization=engine.has_quantization,
@@ -321,7 +321,7 @@ class Trainer(Configurable):
                     device_mem_stats.num_alloc_retries
                 ),
                 "trainer/memory/num_ooms": float(device_mem_stats.num_ooms),
-                **collect_aux_loss_metrics(engine.parallel_dims),
+                **collect_aux_loss_metrics(engine.parallelism_context),
                 **(
                     {"trainer/mfu_percent": performance["mfu_percent"]}
                     if "mfu_percent" in performance

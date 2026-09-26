@@ -27,7 +27,7 @@ import torch.distributed as dist
 
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.models.qwen3_5 import Qwen35Model, qwen3_5_configs
 from torchtitan.tools import utils
@@ -61,7 +61,7 @@ def run_worker(args):
         seq_len=max_context_length,
     )
 
-    parallel_dims = ParallelDims(
+    parallelism_context = ParallelismContext(
         dp_shard=dp_shard,
         dp_replicate=1,
         cp=1,
@@ -71,7 +71,7 @@ def run_worker(args):
         world_size=world_size,
         enable_sequence_parallel=True,
     )
-    parallel_dims.build_mesh()
+    parallelism_context.build_mesh()
 
     parallelism = ParallelismConfig(
         tensor_parallel_degree=args.tp,
@@ -103,7 +103,7 @@ def run_worker(args):
     model.init_weights(buffer_device=torch.device("cuda"))
 
     model = model.parallelize(
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         training=training,
         parallelism=parallelism,
         compile_config=CompileConfig(),
