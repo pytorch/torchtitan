@@ -364,11 +364,7 @@ def cuda_graphs_supported() -> bool:
     ROCm is excluded: capture is unsupported there, so anything gated on CUDA
     graphs must agree that they are inert.
     """
-    return (
-        utils.device_type == "cuda"
-        and torch.cuda.is_available()
-        and torch.version.hip is None
-    )
+    return utils.is_nvidia_cuda()
 
 
 # TODO: Unify PP and non-PP callable signatures to restore strict input typing.

@@ -24,8 +24,13 @@ from torch import distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.config import CommConfig, DebugConfig, Fp32MatmulPrecision
-from torchtitan.tools.utils import device_module, device_type
+from torchtitan.config import CommConfig, DebugConfig, FP32MatmulPrecision
+from torchtitan.tools.utils import (
+    device_module,
+    device_type,
+    has_cuda_capability,
+    is_nvidia_cuda,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -267,24 +272,16 @@ _BFX9_REQUIREMENT = (
 _TF32_REQUIREMENT = "NVIDIA compute capability 8.0 or later"
 
 
-def _is_nvidia_cuda() -> bool:
-    return (
-        device_type == "cuda"
-        and torch.cuda.is_available()
-        and torch.version.hip is None
-    )
-
-
-def set_fp32_matmul_precision(precision: Fp32MatmulPrecision = "auto") -> None:
+def set_fp32_matmul_precision(precision: FP32MatmulPrecision) -> None:
     """Select the CUDA backend math mode for FP32 matmuls.
 
     Under BF16 mixed precision the model's only FP32 GEMM is the MoE router
     gate (``RouterGateLinear``), whose backward upcasts its BF16 operands, so
     this knob is in practice the router's precision knob.
 
-    - ``auto``: BF16x9 emulation on NVIDIA GPUs with compute capability 10.0 or
-      later, and the PyTorch default elsewhere. This is torchtitan's historical
-      behavior.
+    - ``default``: BF16x9 emulation on NVIDIA GPUs with compute capability 10.0
+      or later, and the PyTorch default elsewhere. This is torchtitan's
+      historical behavior.
     - ``ieee``: true IEEE FP32. Most accurate, slowest.
     - ``tf32``: TF32 tensor cores. 10 mantissa bits, roughly half the BF16
       tensor-core rate. Requires compute capability 8.0 or later.
@@ -303,8 +300,8 @@ def set_fp32_matmul_precision(precision: Fp32MatmulPrecision = "auto") -> None:
             "debug.batch_invariant."
         )
 
-    if not _is_nvidia_cuda():
-        if precision != "auto":
+    if not is_nvidia_cuda():
+        if precision != "default":
             logger.warning(
                 "fp32_matmul_precision=%r only applies to NVIDIA CUDA devices; "
                 "leaving the FP32 matmul backend at its default.",
@@ -312,24 +309,24 @@ def set_fp32_matmul_precision(precision: Fp32MatmulPrecision = "auto") -> None:
             )
         return
 
-    device_capability = torch.cuda.get_device_capability()
-
-    if precision == "auto":
+    if precision == "default":
         # Blackwell and later emulate FP32 matmuls with BF16x9 by default: it
         # keeps near-IEEE accuracy while running on the BF16 tensor cores.
         # Older devices have no such mode, so leave the PyTorch default alone.
-        if device_capability < (10, 0):
+        if not has_cuda_capability(10, 0):
             return
         precision = "bfx9"
-    elif precision == "bfx9" and device_capability < (10, 0):
+    elif precision == "bfx9" and not has_cuda_capability(10, 0):
         raise ValueError(
             f"fp32_matmul_precision='bfx9' requires {_BFX9_REQUIREMENT}, but "
-            f"this device has compute capability {device_capability}."
+            f"this device has compute capability "
+            f"{torch.cuda.get_device_capability()}."
         )
-    elif precision == "tf32" and device_capability < (8, 0):
+    elif precision == "tf32" and not has_cuda_capability(8, 0):
         raise ValueError(
             f"fp32_matmul_precision='tf32' requires {_TF32_REQUIREMENT}, but "
-            f"this device has compute capability {device_capability}."
+            f"this device has compute capability "
+            f"{torch.cuda.get_device_capability()}."
         )
 
     try:
@@ -470,7 +467,8 @@ def init_distributed(
     enable_cpu_backend: bool = False,
     base_folder: str = "",
     ranks: list[int] | None = None,
-    fp32_matmul_precision: Fp32MatmulPrecision = "auto",
+    *,
+    fp32_matmul_precision: FP32MatmulPrecision,
 ) -> int:
     set_fp32_matmul_precision(fp32_matmul_precision)
 

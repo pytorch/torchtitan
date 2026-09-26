@@ -74,6 +74,19 @@ def get_device_info() -> tuple[str, ModuleType]:
 device_type, device_module = get_device_info()
 
 
+def is_nvidia_cuda() -> bool:
+    """Whether the active device is an NVIDIA CUDA device.
+
+    ROCm is excluded: it presents as CUDA to torch, so anything gated on
+    NVIDIA-only backend features has to rule it out explicitly.
+    """
+    return (
+        device_type == "cuda"
+        and torch.cuda.is_available()
+        and torch.version.hip is None
+    )
+
+
 def get_local_device() -> torch.device:
     """Return this process's device under LOCAL_RANK or visible-device launch.
 

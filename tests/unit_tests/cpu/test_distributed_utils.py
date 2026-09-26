@@ -15,11 +15,12 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.utils.checkpoint import checkpoint
 
-from torchtitan.config import CommConfig, Fp32MatmulPrecision
+from torchtitan.config import CommConfig, FP32MatmulPrecision
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_enabled
 from torchtitan.distributed.utils import init_distributed
+from torchtitan.tools import utils as tools_utils
 
 
 def _fake_nvidia_gpu(
@@ -27,7 +28,8 @@ def _fake_nvidia_gpu(
 ) -> SimpleNamespace:
     """Point the FP32 matmul backend at a stub for the given device capability."""
     matmul = SimpleNamespace(fp32_precision="ieee")
-    monkeypatch.setattr(dist_utils, "device_type", "cuda")
+    # is_nvidia_cuda and has_cuda_capability both read from tools.utils.
+    monkeypatch.setattr(tools_utils, "device_type", "cuda")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
     monkeypatch.setattr(torch.version, "hip", None)
@@ -35,33 +37,33 @@ def _fake_nvidia_gpu(
     return matmul
 
 
-def test_auto_enables_bf16x9_on_future_nvidia_gpus(
+def test_default_enables_bf16x9_on_future_nvidia_gpus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     matmul = _fake_nvidia_gpu(monkeypatch, (12, 0))
 
-    dist_utils.set_fp32_matmul_precision()
+    dist_utils.set_fp32_matmul_precision("default")
 
     assert matmul.fp32_precision == "bfx9"
 
 
-def test_auto_leaves_older_nvidia_gpus_untouched(
+def test_default_leaves_older_nvidia_gpus_untouched(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     matmul = _fake_nvidia_gpu(monkeypatch, (9, 0))
 
-    dist_utils.set_fp32_matmul_precision("auto")
+    dist_utils.set_fp32_matmul_precision("default")
 
     assert matmul.fp32_precision == "ieee"
 
 
 @pytest.mark.parametrize("precision", ["ieee", "tf32", "bfx9"])
-def test_explicit_precision_overrides_auto(
+def test_explicit_precision_overrides_default(
     monkeypatch: pytest.MonkeyPatch, precision: str
 ) -> None:
     matmul = _fake_nvidia_gpu(monkeypatch, (10, 0))
 
-    dist_utils.set_fp32_matmul_precision(cast(Fp32MatmulPrecision, precision))
+    dist_utils.set_fp32_matmul_precision(cast(FP32MatmulPrecision, precision))
 
     assert matmul.fp32_precision == precision
 
@@ -76,7 +78,7 @@ def test_explicit_precision_rejects_unsupported_hardware(
     _fake_nvidia_gpu(monkeypatch, capability)
 
     with pytest.raises(ValueError, match=f"fp32_matmul_precision='{precision}'"):
-        dist_utils.set_fp32_matmul_precision(cast(Fp32MatmulPrecision, precision))
+        dist_utils.set_fp32_matmul_precision(cast(FP32MatmulPrecision, precision))
 
 
 def test_tf32_conflicts_with_batch_invariant_mode(
@@ -92,7 +94,7 @@ def test_tf32_conflicts_with_batch_invariant_mode(
 def test_non_cuda_warns_for_explicit_precision(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setattr(dist_utils, "device_type", "cpu")
+    monkeypatch.setattr(tools_utils, "device_type", "cpu")
 
     with caplog.at_level(logging.WARNING, logger=dist_utils.logger.name):
         dist_utils.set_fp32_matmul_precision("tf32")
@@ -107,7 +109,12 @@ def test_fake_pg_uses_requested_rank(monkeypatch: pytest.MonkeyPatch) -> None:
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torchtitan.distributed.utils.init_fake_mode") as init_fake_mode,
     ):
-        assert init_distributed(CommConfig(mode="fake_backend")) == 8
+        assert (
+            init_distributed(
+                CommConfig(mode="fake_backend"), fp32_matmul_precision="default"
+            )
+            == 8
+        )
     init_fake_mode.assert_called_once_with(8, rank=6)
 
 
@@ -120,7 +127,9 @@ def test_fake_pg_rejects_out_of_range_rank(
         patch("torch.distributed.is_initialized", return_value=False),
         pytest.raises(ValueError, match=r"RANK must be in \[0, 8\)"),
     ):
-        init_distributed(CommConfig(mode="fake_backend"))
+        init_distributed(
+            CommConfig(mode="fake_backend"), fp32_matmul_precision="default"
+        )
 
 
 def test_dist_sum_tensor_keeps_local_result_as_tensor():
