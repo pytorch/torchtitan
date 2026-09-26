@@ -5,14 +5,34 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import replace
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import patch
 
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import ContextParallelTransform
+from torchtitan.distributed import context_parallel
+from torchtitan.distributed.context_parallel import (
+    HeadTailCPLoadBalancer,
+    PTRRFlexAttentionCPLoadBalancer,
+)
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
+from torchtitan.models.kimi_k3.attention import (
+    MLAFlexInnerAttention,
+    MLAVarlenInnerAttention,
+)
 from torchtitan.models.kimi_k3.config_registry import _dist_muon_optimizer
-from torchtitan.models.kimi_k3.kda import KDAAttentionMetadata, KDAKernel
+from torchtitan.models.kimi_k3.cp_attention import (
+    KVAllGatherCPMLAFlexInnerAttention,
+    UlyssesCPMLAFlexInnerAttention,
+)
+from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
+from torchtitan.models.kimi_k3.kda import InnerKDA, KDAAttentionMetadata, KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
@@ -137,6 +157,196 @@ class TestKimiK3(unittest.TestCase):
         )
         self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_group.pattern)
         self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_group.pattern)
+
+    def test_mla_attention_rejects_standard_backend_config(self):
+        model_config = _small_model_config()
+        attention_config = next(
+            layer.attention
+            for layer in model_config.layers
+            if layer.attention is not None
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires an MLAInnerAttention"):
+            replace(
+                attention_config,
+                inner_attention=FlexInnerAttention.Config(),
+            )
+
+    def test_preprocess_builds_token_aligned_vision_bank_indices(self):
+        model_config = _small_model_config()
+        ContextParallelTransform(
+            inner_attention={InnerKDA.Config: ContextParallelInnerKDA}
+        ).transform(model_config)
+        model = model_config.build()
+        image_id = 7
+        tokens_T = torch.tensor([1, image_id, image_id, image_id, image_id, 2, 3, 4])
+        labels_T = torch.arange(tokens_T.shape[0])
+        permutation = torch.tensor([[0, 1, 6, 7, 2, 3, 4, 5]])
+        load_balancer = SimpleNamespace(generate_permutation=lambda: permutation)
+        cp_group = SimpleNamespace(size=lambda: 2)
+        routing = object()
+        shard_input_keys: set[str] = set()
+
+        def shard_inputs(
+            batch: dict[str, object], **kwargs: object
+        ) -> dict[str, object]:
+            self.assertIs(kwargs["permutation"], permutation)
+            shard_input_keys.update(batch)
+            return batch
+
+        with (
+            patch.object(
+                HeadTailCPLoadBalancer.Config,
+                "build",
+                return_value=load_balancer,
+            ),
+            patch.object(
+                context_parallel,
+                "shard_inputs",
+                side_effect=shard_inputs,
+            ),
+            patch(
+                "torchtitan.models.kimi_k3.cp_kda.spmd_mesh_group",
+                return_value=cp_group,
+            ),
+            patch(
+                "torchtitan.models.kimi_k3.cp_kda."
+                "ContextParallelRouting.from_fragments",
+                return_value=routing,
+            ) as build_routing,
+            patch("torchtitan.models.kimi_k3.cp_kda.dist.get_rank", return_value=0),
+            patch(
+                "torchtitan.models.kimi_k3.model.annotate_input_spmd_types",
+                side_effect=lambda _parallel_dims, batch, _input_shardings: batch,
+            ),
+        ):
+            inputs, labels, kwargs = model.preprocess_inputs(
+                {
+                    "input": tokens_T,
+                    "labels": labels_T,
+                    "pixel_values": torch.empty(1),
+                    "grid_thw": torch.tensor([[1, 4, 4]]),
+                    "special_tokens": {"image_id": image_id},
+                    "positions": torch.arange(tokens_T.shape[0]),
+                },
+                parallel_dims=SimpleNamespace(cp_enabled=True),
+                parallelism=ParallelismConfig(
+                    context_parallel_degree=2,
+                    context_parallel_load_balancer=HeadTailCPLoadBalancer.Config(),
+                ),
+            )
+
+        torch.testing.assert_close(inputs, tokens_T)
+        torch.testing.assert_close(labels, labels_T)
+        torch.testing.assert_close(
+            kwargs["vision_bank_indices_T"],
+            torch.tensor([-1, 0, 1, 2, 3, -1, -1, -1]),
+        )
+        self.assertNotIn("special_tokens", kwargs)
+        self.assertIs(kwargs["attention_masks"]["kda"].cp_routing, routing)
+        build_routing.assert_called_once_with(
+            cu_seqlens_global=[0, 8],
+            fragments=[[(0, 2), (6, 8)], [(2, 6)]],
+            cp_rank=0,
+            device=tokens_T.device,
+            conv_history=2,
+        )
+        self.assertIn("vision_bank_indices_T", shard_input_keys)
+
+    def test_context_parallel_config_uses_kda_and_allgather_mla(self):
+        from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+
+        config = kimi_k3_debugmodel()
+        config.parallelism.context_parallel_degree = 2
+        config.parallelism.context_parallel_load_balancer = (
+            HeadTailCPLoadBalancer.Config()
+        )
+        ContextParallelTransform(
+            inner_attention={
+                MLAFlexInnerAttention.Config: KVAllGatherCPMLAFlexInnerAttention,
+                InnerKDA.Config: ContextParallelInnerKDA,
+            }
+        ).transform(config.model)
+        config.__post_init__()
+        model_config = cast(KimiK3Model.Config, config.model)
+        model_config.update_from_config(config=config)
+
+        for layer in model_config.layers:
+            if layer.attention is not None:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    KVAllGatherCPMLAFlexInnerAttention.Config,
+                )
+                self.assertIsNotNone(layer.attention.inner_attention.sharding_config)
+            if layer.delta_attention is not None:
+                self.assertIsInstance(
+                    layer.delta_attention.inner_kda,
+                    ContextParallelInnerKDA.Config,
+                )
+                self.assertEqual(
+                    layer.delta_attention.inner_kda.conv_kernel_size,
+                    layer.delta_attention.conv_kernel_size,
+                )
+                self.assertIsNotNone(layer.delta_attention.inner_kda.sharding_config)
+
+    def test_context_parallel_config_uses_kda_and_ulysses_mla(self):
+        from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+
+        config = kimi_k3_debugmodel()
+        config.parallelism.context_parallel_degree = 2
+        config.parallelism.context_parallel_load_balancer = None
+        ContextParallelTransform(
+            inner_attention={
+                MLAFlexInnerAttention.Config: UlyssesCPMLAFlexInnerAttention,
+                InnerKDA.Config: ContextParallelInnerKDA,
+            }
+        ).transform(config.model)
+        config.__post_init__()
+        model_config = cast(KimiK3Model.Config, config.model)
+        model_config.update_from_config(config=config)
+
+        for layer in model_config.layers:
+            if layer.attention is not None:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    UlyssesCPMLAFlexInnerAttention.Config,
+                )
+                self.assertIsNotNone(layer.attention.inner_attention.sharding_config)
+            if layer.delta_attention is not None:
+                self.assertIsInstance(
+                    layer.delta_attention.inner_kda,
+                    ContextParallelInnerKDA.Config,
+                )
+                self.assertEqual(
+                    layer.delta_attention.inner_kda.conv_kernel_size,
+                    layer.delta_attention.conv_kernel_size,
+                )
+                self.assertIsNotNone(layer.delta_attention.inner_kda.sharding_config)
+
+    def test_varlen_config_uses_mla_backend(self):
+        from torchtitan.models.kimi_k3 import model_registry
+
+        model_config = cast(
+            KimiK3Model.Config,
+            model_registry("debugmodel", attn_backend="varlen"),
+        )
+        for layer in model_config.layers:
+            if layer.attention is not None:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    MLAVarlenInnerAttention.Config,
+                )
+
+    def test_context_parallel_rejects_ptrr_partition(self):
+        from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
+
+        config = kimi_k3_debugmodel()
+        config.parallelism.context_parallel_degree = 2
+        config.parallelism.context_parallel_load_balancer = (
+            PTRRFlexAttentionCPLoadBalancer.Config()
+        )
+        with self.assertRaisesRegex(ValueError, "contiguous or head-tail"):
+            config.model.update_from_config(config=config)
 
     def test_flex_attention_mask(self):
         config = _small_model_config()

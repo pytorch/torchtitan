@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, cast, TypedDict
 
 import spmd_types as spmd
@@ -18,21 +18,16 @@ from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
-    spmd_dense_sp_enabled,
     spmd_local_context,
-    spmd_mesh_group,
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    BaseAttention,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
-    local_head_split,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
@@ -60,6 +55,7 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import Module
 
+from .attention import KimiMLAAttention
 from .kda import KDA, KDAAttentionMetadata
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
@@ -74,135 +70,29 @@ class KimiK3AttentionMetadata(TypedDict):
 
 
 # Shape suffixes:
-# T = packed tokens, D = model dimension, C = projection channels, H = heads,
-# K = query/key head dimension, V = value head dimension,
-# N = attention-residual entries.
-
-
-class KimiMLAAttention(BaseAttention):
-    """Kimi K3 multi-head latent attention.
-
-    Unlike DeepSeek-V3 MLA, the released K3 configuration sets
-    ``mla_use_nope=True``: the RoPE-sized query/key slices remain part of the
-    projected head, but no rotary transform is applied, so this has no rope
-    config at all. Attention delegates to the configured inner backend.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(BaseAttention.Config):
-        dim: int
-        kv_lora_rank: int
-        qk_nope_head_dim: int
-        qk_rope_head_dim: int
-        v_head_dim: int
-        wq_a: Linear.Config
-        q_norm: RMSNorm.Config
-        wq_b: Linear.Config
-        wkv_a: Linear.Config
-        kv_norm: RMSNorm.Config
-        wkv_b: Linear.Config
-        gate: Linear.Config
-        wo: Linear.Config
-        inner_attention: Module.Config = field(
-            default_factory=FlexInnerAttention.Config
-        )
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.n_heads = config.n_heads
-        self.qk_nope_head_dim = config.qk_nope_head_dim
-        self.qk_rope_head_dim = config.qk_rope_head_dim
-        self.q_head_dim = config.qk_nope_head_dim + config.qk_rope_head_dim
-        self.v_head_dim = config.v_head_dim
-        self.kv_lora_rank = config.kv_lora_rank
-        self.scale = self.q_head_dim**-0.5
-
-        self.wq_a = config.wq_a.build()
-        self.q_norm = config.q_norm.build()
-        self.wq_b = config.wq_b.build()
-        self.wkv_a = config.wkv_a.build()
-        self.kv_norm = config.kv_norm.build()
-        self.wkv_b = config.wkv_b.build()
-        self.gate = config.gate.build()
-        self.wo = config.wo.build()
-        self.inner_attention = config.inner_attention.build()
-
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        del positions
-
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # The MLA and gate projections all consume x. Gather once at their
-            # common attention boundary.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
-
-        q_THK = local_head_split(
-            self.wq_b(self.q_norm(self.wq_a(x_TD))), self.q_head_dim
-        )
-
-        compressed_kv_TC = self.wkv_a(x_TD)
-        kv_latent_TC, k_rope_TK = torch.split(
-            compressed_kv_TC,
-            [self.kv_lora_rank, self.qk_rope_head_dim],
-            dim=-1,
-        )
-        kv_THC = local_head_split(
-            self.wkv_b(self.kv_norm(kv_latent_TC)),
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-        k_nope_THK, v_THV = torch.split(
-            kv_THC,
-            [self.qk_nope_head_dim, self.v_head_dim],
-            dim=-1,
-        )
-        # Headless rope slice broadcast onto the local heads, as in DeepSeek-V3's MLA.
-        with spmd.local():
-            k_rope_THK = k_rope_TK.unsqueeze(1).expand(-1, k_nope_THK.shape[-2], -1)
-            k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
-            if spmd.is_type_checking():
-                spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
-
-        out_THV = self.inner_attention(
-            q_THK,
-            k_THK,
-            v_THV,
-            attention_masks=attention_masks,
-            scale=self.scale,
-        )
-        out_TD = out_THV.flatten(-2)
-        out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
-        return self.wo(out_TD)
+# T = packed token count (num_tokens)
+# D = model dimension (dim)
+# A = residual candidate count per token
 
 
 def _apply_attention_residual(
     prefix_sum_TD: torch.Tensor,
-    block_residual_TND: torch.Tensor,
+    block_residual_TAD: torch.Tensor,
     projection: Linear,
     norm: RMSNorm,
 ) -> torch.Tensor:
     """Apply Kimi's block-level attention residual in FP32."""
     assert norm.eps is not None
 
-    values_TND = torch.cat((block_residual_TND, prefix_sum_TD.unsqueeze(1)), dim=1)
-    values_float = values_TND.float()
+    values_TAD = torch.cat((block_residual_TAD, prefix_sum_TD.unsqueeze(1)), dim=1)
+    values_float = values_TAD.float()
     variance = values_float.pow(2).mean(dim=-1, keepdim=True)
-    keys_TND = values_float * torch.rsqrt(variance + norm.eps)
+    keys_TAD = values_float * torch.rsqrt(variance + norm.eps)
     score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
-    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
-    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
-    output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
-    return output_TD.to(values_TND.dtype)
+    scores_TA = (keys_TAD * score_weight_D).sum(dim=-1)
+    probs_T1A = torch.softmax(scores_TA, dim=-1).unsqueeze(1)
+    output_TD = torch.matmul(probs_T1A, values_float).squeeze(1)
+    return output_TD.to(values_TAD.dtype)
 
 
 class KimiK3TransformerBlock(Module):
@@ -264,29 +154,29 @@ class KimiK3TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        block_residual_TND: torch.Tensor,
-        attention_masks: KimiK3AttentionMetadata | None = None,
+        block_residual_TAD: torch.Tensor,
+        attention_metadata: KimiK3AttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prefix_sum_TD = x_TD
 
-        if block_residual_TND.shape[1] > 0:
+        if block_residual_TAD.shape[1] > 0:
             assert self.attention_res_proj is not None
             assert self.attention_res_norm is not None
             x_TD = _apply_attention_residual(
                 prefix_sum_TD,
-                block_residual_TND,
+                block_residual_TAD,
                 self.attention_res_proj,
                 self.attention_res_norm,
             )
 
         opens_block = self.layer_id % self.attn_res_block_size == 0
         if opens_block:
-            block_residual_TND = torch.cat(
+            block_residual_TAD = torch.cat(
                 (
-                    block_residual_TND,
+                    block_residual_TAD,
                     prefix_sum_TD.unsqueeze(1),
                 ),
                 dim=1,
@@ -295,20 +185,20 @@ class KimiK3TransformerBlock(Module):
         h_TD = self.attention_norm(x_TD)
         if self.attention is not None:
             layer_mask = (
-                attention_masks["quadratic_attention"]
-                if attention_masks is not None
+                attention_metadata["quadratic_attention"]
+                if attention_metadata is not None
                 else None
             )
             h_TD = self.attention(h_TD, layer_mask, positions)
         else:
             assert self.delta_attention is not None
-            kda_metadata = attention_masks["kda"] if attention_masks else None
+            kda_metadata = attention_metadata["kda"] if attention_metadata else None
             h_TD = self.delta_attention(h_TD, kda_metadata, positions)
         prefix_sum_TD = h_TD if opens_block else prefix_sum_TD + h_TD
 
         h_TD = _apply_attention_residual(
             prefix_sum_TD,
-            block_residual_TND,
+            block_residual_TAD,
             self.ffn_res_proj,
             self.ffn_res_norm,
         )
@@ -318,7 +208,7 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
-        return prefix_sum_TD + h_TD, block_residual_TND
+        return prefix_sum_TD + h_TD, block_residual_TAD
 
 
 class KimiK3Model(MultimodalModel):
@@ -657,19 +547,19 @@ class KimiK3Model(MultimodalModel):
                 dense_activation_placement(tp=spmd.I, cp=spmd.S(0)),
             )
 
-        block_residual_TND = h_TD.unsqueeze(1)[:, :0]
+        block_residual_TAD = h_TD.unsqueeze(1)[:, :0]
         for layer in self.layers.values():
-            h_TD, block_residual_TND = layer(
+            h_TD, block_residual_TAD = layer(
                 h_TD,
-                block_residual_TND,
-                attention_masks,
-                positions,
+                block_residual_TAD,
+                attention_metadata=attention_masks,
+                positions=positions,
                 padding_mask=padding_mask,
             )
 
         h_TD = _apply_attention_residual(
             h_TD,
-            block_residual_TND,
+            block_residual_TAD,
             self.output_res_proj,
             self.output_res_norm,
         )

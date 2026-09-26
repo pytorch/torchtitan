@@ -27,7 +27,6 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_spmd,
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import (
@@ -35,15 +34,13 @@ from torchtitan.models.common.moe_sharding import (
     set_moe_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.sharding import set_moonvit_sharding_config
+from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
+    from torchtitan.models.kimi_k3.attention import KimiMLAAttention
     from torchtitan.models.kimi_k3.kda import KDA
-    from torchtitan.models.kimi_k3.model import (
-        KimiK3Model,
-        KimiK3TransformerBlock,
-        KimiMLAAttention,
-    )
+    from torchtitan.models.kimi_k3.model import KimiK3Model, KimiK3TransformerBlock
     from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 
 
@@ -161,7 +158,27 @@ def _set_mla_sharding(
         input_layout=replicated_input_layout
     )
     attention_cfg.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
-    set_gqa_inner_attention_local_spmd(attention_cfg.inner_attention)
+    _set_mla_inner_attention_local_spmd(attention_cfg.inner_attention)
+
+
+def _set_mla_inner_attention_local_spmd(inner_attention: Module.Config) -> None:
+    """Localize MLA inputs while preserving their CP and TP placements."""
+    token_head_vectors = attention_activation_placement()
+    shared_key = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    inner_attention.sharding_config = ShardingConfig(
+        in_src_shardings={
+            "q_THK": token_head_vectors,
+            "kv_THP": token_head_vectors,
+            "k_shared_TR": shared_key,
+        },
+        in_dst_shardings={
+            "q_THK": token_head_vectors,
+            "kv_THP": token_head_vectors,
+            "k_shared_TR": shared_key,
+        },
+        out_src_shardings=token_head_vectors,
+        local_spmd=True,
+    )
 
 
 def _set_kda_sharding(
