@@ -185,13 +185,22 @@ def validate_context_parallel(
     model: "Module.Config", parallelism: "ParallelismConfig"
 ) -> None:
     """Validate that each inner attention matches the CP configuration."""
+    from torchtitan.distributed.context_parallel import (
+        HeadTailCPLoadBalancer,
+        PTRRFlexAttentionCPLoadBalancer,
+    )
     from torchtitan.models.common.cp_attention import (
         CPInnerAttention,
+        KVAllGatherCPFlexInnerAttention,
         UlyssesCPInnerAttention,
     )
 
     cp = parallelism.context_parallel_degree
     first_cp_config: tuple[str, type] | None = None
+    supported_backends: dict[type, tuple[type, ...]] = {
+        HeadTailCPLoadBalancer: (KVAllGatherCPFlexInnerAttention,),
+        PTRRFlexAttentionCPLoadBalancer: (KVAllGatherCPFlexInnerAttention,),
+    }
 
     for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
         attention = traversed
@@ -221,18 +230,17 @@ def validate_context_parallel(
                 f"{first_cp_config[0]}.inner_attention use different CP "
                 "backends, but model inputs are sharded once."
             )
-        # TODO(fegin): it seems to be cleaner if we move this logic to each
-        # backend class definition. We need to revisit a good strategy to
-        # define "where" should a validation implementation lives.
-        if isinstance(inner_attention, UlyssesCPInnerAttention.Config):
-            if parallelism.context_parallel_load_balancer is not None:
+        backend = inner_attention._owner
+        assert backend is not None and issubclass(backend, CPInnerAttention)
+        load_balancer = parallelism.context_parallel_load_balancer
+        if issubclass(backend, UlyssesCPInnerAttention):
+            if load_balancer is not None:
                 raise ValueError(
-                    f"{fqn}.inner_attention uses {cp_config_type.__qualname__}, so "
+                    f"{fqn}.inner_attention uses {backend.__qualname__}, so "
                     "context_parallel_load_balancer must be None."
                 )
-            head_shard_degree = (
-                parallelism.tensor_parallel_degree * parallelism.context_parallel_degree
-            )
+
+            head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
             for name, count in (("n_heads", n_heads), ("n_kv_heads", n_kv_heads)):
@@ -242,3 +250,17 @@ def validate_context_parallel(
                         "by tensor_parallel_degree * context_parallel_degree "
                         f"({head_shard_degree})."
                     )
+            continue
+
+        if load_balancer is None:
+            continue
+        load_balancer_type = load_balancer._owner
+        assert load_balancer_type is not None
+        if not any(
+            issubclass(backend, supported_backend)
+            for supported_backend in supported_backends.get(load_balancer_type, ())
+        ):
+            raise ValueError(
+                f"{type(load_balancer).__qualname__} does not support "
+                f"{fqn}.inner_attention using {backend.__qualname__}."
+            )

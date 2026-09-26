@@ -44,6 +44,24 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         config = self._config(cp=2, cp_kernel=True)
         config.__post_init__()
 
+    def test_contiguous_cp_requires_divisibility_by_cp_only(self):
+        config = self._config(cp=2, cp_kernel=True)
+        config.parallelism.context_parallel_load_balancer = None
+        config.training.num_tokens_per_microbatch_per_dp_rank = 6
+        config.__post_init__()
+
+    def test_ptrr_cp_requires_divisibility_by_cp_only(self):
+        from torchtitan.distributed.context_parallel import (
+            PTRRFlexAttentionCPLoadBalancer,
+        )
+
+        config = self._config(cp=2, cp_kernel=True)
+        config.parallelism.context_parallel_load_balancer = (
+            PTRRFlexAttentionCPLoadBalancer.Config()
+        )
+        config.training.num_tokens_per_microbatch_per_dp_rank = 6
+        config.__post_init__()
+
     def test_allows_plain_flex_without_cp(self):
         config = self._config(cp=1)
         config.__post_init__()
@@ -117,11 +135,9 @@ class TestUlyssesConfigValidation(unittest.TestCase):
             config.__post_init__()
 
     def test_rejects_unknown_load_balancer(self):
-        from torchtitan.config.configurable import Configurable
-
         class OtherLoadBalancer(ContextParallelLoadBalancer):
             @dataclass(kw_only=True, slots=True)
-            class Config(Configurable.Config):
+            class Config(ContextParallelLoadBalancer.Config):
                 pass
 
         config = self._config(load_balancer=OtherLoadBalancer.Config())
@@ -171,7 +187,7 @@ class TestGptOssUlysses(unittest.TestCase):
             GptOssModel.parallelize(
                 SimpleNamespace(
                     config=SimpleNamespace(
-                        first_full_attention_backend=inner_attention.Config()
+                        full_attention_backends=(inner_attention.Config(),)
                     )
                 ),
                 parallelism_context=SimpleNamespace(cp_enabled=True),

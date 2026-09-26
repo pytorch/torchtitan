@@ -237,7 +237,7 @@ def annotate_input_spmd_types(
 
     ``input_dict`` maps each name ('input', 'labels', and extra forward kwargs)
     to its value. Each named tensor is asserted against its own layout.
-    Non-tensor kwargs (e.g. ``attention_masks`` containers, ``special_tokens``)
+    Non-tensor kwargs (e.g. ``attention_metadata`` containers, ``special_tokens``)
     are left untouched. Every *tensor* input, however, must have a layout entry:
     a tensor with no entry raises rather than being silently left untyped.
     Tensors nested inside container kwargs are not reachable here and must

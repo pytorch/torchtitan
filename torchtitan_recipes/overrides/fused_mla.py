@@ -77,7 +77,10 @@ import triton
 import triton.language as tl
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import (
+    FlexAttentionMetadata,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.deepseek_v3.model import Attention
@@ -965,11 +968,11 @@ class FusedMLAAttention(Attention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not x.is_cuda:
-            return super().forward(x, attention_masks, positions)
+            return super().forward(x, attention_metadata, positions)
 
         x = maybe_gather_tp_input(self, x)
         num_tokens = x.shape[0]
@@ -1038,7 +1041,13 @@ class FusedMLAAttention(Attention):
             self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
-        )(q, k, v, attention_masks=attention_masks, scale=self.softmax_scale)
+        )(
+            q,
+            k,
+            v,
+            attention_metadata=attention_metadata,
+            scale=self.softmax_scale,
+        )
         # The copy below reads the inner_attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)

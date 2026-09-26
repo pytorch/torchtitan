@@ -140,7 +140,7 @@ class _AttentionBlock(Module):
         self.attention = _CountingGQAttention()
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        out_TD = self.attention(x_TD, attention_masks=None)
+        out_TD = self.attention(x_TD, attention_metadata=None)
         # The sum is a bare consumer of the attention output.
         remat.recompute_needs_tensor(out_TD)
         return out_TD.sum()

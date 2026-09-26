@@ -56,11 +56,9 @@ class TestKernelSelection(unittest.TestCase):
     def test_all_gather_prepares_only_block_masks(self):
         block_mask = object.__new__(BlockMask)
         sliding_block_mask = object.__new__(BlockMask)
-        linear_attention_metadata = object()
         attention_metadata = {
             "quadratic_attention": block_mask,
             "sliding_attention": sliding_block_mask,
-            "linear_attention": linear_attention_metadata,
         }
         sharded_block_mask = object.__new__(BlockMask)
         sharded_sliding_block_mask = object.__new__(BlockMask)
@@ -78,7 +76,6 @@ class TestKernelSelection(unittest.TestCase):
         assert isinstance(result, dict)
         self.assertIs(result["quadratic_attention"], sharded_block_mask)
         self.assertIs(result["sliding_attention"], sharded_sliding_block_mask)
-        self.assertIs(result["linear_attention"], linear_attention_metadata)
         self.assertEqual(
             shard_block_mask.call_args_list,
             [
@@ -167,7 +164,7 @@ class TestDecoderCpSharding(unittest.TestCase):
             ContextParallelLoadBalancer.Config().build()
 
     def test_no_shardable_inputs_is_a_noop(self):
-        batch = {"attention_masks": object()}
+        batch = {"attention_metadata": object()}
         result = context_parallel.shard_tensors(
             batch,
             input_shardings={},
@@ -191,11 +188,11 @@ class TestDecoderCpSharding(unittest.TestCase):
     def test_common_input_sharding_does_not_modify_metadata(self):
         input_T = torch.arange(8)
         labels_T = torch.arange(8)
-        attention_metadata = object()
+        attention_metadata = object.__new__(BlockMask)
         batch = {
             "input": input_T,
             "labels": labels_T,
-            "attention_masks": attention_metadata,
+            "attention_metadata": attention_metadata,
         }
         sharded_input_T = input_T[:4]
         sharded_labels_T = labels_T[:4]
@@ -233,7 +230,7 @@ class TestDecoderCpSharding(unittest.TestCase):
         self.assertIs(result, batch)
         self.assertIs(result["input"], sharded_input_T)
         self.assertIs(result["labels"], sharded_labels_T)
-        self.assertIs(result["attention_masks"], attention_metadata)
+        self.assertIs(result["attention_metadata"], attention_metadata)
         create_load_balancer.assert_called_once_with(8, 2, "cuda")
         self.assertEqual(shard_input.call_count, 2)
         self.assertIs(shard_input.call_args_list[0].args[1], cp_group)
@@ -552,9 +549,9 @@ class TestUlyssesVarlen(unittest.TestCase):
             autospec=True,
             return_value=q,
         ) as inner_forward:
-            result = kernel.forward(q, k, v, attention_masks=mask)
+            result = kernel.forward(q, k, v, attention_metadata=mask)
 
-        inner_forward.assert_called_once_with(kernel, q, k, v, attention_masks=mask)
+        inner_forward.assert_called_once_with(kernel, q, k, v, attention_metadata=mask)
         self.assertIs(result, q)
 
 

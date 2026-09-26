@@ -517,10 +517,10 @@ class GraphRuntimeTraceTest(unittest.TestCase):
     def test_split_block_mask_batch_offset_is_dynamic_for_replay(self) -> None:
         _, kwargs_mbs = normalize_graph_pp_microbatch_inputs(
             [(), ()],
-            [{"attention_masks": mask} for mask in _split_batch_offset_block_masks()],
+            [{"attention_metadata": mask} for mask in _split_batch_offset_block_masks()],
         )
-        mask0 = kwargs_mbs[0]["attention_masks"]
-        mask1 = kwargs_mbs[1]["attention_masks"]
+        mask0 = kwargs_mbs[0]["attention_metadata"]
+        mask1 = kwargs_mbs[1]["attention_metadata"]
 
         self.assertEqual(_trace_mask_mod_replay(mask0, mask1), (False, True))
 
@@ -623,7 +623,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
     def test_existing_stage_graphs_normalize_split_block_masks_in_place(self) -> None:
         arg_mbs = [(), ()]
         kwarg_mbs = [
-            {"attention_masks": mask} for mask in _split_batch_offset_block_masks()
+            {"attention_metadata": mask} for mask in _split_batch_offset_block_masks()
         ]
         stage = types.SimpleNamespace(graphs=object())
         schedule = types.SimpleNamespace(
@@ -653,8 +653,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         self.assertIs(ctx.arg_mbs, arg_mbs)
         self.assertIs(ctx.kwarg_mbs, kwarg_mbs)
-        mask0 = ctx.kwarg_mbs[0]["attention_masks"]
-        mask1 = ctx.kwarg_mbs[1]["attention_masks"]
+        mask0 = ctx.kwarg_mbs[0]["attention_metadata"]
+        mask1 = ctx.kwarg_mbs[1]["attention_metadata"]
 
         self.assertEqual(_trace_mask_mod_replay(mask0, mask1), (False, True))
 
