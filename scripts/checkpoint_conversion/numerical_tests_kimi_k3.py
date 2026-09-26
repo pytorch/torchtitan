@@ -474,7 +474,7 @@ def main() -> None:
     dtype = _DTYPE
     print(f"dtype={dtype} hf_attn={_HF_ATTN_BACKEND}")
 
-    tt_config = model_registry(args.model_flavor)
+    tt_config = model_registry(args.model_flavor, enable_sp=True)
     torch.manual_seed(args.seed)
     tt_model = _build_tt_model(tt_config, dtype)
     hf_state_dict = KimiK3StateDictAdapter(tt_config, hf_assets_path=None).to_hf(

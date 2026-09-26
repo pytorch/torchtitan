@@ -61,6 +61,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
     def test_mtp_mask_remains_replicated_at_block_boundary(self):
         config = model_registry(
             "debugmodel",
+            enable_sp=True,
             seq_len=128,
             num_mtp_layers=1,
         )
