@@ -85,10 +85,11 @@ class TrainingConfig:
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
-    with the host during dispatch. Pipeline parallelism
-    is supported with single-stage schedules such as GPipe and 1F1B. CUDA graphs
-    are independent of ``torch.compile(mode="reduce-overhead")``, which performs
-    its own CUDA graph capture.
+    with the host during dispatch. For pipeline parallelism, TorchTitan
+    configures the schedule-derived directed-edge process groups required by
+    looped and split-backward schedule replay. CUDA graphs are independent of
+    ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
+    capture.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
