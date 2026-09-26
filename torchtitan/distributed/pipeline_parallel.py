@@ -350,14 +350,26 @@ def _build_pipeline_schedule(
         return loss
 
     if looped_schedule:
+        schedule_kwargs: dict[str, Any] = {
+            "max_active_stages": (
+                parallelism.pp_max_unsharded_active_stages or len(stages)
+            ),
+            "unshard_lookahead": parallelism.pp_num_unshard_lookahead_factor,
+        }
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]
             n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
             backward_requires_autograd=backward_requires_autograd,
+            **schedule_kwargs,
         )
     else:
+        if isinstance(parallelism.pp_num_unshard_lookahead_factor, tuple):
+            raise ValueError(
+                "Per-rank pp_num_unshard_lookahead_factor is supported only "
+                "by multi-stage pipeline schedules"
+            )
         schedule = schedule_class(
             stages[0],
             n_microbatches=num_microbatches,

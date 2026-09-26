@@ -237,6 +237,24 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
+    pp_max_unsharded_active_stages: int | None = None
+    """Maximum local pipeline stages whose parameters may remain unsharded.
+
+    ``None`` keeps all stages owned by the local pipeline rank resident. A
+    smaller value reduces peak unsharded-parameter memory, but may expose more
+    FSDP communication because evicted stages must be unsharded again.
+    """
+
+    pp_num_unshard_lookahead_factor: Literal["auto", "full"] | tuple[int, ...] = "auto"
+    """FSDP unshard issue distance for multi-stage pipeline schedules.
+
+    This setting does not change parameter residency, collective count, or
+    reshard placement. ``"auto"`` uses ``min(pp_rank + 2,
+    pp_max_unsharded_active_stages)``. ``"full"`` uses the complete residency
+    window. A tuple supplies one positive value per pipeline rank for expert
+    tuning. See ``docs/composability.md`` for the detailed contract.
+    """
+
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
@@ -269,6 +287,33 @@ class ParallelismConfig:
                 "parallelism.context_parallel_load_balancer must be one of: "
                 f"None, 'headtail', 'ptrr' "
                 f"(got {self.context_parallel_load_balancer!r})"
+            )
+        if (
+            self.pp_max_unsharded_active_stages is not None
+            and self.pp_max_unsharded_active_stages < 1
+        ):
+            raise ValueError("pp_max_unsharded_active_stages must be positive")
+        lookahead = self.pp_num_unshard_lookahead_factor
+        if isinstance(lookahead, str):
+            valid_lookahead = lookahead in {"full", "auto"}
+        elif isinstance(lookahead, tuple):
+            valid_lookahead = len(lookahead) == self.pipeline_parallel_degree and all(
+                not isinstance(value, bool) and isinstance(value, int) and value >= 1
+                for value in lookahead
+            )
+            if valid_lookahead and self.pp_max_unsharded_active_stages is not None:
+                valid_lookahead = all(
+                    value <= self.pp_max_unsharded_active_stages for value in lookahead
+                )
+        else:
+            valid_lookahead = False
+        if not valid_lookahead:
+            raise ValueError(
+                "pp_num_unshard_lookahead_factor must be 'full', 'auto', or "
+                "a tuple with one positive integer per pipeline rank. Tuple "
+                "values may not exceed pp_max_unsharded_active_stages when "
+                f"that limit is set; got {lookahead!r} for pipeline degree "
+                f"{self.pipeline_parallel_degree}"
             )
         if self.fsdp_symm_mem_scope not in _FSDP_SYMM_MEM_SCOPES:
             raise ValueError(
