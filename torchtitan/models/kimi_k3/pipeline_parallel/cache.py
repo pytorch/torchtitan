@@ -11,17 +11,25 @@ Suffixes: T tokens, D model dim.
 
 import torch
 
+from torchtitan.distributed.activation_storage import ActivationStorage
+
 
 class PPRankLocalCache:
-    """The blocks a rank holds per micro-batch and the gradient deposits, shared by its stages."""
+    """The blocks a rank holds per micro-batch and the gradient deposits, shared by its stages.
 
-    def __init__(self) -> None:
+    With an activation storage, each held block is pinned there, so no policy moves it.
+    """
+
+    def __init__(self, storage: ActivationStorage | None = None) -> None:
+        self._storage = storage
         self._blocks: dict[int, dict[int, torch.Tensor]] = {}
         self._deposits: dict[tuple[int, int], torch.Tensor] = {}
         self._counts: dict[tuple[int, int], int] = {}
 
     def put(self, mb: int, block_idx: int, block_TD: torch.Tensor) -> None:
         self._blocks.setdefault(mb, {})[block_idx] = block_TD
+        if self._storage is not None:
+            self._storage.pin(block_TD)
 
     def blocks(self, mb: int) -> dict[int, torch.Tensor]:
         return dict(self._blocks.get(mb, {}))
@@ -32,7 +40,9 @@ class PPRankLocalCache:
         if held is None:
             return
         for b in list(held) if block_idxs is None else block_idxs:
-            held.pop(b, None)
+            block_TD = held.pop(b, None)
+            if block_TD is not None and self._storage is not None:
+                self._storage.unpin(block_TD)
         if not held:
             del self._blocks[mb]
 

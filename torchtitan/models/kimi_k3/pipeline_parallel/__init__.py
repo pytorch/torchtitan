@@ -18,6 +18,8 @@ from torch.distributed.pipelining.schedules import (
 )
 from torch.distributed.pipelining.stage import _PipelineStageBase, PipelineStage
 
+from torchtitan.distributed.activation_storage import ActivationStorage
+
 from torchtitan.distributed.pipeline_parallel import (
     get_module_fqns_per_model_part,
     pipeline_llm,
@@ -117,7 +119,10 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
         layer_to_stage=layer_to_stage,
         cache=attn_res_cache,
     )
-    store = PPRankLocalCache()
+    storage = None
+    if model_config.pp_memory.manager:
+        storage = ActivationStorage(stages[0].device, {}, lambda tensor, chunk: None)
+    store = PPRankLocalCache(storage)
     # The action-list runtime issues each send as its own action, never fused with a receive.
     wait_sends_at_backward = isinstance(pp_schedule, _PipelineScheduleRuntime)
     grad_send_waits = None
@@ -134,6 +139,9 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
             wait_sends_at_backward=wait_sends_at_backward,
             grad_send_waits=grad_send_waits,
         )
+        if storage is not None:
+            storage.register_stage(stage.stage_index, stage.submod.layers)
+            stage.set_activation_storage(storage)
     logger.info(
         "Kimi K3 pipeline: %d stage(s) on this rank %s, block transport %s",
         len(stages),

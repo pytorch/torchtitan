@@ -43,6 +43,7 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
+from torchtitan.models.kimi_k3.pipeline_parallel.activations import PPMemoryConfig
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
@@ -330,6 +331,8 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        pp_memory: PPMemoryConfig = field(default_factory=PPMemoryConfig)
+        """How each pipeline rank stores the tensors its backward reads."""
 
         def update_from_config(self, *, config, **kwargs) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)

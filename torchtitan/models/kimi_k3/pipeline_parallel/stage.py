@@ -11,6 +11,7 @@ Suffixes: T tokens, D model dim.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import torch
@@ -18,6 +19,8 @@ from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining._utils import flatten_args
 from torch.distributed.pipelining.schedules import _batch_p2p, _ComputationType
 from torch.distributed.pipelining.stage import _make_tensor_from_meta
+
+from torchtitan.distributed.activation_storage import ActivationStorage
 
 from .cache import PPRankLocalCache
 from .layout import BlockLayoutTables
@@ -115,6 +118,7 @@ class AttnResPipelineStage(PipelineStage):
         self._held_in: dict[int, list[int]] = {}
         self._fwd_send_works: dict[int, list] = {}
         self._input_grads: tuple[torch.Tensor | None, ...] = ()
+        self._activations: ActivationStorage | None = None
 
     def set_routing(
         self,
@@ -128,6 +132,10 @@ class AttnResPipelineStage(PipelineStage):
         self._store = store
         self._wait_sends_at_backward = wait_sends_at_backward
         self._grad_send_waits = grad_send_waits
+
+    def set_activation_storage(self, storage: ActivationStorage) -> None:
+        """Route the tensors this stage's forward saves through ``storage``."""
+        self._activations = storage
 
     def layout(self) -> BlockLayoutTables:
         if self._layout is None:
@@ -281,20 +289,24 @@ class AttnResPipelineStage(PipelineStage):
             )
             # The received tensors lead, in wire order, where core reads their gradients.
             input_tensors = [hidden_TD, *delta_TD, *held_TD]
-        output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
-        if self.is_last:
-            output_tuple = (
-                (output,) if isinstance(output, torch.Tensor) else tuple(output)
-            )
-            if save_forward_output:
-                self.output_chunks.append(output)
-        else:
-            hidden_out_TD, blocks_out_TD = output
-            payload_TD = self._commit_and_route(fwd_chunk_id, blocks_out_TD, order_in)
-            output_tuple = (hidden_out_TD, *payload_TD)
-            output = output_tuple
         # flatten_args returns a list with detach=False; lists keep the checker on that overload.
         kwarg_tensors: list[torch.Tensor] = list(flatten_args(composite_kwargs))
+        saves = contextlib.nullcontext()
+        if self._activations is not None and self.has_backward:
+            saves = self._activations.forward(
+                self.stage_index, fwd_chunk_id, keep=input_tensors + kwarg_tensors
+            )
+        with saves:
+            output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
+            if not self.is_last:
+                hidden_out_TD, blocks_out_TD = output
+                payload_TD = self._commit_and_route(
+                    fwd_chunk_id, blocks_out_TD, order_in
+                )
+                output = (hidden_out_TD, *payload_TD)
+        output_tuple = (output,) if isinstance(output, torch.Tensor) else tuple(output)
+        if self.is_last and save_forward_output:
+            self.output_chunks.append(output)
         self.fwd_cache[fwd_chunk_id] = (output_tuple, input_tensors + kwarg_tensors)
         if not self.has_backward and self._is_last_on_rank():
             self.store().release(fwd_chunk_id)
@@ -369,6 +381,8 @@ class AttnResPipelineStage(PipelineStage):
             full_backward=full_backward,
             last_backward=last_backward,
         )
+        if self._activations is not None and full_backward:
+            self._activations.finish(self.stage_index, bwd_chunk_id)
         if not self.has_backward:
             # Forward-only pass (schedule.eval): no backward ran; drop the forward's bookkeeping.
             self.fwd_cache.pop(bwd_chunk_id, None)
@@ -387,6 +401,12 @@ class AttnResPipelineStage(PipelineStage):
                     f"{sorted(store.blocks(bwd_chunk_id))} or their gradient deposits "
                     "outlived the rank's last backward"
                 )
+
+    def backward_weight_one_chunk(self, bwd_chunk_id: int, last_backward=False):
+        super().backward_weight_one_chunk(bwd_chunk_id, last_backward=last_backward)
+        # The weight half of a split backward reads the saves again.
+        if self._activations is not None:
+            self._activations.finish(self.stage_index, bwd_chunk_id)
 
     def _route_input_grads(self, mb: int) -> None:
         """Deposit the stored blocks' gradients and send the received ones back with their deposits."""
