@@ -12,7 +12,7 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
@@ -30,6 +30,7 @@ from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
     _score_mod_signature,
+    and_masks,
     AuxRequest,
     BlockMask,
     create_block_mask,
@@ -50,6 +51,7 @@ from torchtitan.tools.utils import round_up
 
 
 __all__ = [
+    "ContextMetadata",
     "FlexInnerAttention",
     "GQAttention",
     "InnerAttention",
@@ -131,6 +133,33 @@ class InnerAttention(Module):
     class Config(Module.Config):
         pass
 
+    def select_context_metadata(
+        self,
+        context_metadata: "ContextMetadata | AttentionMasksType | None",
+    ) -> AttentionMasksType | None:
+        """Select this backend's metadata from model-level metadata."""
+        key = type(self)
+        if isinstance(context_metadata, Mapping) and key in context_metadata:
+            return context_metadata[key]
+        return context_metadata
+
+    @classmethod
+    def build_context_metadata(
+        cls,
+        positions: torch.Tensor,
+        *,
+        config: Config,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> AttentionMasksType | None:
+        """Build metadata consumed by this backend, if any."""
+        del cls, positions, config, padding_mask, max_num_documents, max_context_length
+        return None
+
+
+ContextMetadata = dict[type[InnerAttention], AttentionMasksType]
+
 
 class VarlenInnerAttention(InnerAttention):
     @dataclass(kw_only=True, slots=True)
@@ -146,6 +175,26 @@ class VarlenInnerAttention(InnerAttention):
                           is_causal=False.
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
+
+    @classmethod
+    def build_context_metadata(
+        cls,
+        positions: torch.Tensor,
+        *,
+        config: InnerAttention.Config,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> VarlenMetadata:
+        """Build packed-sequence metadata consumed by Varlen attention."""
+        del cls
+        assert isinstance(config, VarlenInnerAttention.Config)
+        return create_varlen_metadata_for_document(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+        )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -166,13 +215,14 @@ class VarlenInnerAttention(InnerAttention):
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_masks: VarlenMetadata,
+        attention_masks: ContextMetadata | VarlenMetadata,
         scale: float | None = None,
         out_transform: (
             Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
         ) = None,
         **kwargs,
     ) -> torch.Tensor:
+        attention_masks = self.select_context_metadata(attention_masks)
         assert isinstance(
             attention_masks, VarlenMetadata
         ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
@@ -261,6 +311,55 @@ class FlexInnerAttention(InnerAttention):
         "triton.cudagraphs": False,
     }
 
+    @classmethod
+    def build_context_metadata(
+        cls,
+        positions: torch.Tensor,
+        *,
+        config: InnerAttention.Config,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> BlockMask:
+        """Build the standard document-causal FlexAttention BlockMask."""
+        del padding_mask, max_num_documents, max_context_length
+        return cls.build_context_metadata_from_mask_mods(
+            positions,
+            config=config,
+            mask_mods=[
+                get_causal_mask_mod(),
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+            ],
+        )
+
+    @classmethod
+    def build_context_metadata_from_mask_mods(
+        cls,
+        positions: torch.Tensor,
+        *,
+        config: InnerAttention.Config,
+        mask_mods: Sequence[_mask_mod_signature],
+    ) -> BlockMask:
+        """Build the BlockMask consumed by FlexAttention."""
+        del cls
+        assert isinstance(config, FlexInnerAttention.Config)
+        seq_len = positions.shape[0]
+        return create_attention_mask(
+            and_masks(*mask_mods),
+            1,
+            None,
+            seq_len,
+            seq_len,
+            device=positions.device,
+            BLOCK_SIZE=config.block_size,
+            # when separate_full_blocks = True, kernel iterates through
+            # full blocks first (blocks where all elements are unmasked)
+            # but which blocks are "full" vs "partial" changes depending
+            # on the particular batch
+            # for batch invariance, we disable this optimization
+            separate_full_blocks=not is_in_batch_invariant_mode(),
+        )
+
     # pyrefly: ignore[no-matching-overload]
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
         flex_attention,
@@ -338,7 +437,7 @@ class FlexInnerAttention(InnerAttention):
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_masks: BlockMask,
+        attention_masks: ContextMetadata | BlockMask,
         score_mod: _score_mod_signature | None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
@@ -348,6 +447,7 @@ class FlexInnerAttention(InnerAttention):
         ) = None,
         **kwargs,
     ) -> torch.Tensor:
+        attention_masks = self.select_context_metadata(attention_masks)
         assert isinstance(
             attention_masks, BlockMask
         ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"

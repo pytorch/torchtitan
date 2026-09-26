@@ -22,11 +22,12 @@ from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    create_varlen_metadata_for_document,
+    ContextMetadata,
     FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
+    InnerAttention,
     QKVLinear,
     VarlenInnerAttention,
 )
@@ -184,6 +185,9 @@ class GptOssTransformerBlock(TransformerBlock):
             torch.Tensor: Output tensor with the same shape as the input.
         """
 
+        attention_masks = self.attention.inner_attention.select_context_metadata(
+            attention_masks
+        )
         if isinstance(attention_masks, dict):  # flex
             attention_masks = attention_masks[self.attn_mask_key]
 
@@ -301,19 +305,24 @@ class GptOssModel(Decoder):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> AttentionMasksType:
+    ) -> ContextMetadata:
         attn_cfg = self.config.layers[0].attention
         assert isinstance(attn_cfg, Attention.Config)
-        inner_attn = attn_cfg.inner_attention
+        inner_attention_config = attn_cfg.inner_attention
+        backend = inner_attention_config._owner
+        assert backend is not None and issubclass(backend, InnerAttention)
 
-        if isinstance(inner_attn, VarlenInnerAttention.Config):
-            return create_varlen_metadata_for_document(
-                positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-        elif isinstance(inner_attn, FlexInnerAttention.Config):
+        if issubclass(backend, VarlenInnerAttention):
+            return {
+                backend: backend.build_context_metadata(
+                    positions,
+                    config=inner_attention_config,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                )
+            }
+        elif issubclass(backend, FlexInnerAttention):
             base_mask_mods = [
                 get_causal_mask_mod(),
                 get_efficient_causal_mask_mod_for_packed_document(positions),
@@ -321,8 +330,10 @@ class GptOssModel(Decoder):
             # Full-attention (causal + document) mask, used by layers without a
             # sliding window.
             masks: dict[str, BlockMask] = {
-                "basic_mask": self._create_flex_attention_mask(
-                    positions, attn_cfg, base_mask_mods
+                "basic_mask": backend.build_context_metadata_from_mask_mods(
+                    positions,
+                    config=inner_attention_config,
+                    mask_mods=base_mask_mods,
                 )
             }
 
@@ -336,15 +347,20 @@ class GptOssModel(Decoder):
                     window = layer.attention.sliding_window_size
                     break
             if window is not None:
-                masks["sliding_window_mask"] = self._create_flex_attention_mask(
+                masks[
+                    "sliding_window_mask"
+                ] = backend.build_context_metadata_from_mask_mods(
                     positions,
-                    attn_cfg,
-                    [*base_mask_mods, get_sliding_window_mask_mod(window)],
+                    config=inner_attention_config,
+                    mask_mods=[
+                        *base_mask_mods,
+                        get_sliding_window_mask_mod(window),
+                    ],
                 )
 
-            return masks
+            return {backend: masks}
         else:
             raise TypeError(
                 f"GPT-OSS supports FlexInnerAttention and VarlenInnerAttention inner attention, "
-                f"got {type(inner_attn).__name__}"
+                f"got {backend.__name__}"
             )

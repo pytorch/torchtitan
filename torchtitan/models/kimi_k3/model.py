@@ -487,12 +487,15 @@ class KimiK3Model(MultimodalModel):
             # Under varlen both consumers read the same document offsets.
             quadratic_attention = kda_metadata
         else:
-            quadratic_attention = super().get_attention_masks(
+            full_attention_metadata = super().get_attention_masks(
                 positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
+            assert full_attention_metadata is not None
+            assert len(full_attention_metadata) == 1
+            quadratic_attention = next(iter(full_attention_metadata.values()))
         # pyrefly: ignore [bad-return]
         return {
             "quadratic_attention": quadratic_attention,  # pyrefly: ignore [bad-assignment]

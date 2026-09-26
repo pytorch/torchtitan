@@ -1257,7 +1257,7 @@ class HFTransformerModel(BaseModel):
                 if load_balancer is not None
                 else None
             )
-            if "attention_masks" in batch:
+            if permutation is not None:
                 batch[
                     "attention_masks"
                 ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(

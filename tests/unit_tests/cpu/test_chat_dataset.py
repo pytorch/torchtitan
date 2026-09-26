@@ -33,7 +33,6 @@ from torchtitan.models.common.attention import (
     get_document_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
 )
-from torchtitan.models.common.decoder import Decoder
 
 
 # Path to the test tokenizer and fixture data
@@ -505,8 +504,14 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
             inner_attention=FlexInnerAttention.Config(block_size=4),
         )
 
-        decoder = Decoder.__new__(Decoder)
-        mask = decoder._create_flex_attention_mask_for_document(positions, attn_config)
+        mask = FlexInnerAttention.build_context_metadata_from_mask_mods(
+            positions,
+            config=attn_config.inner_attention,
+            mask_mods=[
+                get_causal_mask_mod(),
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+            ],
+        )
 
         self.assertEqual(mask.shape, (1, 1, positions.shape[0], positions.shape[0]))
 

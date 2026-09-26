@@ -12,14 +12,13 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast, Generic, Literal, TypeVar
+from typing import Generic, Literal, TypeVar
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
 from torch.nn.attention.flex_attention import BlockMask
-from torch.utils import _pytree as pytree
 
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.distributed.parallel_dims import MeshAxisName
@@ -61,16 +60,15 @@ class CPInnerAttention(
     class Config(Configurable.Config):
         pass
 
-    # TODO(acisseJZhong): Let each attention backend own and prepare only its
-    # corresponding metadata instead of receiving the model-level container.
-    @staticmethod
+    @classmethod
     @abstractmethod
     def prepare_cp_metadata(
+        cls,
         attention_metadata: _GlobalAttentionMetadataT,
         *,
         permutation: torch.Tensor | None,
     ) -> _LocalAttentionMetadataT:
-        """Prepare local metadata; ``None`` means contiguous CP sharding."""
+        """Prepare this backend's metadata for rank-local CP execution."""
         raise NotImplementedError
 
 
@@ -89,42 +87,31 @@ class KVAllGatherCPFlexInnerAttention(
         super().__init__(config)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
-    @staticmethod
+    @classmethod
     def prepare_cp_metadata(
+        cls,
         attention_metadata: FlexAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
     ) -> FlexAttentionMetadata:
-        """Shard global BlockMask metadata to match the model-input partition."""
-        if not isinstance(attention_metadata, (BlockMask, Mapping)):
-            raise ValueError(
-                "K/V all-gather context parallelism requires BlockMask metadata, "
-                f"but got {type(attention_metadata).__name__}."
+        """Prepare FlexAttention BlockMasks for rank-local execution."""
+        if isinstance(attention_metadata, BlockMask):
+            return cls._shard_block_mask(
+                attention_metadata,
+                permutation=permutation,
             )
-
-        flat_metadata, spec = pytree.tree_flatten(
-            attention_metadata,
-            is_leaf=lambda value: isinstance(value, BlockMask),
-        )
-        if not any(isinstance(value, BlockMask) for value in flat_metadata):
-            raise ValueError(
-                "K/V all-gather context parallelism requires BlockMask metadata."
-            )
-
-        flat_local_metadata = [
-            (
-                KVAllGatherCPFlexInnerAttention._shard_block_mask(
-                    value,
+        # Flex backend may own multiple BlockMasks, such as GPT-OSS full and sliding masks.
+        if isinstance(attention_metadata, Mapping):
+            return {
+                name: cls._shard_block_mask(
+                    block_mask,
                     permutation=permutation,
                 )
-                if isinstance(value, BlockMask)
-                else value
-            )
-            for value in flat_metadata
-        ]
-        return cast(
-            FlexAttentionMetadata,
-            pytree.tree_unflatten(flat_local_metadata, spec),
+                for name, block_mask in attention_metadata.items()
+            }
+        raise ValueError(
+            "K/V all-gather context parallelism requires BlockMask metadata, "
+            f"but got {type(attention_metadata).__name__}."
         )
 
     @staticmethod
@@ -267,13 +254,14 @@ class UlyssesCPInnerAttention(
     class Config(CPInnerAttention.Config):
         pass
 
-    @staticmethod
+    @classmethod
     def prepare_cp_metadata(
+        cls,
         attention_metadata: _GlobalAttentionMetadataT,
         *,
         permutation: torch.Tensor | None,
     ) -> _GlobalAttentionMetadataT:
-        del permutation
+        del cls, permutation
         return attention_metadata
 
     def forward(
