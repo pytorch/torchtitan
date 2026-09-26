@@ -36,8 +36,9 @@ class WeightSyncManager:
         - Called after push completes.
         - Awaited before next push (weights changes then)
 
-    Impact on off-policiness: The buffer guarantees that no sample will be born stale,
-    as long as we call `self._group_buffer.release_active_groups` after the pull.
+    Trained groups release their active slots only after every generator has
+    pulled the new weights. Other slots may open earlier; the router pins a
+    cache namespace once per group when its first request is routed.
 
     Example:
         for step in training_steps:
@@ -119,13 +120,12 @@ class WeightSyncManager:
             start = time.perf_counter()
             await self._generator_router.pull_model_state_dict.call_one(version)
             self._last_pull_s = time.perf_counter() - start
-        # TODO(perf): pull_model_state_dict awaits ALL generators before we release any buffer slots,
-        #   so a generator that finishes its pull early idles until the slowest one. Investigate
-        #   per-generator release (router surfaces each pull's completion -> release that generator's
-        #   share / resume it early); needs the born-fresh invariant to hold per-generator, not globally.
+        # TODO(perf): trained slots wait for all pulls even though each generator
+        #   can resume earlier. Per-generator slot release would require routing
+        #   new groups to updated generators while preserving the freshness bound.
 
-        # Born-fresh: admit the next groups only now that the generators are on `version`, so a new
-        # rollout starts at the current version (keeps policy_age within the derived freshness bound).
+        # Keep trained slots occupied until every generator has installed the
+        # new weights; existing groups retain their cache namespace across pulls.
         await self._group_buffer.release_active_groups(
             self._num_prompts_per_train_step, reason="trained"
         )

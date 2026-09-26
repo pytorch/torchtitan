@@ -23,6 +23,7 @@ import shutil
 import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -38,6 +39,7 @@ from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
     GenerationFuture,
+    GenerationRequest,
     RequestDispatcher,
     SamplingConfig,
     VLLMCudaGraphConfig,
@@ -61,6 +63,7 @@ class _FakeRenderer:
             {
                 "type": "token",
                 "prompt_token_ids": p["prompt_token_ids"],
+                "cache_salt": p.get("cache_salt"),
                 "arrival_time": 0.0,
             }
             for p in prompts
@@ -70,10 +73,14 @@ class _FakeRenderer:
 class _FakeEngine:
     def __init__(self):
         self.add_requests = []
+        self.reset_prefix_cache_calls = []
         self.renderer = _FakeRenderer()
 
     def add_request(self, *args, **kwargs):
         self.add_requests.append((args, kwargs))
+
+    def reset_prefix_cache(self, *args, **kwargs):
+        self.reset_prefix_cache_calls.append((args, kwargs))
 
 
 def _sample(*, token_ids=(10, 11), finish_reason="stop"):
@@ -110,6 +117,7 @@ def _generator():
     generator.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
+        reset_kv_cache_on_weight_sync=False,
     )
     return generator
 
@@ -240,6 +248,75 @@ def test_build_sampling_params_seed_and_stop_default_to_none():
     assert not params.stop_token_ids  # vLLM normalizes None -> []
 
 
+@pytest.mark.parametrize("cache_policy_version", [None, 6])
+def test_admit_requests_uses_local_version_for_new_rollouts(cache_policy_version):
+    generator = _generator()
+    engine = cast(_FakeEngine, generator._engine)
+    request = GenerationRequest(
+        request_id="r0",
+        prompt_token_ids=[1, 2],
+        sampling=SamplingConfig(),
+        routing_session_id="group=3/rollout=0",
+        cache_policy_version=cache_policy_version,
+    )
+
+    generator._admit_requests([request])
+
+    _, kwargs = engine.add_requests[0]
+    assert kwargs["prompt"]["cache_salt"] == (
+        "7" if cache_policy_version is None else "6"
+    )
+
+
+def test_new_request_uses_version_installed_after_queueing():
+    generator = _generator()
+    engine = cast(_FakeEngine, generator._engine)
+    request = GenerationRequest(
+        request_id="r0",
+        prompt_token_ids=[1, 2],
+        sampling=SamplingConfig(),
+        routing_session_id="group=3/rollout=0",
+        cache_policy_version=None,
+    )
+
+    generator.policy_version = 8
+    generator._admit_requests([request])
+
+    assert engine.add_requests[0][1]["prompt"]["cache_salt"] == "8"
+
+
+@pytest.mark.parametrize("reset_kv_cache", [False, True])
+def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
+    monkeypatch, reset_kv_cache: bool
+):
+    async def run() -> None:
+        generator = _generator()
+        engine = cast(_FakeEngine, generator._engine)
+        generator.config.reset_kv_cache_on_weight_sync = reset_kv_cache
+        generator._pull_model_state_dict_future = None
+        generator._model_state_dict_pull_request = None
+        model = SimpleNamespace(
+            model=SimpleNamespace(
+                state_dict=lambda: {},
+                load_state_dict=lambda state_dict, strict: None,
+            )
+        )
+        monkeypatch.setattr(generator, "_get_model", lambda: model)
+
+        async def get_state_dict(model_sd, *, model):
+            return None
+
+        monkeypatch.setattr(generator, "_get_spmd_state_dict", get_state_dict)
+
+        await generator._pull_model_state_dict(version=8)
+
+        assert generator.policy_version == 8
+        expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
+        assert engine.reset_prefix_cache_calls == expected
+
+    asyncio.run(run())
+
+
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---
 
 
@@ -297,43 +374,17 @@ def test_generator_dp_can_supply_expert_parallelism():
     )
 
 
-def test_batch_invariant_requires_prefix_cache_reset():
-    with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
+def test_generator_defaults_to_preserving_salted_kv_on_weight_sync():
+    config = VLLMGenerator.Config(parallelism=_PARALLELISM)
+
+    assert not config.reset_kv_cache_on_weight_sync
+
+
+def test_batch_invariant_requires_kv_cache_reset():
+    with pytest.raises(ValueError, match="reset_kv_cache_on_weight_sync"):
         VLLMGenerator.Config(
             parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
-            reset_prefix_cache_on_weight_sync=False,
-        )
-
-
-def test_reset_running_requests_requires_prefix_cache_reset():
-    with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
-        VLLMGenerator.Config(
-            parallelism=_PARALLELISM,
-            reset_running_requests_on_weight_sync=True,
-            reset_prefix_cache_on_weight_sync=False,
-        )
-
-
-def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
-    # Strict drain (hot_swap=False) needs the prefix cache reset so post-pull requests don't reuse old-weight KV.
-    import dataclasses
-
-    from torchtitan.rl.examples.alphabet_sort.config_registry import (
-        rl_grpo_qwen3_0_6b_varlen,
-    )
-
-    config = rl_grpo_qwen3_0_6b_varlen()
-    # hot_swap defaults True; the guard fires only in drain mode (hot_swap=False) with reset also off.
-    with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
-        dataclasses.replace(
-            config,
-            generator_router=dataclasses.replace(
-                config.generator_router, hot_swap=False
-            ),
-            generator=dataclasses.replace(
-                config.generator, reset_prefix_cache_on_weight_sync=False
-            ),
         )
 
 

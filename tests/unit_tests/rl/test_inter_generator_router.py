@@ -18,6 +18,7 @@ from torchtitan.rl.distributed.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.distributed.routing.types import RoutingContext
+from torchtitan.rl.types import Completion
 
 
 class _Endpoint:
@@ -61,6 +62,239 @@ class _Actor:
 
     def __len__(self):
         return 1
+
+
+class _VersionedGenerateEndpoint(_Endpoint):
+    def __init__(self, actor):
+        super().__init__()
+        self.actor = actor
+
+    async def call_one(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        self.started.set()
+        await self.release.wait()
+        return Completion(
+            min_policy_version=self.actor.policy_version,
+            max_policy_version=self.actor.policy_version,
+            request_id=kwargs["request_id"],
+            token_ids=[1],
+            token_logprobs=[-0.1],
+        )
+
+
+class _VersionedPullEndpoint(_Endpoint):
+    def __init__(self, actor):
+        super().__init__()
+        self.actor = actor
+
+    async def call_one(self, version):
+        self.calls.append(((version,), {}))
+        self.started.set()
+        await self.release.wait()
+        self.actor.policy_version = version
+
+
+class _VersionedActor(_Actor):
+    def __init__(self, name):
+        super().__init__(name)
+        self.policy_version = 0
+        self.generate = _VersionedGenerateEndpoint(self)
+        self.pull_model_state_dict = _VersionedPullEndpoint(self)
+
+
+async def _generate(router, *, session_id, turn, group_id=0):
+    return await router._route(
+        "generate",
+        [1, 2],
+        request_id=f"{session_id}/turn={turn}",
+        routing_session_id=session_id,
+        routing_group_id=group_id,
+        sampling_config=None,
+        metrics_prefix="generator",
+        routing_ctx=RoutingContext(estimated_cost=1, session_id=session_id),
+        pin_session=True,
+    )
+
+
+def test_generation_pins_group_salt_and_generator_after_weight_sync():
+    async def run():
+        actors = [_VersionedActor("gen0"), _VersionedActor("gen1")]
+        router = _router(actors, hot_swap=True)
+        await router._pull_model_state_dict(policy_version=7)
+
+        await _generate(router, session_id="group=0/rollout=0", turn=0)
+        await router._pull_model_state_dict(policy_version=8)
+        await _generate(router, session_id="group=0/rollout=0", turn=1)
+        await _generate(router, session_id="group=0/rollout=1", turn=0)
+
+        assert [
+            call[1]["cache_policy_version"] for call in actors[0].generate.calls
+        ] == [
+            7,
+            7,
+            7,
+        ]
+        assert not actors[1].generate.calls
+        router._finish_group(0)
+        assert not router._sessions
+        assert not router._group_routes
+        assert not router._sessions_by_group
+
+    asyncio.run(run())
+
+
+def test_concurrent_siblings_share_first_groups_salt_before_completion():
+    async def run():
+        actors = [_VersionedActor("gen0"), _VersionedActor("gen1")]
+        router = _router(actors, hot_swap=True)
+        await router._pull_model_state_dict(policy_version=7)
+        actors[0].generate.release.clear()
+
+        first = asyncio.create_task(
+            _generate(router, session_id="group=0/rollout=0", turn=0)
+        )
+        await actors[0].generate.started.wait()
+        second = asyncio.create_task(
+            _generate(router, session_id="group=0/rollout=1", turn=0)
+        )
+        await asyncio.sleep(0)
+        assert len(actors[0].generate.calls) == 2
+        assert not actors[1].generate.calls
+        assert [
+            call[1]["cache_policy_version"] for call in actors[0].generate.calls
+        ] == [7, 7]
+        actors[0].generate.release.set()
+        await asyncio.gather(first, second)
+
+    asyncio.run(run())
+
+
+def test_partial_pull_keeps_old_groups_namespace_for_later_siblings():
+    async def run():
+        actors = [_VersionedActor("gen0"), _VersionedActor("gen1")]
+        router = _router(actors, hot_swap=True)
+        await router._pull_model_state_dict(policy_version=7)
+        await _generate(router, session_id="group=0/rollout=0", turn=0)
+
+        actors[1].pull_model_state_dict.started.clear()
+        actors[1].pull_model_state_dict.release.clear()
+        update = asyncio.create_task(router._pull_model_state_dict(policy_version=8))
+        await actors[1].pull_model_state_dict.started.wait()
+        await asyncio.sleep(0)
+        assert [h.policy_version for h in router._generators] == [8, 7]
+
+        second = await _generate(router, session_id="group=0/rollout=1", turn=0)
+        assert second.min_policy_version == 8
+        assert [
+            call[1]["cache_policy_version"] for call in actors[0].generate.calls
+        ] == [7, 7]
+        assert not actors[1].generate.calls
+
+        actors[1].pull_model_state_dict.release.set()
+        await update
+
+    asyncio.run(run())
+
+
+def test_new_sibling_waits_for_group_version_if_original_generator_unavailable():
+    async def run():
+        actors = [_VersionedActor("gen0"), _VersionedActor("gen1")]
+        router = _router(actors, hot_swap=True)
+        await router._pull_model_state_dict(policy_version=7)
+        actors[0].policy_version = 8
+        router._generators[0].policy_version = 8
+        await _generate(router, session_id="group=0/rollout=0", turn=0)
+        router._set_state(router._generators[0], _GeneratorState.SYNCING)
+
+        pending = asyncio.create_task(
+            _generate(router, session_id="group=0/rollout=1", turn=0)
+        )
+        await asyncio.sleep(0)
+        assert not pending.done()
+        assert not actors[1].generate.calls
+
+        actors[1].policy_version = 8
+        router._generators[1].policy_version = 8
+        router._routing_state_changed.set()
+        await pending
+        assert actors[1].generate.calls[0][1]["cache_policy_version"] == 8
+
+    asyncio.run(run())
+
+
+def test_reused_validation_session_starts_with_new_group_salt():
+    async def run():
+        actor = _VersionedActor("gen0")
+        router = _router([actor], hot_swap=True)
+        await router._pull_model_state_dict(policy_version=7)
+        await _generate(router, session_id="group=-1/rollout=0", turn=0, group_id=-1)
+        router._finish_group(-1)
+
+        await router._pull_model_state_dict(policy_version=8)
+        completion = await _generate(
+            router, session_id="group=-1/rollout=0", turn=0, group_id=-1
+        )
+        assert completion.min_policy_version == 8
+        assert [call[1]["cache_policy_version"] for call in actor.generate.calls] == [
+            7,
+            8,
+        ]
+
+    asyncio.run(run())
+
+
+def test_finished_group_does_not_keep_a_late_completion_session():
+    async def run():
+        actor = _VersionedActor("gen0")
+        router = _router([actor], hot_swap=True)
+        await router._pull_model_state_dict(policy_version=7)
+        actor.generate.release.clear()
+
+        pending = asyncio.create_task(
+            _generate(router, session_id="group=0/rollout=0", turn=0)
+        )
+        await actor.generate.started.wait()
+        router._finish_group(0)
+        actor.generate.release.set()
+        await pending
+        assert not router._sessions
+        assert not router._group_routes
+
+    asyncio.run(run())
+
+
+def test_reroute_waits_for_new_generator_version_and_reselects_salt():
+    async def run():
+        actors = [_VersionedActor("gen0"), _VersionedActor("gen1")]
+        router = _router(actors, hot_swap=True)
+        await router._pull_model_state_dict(policy_version=7)
+
+        actors[0].policy_version = 8
+        router._generators[0].policy_version = 8
+        await _generate(router, session_id="group=0/rollout=0", turn=0)
+        router._set_state(router._generators[0], _GeneratorState.SYNCING)
+
+        rerouted = asyncio.create_task(
+            _generate(router, session_id="group=0/rollout=0", turn=1)
+        )
+        await asyncio.sleep(0)
+        assert not rerouted.done()
+        assert not actors[1].generate.calls
+
+        actors[1].policy_version = 8
+        router._generators[1].policy_version = 8
+        router._routing_state_changed.set()
+        await rerouted
+        await _generate(router, session_id="group=0/rollout=0", turn=2)
+
+        assert [
+            call[1]["cache_policy_version"] for call in actors[1].generate.calls
+        ] == [
+            None,
+            8,
+        ]
+
+    asyncio.run(run())
 
 
 def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:

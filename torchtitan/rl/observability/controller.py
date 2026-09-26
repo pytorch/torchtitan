@@ -262,6 +262,15 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     truncated = [float(rollout.status.is_truncated()) for rollout in rollouts]
     rewards = [rollout.reward for rollout in rollouts if rollout.reward is not None]
     num_turns = [float(len(rollout.turns)) for rollout in rollouts]
+    start_versions_by_group: dict[int, list[int]] = defaultdict(list)
+    for rollout in rollouts:
+        if rollout.turns and rollout.turns[0].min_policy_version is not None:
+            start_versions_by_group[rollout.group_id].append(
+                rollout.turns[0].min_policy_version
+            )
+    start_version_spreads = [
+        max(versions) - min(versions) for versions in start_versions_by_group.values()
+    ]
 
     out: list[m.Metric] = [
         m.Metric(f"{prefix}/output_tokens", m.Mean.from_list(completion_lens)),
@@ -275,6 +284,10 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         m.Metric(f"{prefix}/total_length", m.Max.from_list(total_lens)),
         m.Metric(f"{prefix}/num_turns", m.Mean.from_list(num_turns)),
         m.Metric(f"{prefix}/num_turns", m.Max.from_list(num_turns)),
+        m.Metric(
+            f"{prefix}/group_start_policy_version_spread",
+            m.Mean.from_list(start_version_spreads),
+        ),
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
         m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
     ]

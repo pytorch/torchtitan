@@ -51,8 +51,24 @@ class _GeneratorHandle(RoutingCandidate):
     state: _GeneratorState = _GeneratorState.SERVING
     """Current routing lifecycle state for this generator."""
 
+    policy_version: int | None = None
+    """Version installed by the last completed pull on this generator."""
+
     idle: asyncio.Event = field(default_factory=asyncio.Event)
     """Set when this generator has no reserved routed calls."""
+
+
+@dataclass(kw_only=True, slots=True)
+class _RoutingSession:
+    generator: _GeneratorHandle
+    cache_policy_version: int
+    max_policy_version: int
+
+
+@dataclass(kw_only=True, slots=True)
+class _GroupRoute:
+    generator: _GeneratorHandle
+    cache_policy_version: int
 
 
 class InterGeneratorRouter(Actor, Configurable):
@@ -88,7 +104,7 @@ class InterGeneratorRouter(Actor, Configurable):
         strategy: RoutingStrategy.Config = field(
             default_factory=LeastLoadedRoutingStrategy.Config
         )
-        """Routing strategy, selected by its config type, e.g.
+        """Strategy for choosing a generator for a new routing session, e.g.
         ``RoundRobinRoutingStrategy.Config()`` or
         ``LeastLoadedRoutingStrategy.Config()``."""
 
@@ -127,6 +143,10 @@ class InterGeneratorRouter(Actor, Configurable):
             h.idle.set()
 
         self._strategy = config.strategy.build()
+        self._sessions: dict[str, _RoutingSession] = {}
+        self._group_routes: dict[int, _GroupRoute] = {}
+        self._sessions_by_group: dict[int, set[str]] = {}
+        self._routing_state_changed = asyncio.Event()
         self._serving = asyncio.Event()
         self._refresh_serving_status()
 
@@ -148,6 +168,7 @@ class InterGeneratorRouter(Actor, Configurable):
 
         h.state = state
         self._refresh_serving_status()
+        self._routing_state_changed.set()
 
     def _reserve(self, h: _GeneratorHandle, cost: int) -> None:
         """Reserve estimated generation work on a handle before dispatch."""
@@ -173,18 +194,94 @@ class InterGeneratorRouter(Actor, Configurable):
         method: str,
         *args,
         routing_ctx: RoutingContext,
+        pin_session: bool = False,
+        routing_group_id: int | None = None,
         **kwargs,
     ) -> Any:
-        """Dispatch one call to a strategy-chosen serving generator's rank 0;
-        return its result.
-        """
-        await self._serving.wait()
-        candidates = self._candidates()
-        assert candidates, "serving event was set with no serving generators"
-        h = self._strategy.choose(routing_ctx, candidates)
+        """Route a call, sharing cache salt within a group and pinning each rollout."""
+        session_id = routing_ctx.session_id if pin_session else None
+        session = self._sessions.get(session_id) if session_id is not None else None
+        group_route = (
+            self._group_routes.get(routing_group_id)
+            if pin_session and routing_group_id is not None
+            else None
+        )
+        while True:
+            await self._serving.wait()
+            candidates = self._candidates()
+            if session is not None and any(h is session.generator for h in candidates):
+                h = session.generator
+                break
+            if (
+                session is None
+                and group_route is not None
+                and any(h is group_route.generator for h in candidates)
+            ):
+                h = group_route.generator
+                break
+            if session is not None:
+                min_version = session.max_policy_version
+            elif group_route is not None:
+                min_version = group_route.cache_policy_version
+            else:
+                min_version = None
+            eligible = [
+                h
+                for h in candidates
+                if min_version is None
+                or (h.policy_version is not None and h.policy_version >= min_version)
+            ]
+            if eligible:
+                h = self._strategy.choose(routing_ctx, eligible)
+                break
+            # A replacement generator must not roll back a rollout or group.
+            self._routing_state_changed.clear()
+            await self._routing_state_changed.wait()
+        selected_cache_policy_version = None
+        if pin_session:
+            if group_route is None:
+                # Siblings enter concurrently, so pin the group's namespace at
+                # routing without waiting for the first generation to complete.
+                assert routing_group_id is not None
+                assert (
+                    h.policy_version is not None
+                ), "generation requires an initial weight pull"
+                group_route = _GroupRoute(
+                    generator=h, cache_policy_version=h.policy_version
+                )
+                self._group_routes[routing_group_id] = group_route
+            selected_cache_policy_version = (
+                session.cache_policy_version
+                if session is not None and h is session.generator
+                else (None if session is not None else group_route.cache_policy_version)
+            )
+            kwargs["cache_policy_version"] = selected_cache_policy_version
+            if session_id is not None and routing_group_id is not None:
+                self._sessions_by_group.setdefault(routing_group_id, set()).add(
+                    session_id
+                )
         self._reserve(h, routing_ctx.estimated_cost)
         try:
-            return await getattr(h.rank0_actor, method).call_one(*args, **kwargs)
+            result = await getattr(h.rank0_actor, method).call_one(*args, **kwargs)
+            if session_id is not None and (
+                routing_group_id is None
+                or session_id in self._sessions_by_group.get(routing_group_id, ())
+            ):
+                self._sessions[session_id] = _RoutingSession(
+                    generator=h,
+                    cache_policy_version=(
+                        selected_cache_policy_version
+                        if selected_cache_policy_version is not None
+                        else result.min_policy_version
+                    ),
+                    max_policy_version=max(
+                        session.max_policy_version
+                        if session is not None
+                        else result.max_policy_version,
+                        result.max_policy_version,
+                    ),
+                )
+            return result
         finally:
             self._release(h, routing_ctx.estimated_cost)
 
@@ -238,6 +335,8 @@ class InterGeneratorRouter(Actor, Configurable):
                     await h.rank0_actor.pull_model_state_dict.call_one(policy_version)
                 finally:
                     self._set_state(h, _GeneratorState.SERVING)
+            h.policy_version = policy_version
+            self._routing_state_changed.set()
 
         # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during weight sync, but that's not a priority
@@ -254,6 +353,7 @@ class InterGeneratorRouter(Actor, Configurable):
         *,
         request_id: str,
         routing_session_id: str | None,
+        routing_group_id: int,
         sampling_config: Any | None,
         metrics_prefix: str,
     ) -> Any:
@@ -265,14 +365,26 @@ class InterGeneratorRouter(Actor, Configurable):
             # VLLMGenerator.generate also requires this field for its
             # intra-mesh DP routing.
             routing_session_id=routing_session_id,
+            routing_group_id=routing_group_id,
             sampling_config=sampling_config,
             metrics_prefix=metrics_prefix,
+            pin_session=True,
             # Load is measured as in-flight request count (one unit per call).
             routing_ctx=RoutingContext(
                 estimated_cost=1,
                 session_id=routing_session_id,
             ),
         )
+
+    def _finish_group(self, group_id: int) -> None:
+        self._group_routes.pop(group_id, None)
+        for session_id in self._sessions_by_group.pop(group_id, set()):
+            self._sessions.pop(session_id, None)
+
+    @concurrent_endpoint
+    async def finish_group(self, group_id: int) -> None:
+        """Release all routing sessions from a completed rollout group."""
+        self._finish_group(group_id)
 
     @concurrent_endpoint
     async def start_engine_loop(self) -> None:

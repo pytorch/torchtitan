@@ -32,8 +32,9 @@ class _RolloutGroupWorkState(enum.Enum):
 class RolloutGroupWork:
     """One prompt group's work, tracked through _RolloutGroupWorkState.
 
-    The input loop sets `group_id` + `sample`; the buffer owns `state` and `rollout_group`
-    (`init=False`, so the input loop can't set them).
+    The input loop sets `group_id` and `sample`; the
+    buffer owns `state` and `rollout_group` (`init=False`, so the input loop
+    can't set them).
     """
 
     group_id: int
@@ -118,7 +119,12 @@ class RolloutGroupWorkBuffer(Configurable):
             # False means the buffer was closed, so the data input loop exits.
             group_index = 0
             while await buffer.wait_for_slot():
-                await buffer.add_work(RolloutGroupWork(group_id=group_index, sample=sample))
+                await buffer.add_work(
+                    RolloutGroupWork(
+                        group_id=group_index,
+                        sample=sample,
+                    )
+                )
                 group_index += 1
         """
         async with self._condition:

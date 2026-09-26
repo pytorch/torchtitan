@@ -17,14 +17,160 @@ from torchtitan.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.controller import Controller
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.controller import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
+    compute_rollout_metrics,
     MetricsTimer,
 )
-from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.types import RolloutTurnID, TrainingSample, TrainingSampleGroup
+from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
+from torchtitan.rl.types import (
+    Completion,
+    RolloutTurnID,
+    TrainingSample,
+    TrainingSampleGroup,
+)
+
+
+def test_generate_fn_identifies_group_for_router() -> None:
+    class _GenerateEndpoint:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def call_one(self, prompt_token_ids, **kwargs):
+            self.calls.append((prompt_token_ids, kwargs))
+            return Completion(
+                min_policy_version=7,
+                max_policy_version=7,
+                request_id=kwargs["request_id"],
+                token_ids=[3],
+                token_logprobs=[-0.1],
+            )
+
+    async def run() -> None:
+        controller = Controller.__new__(Controller)
+        endpoint = _GenerateEndpoint()
+        controller.generator_router = type("Router", (), {"generate": endpoint})()
+        generate = controller._make_generate_fn("generator", group_id=3)
+        generate_next = controller._make_generate_fn("generator", group_id=4)
+
+        await generate(
+            [1, 2],
+            request_id="group=3/rollout=0/turn=1",
+            routing_session_id="group=3/rollout=0",
+        )
+        await generate(
+            [1, 2, 3],
+            request_id="group=3/rollout=0/turn=2",
+            routing_session_id="group=3/rollout=0",
+        )
+        await generate_next(
+            [4, 5],
+            request_id="group=4/rollout=0/turn=0",
+            routing_session_id="group=4/rollout=0",
+        )
+
+        assert [kwargs["routing_group_id"] for _, kwargs in endpoint.calls] == [
+            3,
+            3,
+            4,
+        ]
+        assert all("cache_salt" not in kwargs for _, kwargs in endpoint.calls)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fail_group", [False, True])
+def test_group_releases_routing_sessions(fail_group: bool) -> None:
+    class _GenerateEndpoint:
+        async def call_one(self, prompt_token_ids, **kwargs):
+            return Completion(
+                min_policy_version=7,
+                max_policy_version=7,
+                request_id=kwargs["request_id"],
+                token_ids=[3],
+                token_logprobs=[-0.1],
+            )
+
+    class _FinishEndpoint:
+        def __init__(self):
+            self.calls = []
+
+        async def call_one(self, group_id):
+            self.calls.append(group_id)
+
+    class _Rollouter:
+        async def run_group_rollouts(self, *, generate_fn, group_id, **kwargs):
+            await generate_fn(
+                [1, 2],
+                request_id=f"group={group_id}/rollout=0/turn=0",
+                routing_session_id=f"group={group_id}/rollout=0",
+            )
+            if fail_group:
+                raise RuntimeError("rollout failed")
+            return RolloutGroup(group_id=group_id, rollouts=[])
+
+    async def run() -> None:
+        controller = Controller.__new__(Controller)
+        finish_endpoint = _FinishEndpoint()
+        controller.generator_router = type(
+            "Router",
+            (),
+            {"generate": _GenerateEndpoint(), "finish_group": finish_endpoint},
+        )()
+        controller._rollouter = _Rollouter()
+        if fail_group:
+            with pytest.raises(RuntimeError, match="rollout failed"):
+                await controller._run_group_rollouts(
+                    sample=object(),
+                    group_id=3,
+                    group_size=1,
+                    sampling=object(),
+                    metrics_prefix="generator",
+                )
+        else:
+            await controller._run_group_rollouts(
+                sample=object(),
+                group_id=3,
+                group_size=1,
+                sampling=object(),
+                metrics_prefix="generator",
+            )
+        assert finish_endpoint.calls == [3]
+
+    asyncio.run(run())
+
+
+def test_group_start_version_spread_reports_mixed_siblings() -> None:
+    rollouts = [
+        Rollout(
+            group_id=3,
+            rollout_id=rollout_id,
+            status=RolloutStatus.COMPLETED,
+            turns=[
+                RolloutTurn(
+                    rollout_id=RolloutTurnID(
+                        group_id=3, rollout_id=rollout_id, turn_id=0
+                    ),
+                    prompt_token_ids=[1],
+                    completion_token_ids=[2],
+                    completion_logprobs=[-0.1],
+                    min_policy_version=version,
+                    max_policy_version=version,
+                )
+            ],
+        )
+        for rollout_id, version in enumerate([7, 8])
+    ]
+
+    metric = next(
+        metric
+        for metric in compute_rollout_metrics("rollout", rollouts)
+        if metric.key == "rollout/group_start_policy_version_spread"
+    )
+    assert metric.value.value == 1.0
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
