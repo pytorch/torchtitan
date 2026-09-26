@@ -31,6 +31,7 @@ from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CompileConfig, OverrideConfig
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 
@@ -44,6 +45,26 @@ TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
 # Selects the experiment-owned runner that pads tokens for dense and expert SP.
 TORCHTITAN_WORKER_CLS = "torchtitan.rl.model.vllm_worker.TorchTitanGPUWorker"
+
+
+def uses_flex_attention_for_vllm(model_config: Decoder.Config) -> bool:
+    """Validate the model's attention backends and select the vLLM backend."""
+    attention_backends = model_config.full_attention_backends
+    if not attention_backends:
+        raise ValueError("No full-attention layer found in the model config.")
+    if all(
+        isinstance(backend, FlexInnerAttention.Config) for backend in attention_backends
+    ):
+        return True
+    if all(
+        isinstance(backend, VarlenInnerAttention.Config)
+        for backend in attention_backends
+    ):
+        return False
+    raise ValueError(
+        "vLLM requires all full-attention layers to use either FlexAttention "
+        "or VarlenAttention consistently."
+    )
 
 
 def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:

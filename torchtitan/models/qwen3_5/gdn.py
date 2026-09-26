@@ -23,7 +23,7 @@ from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.protocols.module import Module
 
 
@@ -354,10 +354,8 @@ class GatedDeltaNet(Module):
     Uses recurrent state + gated delta rule instead of softmax attention.
     No RoPE, different head structure from standard attention. Conv and
     recurrent state are reset at document boundaries whenever document
-    offsets (``VarlenMetadata``) are provided -- the transformer block picks
-    them out of the model's attention-mask dict under the ``"deltanet"`` key
-    (both attention backends). With no offsets (``None``) the packed sequence
-    is processed as a single continuous stream.
+    offsets (``VarlenAttentionMetadata``) are provided. With no offsets
+    (``None``), the packed sequence is processed as a single continuous stream.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -408,7 +406,7 @@ class GatedDeltaNet(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: VarlenMetadata | None = None,
+        attention_masks: VarlenAttentionMetadata | None = None,
     ) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:

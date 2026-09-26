@@ -20,14 +20,16 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
+    AttentionMetadata,
     BaseAttention,
-    create_varlen_metadata_for_document,
+    FlexAttentionMetadata,
     FlexInnerAttention,
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
+    InnerAttention,
     QKVLinear,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
@@ -98,7 +100,7 @@ class Attention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_masks: FlexAttentionMetadata | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ):
         """
@@ -106,7 +108,8 @@ class Attention(BaseAttention):
 
         Args:
             x: Input tensor with shape ``[T, D]``.
-            attention_masks: a ``BlockMask`` (flex) or ``VarlenMetadata`` (varlen).
+            attention_masks: A ``BlockMask`` (flex) or
+                ``VarlenAttentionMetadata`` (varlen).
             positions: Optional position indices (unused, for API compatibility).
 
         Returns:
@@ -163,7 +166,7 @@ class GptOssTransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -173,9 +176,9 @@ class GptOssTransformerBlock(TransformerBlock):
 
         Args:
             x (torch.Tensor): Input tensor of shape (num_tokens, dim).
-            attention_masks (AttentionMasksType): with flex, a dict of per-window
+            attention_masks: With flex, a dict of per-window
                 ``BlockMask``s from which this layer picks its mask; with varlen,
-                a single ``VarlenMetadata`` shared by all layers (the per-layer
+                a single ``VarlenAttentionMetadata`` shared by all layers (the per-layer
                 causal window is baked into each layer's
                 ``VarlenInnerAttention.window_size``).
             positions: Optional position indices.
@@ -257,9 +260,9 @@ class GptOssModel(Decoder):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> GptOssModel:
-        if parallel_dims.cp_enabled and isinstance(
-            self.config.first_full_attention_backend,
-            UlyssesCPInnerAttention.Config,
+        if parallel_dims.cp_enabled and any(
+            isinstance(backend, UlyssesCPInnerAttention.Config)
+            for backend in self.config.full_attention_backends
         ):
             raise NotImplementedError(
                 "GPT-OSS does not support Ulysses CP because its per-head "
@@ -301,19 +304,24 @@ class GptOssModel(Decoder):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> AttentionMasksType:
+    ) -> AttentionMetadata:
         attn_cfg = self.config.layers[0].attention
         assert isinstance(attn_cfg, Attention.Config)
-        inner_attn = attn_cfg.inner_attention
+        inner_attention_config = attn_cfg.inner_attention
+        backend = inner_attention_config._owner
+        assert backend is not None and issubclass(backend, InnerAttention)
 
-        if isinstance(inner_attn, VarlenInnerAttention.Config):
-            return create_varlen_metadata_for_document(
-                positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-        elif isinstance(inner_attn, FlexInnerAttention.Config):
+        if issubclass(backend, VarlenInnerAttention):
+            return {
+                backend: backend.build_attention_metadata(
+                    positions,
+                    config=inner_attention_config,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                )
+            }
+        elif issubclass(backend, FlexInnerAttention):
             base_mask_mods = [
                 get_causal_mask_mod(),
                 get_efficient_causal_mask_mod_for_packed_document(positions),
@@ -321,8 +329,10 @@ class GptOssModel(Decoder):
             # Full-attention (causal + document) mask, used by layers without a
             # sliding window.
             masks: dict[str, BlockMask] = {
-                "basic_mask": self._create_flex_attention_mask(
-                    positions, attn_cfg, base_mask_mods
+                "basic_mask": backend.build_attention_metadata_from_mask_mods(
+                    positions,
+                    config=inner_attention_config,
+                    mask_mods=base_mask_mods,
                 )
             }
 
@@ -336,15 +346,20 @@ class GptOssModel(Decoder):
                     window = layer.attention.sliding_window_size
                     break
             if window is not None:
-                masks["sliding_window_mask"] = self._create_flex_attention_mask(
+                masks[
+                    "sliding_window_mask"
+                ] = backend.build_attention_metadata_from_mask_mods(
                     positions,
-                    attn_cfg,
-                    [*base_mask_mods, get_sliding_window_mask_mod(window)],
+                    config=inner_attention_config,
+                    mask_mods=[
+                        *base_mask_mods,
+                        get_sliding_window_mask_mod(window),
+                    ],
                 )
 
-            return masks
+            return {backend: masks}
         else:
             raise TypeError(
                 f"GPT-OSS supports FlexInnerAttention and VarlenInnerAttention inner attention, "
-                f"got {type(inner_attn).__name__}"
+                f"got {backend.__name__}"
             )

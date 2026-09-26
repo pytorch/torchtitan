@@ -26,9 +26,9 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_group,
 )
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    FlexInnerAttention,
-    VarlenInnerAttention,
+    AttentionMetadata,
+    FlexAttentionMetadata,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -163,7 +163,7 @@ class MTPTransformerBlock(TransformerBlock):
         mtp_input_embed: torch.Tensor,
         prev_embed: torch.Tensor,
         mtp_input_valid_mask: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -349,16 +349,14 @@ class MTPDecoder(Decoder):
             input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
 
         if positions is not None:
-            inner = self.config.first_full_attention_backend
-            if isinstance(
-                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-            ):
-                input_dict["attention_masks"] = self.get_attention_masks(
-                    positions=positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                )
+            attention_masks = self.get_attention_masks(
+                positions=positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+            if attention_masks is not None:
+                input_dict["attention_masks"] = attention_masks
 
         if parallel_dims.cp_enabled:
             input_dict = self._cp_shard(
@@ -393,7 +391,7 @@ class MTPDecoder(Decoder):
         self,
         tokens: torch.Tensor | tuple[torch.Tensor, ...],
         positions: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: AttentionMetadata | None = None,
         mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -425,7 +423,12 @@ class MTPDecoder(Decoder):
         # hidden state because MTP consumes the last decoder-layer output.
         h = self.tok_embeddings(main_tokens)
         for layer in self.layers.values():
-            h = layer(h, attention_masks, positions, padding_mask=padding_mask)
+            h = layer(
+                h,
+                layer.attention.get_inner_attention_metadata(attention_masks),
+                positions,
+                padding_mask=padding_mask,
+            )
 
         prev_depth_hidden = h
         h = self.norm(h) if self.norm is not None else h
@@ -442,7 +445,7 @@ class MTPDecoder(Decoder):
                 mtp_input_embed,
                 prev_depth_hidden,
                 mtp_input_valid_mask,
-                attention_masks,
+                layer.attention.get_inner_attention_metadata(attention_masks),
                 positions,
                 padding_mask=padding_mask,
             )

@@ -26,7 +26,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_local_context,
 )
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
+    AttentionMetadata,
     FlexInnerAttention,
     VarlenInnerAttention,
 )
@@ -279,7 +279,7 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: AttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
     ):
@@ -322,7 +322,12 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
-            x = layer(x, attention_masks, positions, padding_mask=padding_mask)
+            x = layer(
+                x,
+                layer.attention.get_inner_attention_metadata(attention_masks),
+                positions,
+                padding_mask=padding_mask,
+            )
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

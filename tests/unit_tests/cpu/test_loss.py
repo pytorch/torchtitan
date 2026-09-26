@@ -590,13 +590,27 @@ class _FakeDecoder(nn.Module):
         return self.output(tokens)
 
 
+class _IdentityAttention:
+    @staticmethod
+    def get_inner_attention_metadata(attention_metadata):
+        return attention_metadata
+
+
 class _IdentityDecoderBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attention = _IdentityAttention()
+
     def forward(self, hidden, attention_masks, positions, *, padding_mask=None):
         del attention_masks, positions, padding_mask
         return hidden
 
 
 class _AddMTPBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attention = _IdentityAttention()
+
     def forward(
         self,
         mtp_input_embed,
@@ -620,7 +634,6 @@ class _FakeMTPDecoder(MTPDecoder):
         self.norm = nn.Identity()
         self.lm_head = nn.Linear(4, 16, bias=False)
         self.mtp_layers = nn.ModuleList(_AddMTPBlock() for _ in range(num_mtp_layers))
-        self.config = SimpleNamespace(first_full_attention_backend=None)
 
 
 class _WeightedTwoOutputLoss(BaseLoss):

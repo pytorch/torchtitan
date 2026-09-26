@@ -7,7 +7,31 @@
 import sys
 from types import ModuleType, SimpleNamespace
 
-from torchtitan.rl.model.vllm_registry import _configure_gdn_hybrid_model
+import pytest
+
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.rl.model.vllm_registry import (
+    _configure_gdn_hybrid_model,
+    uses_flex_attention_for_vllm,
+)
+
+
+def test_vllm_attention_backend_selection():
+    flex = FlexInnerAttention.Config()
+    varlen = VarlenInnerAttention.Config()
+
+    assert uses_flex_attention_for_vllm(
+        SimpleNamespace(full_attention_backends=(flex, flex))
+    )
+    assert not uses_flex_attention_for_vllm(
+        SimpleNamespace(full_attention_backends=(varlen, varlen))
+    )
+    with pytest.raises(ValueError, match="consistently"):
+        uses_flex_attention_for_vllm(
+            SimpleNamespace(full_attention_backends=(flex, varlen))
+        )
+    with pytest.raises(ValueError, match="No full-attention layer"):
+        uses_flex_attention_for_vllm(SimpleNamespace(full_attention_backends=()))
 
 
 def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):

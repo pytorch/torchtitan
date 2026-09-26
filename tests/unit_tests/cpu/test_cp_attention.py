@@ -56,11 +56,9 @@ class TestKernelSelection(unittest.TestCase):
     def test_all_gather_prepares_only_block_masks(self):
         block_mask = object.__new__(BlockMask)
         sliding_block_mask = object.__new__(BlockMask)
-        linear_attention_metadata = object()
         attention_metadata = {
             "quadratic_attention": block_mask,
             "sliding_attention": sliding_block_mask,
-            "linear_attention": linear_attention_metadata,
         }
         sharded_block_mask = object.__new__(BlockMask)
         sharded_sliding_block_mask = object.__new__(BlockMask)
@@ -78,7 +76,6 @@ class TestKernelSelection(unittest.TestCase):
         assert isinstance(result, dict)
         self.assertIs(result["quadratic_attention"], sharded_block_mask)
         self.assertIs(result["sliding_attention"], sharded_sliding_block_mask)
-        self.assertIs(result["linear_attention"], linear_attention_metadata)
         self.assertEqual(
             shard_block_mask.call_args_list,
             [
@@ -191,7 +188,7 @@ class TestDecoderCpSharding(unittest.TestCase):
     def test_common_input_sharding_does_not_modify_metadata(self):
         input_T = torch.arange(8)
         labels_T = torch.arange(8)
-        attention_metadata = object()
+        attention_metadata = object.__new__(BlockMask)
         batch = {
             "input": input_T,
             "labels": labels_T,

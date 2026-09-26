@@ -16,7 +16,6 @@ from torch.nn.attention import (
 )
 from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.observability.logging import warn_once
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
@@ -341,7 +340,7 @@ class VLLMAttentionWrapper(Module):
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Run vLLM paged attention on local (non-DTensor) tensors.

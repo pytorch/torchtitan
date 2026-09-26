@@ -26,8 +26,8 @@ from .attention import (
     InnerAttention,
     QKVLinear,
     ScaledDotProductInnerAttention,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
-    VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
@@ -99,6 +99,6 @@ __all__ = [
     "TransformerBlock",
     "UnaryActivationFn",
     "VarlenInnerAttention",
-    "VarlenMetadata",
+    "VarlenAttentionMetadata",
     "compute_ffn_hidden_dim",
 ]

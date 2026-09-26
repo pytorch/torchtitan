@@ -32,12 +32,12 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.examples.alphabet_sort import config_registry
 from torchtitan.rl.model.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
+    uses_flex_attention_for_vllm,
 )
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -102,13 +102,7 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    attention_backend = model_config.first_full_attention_backend
-    if attention_backend is None:
-        raise ValueError("No full-attention layer found in the model spec.")
-    if not isinstance(
-        attention_backend, (VarlenInnerAttention.Config, FlexInnerAttention.Config)
-    ):
-        raise ValueError("Only varlen and flex attention backends are supported.")
+    use_flex_attention = uses_flex_attention_for_vllm(model_config)
 
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     set_batch_invariance(gen_config.debug.batch_invariant)
@@ -142,7 +136,7 @@ def generate() -> None:
         attention_config=AttentionConfig(
             backend=(
                 AttentionBackendEnum.FLEX_ATTENTION
-                if isinstance(attention_backend, FlexInnerAttention.Config)
+                if use_flex_attention
                 else AttentionBackendEnum.CUSTOM
             ),
         ),

@@ -35,7 +35,6 @@ from torchtitan.distributed.spmd_types import (
     plain_tensor_to_dtensor_state_dict,
 )
 from torchtitan.distributed.utils import set_batch_invariance
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
@@ -46,6 +45,7 @@ from torchtitan.rl.model.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
+    uses_flex_attention_for_vllm,
 )
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
@@ -851,11 +851,7 @@ class VLLMGenerator(Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        attention_backend = model_config.first_full_attention_backend
-        assert isinstance(
-            attention_backend,
-            (VarlenInnerAttention.Config, FlexInnerAttention.Config),
-        ), "Only varlen and flex attention backends are allowed."
+        use_flex_attention = uses_flex_attention_for_vllm(model_config)
 
         os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         set_batch_invariance(config.debug.batch_invariant)
@@ -900,7 +896,7 @@ class VLLMGenerator(Configurable):
             attention_config=AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(attention_backend, FlexInnerAttention.Config)
+                    if use_flex_attention
                     else AttentionBackendEnum.CUSTOM
                 ),
             ),

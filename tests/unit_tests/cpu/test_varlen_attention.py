@@ -20,16 +20,16 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
-    VarlenMetadata,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import ComplexRoPE
 
 
-class TestPackedVarlenMetadata(unittest.TestCase):
+class TestPackedVarlenAttentionMetadata(unittest.TestCase):
     def test_spmd_annotation_includes_partition_spec(self):
-        metadata = VarlenMetadata(
+        metadata = VarlenAttentionMetadata(
             cu_seq_q=torch.tensor([0, 2], dtype=torch.int32),
             cu_seq_k=torch.tensor([0, 3], dtype=torch.int32),
             max_q=2,

@@ -46,9 +46,10 @@ class _RecordingLayer(nn.Module):
     ``preprocess_inputs`` and ``forward`` glue.
     """
 
-    def __init__(self, sink: dict):
+    def __init__(self, sink: dict, attention_metadata_key: type[nn.Module]):
         super().__init__()
         self._sink = sink
+        self.attention_metadata_key = attention_metadata_key
 
     def forward(
         self,
@@ -73,7 +74,11 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         ).build()
         sink: dict = {}
         for key in list(model.layers.keys()):
-            model.layers[key] = _RecordingLayer(sink)
+            layer = model.layers[key]
+            model.layers[key] = _RecordingLayer(
+                sink,
+                layer.attention_metadata_key,
+            )
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=1,
@@ -85,7 +90,12 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             enable_sequence_parallel=False,
         )
         parallelism = ParallelismConfig()
-        return model, sink, parallel_dims, parallelism
+        deltanet_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.attention_metadata_key.__name__ == "GatedDeltaNet"
+        )
+        return model, sink, parallel_dims, parallelism, deltanet_backend
 
     def _run(self, model, parallel_dims, parallelism, input_dict):
         with patch(
@@ -107,7 +117,13 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         return batch
 
     def test_text_batch_routes_1d_positions_to_layers(self):
-        model, sink, parallel_dims, parallelism = self._build_stub_model()
+        (
+            model,
+            sink,
+            parallel_dims,
+            parallelism,
+            deltanet_backend,
+        ) = self._build_stub_model()
         # Folded 1D token stream packing docs of length 3, 2, and 5.
         positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3, 4], dtype=torch.int32)
         input_dict = {
@@ -122,12 +138,18 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         self.assertTrue(torch.equal(sink["positions"], positions))
         # Masks come from the 1D positions.
         torch.testing.assert_close(
-            batch["attention_masks"]["deltanet"].cu_seq_q,
+            batch["attention_masks"][deltanet_backend].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 
     def test_multimodal_batch_routes_mrope_to_layers(self):
-        model, sink, parallel_dims, parallelism = self._build_stub_model()
+        (
+            model,
+            sink,
+            parallel_dims,
+            parallelism,
+            deltanet_backend,
+        ) = self._build_stub_model()
         positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3, 4], dtype=torch.int32)
         # Folded (num_tokens, 3) T/H/W positions whose H/W channels differ from
         # the 1D positions, so routing the wrong tensor to the layers is
@@ -151,12 +173,12 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         self.assertTrue(torch.equal(sink["positions"], mrope_positions))
         # Masks are still built from the 1D positions, not the mrope positions.
         torch.testing.assert_close(
-            batch["attention_masks"]["deltanet"].cu_seq_q,
+            batch["attention_masks"][deltanet_backend].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 
     def test_padding_mask_routes_to_layers(self):
-        model, sink, parallel_dims, parallelism = self._build_stub_model()
+        model, sink, parallel_dims, parallelism, _ = self._build_stub_model()
         positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 0, 1, 2], dtype=torch.int32)
         padding_mask = torch.tensor([False] * 7 + [True] * 3)
         input_dict = {
