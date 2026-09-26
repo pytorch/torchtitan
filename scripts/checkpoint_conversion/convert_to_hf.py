@@ -12,7 +12,13 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.models import build_model_config
+
+if __package__:
+    from scripts.checkpoint_conversion.utils import build_model_config_for_conversion
+else:
+    from utils import (  # pyrefly: ignore [missing-import]
+        build_model_config_for_conversion,
+    )
 
 
 @torch.inference_mode()
@@ -25,7 +31,7 @@ def convert_to_hf(
     export_dtype,
 ):
     # load model and model args so that we can get the state dict shape
-    model_config = build_model_config(model_name, model_flavor, enable_sp=False)
+    model_config = build_model_config_for_conversion(model_name, model_flavor)
 
     with torch.device("cpu"):
         model = model_config.build()
