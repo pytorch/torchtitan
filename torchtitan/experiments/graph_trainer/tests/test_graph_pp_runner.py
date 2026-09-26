@@ -52,7 +52,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     _make_spmd_runtime_schedule,
     _set_graph_backward_actions,
     _validate_graph_pp_config,
-    _validate_spmd_graph_runtime_config,
     make_graph_runtime,
     resolve_graph_runtime_fsdp_policy,
     resolve_graph_runtime_gradient_accumulation_policy,
@@ -383,7 +382,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         ctx = _PipelineContext(schedule, arg_mbs, kwarg_mbs, None, [])
         provider = GraphTrainerStageGraphProvider(
             loss_fn=lambda pred, target: pred.sum(),
-            compile_config=GraphTrainerCompileConfig(mode=None),
+            compile_config=GraphTrainerCompileConfig(),
             model_config=None,
             parallelism=None,
         )
@@ -606,11 +605,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                         extract_fsdp_param_unshard=extract_unshard,
                         extract_fsdp_grad_reduction=extract_reduce_grad,
                     )
-
-    def test_spmd_graph_runtime_accepts_precompile_artifacts(self) -> None:
-        _validate_spmd_graph_runtime_config(
-            GraphTrainerCompileConfig(precompile_artifact_dir="artifacts")
-        )
 
     def test_precompile_rejects_scheduled_joint_graphs(self) -> None:
         parallel_dims = types.SimpleNamespace(pp_enabled=False, fsdp_enabled=False)
