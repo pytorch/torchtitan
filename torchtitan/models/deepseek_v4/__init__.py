@@ -28,12 +28,12 @@ from torchtitan.models.common import (
     SqrtSoftplus,
 )
 from torchtitan.models.common.config_utils import (
+    configure_shared_expert_w2_for_sp,
     fused_gate_up_param_init,
     fused_grouped_gate_up_param_init,
     make_ffn_config,
     make_routed_experts_config,
     make_shared_expert_ffn_config,
-    select_shared_expert_w2_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
 
@@ -1025,7 +1025,7 @@ deepseek_v4_configs = {
 def model_registry(
     flavor: str,
     *,
-    enable_sp: bool = True,
+    enable_sp: bool,
     seq_len: int | None = None,
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
@@ -1050,7 +1050,7 @@ def model_registry(
         n_mtp_layers=n_mtp_layers,
         seq_len=context_len,
     )
-    select_shared_expert_w2_config(config, enable_sp=enable_sp)
+    configure_shared_expert_w2_for_sp(config, enable_sp=enable_sp)
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter_cfg in converters:

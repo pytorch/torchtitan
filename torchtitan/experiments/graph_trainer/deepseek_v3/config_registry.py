@@ -36,6 +36,7 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
     # Quantize dense and moe gemms to mxfp8
     base.model = deepseek_v3_model_registry(
         "debugmodel",
+        enable_sp=True,
         seq_len=base.training.max_context_length,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(

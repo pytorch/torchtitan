@@ -1036,6 +1036,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
 def _qwen3_5_rl_model_registry(
     flavor: str,
     *,
+    enable_sp: bool,
     seq_len: int,
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
@@ -1048,7 +1049,11 @@ def _qwen3_5_rl_model_registry(
     converters = list(converters or [])
     converters.append(LMHeadCastConverter.Config())
     return qwen3_5_model_registry(
-        flavor, seq_len=seq_len, attn_backend=attn_backend, converters=converters
+        flavor,
+        enable_sp=enable_sp,
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        converters=converters,
     )
 
 
@@ -1057,7 +1062,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = _qwen3_5_rl_model_registry(
-        "9B", seq_len=seq_len, attn_backend="varlen"
+        "9B", enable_sp=True, seq_len=seq_len, attn_backend="varlen"
     )
     return Controller.Config(
         model=model_config,
@@ -1142,7 +1147,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = _qwen3_5_rl_model_registry(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel", enable_sp=True, seq_len=seq_len, attn_backend="varlen"
     )
     return Controller.Config(
         model=model_config,
@@ -1228,7 +1233,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     seq_len = 65536
     config = rl_grpo_qwen3_5_9b_varlen()
     config.model = _qwen3_5_rl_model_registry(
-        "27B", seq_len=seq_len, attn_backend="varlen"
+        "27B", enable_sp=True, seq_len=seq_len, attn_backend="varlen"
     )
     config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3.6-27B"
     perf_imports = ["torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm"]
