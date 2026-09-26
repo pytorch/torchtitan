@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13" viewBox="0 0 1550 866" role="img" aria-label="Forward and backward data flow of one Kimi K3 pipeline stage with the block cache on, next to the same stage with the cache off">
+    <defs>
+      <marker id="mf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#1f2328"/>
+      </marker>
+      <marker id="mb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#d92d20"/>
+      </marker>
+      <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect width="6" height="6" fill="#eef9f0"/>
+        <line x1="0" y1="0" x2="0" y2="6" stroke="#2f9e44" stroke-width="1.2"/>
+      </pattern>
+    </defs>
+    <rect x="0" y="0" width="1550" height="866" fill="#ffffff"/>
+
+    <!-- ===================== cache on ===================== -->
+    <text x="20" y="30" class="title" fill="#1f2328" font-size="16" font-weight="600">attn_res_cache on</text>
+    <text x="180" y="30" class="sub" fill="#5f6b76">virtual stage s on rank r</text>
+
+    <text x="375" y="72" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, Δ] from virtual stage s−1</text>
+    <text x="375" y="604" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, Δ′] to virtual stage s+1</text>
+    <text x="695" y="72" text-anchor="middle" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h, ∇Δ] to virtual stage s−1</text>
+    <text x="695" y="604" text-anchor="middle" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h′, ∇Δ′] from virtual stage s+1</text>
+
+    <!-- forward column: x 260..490, midline 375 -->
+    <rect x="260" y="90" width="230" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44" stroke-width="1.4"/>
+    <text x="375" y="115" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P recv</text>
+
+    <rect x="260" y="190" width="230" height="50" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="375" y="210" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">assemble</text>
+    <text x="375" y="230" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">B = cache ⊕ Δ  (leaf)</text>
+
+    <rect x="260" y="290" width="230" height="60" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="375" y="315" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">layers l..m</text>
+    <text x="375" y="337" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">block start: B ⊕= h</text>
+
+    <rect x="260" y="420" width="230" height="50" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="375" y="440" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">pack Δ′</text>
+    <text x="375" y="460" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">what the next rank lacks</text>
+
+    <rect x="260" y="530" width="230" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44" stroke-width="1.4"/>
+    <text x="375" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P send</text>
+
+    <text x="260" y="640" class="cap f" fill="#d9760a" font-weight="600" letter-spacing="0.08em">FORWARD</text>
+
+    <!-- forward arrows: bottom-edge midpoint to top-edge midpoint -->
+    <line x1="375" y1="130" x2="375" y2="189" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
+    <text x="383" y="178" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, Δ]</text>
+    <line x1="375" y1="240" x2="375" y2="289" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
+    <text x="383" y="270" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B]</text>
+    <line x1="375" y1="350" x2="375" y2="419" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
+    <text x="383" y="390" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′]</text>
+    <line x1="375" y1="470" x2="375" y2="529" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
+    <text x="383" y="522" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, Δ′]</text>
+
+    <!-- rank cache: x 20..190, y 190..450, right-edge midpoint (190, 320) -->
+    <rect x="20" y="190" width="170" height="260" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="105" y="216" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">rank cache</text>
+    <text x="105" y="246" text-anchor="middle" class="txt" fill="#1f2328">blocks produced at</text>
+    <text x="105" y="264" text-anchor="middle" class="txt" fill="#1f2328">stage s−P or earlier</text>
+    <text x="105" y="292" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">∇B deposits</text>
+    <text x="105" y="318" text-anchor="middle" class="sub" fill="#5f6b76">keyed (mb, block)</text>
+    <text x="105" y="404" text-anchor="middle" class="sub" fill="#5f6b76">one per rank,</text>
+    <text x="105" y="424" text-anchor="middle" class="sub" fill="#5f6b76">shared by its stages</text>
+
+    <!-- cache <-> assemble: one line, a head at each end, at assemble's left-edge midpoint -->
+    <line x1="191" y1="215" x2="259" y2="215" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-start="url(#mf)" marker-end="url(#mf)"/>
+    <text x="225" y="206" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">held B</text>
+    <text x="225" y="234" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">cache Δ</text>
+    <!-- layers -> cache: left-edge midpoint to right-edge midpoint, straight -->
+    <line x1="260" y1="320" x2="191" y2="320" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
+    <text x="225" y="311" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">commit</text>
+
+    <!-- backward column: x 580..810, midline 695 -->
+    <rect x="580" y="530" width="230" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44" stroke-width="1.4"/>
+    <text x="695" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P recv</text>
+
+    <rect x="580" y="420" width="230" height="50" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="695" y="440" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">collect</text>
+    <text x="695" y="460" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">∇Δ′ += deposits</text>
+
+    <rect x="580" y="190" width="230" height="50" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="695" y="210" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">split ∇B</text>
+    <text x="695" y="230" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">Δ → wire, held → deposit</text>
+
+    <rect x="580" y="90" width="230" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44" stroke-width="1.4"/>
+    <text x="695" y="115" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P send</text>
+
+    <text x="580" y="640" class="cap b" fill="#d92d20" font-weight="600" letter-spacing="0.08em">BACKWARD</text>
+
+    <!-- backward arrows, right angles only -->
+    <line x1="695" y1="530" x2="695" y2="471" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
+    <text x="703" y="506" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h′, ∇Δ′]</text>
+    <!-- collect top-edge midpoint -> layers right-edge midpoint -->
+    <polyline points="695,420 695,320 491,320" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
+    <text x="540" y="340" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h′, ∇B′]</text>
+    <!-- layers right edge -> split bottom-edge midpoint -->
+    <polyline points="490,298 695,298 695,241" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
+    <text x="540" y="290" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h, ∇B]</text>
+    <line x1="695" y1="190" x2="695" y2="131" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
+    <text x="703" y="151" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h, ∇Δ]</text>
+
+    <!-- split right-edge midpoint -> cache top-edge midpoint -->
+    <polyline points="810,215 830,215 830,160 105,160 105,189" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
+    <text x="498" y="152" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">deposit ∇B</text>
+    <!-- cache bottom-edge midpoint -> collect left-edge midpoint -->
+    <polyline points="105,450 105,496 545,496 545,445 579,445" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
+    <text x="113" y="488" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">deposits</text>
+
+    <!-- notes -->
+    <text x="842" y="200" class="note" fill="#1f6fb2" font-size="12">tables: the same on</text>
+    <text x="842" y="217" class="note" fill="#1f6fb2" font-size="12">every rank, no collective</text>
+    <text x="842" y="330" class="note" fill="#1f6fb2" font-size="12">last stage: aggregation</text>
+    <text x="842" y="347" class="note" fill="#1f6fb2" font-size="12">on (h, B), no send</text>
+
+    <line x1="985" y1="20" x2="985" y2="650" stroke="#d9d4c7" stroke-dasharray="4 6"/>
+
+    <!-- ===================== cache off ===================== -->
+    <text x="1005" y="30" class="title" fill="#1f2328" font-size="16" font-weight="600">attn_res_cache off</text>
+    <text x="1180" y="30" class="sub" fill="#5f6b76">the whole stack every hop; no cache, no deposits</text>
+
+    <text x="1140" y="72" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B] from virtual stage s−1</text>
+    <text x="1140" y="604" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′] to virtual stage s+1</text>
+    <text x="1405" y="72" text-anchor="middle" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h, ∇B] to virtual stage s−1</text>
+    <text x="1405" y="604" text-anchor="middle" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h′, ∇B′] from virtual stage s+1</text>
+
+    <rect x="1025" y="90" width="230" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44" stroke-width="1.4"/>
+    <text x="1140" y="115" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P recv</text>
+    <rect x="1025" y="290" width="230" height="60" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="1140" y="315" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">layers l..m</text>
+    <text x="1140" y="337" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">B is the leaf</text>
+    <rect x="1025" y="530" width="230" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44" stroke-width="1.4"/>
+    <text x="1140" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P send</text>
+    <text x="1025" y="640" class="cap f" fill="#d9760a" font-weight="600" letter-spacing="0.08em">FORWARD</text>
+
+    <line x1="1140" y1="130" x2="1140" y2="289" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
+    <text x="1148" y="215" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B]</text>
+    <line x1="1140" y1="350" x2="1140" y2="529" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
+    <text x="1148" y="445" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′]</text>
+
+    <rect x="1330" y="530" width="150" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44" stroke-width="1.4"/>
+    <text x="1405" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P recv</text>
+    <rect x="1330" y="90" width="150" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44" stroke-width="1.4"/>
+    <text x="1405" y="115" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P send</text>
+    <text x="1330" y="640" class="cap b" fill="#d92d20" font-weight="600" letter-spacing="0.08em">BACKWARD</text>
+
+    <!-- recv top-edge midpoint -> layers right-edge midpoint -->
+    <polyline points="1405,530 1405,320 1256,320" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
+    <text x="1290" y="340" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h′, ∇B′]</text>
+    <!-- layers right edge -> send bottom-edge midpoint -->
+    <polyline points="1255,298 1405,298 1405,131" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
+    <text x="1290" y="290" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h, ∇B]</text>
+
+    <!-- ===================== legend ===================== -->
+    <rect x="20" y="668" width="1100" height="178" rx="8" class="lgd" fill="#ffffff" stroke="#d9d4c7" stroke-width="1"/>
+    <text x="44" y="698" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">h</text>
+    <text x="84" y="698" class="def" fill="#3d4750">hidden state [T, D]</text>
+    <text x="44" y="720" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">B</text>
+    <text x="84" y="720" class="def" fill="#3d4750">block stack [T, N, D], one column per block</text>
+    <text x="44" y="742" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">Δ</text>
+    <text x="84" y="742" class="def" fill="#3d4750">delta: the blocks the receiving rank has not seen [T, N<tspan dy="3" font-size="10">d</tspan><tspan dy="-3">, D]</tspan></text>
+    <text x="44" y="764" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">∇</text>
+    <text x="84" y="764" class="def" fill="#3d4750">gradient of</text>
+    <text x="44" y="786" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">⊕</text>
+    <text x="84" y="786" class="def" fill="#3d4750">append columns to the stack</text>
+    <text x="44" y="808" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">h′</text>
+    <text x="84" y="808" class="def" fill="#3d4750">this stage's output, likewise B′ and Δ′</text>
+    <text x="44" y="830" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">mb</text>
+    <text x="84" y="830" class="def" fill="#3d4750">micro-batch</text>
+
+    <text x="486" y="698" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">wire</text>
+    <text x="566" y="698" class="def" fill="#3d4750">the P2P hop to a neighbouring virtual stage</text>
+    <text x="486" y="720" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">held</text>
+    <text x="566" y="720" class="def" fill="#3d4750">kept in the rank cache for this rank's later stages</text>
+    <text x="486" y="742" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">split</text>
+    <text x="566" y="742" class="def" fill="#3d4750">cut ∇B by column: Δ's columns go back on the wire, held ones become deposits</text>
+    <text x="486" y="764" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">deposit</text>
+    <text x="566" y="764" class="def" fill="#3d4750">a held column's gradient, left in the rank cache</text>
+    <text x="486" y="786" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">collect</text>
+    <text x="566" y="786" class="def" fill="#3d4750">the stage that brought a block onto the rank adds that block's deposits</text>
+    <text x="486" y="808" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">leaf</text>
+    <text x="566" y="808" class="def" fill="#3d4750">a fresh autograd leaf the stage owns</text>
+    <text x="486" y="830" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">s, P</text>
+    <text x="566" y="830" class="def" fill="#3d4750">virtual stage, PP degree; this rank last ran the micro-batch at stage s−P</text>
+  </svg>
