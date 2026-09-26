@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import importlib
 import importlib.util
 import shutil
 import tempfile
@@ -17,6 +16,7 @@ import torch.distributed.checkpoint as dcp
 
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.optimizer import EMA
+from torchtitan.models import build_model_config
 
 _SCRIPT = (
     Path(__file__).resolve().parents[3]
@@ -80,9 +80,9 @@ class TestConvertEmaToHf(unittest.TestCase):
     def _write_checkpoint(self):
         """Save a checkpoint laid out the way CheckpointManager writes one:
         model tensors flattened at the top level, EMA nested under "ema"."""
-        model_config = importlib.import_module(
-            f"torchtitan.models.{self.model_name}"
-        ).model_registry(self.model_flavor)
+        model_config = build_model_config(
+            self.model_name, self.model_flavor, enable_sp=False
+        )
         with torch.device("cpu"):
             model = model_config.build()
         ema = EMA.Config(buffer_patterns=self.buffer_patterns).build(
@@ -253,9 +253,9 @@ class TestConvertEmaToHf(unittest.TestCase):
         self.assertIn("no matching key", str(caught.exception))
 
     def test_checkpoint_without_ema_is_rejected(self):
-        model_config = importlib.import_module(
-            f"torchtitan.models.{self.model_name}"
-        ).model_registry(self.model_flavor)
+        model_config = build_model_config(
+            self.model_name, self.model_flavor, enable_sp=False
+        )
         with torch.device("cpu"):
             model = model_config.build()
         ckpt = str(Path(self.tmp) / "no-ema")
@@ -359,9 +359,9 @@ class TestConvertEmaToHfFrozenParameters(unittest.TestCase):
     def test_frozen_parameter_exports_the_trained_weights(self):
         from safetensors.torch import load_file
 
-        model_config = importlib.import_module(
-            f"torchtitan.models.{self.model_name}"
-        ).model_registry(self.model_flavor)
+        model_config = build_model_config(
+            self.model_name, self.model_flavor, enable_sp=False
+        )
         with torch.device("cpu"):
             model = model_config.build()
         params = dict(model.named_parameters())
