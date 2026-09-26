@@ -59,7 +59,9 @@ def main() -> None:
         context_parallel_load_balancer=None,
         enable_sequence_parallel=False,
     )
-    parallel_dims = ParallelDims.from_config(parallelism, world_size=dist.get_world_size())
+    parallel_dims = ParallelDims.from_config(
+        parallelism, world_size=dist.get_world_size()
+    )
     training = TrainingConfig(dtype="bfloat16")
 
     cp_config = _tiny_config()
@@ -116,7 +118,9 @@ def main() -> None:
         )
         cp_logits.float().pow(2).mean().backward()
 
-    gathered = [torch.empty_like(cp_logits.detach()) for _ in range(dist.get_world_size())]
+    gathered = [
+        torch.empty_like(cp_logits.detach()) for _ in range(dist.get_world_size())
+    ]
     dist.all_gather(gathered, cp_logits.detach())
     cp_full = torch.cat(gathered, dim=0)
     torch.testing.assert_close(cp_full, ref_logits, atol=2e-2, rtol=2e-2)
