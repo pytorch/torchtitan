@@ -67,6 +67,9 @@ jobs:
         assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
         '
 
+        # TorchStore is not on PyPI; do not let its dependencies change torch.
+        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+
         # The shared HF cache is read-only and does not contain this tokenizer.
         # Fetch only tokenizer files into a writable cache (no model weights).
         export MUSE_GLIMMER_TOKENIZER="$(python -c '
