@@ -80,18 +80,19 @@ class VarlenMetadata(NamedTuple):
     max_q: int
     max_k: int
 
+    _OFFSETS_SPMD_TYPE = spmd.SpmdType(
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.TP: spmd.R,
+        },
+        partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
+    )
+
     def annotate_spmd_types(self) -> None:
         """Annotate offsets under the active dense model-parallel mesh."""
-        placements = spmd.SpmdType(
-            {
-                MeshAxisName.DP: spmd.V,
-                MeshAxisName.TP: spmd.R,
-            },
-            partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
-        )
-        spmd.assert_type(self.cu_seq_q, placements)
+        spmd.assert_type(self.cu_seq_q, self._OFFSETS_SPMD_TYPE)
         if self.cu_seq_k is not self.cu_seq_q:
-            spmd.assert_type(self.cu_seq_k, placements)
+            spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
 
 
 # Mapping (not dict) lets covariant value types accept both BlockMask-only
