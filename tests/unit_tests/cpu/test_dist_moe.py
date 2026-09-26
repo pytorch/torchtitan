@@ -10,19 +10,26 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+
+import torchtitan.config.transform.quantization as quantization_transform
 from dist_moe import RMSNormPostprocess, VmmConfig
 from torch.distributed.pipelining import PipelineStageInfo
-
 from torchtitan.components.dist_moe import (
     DistMoeRoutedExperts,
     DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
+    prepare_dist_moe_runtime,
 )
 from torchtitan.components.dist_moe.backend import _build_dist_moe_runtime_config
 from torchtitan.config.transform import DistMoeTransform, MXFP8DistMoeTransform
+from torchtitan.experiments.graph_trainer.deepseek_v3 import (
+    config_registry as graph_configs,
+)
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.deepseek_v3 import config_registry as eager_configs
 from torchtitan.protocols.module import Module
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
@@ -256,3 +263,123 @@ def test_dist_moe_config_rejects_invalid_values(kwargs, message):
             token_dispatcher=stock.token_dispatcher,
             **kwargs,
         )
+
+
+def test_prepare_runtime_allows_initializers_and_rejects_shared_policy_mismatch(
+    monkeypatch,
+):
+    config = eager_configs.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
+    expert_configs = [
+        entry[1] for entry in config.model.traverse(DistMoeRoutedExperts.Config)
+    ]
+    modules = tuple(expert_config.build() for expert_config in expert_configs[:2])
+    assert modules[0]._dist_moe_config.w13 != modules[1]._dist_moe_config.w13
+    assert modules[0]._dist_moe_config.w2 != modules[1]._dist_moe_config.w2
+    group = Mock()
+    ep_mesh = Mock()
+    ep_mesh.get_group.return_value = group
+    parallel_dims = Mock(cp=1, tp=1, pp_enabled=False)
+    parallel_dims.get_optional_mesh.return_value = ep_mesh
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (10, 0))
+
+    runtime = prepare_dist_moe_runtime(
+        config=config,
+        model_parts=list(modules),
+        parallel_dims=parallel_dims,
+        device=torch.device("cuda"),
+        pp_schedule=None,
+    )
+
+    assert runtime is not None
+    assert all(module._runtime is runtime for module in modules)
+    runtime.close()
+    modules[1]._dist_moe_config.activation_slot_policy = "microbatch"
+    with pytest.raises(ValueError, match="activation-slot and VMM policy"):
+        prepare_dist_moe_runtime(
+            config=config,
+            model_parts=list(modules),
+            parallel_dims=parallel_dims,
+            device=torch.device("cuda"),
+            pp_schedule=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "factory,num_experts_modules,device_scratch_capacity_factor",
+    [
+        (eager_configs.deepseek_v3_debugmodel_dist_moe_bf16, 5, 1.0),
+        (eager_configs.deepseek_v3_16b_dist_moe_bf16, 26, 4.0),
+        (eager_configs.deepseek_v3_671b_dist_moe_bf16, 58, 4.0),
+        (graph_configs.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16, 5, 1.0),
+        (graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_bf16, 26, 4.0),
+        (graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_bf16, 58, 4.0),
+    ],
+)
+def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
+    factory, num_experts_modules, device_scratch_capacity_factor
+):
+    config = factory()
+    model_config = config.model
+    experts = list(model_config.traverse(DistMoeRoutedExperts.Config))
+
+    assert len(experts) == num_experts_modules
+    assert all(type(entry[1]) is DistMoeRoutedExperts.Config for entry in experts)
+    assert all(entry[1].vmm is None for entry in experts)
+    assert all(
+        entry[1].device_scratch_capacity_factor == device_scratch_capacity_factor
+        for entry in experts
+    )
+    assert all(
+        isinstance(layer.attention.inner_attention, VarlenInnerAttention.Config)
+        for layer in model_config.layers
+    )
+    assert config.dataloader.max_num_documents == 512
+
+
+def test_dist_moe_recipe_supports_cuda_graphs_with_expert_parallelism():
+    config = eager_configs.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+
+    config.__post_init__()
+
+
+@pytest.mark.parametrize(
+    "factory,num_experts_modules,device_scratch_capacity_factor",
+    [
+        (eager_configs.deepseek_v3_debugmodel_dist_moe_mxfp8, 5, 1.0),
+        (eager_configs.deepseek_v3_16b_dist_moe_mxfp8, 26, 4.0),
+        (eager_configs.deepseek_v3_671b_dist_moe_mxfp8, 58, 4.0),
+        (graph_configs.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8, 5, 1.0),
+        (graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_mxfp8, 26, 4.0),
+        (graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_mxfp8, 58, 4.0),
+    ],
+)
+def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
+    factory, num_experts_modules, device_scratch_capacity_factor, monkeypatch
+):
+    pytest.importorskip("torchao")
+    from torchtitan.quantization import MXFP8Linear
+
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    config = factory()
+    model_config = config.model
+    experts = list(model_config.traverse(DistMoeRoutedExperts.Config))
+    linears = {
+        fqn
+        for fqn, _linear, _parent, _attr in model_config.traverse(MXFP8Linear.Config)
+    }
+
+    assert len(experts) == num_experts_modules
+    assert all(
+        isinstance(entry[1], MXFP8DistMoeRoutedExperts.Config) for entry in experts
+    )
+    assert all(entry[1].vmm is None for entry in experts)
+    assert all(
+        entry[1].device_scratch_capacity_factor == device_scratch_capacity_factor
+        for entry in experts
+    )
+    assert "lm_head" in linears
