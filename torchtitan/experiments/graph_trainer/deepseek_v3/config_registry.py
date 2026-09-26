@@ -66,16 +66,6 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
-    """Test-only FlexInnerAttention baseline that runs through eager pipeline parallelism."""
-    config = graph_trainer_deepseek_v3_debugmodel()
-    config.compile = GraphTrainerCompileConfig(
-        components=["loss"],
-        mode=None,
-    )
-    return config
-
-
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
     config = to_graph_trainer_config(
         deepseek_v3_16b(seq_len=4096), GraphTrainerDeepSeekV3Model.Config
