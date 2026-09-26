@@ -54,7 +54,10 @@ def run_worker(args):
 
     build_config, max_context_length = qwen3_5_configs["debugmodel_moe"]
     config = build_config(
-        attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+        attn_backend="flex",
+        moe_comm_backend="standard",
+        enable_sp=True,
+        seq_len=max_context_length,
     )
 
     parallel_dims = ParallelDims(

@@ -60,6 +60,7 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     config.compile = GraphTrainerCompileConfig()
     config.model = model_registry(
         "debugmodel",
+        enable_sp=True,
         seq_len=config.training.max_context_length,
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
@@ -80,6 +81,7 @@ def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
     config.parallelism.context_parallel_load_balancer = "headtail"
     config.model = model_registry(
         "16B",
+        enable_sp=True,
         seq_len=config.training.max_context_length,
         attn_backend="sdpa",
     )

@@ -8,7 +8,6 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.models.common.config_utils import configure_shared_expert_w2_for_sp
 from torchtitan.models.qwen3_5 import (
     _27b,
     _35b_a3b,
@@ -53,6 +52,7 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
+        enable_sp=enable_sp,
         seq_len=context_len,
         **(
             {"moe_comm_backend": moe_comm_backend}
@@ -60,7 +60,6 @@ def model_registry(
             else {}
         ),
     )
-    configure_shared_expert_w2_for_sp(config, enable_sp=enable_sp)
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter_config in converters:

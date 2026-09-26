@@ -733,7 +733,7 @@ class MoE(Module):
         if spmd_sparse_mesh() is None:
             assert (
                 spmd_mesh_group(MeshAxisName.TP) is None
-            ), "MoE requires expert parallelism when tensor parallelism is enabled"
+            ), "MoE requires expert parallelism when tensor parallelism is enabled on dense modules"
             return x_TD, padding_mask_T
 
         tp_group = spmd_mesh_group(MeshAxisName.TP)
