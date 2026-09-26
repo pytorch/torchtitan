@@ -5,8 +5,13 @@ This directory contains tests for the torchtitan project, including unit tests a
 ## Test Structure
 
 - `unit_tests/cpu/`: Unit tests that run without a GPU
+  - `rl/`: RL tests that use the core development dependencies and CPU PyTorch;
+    these are collected by the standard CPU unit-test workflow
 - `unit_tests/gpu/`: Tests that require GPUs; multi-GPU tests use the
   `multi_gpu` pytest marker
+- `unit_tests/rl/`: RL tests that still require optional inference, orchestration,
+  example-specific, or GPU dependencies and are not collected by the standard
+  CPU unit-test workflow
 - `integration_tests/`: Contains integration tests that test multiple components together
   - `features.py`: Tests for torchtitan features and composability
   - `flux.py`: Tests for the FLUX model
@@ -137,6 +142,9 @@ hardware-specific workflows.
 
 - CPU versus GPU requirements are encoded by the `unit_tests/cpu/` and
   `unit_tests/gpu/` directories.
+- CPU-safe RL tests live in `unit_tests/cpu/rl/`. Importing `torchtitan.rl`
+  does not eagerly import vLLM, so these tests can run without the inference
+  backend installed.
 - GPU tests that require multiple physical devices use the `multi_gpu` pytest
   marker. The 1-GPU lane selects `not multi_gpu`, while the multi-GPU lane
   selects `multi_gpu` from the same GPU directory.
@@ -204,6 +212,9 @@ To run only the unit tests:
 
 ```bash
 pytest -s tests/unit_tests/cpu/
+
+# CPU-safe RL tests only
+pytest -s tests/unit_tests/cpu/rl/
 
 # Single-GPU tests
 pytest -s tests/unit_tests/gpu/ -m "not multi_gpu"

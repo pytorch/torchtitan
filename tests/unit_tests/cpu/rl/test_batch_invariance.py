@@ -84,10 +84,9 @@ def test_replicated_policy_stats_do_not_infer_layout_from_spmd_context(monkeypat
 
 def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
     """The vLLM patch must retain the trainer's batch-invariant op sequence."""
-    # Import by path so this CPU test does not load the RL package initializer,
-    # which intentionally requires the optional vLLM runtime.
+    # Import by path so this CPU test can stub vLLM without importing the backend.
     module_path = (
-        Path(__file__).resolve().parents[3] / "torchtitan/rl/model/batch_invariance.py"
+        Path(__file__).resolve().parents[4] / "torchtitan/rl/model/batch_invariance.py"
     )
     spec = importlib.util.spec_from_file_location(
         "torchtitan_batch_invariance_test", module_path
