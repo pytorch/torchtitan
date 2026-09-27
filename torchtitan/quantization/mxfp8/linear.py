@@ -213,7 +213,8 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # AccumulateGrad needs no cast. FSDP will set the unsharded parameter's
         # grad_dtype to the reduce dtype.
         # TODO(anijain2305): drop the dtype fallback once FSDP always sets
-        # grad_dtype on the unsharded parameter.
+        # grad_dtype on the unsharded parameter
+        # (https://github.com/pytorch/pytorch/pull/194434).
         ctx.wgrad_dtype = weight.grad_dtype or weight.dtype
         # Kept on ctx rather than saved: backward needs this exact parameter
         # object, and saved-tensor hooks may unpack a different one. A leaf

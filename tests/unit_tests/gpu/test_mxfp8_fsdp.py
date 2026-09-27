@@ -566,7 +566,8 @@ def _run_fused_wgrad_accum(
         pytest.param(torch.bfloat16, id="bf16-reduce"),
         # TODO(anijain2305): FSDP leaves the unsharded parameter's grad_dtype
         # at its BF16 dtype today and accumulates in FP32 separately, so the
-        # fused path does not fire. A pending PyTorch PR makes FSDP set
+        # fused path does not fire.
+        # https://github.com/pytorch/pytorch/pull/194434 makes FSDP set
         # grad_dtype to reduce_dtype, removing that separate accumulation.
         # Remove the xfail once it lands.
         pytest.param(
