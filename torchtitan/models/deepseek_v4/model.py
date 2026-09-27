@@ -13,7 +13,11 @@ from torch import nn
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import (
+    AttentionMetadata,
+    FlexAttentionMetadata,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
@@ -68,7 +72,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         self,
         x: torch.Tensor,
         input_ids_T: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -280,7 +284,7 @@ class DeepSeekV4Model(Decoder):
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: AttentionMetadata | None = None,
         padding_mask: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
@@ -301,7 +305,7 @@ class DeepSeekV4Model(Decoder):
             h = layer(
                 h,
                 input_ids_T,
-                attention_masks,
+                layer.attention.get_inner_attention_metadata(attention_masks),
                 positions,
                 padding_mask=padding_mask,
             )
@@ -330,7 +334,7 @@ class DeepSeekV4Model(Decoder):
         self,
         prev_hc_hidden: torch.Tensor,
         tokens: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: AttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:

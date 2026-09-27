@@ -83,6 +83,7 @@ from torchtitan.rl.model.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
+    uses_flex_attention_for_vllm,
     VLLM_MODEL_NAME,
 )
 from torchtitan.tools import utils
@@ -205,8 +206,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     gen_config = config.generator
 
     assert config.model is not None
-    attention_backend = config.model.first_full_attention_backend
-    use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
+    use_flex = uses_flex_attention_for_vllm(config.model)
 
     # Mirror the production VLLMGenerator so the test exercises the same
     # batch-invariant path (v2 runner is required for the logprob-kernel patch).

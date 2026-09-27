@@ -102,10 +102,7 @@ def validate_context_parallel(
     model: "Module.Config", parallelism: "ParallelismConfig"
 ) -> None:
     """Validate that each inner attention matches the CP configuration."""
-    from torchtitan.models.common.cp_attention import (
-        CPInnerAttention,
-        UlyssesCPInnerAttention,
-    )
+    from torchtitan.models.common.cp_attention import CPInnerAttention
 
     cp = parallelism.context_parallel_degree
     first_cp_config: tuple[str, type] | None = None
@@ -138,24 +135,10 @@ def validate_context_parallel(
                 f"{first_cp_config[0]}.inner_attention use different CP "
                 "backends, but model inputs are sharded once."
             )
-        # TODO(fegin): it seems to be cleaner if we move this logic to each
-        # backend class definition. We need to revisit a good strategy to
-        # define "where" should a validation implementation lives.
-        if isinstance(inner_attention, UlyssesCPInnerAttention.Config):
-            if parallelism.context_parallel_load_balancer is not None:
-                raise ValueError(
-                    f"{fqn}.inner_attention uses {cp_config_type.__qualname__}, so "
-                    "context_parallel_load_balancer must be None."
-                )
-            head_shard_degree = (
-                parallelism.tensor_parallel_degree * parallelism.context_parallel_degree
-            )
-            n_heads = attention.n_heads
-            n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
-            for name, count in (("n_heads", n_heads), ("n_kv_heads", n_kv_heads)):
-                if count % head_shard_degree != 0:
-                    raise ValueError(
-                        f"{fqn}.inner_attention {name} ({count}) must be divisible "
-                        "by tensor_parallel_degree * context_parallel_degree "
-                        f"({head_shard_degree})."
-                    )
+        backend = inner_attention._owner
+        assert backend is not None and issubclass(backend, CPInnerAttention)
+        backend.validate_cp_config(
+            attention_config=attention,
+            parallelism=parallelism,
+            fqn=fqn,
+        )

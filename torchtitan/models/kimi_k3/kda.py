@@ -18,11 +18,7 @@ from torch import nn
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
-from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    local_head_split,
-    VarlenMetadata,
-)
+from torchtitan.models.common.attention import local_head_split, VarlenAttentionMetadata
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.protocols.module import Module
@@ -247,7 +243,7 @@ class KDA(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_masks: VarlenAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
@@ -270,11 +266,11 @@ class KDA(Module):
 
         if attention_masks is None:
             cu_seqlens = None
-        elif isinstance(attention_masks, VarlenMetadata):
+        elif isinstance(attention_masks, VarlenAttentionMetadata):
             cu_seqlens = attention_masks.cu_seq_q
         else:
             raise ValueError(
-                "KDA attention_masks must be VarlenMetadata or None, "
+                "KDA attention_masks must be VarlenAttentionMetadata or None, "
                 f"got {type(attention_masks).__name__}."
             )
         raw_gate_THK = local_head_split(

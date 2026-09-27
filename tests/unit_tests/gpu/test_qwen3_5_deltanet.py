@@ -14,8 +14,9 @@ from torch import nn
 
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
-    VarlenMetadata,
+    VarlenAttentionMetadata,
 )
+from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -183,10 +184,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ).build()
         positions = torch.tensor([0, 1, 2, 0, 0], dtype=torch.int32)
 
-        with mock.patch.object(Decoder, "get_attention_masks", return_value=None):
+        with mock.patch.object(Decoder, "get_attention_masks", return_value={}):
             attention_masks = model.get_attention_masks(positions)
 
-        self.assertIsNone(attention_masks["deltanet"])
+        self.assertNotIn(GatedDeltaNet, attention_masks)
 
     def test_flex_masks_include_delta_net_varlen_metadata(self):
         try:
@@ -204,17 +205,22 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ).build()
         positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
         full_attention_mask = mock.sentinel.full_attention_mask
+        full_attention_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.full_attn
+        )
 
         with mock.patch.object(
             Decoder,
             "get_attention_masks",
-            return_value=full_attention_mask,
+            return_value={full_attention_backend: full_attention_mask},
         ):
             attention_masks = model.get_attention_masks(positions)
 
-        self.assertIs(attention_masks["quadratic_attention"], full_attention_mask)
+        self.assertIs(attention_masks[full_attention_backend], full_attention_mask)
         torch.testing.assert_close(
-            attention_masks["deltanet"].cu_seq_q,
+            attention_masks[GatedDeltaNet].cu_seq_q,
             torch.tensor([0, 2, 5], dtype=torch.int32),
         )
 
@@ -418,11 +424,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
     def test_get_attention_masks_pairs_flex_mask_with_deltanet_offsets(self):
-        """Qwen35Model.get_attention_masks must return the per-consumer mask
-        dict: under flex, a BlockMask ("quadratic_attention") paired with the
-        document offsets ("deltanet"); under varlen, one VarlenMetadata shared
-        by both keys. Each transformer block picks its entry by attn_mask_key.
-        """
+        """Qwen35Model groups each metadata value by its attention backend."""
         from torch.nn.attention.flex_attention import BlockMask
 
         try:
@@ -441,34 +443,46 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         flex_model = model_registry("debugmodel", enable_sp=True).build()
         masks = flex_model.get_attention_masks(positions)
+        flex_backend = next(
+            layer.attention_metadata_key
+            for layer in flex_model.layers.values()
+            if layer.full_attn
+        )
         self.assertIsInstance(masks, dict)
-        self.assertEqual(set(masks.keys()), {"quadratic_attention", "deltanet"})
-        self.assertIsInstance(masks["quadratic_attention"], BlockMask)
-        self.assertIsInstance(masks["deltanet"], VarlenMetadata)
+        self.assertEqual(set(masks.keys()), {flex_backend, GatedDeltaNet})
+        self.assertIsInstance(masks[flex_backend], BlockMask)
+        self.assertIsInstance(masks[GatedDeltaNet], VarlenAttentionMetadata)
         # Three packed documents have lengths 3, 2, and 5.
         torch.testing.assert_close(
-            masks["deltanet"].cu_seq_q,
+            masks[GatedDeltaNet].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
         # Each block picks the entry matching its layer type.
-        mask_keys = {layer.attn_mask_key for layer in flex_model.layers.values()}
-        self.assertEqual(mask_keys, {"quadratic_attention", "deltanet"})
+        metadata_keys = {
+            layer.attention_metadata_key for layer in flex_model.layers.values()
+        }
+        self.assertEqual(metadata_keys, {flex_backend, GatedDeltaNet})
         for layer in flex_model.layers.values():
             self.assertEqual(
-                layer.attn_mask_key,
-                "quadratic_attention" if layer.full_attn else "deltanet",
+                layer.attention_metadata_key,
+                flex_backend if layer.full_attn else GatedDeltaNet,
             )
 
         varlen_model = model_registry(
             "debugmodel", enable_sp=True, attn_backend="varlen"
         ).build()
         varlen_masks = varlen_model.get_attention_masks(positions)
+        varlen_backend = next(
+            layer.attention_metadata_key
+            for layer in varlen_model.layers.values()
+            if layer.full_attn
+        )
         self.assertIsInstance(varlen_masks, dict)
-        self.assertIs(varlen_masks["quadratic_attention"], varlen_masks["deltanet"])
-        self.assertIsInstance(varlen_masks["deltanet"], VarlenMetadata)
+        self.assertIs(varlen_masks[varlen_backend], varlen_masks[GatedDeltaNet])
+        self.assertIsInstance(varlen_masks[GatedDeltaNet], VarlenAttentionMetadata)
         torch.testing.assert_close(
-            varlen_masks["deltanet"].cu_seq_q,
+            varlen_masks[GatedDeltaNet].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
@@ -480,14 +494,12 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         ]
         deltanet_only_model = deltanet_only_config.build()
         deltanet_only_masks = deltanet_only_model.get_attention_masks(positions)
-        self.assertEqual(
-            set(deltanet_only_masks.keys()),
-            {"quadratic_attention", "deltanet"},
+        self.assertEqual(set(deltanet_only_masks.keys()), {GatedDeltaNet})
+        self.assertIsInstance(
+            deltanet_only_masks[GatedDeltaNet], VarlenAttentionMetadata
         )
-        self.assertIsNone(deltanet_only_masks["quadratic_attention"])
-        self.assertIsInstance(deltanet_only_masks["deltanet"], VarlenMetadata)
         torch.testing.assert_close(
-            deltanet_only_masks["deltanet"].cu_seq_q,
+            deltanet_only_masks[GatedDeltaNet].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 

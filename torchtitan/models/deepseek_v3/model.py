@@ -15,9 +15,10 @@ from torch import nn
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
     BaseAttention,
+    FlexAttentionMetadata,
     FlexInnerAttention,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -116,7 +117,7 @@ class Attention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_masks: FlexAttentionMetadata | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ):
         x = self._gather_tp_input(x)
@@ -202,7 +203,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_masks: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,

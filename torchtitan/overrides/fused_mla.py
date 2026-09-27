@@ -76,7 +76,10 @@ import triton
 import triton.language as tl
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import (
+    FlexAttentionMetadata,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -963,7 +966,7 @@ class FusedMLAAttention(Attention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_masks: FlexAttentionMetadata | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not x.is_cuda:
