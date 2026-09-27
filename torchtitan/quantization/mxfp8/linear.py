@@ -204,6 +204,10 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         ctx.requires_wgrad = requires_wgrad
         ctx.input_activation_format_for_backward = input_activation_format_for_backward
         ctx.has_bias = bias_N is not None
+        # The WGRAD GEMM yields a 2D [num_linears * N, K], but the returned
+        # gradient must match the parameter, which is [num_linears, N, K] for a
+        # stacked weight. Backward may hold only the flattened quantized
+        # operands, so record the shape.
         ctx.weight_shape = weight.shape
         # Produce WGRAD directly in the parameter's gradient dtype so
         # AccumulateGrad needs no cast. FSDP will set the unsharded parameter's
@@ -415,6 +419,11 @@ class MXFP8Linear(Linear):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
+        # The autograd function takes the parameter itself rather than
+        # ``weight``, its flattened view, so a stacked parameter's gradient
+        # reaches AccumulateGrad without the view's backward casting it. Always
+        # a plain tensor: spmd_types carries TP and EP as annotations instead
+        # of wrapping the weight as a model-parallel DTensor.
         physical_weight = self.weight
         local_out_features = physical_weight.shape[-2]
         if local_out_features % _MXFP8_BLOCK_SIZE:
@@ -424,12 +433,6 @@ class MXFP8Linear(Linear):
                 "Linear out_features or TP degree so quantization blocks do "
                 "not span projection boundaries."
             )
-        # The autograd function takes the parameter itself rather than
-        # ``weight``, its flattened view, so a stacked parameter's gradient
-        # reaches AccumulateGrad without the view's backward casting it. Always
-        # a plain tensor: spmd_types carries TP and EP as annotations instead
-        # of wrapping the weight as a model-parallel DTensor.
-        del weight
         # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
         # not what forward usually sees. Under FSDP the post-all-gather hook has
         # already replaced it for this unshard lifetime with the storage-free
@@ -466,6 +469,8 @@ class MXFP8Linear(Linear):
         # Dynamo sets is_compiling; GraphTrainer's make_fx tracer does not, so
         # ask the proxy mode as well. A traced backward cannot represent this
         # read-and-clear of parameter.grad, so it uses an ordinary WGRAD.
+        # TODO(anijain2305): add a GraphTrainer graph pass that rewrites the
+        # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
         is_tracing = torch.compiler.is_compiling() or get_proxy_mode() is not None
         output = _MXFP8LinearFunction.apply(
             input,
