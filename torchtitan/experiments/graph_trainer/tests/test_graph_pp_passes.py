@@ -23,7 +23,7 @@ from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import DebugConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,

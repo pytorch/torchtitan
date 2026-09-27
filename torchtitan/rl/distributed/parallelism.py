@@ -8,7 +8,7 @@
 
 from dataclasses import dataclass
 
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 
 
 @dataclass(kw_only=True, slots=True)

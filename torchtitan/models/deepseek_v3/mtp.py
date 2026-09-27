@@ -16,7 +16,7 @@ from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
 from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
-from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
+from torchtitan.config.configs.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (

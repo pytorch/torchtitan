@@ -13,7 +13,7 @@ from typing import Any, ClassVar, Self, TYPE_CHECKING
 import torch
 
 from torchtitan.config import CompileConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 from .module import Module

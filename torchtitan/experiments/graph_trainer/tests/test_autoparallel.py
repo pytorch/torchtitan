@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from torchtitan.config import TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
 

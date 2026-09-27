@@ -24,12 +24,12 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
 )
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
-from torchtitan.config.comm import CommConfig
-from torchtitan.config.compile import CompileConfig
-from torchtitan.config.debug import DebugConfig
+from torchtitan.config.configs.comm import CommConfig
+from torchtitan.config.configs.compile import CompileConfig
+from torchtitan.config.configs.debug import DebugConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
+from torchtitan.config.configs.training import TrainingConfig
 from torchtitan.config.override import OverrideConfig
-from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.training import TrainingConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
