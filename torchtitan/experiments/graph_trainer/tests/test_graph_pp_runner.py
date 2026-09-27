@@ -26,7 +26,7 @@ from torch.distributed.pipelining.schedules import (
     UNSHARD,
 )
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )

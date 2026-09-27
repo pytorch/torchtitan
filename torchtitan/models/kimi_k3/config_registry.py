@@ -17,7 +17,8 @@ from torchtitan.components.optimizer import (
     ParamGroupConfig,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.distributed.flex_shard import (
     BlockShard,

@@ -12,9 +12,9 @@ from typing import Any, cast
 import spmd_types as spmd
 import torch
 from torch import nn
-from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
@@ -31,6 +31,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
+    HybridAttentionMetadata,
     local_head_split,
     VarlenInnerAttention,
     VarlenMetadata,
@@ -58,8 +59,6 @@ from .kda import KDA
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
-
-KimiK3AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels, H = heads,
@@ -262,7 +261,7 @@ class KimiK3TransformerBlock(Module):
         self,
         x_TD: torch.Tensor,
         block_residual_TND: torch.Tensor,
-        attention_masks: KimiK3AttentionMaskDict | None = None,
+        attention_masks: HybridAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -435,7 +434,7 @@ class KimiK3Model(MultimodalModel):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
@@ -445,15 +444,14 @@ class KimiK3Model(MultimodalModel):
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks and annotate K3 multimodal inputs."""
         del kwargs
-        batch: dict[str, Any] = dict(input_dict)
-        positions = batch.get("positions")
-        padding_mask = batch.get("padding_mask", None)
+        positions = input_dict.get("positions")
+        padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                batch["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
@@ -461,17 +459,19 @@ class KimiK3Model(MultimodalModel):
                 )
 
         input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
-        attention_masks = batch.get("attention_masks")
+        input_dict = annotate_input_spmd_types(
+            parallel_dims, input_dict, input_sharding
+        )
+        attention_masks = input_dict.get("attention_masks")
         if attention_masks is not None:
             kda_metadata = attention_masks.get("kda")
             if isinstance(kda_metadata, VarlenMetadata):
                 with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
                     kda_metadata.annotate_spmd_types()
 
-        inputs = batch.pop("input")
-        labels = batch.pop("labels")
-        return inputs, labels, batch
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        return inputs, labels, input_dict
 
     def get_attention_masks(
         self,
@@ -480,7 +480,7 @@ class KimiK3Model(MultimodalModel):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> KimiK3AttentionMaskDict:
+    ) -> HybridAttentionMetadata:
         attn_config = self.config.first_attention
 
         kda_metadata = create_varlen_metadata_for_document(
@@ -571,7 +571,7 @@ class KimiK3Model(MultimodalModel):
         grid_thw_videos: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
-        attention_masks: KimiK3AttentionMaskDict | None = None,
+        attention_masks: HybridAttentionMetadata | None = None,
         padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if pixel_values_videos is not None or grid_thw_videos is not None:

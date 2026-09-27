@@ -12,7 +12,8 @@ from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 from .module import Module
@@ -49,7 +50,7 @@ class BaseModel(Module, ABC):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,

@@ -10,7 +10,8 @@ from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     Float8GroupedLinearConverter,

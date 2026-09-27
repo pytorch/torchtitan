@@ -27,12 +27,8 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
-from torchtitan.config import (
-    CompileConfig,
-    ParallelismConfig,
-    TORCH_DTYPE_MAP,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.models.common.decoder import Decoder
@@ -692,11 +688,6 @@ def _build_decoder_stage_io(
 ) -> _DecoderStageIO:
     """Build static metadata for tensors crossing decoder stage boundaries."""
     cp_shards = parallel_dims.cp
-    if (
-        parallel_dims.cp > 1
-        and parallelism.context_parallel_load_balancer == "headtail"
-    ):
-        cp_shards *= 2
     num_tokens, cp_remainder = divmod(
         training.num_tokens_per_microbatch_per_dp_rank, cp_shards
     )

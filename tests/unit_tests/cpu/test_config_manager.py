@@ -15,13 +15,8 @@ from unittest import mock
 import pytest
 import tyro
 from torchtitan.components.validate import Validator
-from torchtitan.config import (
-    CompileConfig,
-    ConfigManager,
-    DebugConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ConfigManager, DebugConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )
@@ -647,10 +642,10 @@ class TestConfigManager(unittest.TestCase):
         )
         assert type(config.model).__qualname__ == "FluxModel.Config"
         assert hasattr(config, "encoder")
-        assert config.parallelism.context_parallel_load_balancer == "headtail"
+        assert config.parallelism.context_parallel_load_balancer is None
 
     def test_default_context_parallel_load_balancer(self):
-        assert ParallelismConfig().context_parallel_load_balancer == "headtail"
+        assert ParallelismConfig().context_parallel_load_balancer is None
 
     def test_deepseek_config(self):
         """Test that --module deepseek_v3 --config deepseek_v3_debugmodel works."""
