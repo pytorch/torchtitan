@@ -30,6 +30,7 @@ from torchtitan.components.optimizer import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import CompileConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import LMHeadFp32OutputConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.muse_glimmer import model_registry as muse_glimmer_model_registry
@@ -85,7 +86,12 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
     data; see ``README.md``.
     """
     seq_len = 4096
-    model_config = model_registry("1.7B", seq_len=seq_len, attn_backend="varlen")
+    model_config = model_registry(
+        "1.7B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFp32OutputConverter.Config()],
+    )
     return Controller.Config(
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-1.7B",
@@ -163,6 +169,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
         "8B",
         seq_len=config.trainer.training.max_context_length,
         attn_backend="varlen",
+        converters=[LMHeadFp32OutputConverter.Config()],
     )
     config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3-8B"
     loss_config = config.trainer.loss
@@ -212,6 +219,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         seq_len=seq_len,
         attn_backend="varlen",
         moe_comm_backend="deepep",
+        converters=[LMHeadFp32OutputConverter.Config()],
     )
 
     # Same opt-in throughput overrides as rl_grpo_qwen3_30b_a3b_varlen_perf, applied

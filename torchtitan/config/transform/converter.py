@@ -38,18 +38,19 @@ def validate_converter_compatibility(
     converters: list[ModelConfigConverter.Config],
 ) -> None:
     """Validate converter compatibility before model conversion."""
-    from .cast_linear import LMHeadCastConverter
+    from .lm_head_fp32 import LMHeadFp32OutputConverter
     from .quantization import QuantizationConverter
 
     has_quantization = any(
         isinstance(converter, QuantizationConverter.Config) for converter in converters
     )
-    has_lm_head_cast = any(
-        isinstance(converter, LMHeadCastConverter.Config) for converter in converters
+    has_lm_head_fp32 = any(
+        isinstance(converter, LMHeadFp32OutputConverter.Config)
+        for converter in converters
     )
-    # TODO: Allow this combination once linear quantization and CastLinear can
+    # TODO: Allow this combination once linear quantization and Fp32OutputLinear can
     # preserve each other's config and compute semantics.
-    if has_quantization and has_lm_head_cast:
+    if has_quantization and has_lm_head_fp32:
         raise ValueError(
-            "QuantizationConverter and LMHeadCastConverter cannot be combined."
+            "QuantizationConverter and LMHeadFp32OutputConverter cannot be combined."
         )

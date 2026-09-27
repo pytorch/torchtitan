@@ -28,9 +28,9 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    Fp32OutputLinear,
     GroupedLinear,
     Linear,
-    RouterGateLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import (
@@ -352,7 +352,7 @@ def make_router_config(
     """Build a fully-specified TokenChoiceTopKRouter.Config."""
     return TokenChoiceTopKRouter.Config(
         num_experts=num_experts,
-        gate=RouterGateLinear.Config(
+        gate=Fp32OutputLinear.Config(
             in_features=dim,
             out_features=num_experts,
             bias=bias,

@@ -10,9 +10,9 @@ from .apply import apply_transforms, transform_model_config_
 from .async_tensor_parallel import AsyncTensorParallelTransform
 from .base import convert_config_type, ModelConfigTransform
 from .batch_invariance import BatchInvariantFlexConverter
-from .cast_linear import LMHeadCastConverter
 from .context_parallel import ContextParallelTransform
 from .converter import ModelConfigConverter, validate_converter_compatibility
+from .lm_head_fp32 import LMHeadFp32OutputConverter
 from .lora import GroupedLinearLoRAHandler, LinearLoRAHandler, LoRATransform
 from .quantization import (
     Float8GroupedLinearConverter,
@@ -32,7 +32,7 @@ __all__ = [
     "convert_config_type",
     "ContextParallelTransform",
     "BatchInvariantFlexConverter",
-    "LMHeadCastConverter",
+    "LMHeadFp32OutputConverter",
     "GroupedLinearLoRAHandler",
     "LinearLoRAHandler",
     "LoRATransform",

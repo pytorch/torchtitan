@@ -22,13 +22,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
-from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
+from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.protocols.module import Module
 
-# Shape suffix legend for the router gate:
-#   T = num tokens, D = model dimension, E = num experts
+# Shape suffix legend:
+#   T = num tokens, D = model dimension, O = output features
 
 
 class Linear(nn.Linear, Module):
@@ -118,37 +118,6 @@ class Linear(nn.Linear, Module):
         before invoking the selected local compute implementation.
         """
         return F.linear(input, weight, bias)
-
-
-class CastLinear(Linear):
-    """``Linear`` whose forward matmul runs in ``compute_dtype``.
-
-    Inputs, weight, and bias are cast to ``compute_dtype`` before
-    ``F.linear`` and the output is returned in that dtype. The stored
-    parameters retain their original dtype, including under weight tying.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        compute_dtype: str = "float32"
-        """Dtype for the forward matmul (key into ``TORCH_DTYPE_MAP``)."""
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.compute_dtype = TORCH_DTYPE_MAP[config.compute_dtype]
-
-    def _linear(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        bias: torch.Tensor | None,
-    ) -> torch.Tensor:
-        # The optimizer updates the weight each step, so training cannot cache
-        # the upcast copy. Inference may be able to cache it between syncs.
-        bias = None if bias is None else bias.to(self.compute_dtype)
-        return F.linear(
-            input.to(self.compute_dtype), weight.to(self.compute_dtype), bias
-        )
 
 
 class ColumnParallelLinear(Linear):
@@ -306,64 +275,16 @@ class GroupedLinear(Module):
         )
 
 
-@spmd.register_local_autograd_function
-class _RouterGateLinearFunction(torch.autograd.Function):
-    """Router projection with FP32 output and backward GEMMs."""
+class Fp32OutputLinear(Linear):
+    """``Linear`` with close to fp32 precision at close to bf16 speed. Useful for layers that need
+    to operate at higher precision, e.g. an LM head or a MoE router gate.
 
-    @staticmethod
-    def forward(  # pyrefly: ignore[bad-override]
-        ctx, input_TD: torch.Tensor, weight_ED: torch.Tensor
-    ) -> torch.Tensor:
-        use_cuda_bf16_forward = (
-            input_TD.device.type == "cuda"
-            and input_TD.dtype is torch.bfloat16
-            and weight_ED.dtype is torch.bfloat16
-        )
-        if use_cuda_bf16_forward:
-            input_forward_TD = input_TD
-            weight_forward_ED = weight_ED
-            # CUDA supports BF16 matmul with FP32 accumulation and output via
-            # out_dtype. The portable path below promotes the operands because
-            # this mixed input/output dtype is not supported by all devices.
-            output_TE = torch.mm(
-                input_forward_TD, weight_forward_ED.T, out_dtype=torch.float32
-            )
-        else:
-            input_forward_TD = input_TD.float()
-            weight_forward_ED = weight_ED.float()
-            output_TE = torch.mm(input_forward_TD, weight_forward_ED.T)
+    Forward: bf16 input and weight, a bf16 GEMM that accumulates in fp32, fp32 output.
+    Backward: approximates an fp32 backward with bf16 GEMMs.
 
-        ctx.save_for_backward(input_forward_TD, weight_forward_ED)
-        ctx.input_dtype = input_TD.dtype
-        ctx.weight_dtype = weight_ED.dtype
-        return output_TE
-
-    @staticmethod
-    @once_differentiable
-    def backward(ctx, grad_output_TE: torch.Tensor):  # pyrefly: ignore[bad-override]
-        input_forward_TD, weight_forward_ED = ctx.saved_tensors
-        grad_output_fp32_TE = grad_output_TE.float()
-
-        grad_input_TD = None
-        if ctx.needs_input_grad[0]:
-            grad_input_TD = torch.mm(grad_output_fp32_TE, weight_forward_ED.float()).to(
-                ctx.input_dtype
-            )
-
-        grad_weight_ED = None
-        if ctx.needs_input_grad[1]:
-            grad_weight_ED = torch.mm(
-                grad_output_fp32_TE.T, input_forward_TD.float()
-            ).to(ctx.weight_dtype)
-
-        return grad_input_TD, grad_weight_ED
-
-
-class RouterGateLinear(Linear):
-    """Router projection with FP32 output and backward compute.
-
-    CUDA uses BF16 forward compute when both operands are BF16. All other
-    forward paths use FP32 compute.
+    Falls back to slower fp32 matmuls when off CUDA, with non-bf16 operands, or in batch-invariant
+    mode.
+    Accuracy and timings: https://github.com/felipemello1/torchtitan/pull/55
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -376,17 +297,177 @@ class RouterGateLinear(Linear):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        output_TE = _RouterGateLinearFunction.apply(input, weight)
-        if bias is not None:
-            output_TE = output_TE + bias.float()
-        return output_TE
+        output = _Fp32OutputLinearFunction.apply(
+            input.reshape(-1, input.shape[-1]), weight
+        )
+        output = output.reshape(*input.shape[:-1], -1)
+        return output if bias is None else output + bias.float()
+
+
+@spmd.register_local_autograd_function
+class _Fp32OutputLinearFunction(torch.autograd.Function):
+    """Linear op with close to fp32 precision at close to bf16 speed. Useful for layers that need
+    to operate at higher precision, e.g. an LM head or a MoE router gate.
+
+    Forward: bf16 input and weight, a bf16 GEMM that accumulates in fp32, fp32 output.
+    Backward: approximates an fp32 backward with bf16 GEMMs; see ``backward``.
+
+    Falls back to slower fp32 matmuls when off CUDA, with non-bf16 operands, or in batch-invariant
+    mode.
+    Accuracy and timings: https://github.com/felipemello1/torchtitan/pull/55
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, input_TD: torch.Tensor, weight_OD: torch.Tensor
+    ) -> torch.Tensor:
+        """``output = input @ weight.T``: a bf16 GEMM that accumulates in fp32 and returns fp32.
+
+        ``torch.mm(..., out_dtype=torch.float32)`` has no autograd formula ("derivative for
+        aten::mm is not implemented"), hence this Function:
+
+            input (bf16) --+
+                           +--> bf16 GEMM, fp32 accumulate --> output (fp32)
+            weight (bf16) -+
+
+        The product of two bf16 numbers is exact in fp32, so upcasting input and weight first
+        would add no precision, only an fp32 copy of the weight. Accumulating in fp32 is enough.
+        """
+        ctx.use_bf16_gemm = (
+            # aten::mm.dtype (bf16 inputs, fp32 output) is only implemented for CUDA/ROCm.
+            input_TD.is_cuda
+            and input_TD.dtype == weight_OD.dtype == torch.bfloat16
+            # TODO: batch-invariant mode can't use this op (cuBLAS's out_dtype GEMM isn't
+            # batch-invariant), so it takes the slow fallback. A bf16-input, fp32-output matmul
+            # in batch_invariant_ops would let it take the optimized path.
+            and not is_in_batch_invariant_mode()
+        )
+        ctx.save_for_backward(input_TD, weight_OD)
+        if ctx.use_bf16_gemm:
+            return torch.mm(input_TD, weight_OD.T, out_dtype=torch.float32)
+        # Slow fallback: upcast the input and weight to fp32.
+        return torch.mm(input_TD.float(), weight_OD.float().T)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_output_TO: torch.Tensor):  # pyrefly: ignore[bad-override]
+        """``grad_input = grad_output @ weight``, ``grad_weight = grad_output.T @ input``.
+
+        Uses only bf16 GEMMs, yet the gradients come out close to an fp32 backward's, at ~2x the
+        cost of a plain bf16 backward.
+
+        The problem: grad_output is fp32 (the output was fp32), but fast GEMMs run on bf16 inputs
+        (bf16 tensor cores), and bf16 keeps only the top 16 bits of an fp32:
+
+            fp32:  [sign | exponent (8 bits) | mantissa (23 bits)]   24 significant bits
+            bf16:  [sign | exponent (8 bits) | mantissa  (7 bits)]    8 significant bits
+
+        We have:
+            grad_output: fp32
+            weight:      bf16
+            input:       bf16
+
+        We want, accumulated in fp32 and rounded once to bf16 (the operands' dtype):
+            grad_input  = grad_output @ weight
+            grad_weight = grad_output.T @ input
+
+        Ways to do it:
+        - Naive: round grad_output to bf16, then bf16 GEMMs. Fast, but drops 16 bits.
+        - fp32 matmul: cast weight and input to fp32. Precise, but slow. On H100 it runs on CUDA
+          cores (~15x lower peak throughput than bf16 tensor cores). On Blackwell, TorchTitan
+          uses cuBLAS's BF16x9 emulation: each fp32 operand is split into 3 bf16 pieces
+          (3 x 8 = 24 bits), and all 3 x 3 = 9 piece pairs are multiplied.
+        - hi + lo (this): input and weight are already exactly bf16 (a single piece), so only
+          grad_output is split, into 2 bf16 pieces: 1 x 2 = 2 GEMMs. 2 pieces keep 16 bits, far
+          more than survive the final rounding of the gradients to bf16, so a third piece isn't
+          needed. It only uses bf16 GEMMs, so it isn't Blackwell-specific.
+
+            round grad_output to bf16   1 GEMM    fast, loses precision
+            fp32 matmul (BF16x9)        9 GEMMs   precise, ~9x the cost
+            hi + lo (this)              2 GEMMs   precise, ~2x the cost
+
+            grad_output = hi + lo   hi = top 16 bits (exactly a bf16), lo = bf16(grad_output - hi)
+            0.1 = 0.099609375 + 0.000391006     off by 4e-7 (bf16(0.1) alone: off by 1e-4)
+
+            grad_input  = hi @ weight  + lo @ weight
+            grad_weight = hi.T @ input + lo.T @ input
+
+        Written out, that is 4 GEMM calls. Stacking hi and lo into one operand makes it one call
+        per gradient, so the large tensor is read once. The stacking direction is picked so the
+        tensor that gets duplicated (or the output that gets added) is the small one:
+
+            out_features > tokens (e.g. an LM head):
+                grad_input:   [hi; lo] @ W          -> [hi @ W; lo @ W], then add the halves
+                grad_weight:  [hi; lo].T @ [x; x]   =  hi.T @ x + lo.T @ x   (summed in the GEMM)
+            out_features <= tokens (e.g. a router):
+                grad_input:   [hi | lo] @ [W; W]    =  hi @ W + lo @ W       (summed in the GEMM)
+                grad_weight:  hi.T @ x + lo.T @ x                            (two small GEMMs)
+        """
+        input_TD, weight_OD = ctx.saved_tensors
+        # Usually a no-op (the output is fp32); autocast can make the fallback's output bf16.
+        grad_output_TO = grad_output_TO.float()
+        grad_input_TD = grad_weight_OD = None
+
+        if not ctx.use_bf16_gemm:
+            # Slow fallback: fp32 matmuls, gradients returned in each operand's dtype.
+            if ctx.needs_input_grad[0]:
+                grad_input_TD = torch.mm(grad_output_TO, weight_OD.float())
+                grad_input_TD = grad_input_TD.to(input_TD.dtype)
+            if ctx.needs_input_grad[1]:
+                grad_weight_OD = torch.mm(grad_output_TO.T, input_TD.float())
+                grad_weight_OD = grad_weight_OD.to(weight_OD.dtype)
+            return grad_input_TD, grad_weight_OD
+
+        hi_TO, lo_TO = _split_into_bf16_hi_lo(grad_output_TO)
+        num_tokens, out_features = hi_TO.shape
+
+        if out_features > num_tokens:
+            # Wide output (e.g. an LM head): stack [hi; lo] along T; only T-sized tensors grow.
+            stacked_2TO = torch.cat([hi_TO, lo_TO])
+            if ctx.needs_input_grad[0]:
+                # [hi; lo] @ W = [hi @ W; lo @ W]: add the two halves.
+                halves_2TD = torch.mm(stacked_2TO, weight_OD, out_dtype=torch.float32)
+                grad_input_TD = halves_2TD[:num_tokens] + halves_2TD[num_tokens:]
+                grad_input_TD = grad_input_TD.to(input_TD.dtype)
+            if ctx.needs_input_grad[1]:
+                # [hi; lo].T @ [x; x] = hi.T @ x + lo.T @ x, summed in the GEMM.
+                grad_weight_OD = torch.mm(
+                    stacked_2TO.T, torch.cat([input_TD, input_TD])
+                )
+        else:
+            # Narrow output (e.g. a router): stack [hi | lo] along O; only the small weight grows.
+            if ctx.needs_input_grad[0]:
+                # [hi | lo] @ [W; W] = hi @ W + lo @ W, summed in the GEMM.
+                grad_input_TD = torch.mm(
+                    torch.cat([hi_TO, lo_TO], dim=1), torch.cat([weight_OD, weight_OD])
+                )
+            if ctx.needs_input_grad[1]:
+                # Two GEMMs with small [O, D] fp32 outputs.
+                grad_weight_OD = torch.mm(hi_TO.T, input_TD, out_dtype=torch.float32)
+                grad_weight_OD += torch.mm(lo_TO.T, input_TD, out_dtype=torch.float32)
+                grad_weight_OD = grad_weight_OD.to(weight_OD.dtype)
+
+        return grad_input_TD, grad_weight_OD
+
+
+# The fp32 bits that bf16 keeps: sign, exponent and the top 7 mantissa bits (0xFFFF0000).
+_BF16_BITS_OF_FP32 = -65536
+
+
+def _split_into_bf16_hi_lo(
+    tensor: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split an fp32 tensor into bf16 ``hi`` and ``lo`` with ``hi + lo`` within 2^-15 of it."""
+    # Clearing the low bits makes hi exactly a bf16 value and tensor - hi exact in fp32. A bit
+    # mask rather than .to(bf16): torch.compile folds a bf16 round trip away, making lo zero.
+    hi = (tensor.view(torch.int32) & _BF16_BITS_OF_FP32).view(torch.float32)
+    return hi.to(torch.bfloat16), (tensor - hi).to(torch.bfloat16)
 
 
 __all__ = [
-    "CastLinear",
     "ColumnParallelLinear",
     "GroupedLinear",
+    "Fp32OutputLinear",
     "Linear",
     "RowParallelLinear",
-    "RouterGateLinear",
 ]
