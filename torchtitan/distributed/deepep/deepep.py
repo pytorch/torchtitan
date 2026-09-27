@@ -36,6 +36,7 @@ ops stay pure communication, and combine works unchanged in both modes (``combin
 ignores ``topk_weights`` in expand mode anyway).
 """
 
+import weakref
 from dataclasses import dataclass
 
 import torch
@@ -59,6 +60,9 @@ _buffer: ElasticBuffer | None = None
 # The torch.library custom ops can only pass tensors across the op boundary, so we
 # smuggle the opaque EPHandle through a CPU int64 handle_id tensor + this cache.
 # SAC saves the handle_id tensor; we use it to retrieve the non-tensor handle.
+# Combine removes the entry it uses. If a dispatch never reaches its combine (FullAC's recompute
+# replays dispatch but stops early, before combine), a finalizer in _dispatch_op_impl removes it.
+# TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
 _handle_cache: dict = {}
 _handle_counter: int = 0
 
@@ -127,7 +131,10 @@ def _resolve_dispatch_num_sms(buffer, num_experts: int, num_topk: int) -> int:
         return min(_DEEPEP_MULTINODE_NUM_SMS, num_device_sms)
 
 
+# torch.compile graph-breaks on this op (it has no fake impl) and would otherwise trace this
+# kernel as a regular frame, which fails on weakref.finalize below.
 @torch.library.impl(_lib, "dispatch", "CUDA")
+@torch.compiler.disable
 def _dispatch_op_impl(
     x: torch.Tensor,
     topk_idx: torch.Tensor,
@@ -173,7 +180,11 @@ def _dispatch_op_impl(
     )
 
     handle_id = _get_next_handle_id()
-    _handle_cache[handle_id.item()] = handle
+    handle_key = handle_id.item()
+    _handle_cache[handle_key] = handle
+    # weakref.finalize(obj, fn) calls fn() once obj is garbage-collected.
+    # FullAC's recompute replays dispatch but stops before combine; this frees that handle.
+    weakref.finalize(handle_id, lambda: _handle_cache.pop(handle_key, None))
 
     # Per-local-expert received-token counts for the grouped GEMM.
     if cuda_graph_compatible:
