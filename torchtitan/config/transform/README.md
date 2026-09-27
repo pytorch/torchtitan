@@ -39,6 +39,15 @@ config = apply_transforms(
 Without a TP mesh, the synchronous projection classes behave as ordinary
 linear modules.
 
+The async TP transform matches projection owner classes exactly. It converts
+`ColumnParallelLinear` and `RowParallelLinear`, but leaves arbitrary subclasses
+unchanged because replacing one with an async base class would discard its
+specialized forward behavior. `SharedExpertRowParallelLinear` is an explicit
+exception: async TP requires sequence parallelism, and in that mode its
+reduction is identical to `RowParallelLinear`, so it is safely converted to
+`AsyncRowParallelLinear`. With sequence parallelism disabled, constructing the
+async TP transform is an error before any conversion occurs.
+
 `apply_transforms` deep-copies the trainer config. It orders and applies the
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.

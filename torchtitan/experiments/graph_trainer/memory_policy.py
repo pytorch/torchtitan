@@ -9,8 +9,8 @@ Memory policy passes for graph_trainer.
 
 Selective activation checkpointing (SAC) tagging and memory policy dispatch.
 Each saved forward activation can independently be tagged as MUST_SAVE,
-MUST_RECOMPUTE, or MUST_CPU_OFFLOAD.  The ``tag_with_memory_policy_pass``
-entry point selects a tagging strategy via ``--compile.memory_policy``.
+MUST_RECOMPUTE, or MUST_CPU_OFFLOAD. The ``tag_with_memory_policy_pass`` entry
+point selects a tagging strategy with ``compile.memory_policy``.
 """
 
 from __future__ import annotations
@@ -108,12 +108,12 @@ def _resolve_op_target(op_name: str) -> object:
             target = getattr(target, component)
     except AttributeError as exc:
         raise ValueError(
-            f"Unknown op in --compile.full_recompute_save_ops: {op_name!r}"
+            f"Unknown op in compile.full_recompute_save_ops: {op_name!r}"
         ) from exc
 
     if not isinstance(target, (torch._ops.OpOverload, torch._ops.HigherOrderOperator)):
         raise ValueError(
-            "Ops in --compile.full_recompute_save_ops must name a specific "
+            "Ops in compile.full_recompute_save_ops must name a specific "
             f"overload or higher-order op, got {op_name!r}"
         )
     return target
@@ -131,7 +131,7 @@ def _parse_full_recompute_save_ops(
         parts = raw_selector.split("::")
         if len(parts) != 2 or not all(part.strip() for part in parts):
             raise ValueError(
-                "Invalid --compile.full_recompute_save_ops selector "
+                "Invalid compile.full_recompute_save_ops selector "
                 f"{raw_selector.strip()!r}; expected 'MODULE_FQN_PATTERN::OP'"
             )
         module_fqn_pattern, op_name = (part.strip() for part in parts)
@@ -148,7 +148,7 @@ def validate_memory_policy_config(
         and compile_config.memory_policy != "full"
     ):
         raise ValueError(
-            "--compile.full_recompute_save_ops requires --compile.memory_policy full"
+            "compile.full_recompute_save_ops requires compile.memory_policy='full'"
         )
     _parse_full_recompute_save_ops(compile_config.full_recompute_save_ops)
 

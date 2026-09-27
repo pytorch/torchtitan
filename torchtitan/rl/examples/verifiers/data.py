@@ -10,10 +10,9 @@ import importlib
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Any
 
 import grain.python as grain
-import tyro
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.utils.loaders import load_taskset
 
@@ -49,7 +48,7 @@ class VerifiersTaskDataset(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        verifiers_taskset: Annotated[VerifiersTasksetConfig, tyro.conf.Suppress]
+        verifiers_taskset: VerifiersTasksetConfig
         """Typed configuration for the Verifiers taskset to load."""
 
         num_tasks: int | None = None

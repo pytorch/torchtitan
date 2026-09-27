@@ -4,15 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import logging
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Annotated, Any
+from typing import Any
 
 import torch
-import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
@@ -143,9 +143,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
 class FaultTolerantTrainer(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
-        checkpointer: Annotated[
-            TorchFTCheckpointManager.Config | None, tyro.conf.AvoidSubcommands
-        ] = None
+        checkpointer: TorchFTCheckpointManager.Config | None = None
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
     engine: FaultTolerantTrainingEngine
@@ -153,11 +151,12 @@ class FaultTolerantTrainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_config = config.model
-        model_config.update_from_config(config=config)
+        model_config = copy.deepcopy(config.model)
+        model_config.set_sharding_(config.parallelism)
+        config.model = model_config
         if config.override.imports:
             apply_overrides(config.override, config)
-        config.__post_init__()
+        model_config = config.model
 
         self.engine = FaultTolerantTrainingEngine(
             config,

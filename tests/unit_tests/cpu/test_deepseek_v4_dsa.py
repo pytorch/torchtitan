@@ -14,7 +14,7 @@ import torch
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.models.deepseek_v4 import config_registry, model_registry
+from torchtitan.models.deepseek_v4 import config_registry
 from torchtitan.models.deepseek_v4.compressor import Indexer
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 
@@ -119,7 +119,9 @@ class TestDSVPackedDocuments(unittest.TestCase):
     def test_preprocess_inputs_rejects_position_resets(self):
         # The shared decoder hook skips get_attention_masks for non-Flex cores.
         with torch.device("meta"):
-            model = model_registry("debugmodel", enable_sp=False).build()
+            config = config_registry.deepseek_v4_debugmodel(seq_len=128)
+            config.model.set_sharding_(config.parallelism)
+            model = config.model.build()
         input_dict = {
             "input": torch.zeros(128, dtype=torch.long),
             "labels": torch.zeros(128, dtype=torch.long),

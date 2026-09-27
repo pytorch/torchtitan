@@ -136,8 +136,6 @@ def _build_qwen3_moe_layers(
     num_experts: int,
     top_k: int,
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3 models."""
@@ -177,8 +175,6 @@ def _build_qwen3_moe_layers(
                         num_experts=num_experts,
                         top_k=top_k,
                         param_init=experts_init,
-                        comm_backend=moe_comm_backend,
-                        non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
                 ),
             )
@@ -448,7 +444,6 @@ def _32b(attn_backend: str, *, seq_len: int) -> Qwen3Model.Config:
 
 def _debugmodel_moe(
     attn_backend: str,
-    moe_comm_backend: str = "standard",
     *,
     seq_len: int,
 ) -> Qwen3Model.Config:
@@ -484,14 +479,12 @@ def _debugmodel_moe(
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
-            moe_comm_backend=moe_comm_backend,
         ),
     )
 
 
 def _30b_a3b(
     attn_backend: str,
-    moe_comm_backend: str = "standard",
     *,
     seq_len: int,
 ) -> Qwen3Model.Config:
@@ -527,14 +520,12 @@ def _30b_a3b(
                 max_context_length=seq_len,
                 theta=1000000.0,
             ),
-            moe_comm_backend=moe_comm_backend,
         ),
     )
 
 
 def _235b_a22b(
     attn_backend: str,
-    moe_comm_backend: str = "standard",
     *,
     seq_len: int,
 ) -> Qwen3Model.Config:
@@ -570,7 +561,6 @@ def _235b_a22b(
                 max_context_length=seq_len,
                 theta=5000000.0,
             ),
-            moe_comm_backend=moe_comm_backend,
         ),
     )
 
@@ -594,7 +584,6 @@ def model_registry(
     *,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen3Model.Config:
     get_config, max_context_len = qwen3_configs[flavor]
@@ -607,9 +596,6 @@ def model_registry(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
-        **{"moe_comm_backend": moe_comm_backend}
-        if moe_comm_backend is not None
-        else {},
     )
     if converters is not None:
         validate_converter_compatibility(converters)

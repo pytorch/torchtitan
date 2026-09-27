@@ -31,7 +31,9 @@ def _gpt_oss_debugmodel(
     attn_backend: str = "varlen",
 ) -> Trainer.Config:
     model_config = model_registry(
-        "debugmodel", seq_len=seq_len, attn_backend=attn_backend
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -80,7 +82,10 @@ def gpt_oss_debugmodel(
 def gpt_oss_debugmodel_flex(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    return _gpt_oss_debugmodel(seq_len=seq_len, attn_backend="flex")
+    return _gpt_oss_debugmodel(
+        seq_len=seq_len,
+        attn_backend="flex",
+    )
 
 
 def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:

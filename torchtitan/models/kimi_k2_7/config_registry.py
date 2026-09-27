@@ -92,8 +92,11 @@ def _kimi_multimodal_dataloader(
 def kimi_k2_5_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = model_registry("debugmodel", enable_sp=True, seq_len=seq_len)
     parallelism = ParallelismConfig()
+    model_config = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+    )
     return _KimiTrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -134,7 +137,9 @@ def kimi_k2_5_debugmodel(
 def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
     """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
     model_config = model_registry(
-        "moonlight-16B-A3B", enable_sp=True, seq_len=seq_len, attn_backend="flex"
+        "moonlight-16B-A3B",
+        seq_len=seq_len,
+        attn_backend="flex",
     )
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
@@ -179,7 +184,9 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
 def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
     """Kimi-VL A3B: Moonlight text tower + 2D MoonViT vision (image-text)."""
     model_config = model_registry(
-        "Kimi-VL-A3B", enable_sp=True, seq_len=seq_len, attn_backend="flex"
+        "Kimi-VL-A3B",
+        seq_len=seq_len,
+        attn_backend="flex",
     )
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
@@ -231,7 +238,9 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     compile_config = CompileConfig(components=["loss"])
     # The report uses BF16 compute; its FP8 path only compresses saved activations.
     model_config = model_registry(
-        "Kimi-K2.5", enable_sp=True, seq_len=seq_len, attn_backend="flex"
+        "Kimi-K2.5",
+        seq_len=seq_len,
+        attn_backend="flex",
     )
     parallelism = ParallelismConfig(
         pipeline_parallel_schedule="Interleaved1F1B",
@@ -478,13 +487,11 @@ def _align_dist_muon_expert_compute_layouts(
 ) -> OptimizersContainer.Config:
     """Align routed-expert layouts with the final parallelism config.
 
-    The registry builds compute layouts from the recipe's declared parallelism,
-    but the CLI can still override ``expert_parallel_degree`` afterwards. That
-    override decides whether routed experts use the 1D ``dp_shard`` layout or
-    the 2D ep/edp_shard layout, so their layouts have to be rebuilt here.
+    Config variants can replace the base recipe's parallelism before invoking
+    ``__post_init__``. That parallelism decides whether routed experts use the
+    1D ``dp_shard`` layout or the 2D ep/edp_shard layout, so their layouts have
+    to be rebuilt here.
     """
-    # TODO: Remove this function once parallelism can no longer be overridden
-    # from the CLI; the registry layouts are then already final.
     dist_muon_index = next(
         (
             index

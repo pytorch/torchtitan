@@ -17,7 +17,9 @@ def model_registry(
     attn_backend: str = "flex",
 ) -> GraphTrainerMuseGlimmerModel.Config:
     base = muse_glimmer_model_registry(
-        flavor, seq_len=seq_len, attn_backend=attn_backend
+        flavor,
+        seq_len=seq_len,
+        attn_backend=attn_backend,
     )
     config = GraphTrainerMuseGlimmerModel.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}

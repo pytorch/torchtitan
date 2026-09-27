@@ -305,7 +305,7 @@ def cuda_graph_pass(
     if not is_cuda_graph_compatible(gm):
         logger.warning(
             "Skipping cuda_graph: graph is not compatible after all preceding "
-            "passes. Use --compile.disable_passes cuda_graph_pass to silence."
+            "passes. Add 'cuda_graph_pass' to compile.disable_passes to silence."
         )
         return gm
 

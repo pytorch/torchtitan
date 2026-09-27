@@ -10,7 +10,14 @@ import logging
 import os
 import subprocess
 
-from tests.integration_tests import OverrideDefinitions
+from tests.integration_tests import (
+    get_importable_config_module,
+    IntegrationTestDefinition,
+)
+
+from torchtitan.experiments.torchft.llama3.config_registry import (
+    llama3_torchft_integration_test,
+)
 
 from torchtitan.observability.logging import init_logger
 
@@ -18,25 +25,17 @@ from torchtitan.observability.logging import init_logger
 logger = logging.getLogger(__name__)
 
 
-def build_ft_test_list() -> list[OverrideDefinitions]:
+def build_ft_test_list() -> list[IntegrationTestDefinition]:
     """
-    key is the config file name and value is a list of OverrideDefinitions
+    key is the config file name and value is a list of IntegrationTestDefinition
     that is used to generate variations of integration tests based on the
     same root config file.
     """
     integration_tests_flavors = [
-        OverrideDefinitions(
-            [
-                [
-                    "--module torchft.llama3 --config llama3_torchft_debugmodel",
-                    "--training.max_context_length 2048",
-                    "--training.num_tokens_per_microbatch_per_dp_rank 16384",
-                    "--training.steps 10",
-                    "",
-                ],
-            ],
-            "Default TorchFT integration test",
-            "default_torchft",
+        IntegrationTestDefinition(
+            configs=[llama3_torchft_integration_test],
+            test_descr="Default TorchFT integration test",
+            test_name="default_torchft",
             ngpu=8,
         )
     ]
@@ -48,10 +47,10 @@ def _run_cmd(cmd):
     return subprocess.run([cmd], text=True, shell=True)
 
 
-def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
+def run_single_test(test_flavor: IntegrationTestDefinition, output_dir: str):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
+    output_dir_arg = f"--output-dir {output_dir}/{test_name}"
 
     # Use all 8 GPUs in a single replica
     # TODO: Use two replica groups
@@ -59,7 +58,7 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
     # Cuda failure 217 'peer access is not supported between these two devices'
     all_ranks = [",".join(map(str, range(0, 8)))]
 
-    for test_idx, override_arg in enumerate(test_flavor.override_args):
+    for test_idx, config_fn in enumerate(test_flavor.configs):
         cmds = []
 
         for replica_id, ranks in enumerate(all_ranks):
@@ -67,13 +66,11 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
                 f'TORCH_TRACE="{output_dir}/{test_name}/compile_trace" '
                 + f"CUDA_VISIBLE_DEVICES={ranks} "
                 + f"NGPU={test_flavor.ngpu} ./run_train.sh "
-                + "--fault_tolerance.enable "
-                + f"--fault_tolerance.replica_id={replica_id} --fault_tolerance.group_size={test_flavor.ngpu}"
+                + f"--module {get_importable_config_module(config_fn)} "
+                + f"--config {config_fn.__name__}"
             )
 
-            cmd += " " + dump_folder_arg
-            if override_arg:
-                cmd += " " + " ".join(override_arg)
+            cmd += " " + output_dir_arg
 
             logger.info(
                 "=====TorchFT Integration test, flavor : "
@@ -96,7 +93,7 @@ def run_single_test(test_flavor: OverrideDefinitions, output_dir: str):
             )
 
 
-def run_tests(args, test_list: list[OverrideDefinitions]):
+def run_tests(args, test_list: list[IntegrationTestDefinition]):
     if args.ngpu < 8:
         logger.info("Skipping TorchFT integration tests as we need 8 GPUs.")
         return

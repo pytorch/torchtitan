@@ -26,7 +26,9 @@ This is an ongoing effort, and the level of grouping is subject to change.
 
 To add custom configuration for an experiment, subclass `Trainer.Config` (or `Trainer` itself) and add new fields. Define config_registry functions that return your custom Config type.
 
-Fields added this way are ordinary command-line options, which is what experiments want. The freeze in [the configuration doc](../torchtitan/config/README.md) applies to core: a field added to a config under `torchtitan/` outside `experiments` needs `tyro.conf.Suppress`.
+Fields added this way are available to experiment config recipes. They do not
+become command-line options; select a complete recipe with `--module` and
+`--config`. See [the configuration doc](../torchtitan/config/README.md).
 
 #### Example
 
