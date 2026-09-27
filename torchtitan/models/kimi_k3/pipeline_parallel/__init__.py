@@ -17,6 +17,7 @@ from torch.distributed.pipelining.schedules import (
     PipelineScheduleSingle,
 )
 from torch.distributed.pipelining.stage import _PipelineStageBase, PipelineStage
+from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.distributed.activation_storage import (
     ActivationStorage,
@@ -129,25 +130,29 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
     # The action-list runtime issues each send as its own action, never fused with a receive.
     wait_sends_at_backward = isinstance(pp_schedule, _PipelineScheduleRuntime)
     memory = model_config.pp_memory
-    if memory.balance and memory.cpu_offload != "planned":
-        raise ValueError('pp_memory.balance needs pp_memory.cpu_offload="planned".')
+    if memory.balance and memory.cpu_offload == "all":
+        raise ValueError(
+            'pp_memory.balance plans its moves, so it takes cpu_offload "planned" or "none".'
+        )
     storage = prefetch = None
-    if memory.cpu_offload != "none":
+    if memory.cpu_offload != "none" or memory.balance:
         if not wait_sends_at_backward:
             raise ValueError(
-                "pp_memory.cpu_offload reads saves back along the schedule's action "
-                "order, which needs an action-list schedule such as Interleaved1F1B."
+                "pp_memory reads saves back along the schedule's action order, which "
+                "needs an action-list schedule such as Interleaved1F1B."
             )
         budget = memory.cpu_offload_budget_gib
         skip_layers = {n_layers - 1}
         storage = ActivationStorage(
             stages[0].device,
-            cpu_offload_all(skip_layers),
+            cpu_offload_all(skip_layers)
+            if memory.cpu_offload != "none"
+            else lambda tensor, chunk: CheckpointPolicy.PREFER_SAVE,
             {"host": HostBackend(None if budget is None else int(budget * 2**30))},
             min_tensor_bytes=memory.min_tensor_mib << 20,
             prefetch_n_layers=memory.cpu_offload_prefetch_n_layers,
         )
-        if memory.cpu_offload == "planned":
+        if memory.cpu_offload == "planned" or memory.balance:
             prefetch = PPMemoryController(
                 memory,
                 storage,

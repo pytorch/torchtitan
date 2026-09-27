@@ -53,8 +53,9 @@ class PPMemoryConfig:
     on the device."""
 
     balance: bool = False
-    """With ``cpu_offload="planned"``, the plan parks saves in pools on lighter pipeline ranks
-    through mooncake's transfer engine before it offloads them to host memory."""
+    """The plan parks saves in pools on lighter pipeline ranks through mooncake's transfer
+    engine; with ``cpu_offload="planned"`` it offloads to host memory what no pool takes, with
+    ``"none"`` it only parks."""
 
     target_gib: float | None = None
     """The peak each rank is planned down to; unset is the mean of the ranks' profiled peaks."""
@@ -65,9 +66,9 @@ class PPMemoryConfig:
     peer_gbps: float = 25.0
     """Rank-to-rank bandwidth that the plan budgets, in GB/s."""
 
-    remote_protocol: Literal["tcp", "rdma"] = "tcp"
+    remote_protocol: Literal["tcp", "rdma", "nvlink_intra"] = "tcp"
     """mooncake transport: ``tcp`` keeps a pool in the destination's pinned host memory,
-    ``rdma`` in its device memory."""
+    ``rdma`` and ``nvlink_intra`` (GPUs of one node) in its device memory."""
 
     remote_device_names: str = ""
     """RDMA devices passed to mooncake's transfer engine, comma separated."""
@@ -276,9 +277,9 @@ class MemoryPlan:
 
 
 class PPMemoryController(BackwardPrefetch):
-    """Profiles a rank's first training step with every eligible save offloaded, then plans
-    its moves with the other ranks once that step has returned and applies them from the next
-    step on."""
+    """Profiles a rank's first training step, with every eligible save offloaded when the plan
+    may use host memory, then plans its moves with the other ranks once that step has returned
+    and applies them from the next step on."""
 
     def __init__(
         self,
@@ -400,7 +401,7 @@ class PPMemoryController(BackwardPrefetch):
             target_bytes=None
             if config.target_gib is None
             else int(config.target_gib * 2**30),
-            offload=True,
+            offload=config.cpu_offload == "planned",
             balance=config.balance,
             host_bps=config.host_gbps * 1e9,
             peer_bps=config.peer_gbps * 1e9,

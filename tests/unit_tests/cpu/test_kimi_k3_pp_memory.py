@@ -267,7 +267,9 @@ class TestPipelineActivationStorage(DTensorTestBase):
         if memory is not None:
             storage = ActivationStorage(
                 torch.device("cpu"),
-                cpu_offload_all({LAYERS - 1}),
+                cpu_offload_all({LAYERS - 1})
+                if memory.cpu_offload != "none"
+                else lambda tensor, chunk: CheckpointPolicy.PREFER_SAVE,
                 {"host": _CopyBackend()},
                 min_tensor_bytes=0,
             )
@@ -331,3 +333,29 @@ class TestPipelineActivationStorage(DTensorTestBase):
         self.assertEqual(storage.off_device_bytes, 0)
         self.assertTrue([key for key in controller.plan.backend if key[0] == self.rank])
         self.assertGreater(storage.stats["host_bytes"], 0)
+
+    @unittest.skipUnless(_has_mooncake(), "needs mooncake-transfer-engine")
+    @with_comms
+    def test_balance_alone_parks_on_the_other_rank_and_leaves_every_gradient_bitwise(
+        self,
+    ):
+        reference, _, _ = self._train_planned(None)
+        # Rank 0 peaks at 5 KiB and rank 1 at 3 KiB; their mean leaves no room for a pool's slack.
+        history, storage, controller = self._train_planned(
+            PPMemoryConfig(balance=True, target_gib=4.5 * 2**10 / 2**30)
+        )
+        for (grads, losses), (ref_grads, ref_losses) in zip(
+            history, reference, strict=True
+        ):
+            self.assertEqual(ref_grads.keys(), grads.keys())
+            for key, grad in grads.items():
+                torch.testing.assert_close(grad, ref_grads[key], rtol=0, atol=0)
+            for a, b in zip(losses, ref_losses, strict=True):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
+        assert storage is not None and controller is not None
+        assert controller.plan is not None
+        self.assertTrue(controller.plan.dests)
+        self.assertEqual(set(controller.plan.backend.values()), {"remote"})
+        self.assertEqual(storage.stats["host_bytes"], 0)
+        if self.rank in controller.plan.dests:
+            self.assertGreater(storage.stats["remote_bytes"], 0)

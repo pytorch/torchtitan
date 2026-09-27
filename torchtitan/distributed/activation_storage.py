@@ -174,7 +174,7 @@ class RemoteBackend:
     Built on every rank of the group. ``dests`` maps each source rank to the rank holding its
     pool and ``spans`` gives each source's bytes there; a destination's pool is its sources'
     spans laid end to end. Over ``tcp`` the pool and the staging buffer sit in pinned host
-    memory, over ``rdma`` in device memory. Transfers run in order on the storage stream through
+    memory, over ``rdma`` and ``nvlink_intra`` in device memory. Transfers run in order on the storage stream through
     the staging buffer; a full span or staging buffer keeps the tensor on the device.
     """
 
@@ -189,8 +189,8 @@ class RemoteBackend:
         protocol: str = "tcp",
         device_names: str = "",
     ) -> None:
-        if protocol not in ("tcp", "rdma"):
-            raise ValueError(f"protocol is tcp or rdma, got {protocol!r}")
+        if protocol not in ("tcp", "rdma", "nvlink_intra"):
+            raise ValueError(f"protocol is tcp, rdma or nvlink_intra, got {protocol!r}")
         engine_cls = _load_transfer_engine()
         rank = dist.get_rank(group)
         if set(dests) & set(dests.values()):
@@ -209,8 +209,8 @@ class RemoteBackend:
         )
         # The engine picks its own RPC port; peers address a segment by host:that_port.
         session = f"{host}:{self._engine.get_rpc_port()}"
-        # The TCP transport serves host memory only; RDMA serves device memory directly.
-        on_device = protocol == "rdma" and device.type == "cuda"
+        # The TCP transport serves host memory only; RDMA and NVLink serve device memory directly.
+        on_device = protocol in ("rdma", "nvlink_intra") and device.type == "cuda"
 
         def buffer(nbytes: int) -> torch.Tensor:
             if on_device:
