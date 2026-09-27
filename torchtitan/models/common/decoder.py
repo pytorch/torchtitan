@@ -356,14 +356,15 @@ class Decoder(BaseModel):
             is_cp_attention_backend_supported,
         )
 
-        cp_attention_backends: list[type[CPInnerAttention[Any, Any]]] = []
+        cp_attention_backends: dict[
+            type[CPInnerAttention[Any, Any]], CPInnerAttention.Config
+        ] = {}
         for _, config, _, _ in self.config.traverse(
             CPInnerAttention.Config, recurse=True
         ):
             backend = config._owner
             assert backend is not None and issubclass(backend, CPInnerAttention)
-            if backend not in cp_attention_backends:
-                cp_attention_backends.append(backend)
+            cp_attention_backends.setdefault(backend, config)
         attention_metadata = input_dict.get("attention_masks")
         load_balancer_config = parallelism.context_parallel_load_balancer
         selected_attention_metadata = None
@@ -394,12 +395,13 @@ class Decoder(BaseModel):
         if "attention_masks" in input_dict:
             attention_metadata = input_dict["attention_masks"]
             assert isinstance(attention_metadata, dict)
-            for attention_backend in cp_attention_backends:
+            for attention_backend, backend_config in cp_attention_backends.items():
                 attention_metadata[
                     attention_backend
                 ] = attention_backend.prepare_cp_metadata(
                     attention_metadata[attention_backend],
                     permutation=permutation,
+                    config=backend_config,
                 )
         return context_parallel.shard_tensors(
             input_dict,

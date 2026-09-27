@@ -94,8 +94,9 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         calls.append("cp_input")
         return input_dict
 
-    def prepare_cp_metadata(attention_metadata, *, permutation):
+    def prepare_cp_metadata(attention_metadata, *, permutation, config):
         assert permutation is expected_permutation
+        assert isinstance(config, KVAllGatherCPFlexInnerAttention.Config)
         calls.append("cp_metadata")
         return attention_metadata
 

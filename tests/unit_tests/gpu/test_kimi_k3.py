@@ -12,7 +12,7 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.config_registry import _dist_muon_optimizer
-from torchtitan.models.kimi_k3.kda import KDA, KDAKernel
+from torchtitan.models.kimi_k3.kda import KDAAttentionMetadata, KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 
@@ -149,10 +149,18 @@ class TestKimiK3(unittest.TestCase):
             for layer in model.layers.values()
             if layer.attention is not None
         )
+        kda_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.delta_attention is not None
+        )
         # MLA layers read the BlockMask; KDA layers read document offsets.
         self.assertIsInstance(attention_masks[full_attention_backend], BlockMask)
+        self.assertIsInstance(attention_masks[kda_backend], KDAAttentionMetadata)
+        assert attention_masks[kda_backend].varlen is not None
         torch.testing.assert_close(
-            attention_masks[KDA].cu_seq_q, torch.tensor([0, 4], dtype=torch.int32)
+            attention_masks[kda_backend].varlen.cu_seq_q,
+            torch.tensor([0, 4], dtype=torch.int32),
         )
 
     def test_padded_tail_is_one_kda_segment(self):
@@ -164,8 +172,16 @@ class TestKimiK3(unittest.TestCase):
         padding_mask = torch.zeros(12, dtype=torch.bool)
         padding_mask[7:] = True
         masks = model.get_attention_masks(positions, padding_mask=padding_mask)
+        kda_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.delta_attention is not None
+        )
+        assert isinstance(masks[kda_backend], KDAAttentionMetadata)
+        assert masks[kda_backend].varlen is not None
         torch.testing.assert_close(
-            masks[KDA].cu_seq_q, torch.tensor([0, 3, 7, 12], dtype=torch.int32)
+            masks[kda_backend].varlen.cu_seq_q,
+            torch.tensor([0, 3, 7, 12], dtype=torch.int32),
         )
 
     @unittest.skipIf(
