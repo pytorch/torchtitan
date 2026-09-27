@@ -485,6 +485,111 @@ def test_mxfp8_fsdp_tensor_lifecycle(target):
     )
 
 
+def _build_fully_sharded_mxfp8_linear(mesh, reduce_dtype: torch.dtype) -> MXFP8Linear:
+    torch.manual_seed(0)
+    linear = (
+        MXFP8Linear.Config(in_features=128, out_features=128, bias=False)
+        .build()
+        .cuda()
+        .bfloat16()
+    )
+    fully_shard(
+        linear,
+        mesh=mesh,
+        mp_policy=MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=reduce_dtype,
+        ),
+        reshard_after_forward=False,
+    )
+    return linear
+
+
+def _run_fused_wgrad_accum(
+    rank: int,
+    world_size: int,
+    port: int,
+    reduce_dtype: torch.dtype,
+    grad_dtype: torch.dtype | None,
+) -> None:
+    """Test WGRAD accumulation across PP-style microbatches under FSDP.
+
+    When the unsharded parameter's grad_dtype matches the reduce dtype, FSDP
+    keeps the running unsharded gradient on the parameter while gradient sync
+    is disabled, so the second microbatch folds into it with scaled_addmm_.
+    Otherwise FSDP moves each gradient into its own accumulator, so the
+    ordinary WGRAD must run instead. Either way the reduced gradient must
+    equal two single-microbatch ones.
+
+    ``grad_dtype=None`` leaves the unsharded parameter's default grad_dtype
+    (its BF16 dtype). Otherwise it is set by hand after the first unshard,
+    standing in for FSDP setting grad_dtype to the reduce dtype.
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    original_scaled_addmm_ = torch.nn.functional.scaled_addmm_
+    num_scaled_addmm_calls = 0
+
+    def counting_scaled_addmm_(*args, **kwargs):
+        nonlocal num_scaled_addmm_calls
+        num_scaled_addmm_calls += 1
+        return original_scaled_addmm_(*args, **kwargs)
+
+    torch.nn.functional.scaled_addmm_ = counting_scaled_addmm_
+    try:
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
+        torch.manual_seed(1)
+        x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+        reference = _build_fully_sharded_mxfp8_linear(mesh, reduce_dtype)
+        reference(x).sum().backward()
+        expected = reference.weight.grad.to_local().float() * 2
+
+        linear = _build_fully_sharded_mxfp8_linear(mesh, reduce_dtype)
+        linear.set_is_last_backward(False)
+        linear.set_reshard_after_backward(False)
+        linear.set_requires_gradient_sync(False)
+        output = linear(x)
+        if grad_dtype is not None:
+            # RAF=False keeps this unsharded parameter for both microbatches.
+            linear.weight.grad_dtype = grad_dtype
+        output.sum().backward()
+        linear.set_is_last_backward(True)
+        linear.set_reshard_after_backward(True)
+        linear.set_requires_gradient_sync(True)
+        linear(x).sum().backward()
+
+        effective_grad_dtype = grad_dtype or torch.bfloat16
+        expected_num_calls = 1 if effective_grad_dtype == reduce_dtype else 0
+        assert num_scaled_addmm_calls == expected_num_calls, num_scaled_addmm_calls
+        torch.testing.assert_close(
+            linear.weight.grad.to_local().float(), expected, rtol=2e-2, atol=2e-2
+        )
+    finally:
+        torch.nn.functional.scaled_addmm_ = original_scaled_addmm_
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    ("reduce_dtype", "grad_dtype"),
+    [
+        (torch.bfloat16, None),
+        (torch.float32, None),
+        (torch.float32, torch.float32),
+    ],
+    ids=["bf16-reduce", "fp32-reduce-bf16-grad", "fp32-reduce-fp32-grad"],
+)
+def test_mxfp8_fsdp_fused_wgrad_accum(reduce_dtype, grad_dtype):
+    mp.spawn(
+        _run_fused_wgrad_accum,
+        args=(2, get_free_port(), reduce_dtype, grad_dtype),
+        nprocs=2,
+        join=True,
+    )
+
+
 def _run_simple_fsdp_disabled_parametrization(
     rank: int,
     world_size: int,

@@ -12,6 +12,7 @@ Tensor shape suffixes:
     K: input features
 """
 
+import weakref
 from dataclasses import dataclass
 from typing import Literal
 
@@ -20,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.autograd.function import once_differentiable
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from torchao.prototype.mx_formats.kernels import (
     mxfp8_quantize_cuda,
@@ -78,6 +80,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         weight_scale_dgrad_swizzled: torch.Tensor,
         bias_N: torch.Tensor | None,
         input_activation_format_for_backward: InputActivationFormatForBackward,
+        weight_param_ref: "weakref.ReferenceType[torch.Tensor] | None",
     ) -> torch.Tensor:
         # FPROP always consumes rowwise MXFP8. WGRAD can either retain the
         # original BF16 input and quantize it columnwise in backward, or retain
@@ -194,6 +197,11 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         ctx.requires_wgrad = requires_wgrad
         ctx.input_activation_format_for_backward = input_activation_format_for_backward
         ctx.has_bias = bias_N is not None
+        ctx.weight_param_ref = weight_param_ref
+        # False for a stacked weight, which arrives as a flattened view.
+        ctx.weight_is_param = (
+            weight_param_ref is not None and weight_param_ref() is weight_NK
+        )
 
         return output_MN[:num_rows].reshape(*input_shape[:-1], weight_NK.shape[0])
 
@@ -279,19 +287,77 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                 grad_output_col_scales = triton_mx_block_rearrange(
                     grad_output_col_scales
                 )
-                grad_weight_NK = F.scaled_mm(
-                    grad_output_col_MN.t(),
-                    x_qdata_col_MK,
+                wgrad_scale_kwargs = dict(
                     scale_a=grad_output_col_scales,
                     scale_recipe_a=F.ScalingType.BlockWise1x32,
                     scale_b=x_scale_col,
                     scale_recipe_b=F.ScalingType.BlockWise1x32,
                     swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
                     swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
-                    output_dtype=torch.bfloat16,
                 )
+                weight_param = (
+                    ctx.weight_param_ref() if ctx.weight_param_ref is not None else None
+                )
+                # A traced execution has no parameter reference. The weight is
+                # BF16, as forward checked, and AccumulateGrad casts to the
+                # parameter's grad_dtype.
+                wgrad_dtype = torch.bfloat16
+                running_grad = None
+                if weight_param is not None:
+                    # Produce the WGRAD directly in the parameter's gradient
+                    # dtype so AccumulateGrad needs no cast. FSDP will set the
+                    # unsharded parameter's grad_dtype to the reduce dtype.
+                    # TODO(anijain2305): drop the param.dtype fallback once
+                    # FSDP always sets grad_dtype on the unsharded parameter.
+                    param_grad_dtype = weight_param.grad_dtype or weight_param.dtype
+                    # A stacked weight reaches its parameter through a flatten
+                    # view, whose backward casts the gradient to the view's
+                    # BF16 dtype. A higher-precision WGRAD, or a running
+                    # gradient folded through it, would be rounded there.
+                    # TODO(anijain2305): pass the stacked parameter itself into
+                    # this function so its WGRAD can honor grad_dtype too.
+                    if ctx.weight_is_param or param_grad_dtype == torch.bfloat16:
+                        wgrad_dtype = param_grad_dtype
+                        running_grad = weight_param.grad
+                if weight_param is None or running_grad is None:
+                    # First contribution since the gradient was last consumed,
+                    # a traced execution, or a stacked weight whose grad_dtype
+                    # the view would round away. Nothing to accumulate into.
+                    grad_weight_NK = F.scaled_mm(
+                        grad_output_col_MN.t(),
+                        x_qdata_col_MK,
+                        output_dtype=wgrad_dtype,
+                        **wgrad_scale_kwargs,
+                    )
+                else:
+                    # A later microbatch, e.g. under PP with gradient sync
+                    # disabled. Fold this contribution into the running
+                    # gradient, in its grad_dtype, in the GEMM epilogue instead
+                    # of a separate AccumulateGrad add. Then hand the same
+                    # buffer back and clear the parameter, so AccumulateGrad
+                    # reattaches it instead of adding it to itself. While
+                    # grad_dtype differs from FSDP's reduce dtype, FSDP moves
+                    # the gradient into its own accumulator after every
+                    # microbatch, so running_grad stays None here.
+                    grad_weight_NK = F.scaled_addmm_(
+                        running_grad.view(-1, running_grad.shape[-1]),
+                        grad_output_col_MN.t(),
+                        x_qdata_col_MK,
+                        **wgrad_scale_kwargs,
+                    )
+                    weight_param.grad = None
 
-        return grad_input, grad_weight_NK, None, None, None, None, grad_bias_N, None
+        return (
+            grad_input,
+            grad_weight_NK,
+            None,
+            None,
+            None,
+            None,
+            grad_bias_N,
+            None,
+            None,
+        )
 
 
 # Marks the function local-only so SPMD type checking can propagate through
@@ -401,6 +467,15 @@ class MXFP8Linear(Linear):
             # the weight changes each optimizer step; inference does not.
             # TODO(anijain2305): key the operands on the parameter's
             # version counter so a frozen weight is quantized once.
+        # Backward folds later WGRADs into the leaf parameter's running .grad.
+        # Dynamo sets is_compiling; GraphTrainer's make_fx tracer does not, so
+        # ask the proxy mode as well. A traced backward cannot represent this
+        # read-and-clear of parameter.grad, so it uses an ordinary WGRAD.
+        # The reference is weak because saved-tensor hooks may repack a saved
+        # tensor into a different object, and a strong ctx reference would make
+        # the autograd node own the parameter.
+        is_tracing = torch.compiler.is_compiling() or get_proxy_mode() is not None
+        weight_param_ref = None if is_tracing else weakref.ref(physical_weight)
         output = _MXFP8LinearFunction.apply(
             input,
             weight_NK,
@@ -410,5 +485,6 @@ class MXFP8Linear(Linear):
             operands.weight_scale_dgrad_swizzled,
             bias,
             self.input_activation_format_for_backward,
+            weight_param_ref,
         )
         return output
