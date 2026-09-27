@@ -15,6 +15,7 @@ from torchtitan.components.data.dataset import (
     WeightedDataset,
 )
 from torchtitan.components.data.loader import GrainDataLoader
+from torchtitan.components.data.megatron import MegatronDataLoader
 from torchtitan.components.data.packing import (
     ConcatThenSplitPackingConfig,
     FirstFitPackingConfig,
@@ -38,6 +39,7 @@ __all__ = [
     "DatasetMixConfig",
     "FirstFitPackingConfig",
     "GrainDataLoader",
+    "MegatronDataLoader",
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",

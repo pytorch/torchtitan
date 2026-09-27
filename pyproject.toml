@@ -24,6 +24,8 @@ dependencies = [
 
     # Miscellaneous
     "tyro",
+    # JIT-compiles the Megatron dataloader's C++ index helpers.
+    "ninja",
     "tensorboard",
     "wandb",
     "einops",
