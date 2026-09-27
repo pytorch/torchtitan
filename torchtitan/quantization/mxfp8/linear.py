@@ -470,7 +470,7 @@ class MXFP8Linear(Linear):
         # Dynamo sets is_compiling; GraphTrainer's make_fx tracer does not, so
         # ask the proxy mode as well. A traced backward cannot represent this
         # read-and-clear of parameter.grad, so it uses an ordinary WGRAD.
-        # TODO(anijain2305): add a GraphTrainer graph pass that rewrites the
+        # TODO(graph_trainer): add a GraphTrainer graph pass that rewrites the
         # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
         # SimpleFSDP hands forward a parametrization output rather than the
         # leaf, whose .grad autograd never populates.
