@@ -21,7 +21,6 @@ from torchtitan.models.common import (
     Linear,
     RMSNorm,
     RoPE,
-    TransformerBlock,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -71,7 +70,7 @@ def _build_llama3_layers(
     rope: RoPE.Config,
     n_kv_heads: int | None = None,
     attn_backend: str,
-) -> list[TransformerBlock.Config]:
+) -> list[Llama3TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
     inner_attention = get_attention_config(attn_backend)
     layers = []

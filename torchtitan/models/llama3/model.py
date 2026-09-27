@@ -11,7 +11,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -32,7 +32,7 @@ class Llama3TransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config):
+    class Config(TransformerBlock.Config[GQAttention.Config]):
         pass
 
     def __init__(self, config: Config):
@@ -68,7 +68,7 @@ class Llama3Model(Decoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[Llama3TransformerBlock.Config]):
         dim: int = 4096
         vocab_size: int = 128256
 

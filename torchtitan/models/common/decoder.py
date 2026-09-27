@@ -6,7 +6,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, cast, Generic, Protocol, TypeVar
 
 import torch
 from spmd_types import SpmdType
@@ -37,7 +37,9 @@ from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
-__all__ = ["Decoder", "TransformerBlock"]
+__all__ = ["Decoder", "DecoderLayerConfig", "TransformerBlock"]
+
+AttentionConfigT = TypeVar("AttentionConfigT", bound=BaseAttention.Config)
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -56,12 +58,34 @@ class TransformerBlock(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        attention: BaseAttention.Config  # required, no default
+    class Config(Module.Config, Generic[AttentionConfigT]):
+        attention: AttentionConfigT  # required, no default
         feed_forward: FeedForward.Config | None = None
         moe: MoE.Config | None = None
         attention_norm: RMSNorm.Config
         ffn_norm: RMSNorm.Config
+
+
+class DecoderLayerConfig(Protocol):
+    """Configuration contract required by :class:`Decoder`."""
+
+    @property
+    def attention(self) -> BaseAttention.Config | None:
+        ...
+
+    @property
+    def feed_forward(self) -> FeedForward.Config | None:
+        ...
+
+    @property
+    def moe(self) -> MoE.Config | None:
+        ...
+
+    def build(self) -> Module:
+        ...
+
+
+DecoderLayerConfigT = TypeVar("DecoderLayerConfigT", bound=DecoderLayerConfig)
 
 
 class Decoder(BaseModel):
@@ -72,17 +96,14 @@ class Decoder(BaseModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(BaseModel.Config):
+    class Config(BaseModel.Config, Generic[DecoderLayerConfigT]):
         max_context_length: int
         dim: int
         vocab_size: int
         lm_head: Linear.Config
         tok_embeddings: Embedding.Config
         norm: RMSNorm.Config
-        # TODO(fegin): revisit
-        # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
-        # and fix the typing here
-        layers: list  # list[TransformerBlock.Config] or subclass configs
+        layers: list[DecoderLayerConfigT]
         # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
         # that support it set this True in their config factories; the tying
         # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.

@@ -330,8 +330,7 @@ class KimiK3Model(MultimodalModel):
         return pipeline_kimi_k3(self, **kwargs)
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
-        layers: list[KimiK3TransformerBlock.Config]
+    class Config(Decoder.Config[KimiK3TransformerBlock.Config]):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
