@@ -33,6 +33,13 @@ from torchtitan.protocols.module import Module
 logger = logging.getLogger(__name__)
 
 
+def _full_ac_policy(
+    _ctx: object, _op: object, *_args: object, **_kwargs: object
+) -> CheckpointPolicy:
+    """Recompute pure operations while PyTorch preserves registered effects."""
+    return CheckpointPolicy.PREFER_RECOMPUTE
+
+
 def _get_default_save_ops() -> set:
     """Returns the default set of ops whose activations should be saved
     (compute + comm).
@@ -170,7 +177,7 @@ class ActivationCheckpointing(Configurable):
 
 
 class FullAC(ActivationCheckpointing):
-    """Recompute the entire transformer block during the backward pass."""
+    """Recompute pure block operations while preserving registered effects."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
@@ -181,6 +188,7 @@ class FullAC(ActivationCheckpointing):
     ) -> nn.Module:
         return ptd_checkpoint_wrapper(
             module,
+            context_fn=lambda: create_selective_checkpoint_contexts(_full_ac_policy),
             preserve_rng_state=self.config.preserve_rng_state,
             determinism_check=self.config.determinism_check,
             early_stop=True,

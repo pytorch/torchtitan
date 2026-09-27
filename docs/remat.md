@@ -149,3 +149,34 @@ The currently supported RegionAC transformer blocks do not advance RNG state
 inside their forwards, so they do not require a `RecomputeStateHook`. Any future
 dropout, stochastic rounding counter, or other external RNG state must add a
 hook before it can be used safely with RegionAC.
+
+## Saving expensive MoE work
+
+Avoiding replay of expensive MoE work requires retaining both its compute and
+communication regions:
+
+- Routed-expert `w13` and `w2` grouped projections.
+- Token-dispatcher `ep_communication`, which controls the token-count exchange,
+  dispatch, and combine collectives together.
+- Shared-expert projection regions. The shared `w2` region includes its
+  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled.
+- `tp_output_reduction`, which controls the final TP all-reduce when sequence
+  parallelism is disabled.
+
+For a common MoE module named `moe`, the corresponding policy is:
+
+```python
+RegionAC.Config(
+    save_regions=[
+        "moe.routed_experts.w13",
+        "moe.routed_experts.w2",
+        "moe.routed_experts.token_dispatcher.ep_communication",
+        "moe.shared_experts.*",
+        "moe.tp_output_reduction",
+    ]
+)
+```
+
+Operations outside these regions, including local permutation, token-shard
+zero-fill, and branch addition, are recomputed. Routing decisions are retained
+separately to keep expert selection identical during replay.

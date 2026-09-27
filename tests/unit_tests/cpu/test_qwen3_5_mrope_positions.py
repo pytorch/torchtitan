@@ -28,7 +28,7 @@ from torch import nn
 
 def _build_config_modules():
     try:
-        from torchtitan.config import ParallelismConfig
+        from torchtitan.config.parallelism import ParallelismConfig
         from torchtitan.distributed.parallel_dims import ParallelDims
         from torchtitan.models.qwen3_5 import model_registry
     except ModuleNotFoundError as exc:
@@ -68,7 +68,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         model_registry, ParallelDims, ParallelismConfig = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex
         # compile) so the pipeline runs on CPU.
-        model = model_registry("debugmodel", attn_backend="varlen").build()
+        model = model_registry(
+            "debugmodel", enable_sp=True, attn_backend="varlen"
+        ).build()
         sink: dict = {}
         for key in list(model.layers.keys()):
             model.layers[key] = _RecordingLayer(sink)

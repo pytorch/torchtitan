@@ -204,6 +204,7 @@ def _debugmodel(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK25Model.Config:
     dim = 256
@@ -218,6 +219,7 @@ def _debugmodel(
     n_dense_layers = 1
 
     layers = _build_kimi_layers(
+        enable_sp=enable_sp,
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
         dim=dim,
@@ -278,6 +280,7 @@ def _debugmodel(
 
 def _moonlight_16b_a3b_config(
     *,
+    enable_sp: bool,
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
@@ -294,6 +297,7 @@ def _moonlight_16b_a3b_config(
     dim = 2048
     vocab_size = 163840
     layers = _build_kimi_layers(
+        enable_sp=enable_sp,
         n_layers=27,
         n_dense_layers=1,
         dim=dim,
@@ -344,10 +348,12 @@ def _moonlight_16b_a3b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK25Model.Config:
     """Build the text-only Moonlight 16B-A3B sibling without a vision tower."""
     return _moonlight_16b_a3b_config(
+        enable_sp=enable_sp,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -362,6 +368,7 @@ def _kimi_vl_a3b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK25Model.Config:
     """Kimi-VL 16B-A3B: Moonlight text tower plus a 2D MoonViT vision tower.
@@ -371,6 +378,7 @@ def _kimi_vl_a3b(
     applied.
     """
     config = _moonlight_16b_a3b_config(
+        enable_sp=enable_sp,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -395,6 +403,7 @@ def _kimi_k2_5(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK25Model.Config:
     """Architecture shared by Kimi K2.5, K2.6, and K2.7-Code: a ~1T-total /
@@ -418,6 +427,7 @@ def _kimi_k2_5(
     n_dense_layers = 1
 
     layers = _build_kimi_layers(
+        enable_sp=enable_sp,
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
         dim=dim,
@@ -488,6 +498,7 @@ kimi_k2_5_configs = {
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
@@ -502,6 +513,7 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     config = get_config(
+        enable_sp=enable_sp,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
