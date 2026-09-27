@@ -5,7 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 """A pipeline rank's saves under a CheckpointPolicy, on gloo: every gradient stays bitwise
-whether the saves stay or are offloaded, and the rank store's blocks never reach the policy."""
+whether the saves stay, go to host memory, are parked on another rank or are moved as a plan
+over the profiled step picks, and the rank store's blocks never reach the policy."""
+
+import unittest
 
 import torch
 import torch.nn as nn
@@ -21,10 +24,17 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torch.utils.checkpoint import CheckpointPolicy
 
-from torchtitan.distributed.activation_storage import ActivationStorage
+from torchtitan.distributed.activation_storage import (
+    _load_transfer_engine,
+    ActivationStorage,
+    cpu_offload_all,
+    RemoteBackend,
+)
 from torchtitan.models.kimi_k3.pipeline_parallel.activations import (
     BackwardPrefetch,
     compute_actions,
+    PPMemoryConfig,
+    PPMemoryController,
 )
 from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
 from torchtitan.models.kimi_k3.pipeline_parallel.layout import infer_block_layout_tables
@@ -35,6 +45,14 @@ from torchtitan.models.kimi_k3.pipeline_parallel.stage import (
 )
 
 TOKENS, DIM, LAYERS, BLOCK, MICROBATCHES = 8, 16, 8, 2, 4
+
+
+def _has_mooncake() -> bool:
+    try:
+        _load_transfer_engine()
+    except ImportError:
+        return False
+    return True
 
 
 class _CopyBackend:
@@ -137,16 +155,26 @@ class TestPipelineActivationStorage(DTensorTestBase):
             asked.append(
                 tensor.untyped_storage().data_ptr() in _held_storages(stores[0])
             )
-            if saves == "offload":
+            if saves == "offload" or (saves == "remote" and self.rank == 1):
                 return CheckpointPolicy.MUST_CPU_OFFLOAD
             return CheckpointPolicy.PREFER_SAVE
 
         storage = prefetch = None
         if saves is not None:
+            backends = {"host": _CopyBackend()}
+            if saves == "remote":
+                backends["remote"] = RemoteBackend(
+                    stages[0].group,
+                    dests={1: 0},
+                    spans={1: 1 << 24},
+                    staging_bytes=1 << 22,
+                    device=torch.device("cpu"),
+                )
             storage = ActivationStorage(
                 torch.device("cpu"),
                 policy,
-                {"host": _CopyBackend()},
+                backends,
+                route=(lambda chunk: "remote") if saves == "remote" else None,
                 min_tensor_bytes=0,
             )
             prefetch = BackwardPrefetch(
@@ -198,3 +226,108 @@ class TestPipelineActivationStorage(DTensorTestBase):
                 self.assertGreater(storage.stats["host_bytes"], 0)
             else:
                 self.assertEqual(storage.stats["host_bytes"], 0)
+
+    @unittest.skipUnless(_has_mooncake(), "needs mooncake-transfer-engine")
+    @with_comms
+    def test_saves_parked_on_another_rank_leave_every_gradient_bitwise(self):
+        reference, ref_losses, _, _ = self._train_pipeline(None)
+        grads, losses, storage, _ = self._train_pipeline("remote")
+        for key, grad in grads.items():
+            torch.testing.assert_close(grad, reference[key], rtol=0, atol=0)
+        for a, b in zip(losses, ref_losses, strict=True):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+        assert storage is not None
+        self.assertFalse(storage._chunks)
+        if self.rank == 1:
+            self.assertGreater(storage.stats["remote_bytes"], 0)
+
+    def _train_planned(self, memory: PPMemoryConfig | None, steps: int = 2):
+        torch.manual_seed(0)
+        split = [[0, 1], [2, 3], [4, 5], [6, 7]]
+        modules = [
+            _Stage(layers, first=s == 0, last=s == 3) for s, layers in enumerate(split)
+        ]
+        mine = list(range(self.rank, 4, self.world_size))
+        stages = [
+            AttnResPipelineStage(modules[s], s, 4, torch.device("cpu")) for s in mine
+        ]
+        schedule = ScheduleInterleaved1F1B(
+            list(stages), n_microbatches=MICROBATCHES, loss_fn=_loss, scale_grads=False
+        )
+        stage_to_rank = dict(stages[0].stage_index_to_group_rank)
+        layout = infer_block_layout_tables(
+            stage_to_rank=stage_to_rank,
+            n_layers=LAYERS,
+            layers_per_block=BLOCK,
+            layer_to_stage={
+                layer: s for s, layers in enumerate(split) for layer in layers
+            },
+        )
+        storage = controller = None
+        if memory is not None:
+            storage = ActivationStorage(
+                torch.device("cpu"),
+                cpu_offload_all({LAYERS - 1}),
+                {"host": _CopyBackend()},
+                min_tensor_bytes=0,
+            )
+            controller = PPMemoryController(
+                memory,
+                storage,
+                group=stages[0].group,
+                rank=self.rank,
+                orders=schedule.pipeline_order,
+                device=torch.device("cpu"),
+                skip_layers={LAYERS - 1},
+            )
+            controller.attach(schedule)
+        store = PPRankLocalCache(storage)
+        waits = _GradSendWaits(
+            _grad_send_wait_points(schedule.pipeline_order, stage_to_rank, self.rank)
+        )
+        for stage in stages:
+            stage.set_routing(
+                layout, store, wait_sends_at_backward=True, grad_send_waits=waits
+            )
+            if storage is not None:
+                storage.register_stage(stage.stage_index, stage.submod.layers)
+                stage.set_activation_storage(storage, controller)
+        history = []
+        for _ in range(steps):
+            inputs = torch.randn(MICROBATCHES * TOKENS, DIM, dtype=torch.float64)
+            targets = torch.randn(MICROBATCHES * TOKENS, dtype=torch.float64)
+            losses: list[torch.Tensor] = []
+            if 3 in mine:
+                schedule.step(target=targets, losses=losses)
+            else:
+                schedule.step(inputs)
+            grads = {
+                (stage.stage_index, name): p.grad.clone()
+                for stage in stages
+                for name, p in stage.submod.named_parameters()
+            }
+            for stage in stages:
+                stage.submod.zero_grad(set_to_none=True)
+            history.append((grads, [loss.detach() for loss in losses]))
+        return history, storage, controller
+
+    @with_comms
+    def test_planned_moves_leave_every_gradient_bitwise(self):
+        reference, _, _ = self._train_planned(None)
+        history, storage, controller = self._train_planned(
+            PPMemoryConfig(cpu_offload="planned", target_gib=0.0)
+        )
+        for (grads, losses), (ref_grads, ref_losses) in zip(
+            history, reference, strict=True
+        ):
+            self.assertEqual(ref_grads.keys(), grads.keys())
+            for key, grad in grads.items():
+                torch.testing.assert_close(grad, ref_grads[key], rtol=0, atol=0)
+            for a, b in zip(losses, ref_losses, strict=True):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
+        assert storage is not None and controller is not None
+        assert controller.plan is not None
+        self.assertFalse(storage._chunks)
+        self.assertEqual(storage.off_device_bytes, 0)
+        self.assertTrue([key for key in controller.plan.backend if key[0] == self.rank])
+        self.assertGreater(storage.stats["host_bytes"], 0)
