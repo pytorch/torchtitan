@@ -103,16 +103,6 @@ def dist_sum_tensor(
     )
 
 
-def dist_mean(
-    x: torch.Tensor,
-    mesh: DeviceMesh | None = None,
-    extra_pg: dist.ProcessGroup | None = None,
-) -> float:
-    return _dist_reduce(
-        x, reduceOp=c10d.ReduceOp.AVG.name, mesh=mesh, extra_pg=extra_pg
-    )
-
-
 def set_determinism(
     parallelism_context: ParallelismContext,
     device: torch.device,

@@ -118,10 +118,10 @@ different rollout protocol.
 
 The default path handles rollout, scoring, batching, training, and weight sync.
 
-That's it. Wire the rollouter into a config registry function:
+That's it. Wire the rollouter into a recipe function:
 
 ```python
-# my_project/my_experiment/config_registry.py
+# my_project/my_experiment/recipe module
 def my_experiment() -> Controller.Config:
     return Controller.Config(
         model=...,
@@ -221,7 +221,7 @@ export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 7. Run the DAPO Math reference experiment:
 ```bash
 python -m torchtitan.rl.train \
-  --module dapo_math \
+  --module torchtitan_recipes.rl.dapo_math \
   --config rl_dapo_qwen3_4b_math_8k
 ```
 

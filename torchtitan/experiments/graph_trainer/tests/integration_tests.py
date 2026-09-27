@@ -9,18 +9,14 @@ import os
 
 from tests.integration_tests import IntegrationTestDefinition
 from tests.integration_tests.run_tests import run_tests
+from torchtitan_recipes.graph_trainer.llama3 import graph_trainer_llama3_8b
 
-from torchtitan.experiments.graph_trainer.deepseek_v3 import (
-    config_registry as deepseek_v3_recipes,
+from torchtitan_recipes.tests.graph_trainer import (
+    deepseek_v3 as deepseek_v3_recipes,
+    llama3 as llama3_recipes,
+    muse_glimmer as muse_glimmer_recipes,
+    qwen3 as qwen3_recipes,
 )
-
-from torchtitan.experiments.graph_trainer.llama3 import (
-    config_registry as llama3_recipes,
-)
-from torchtitan.experiments.graph_trainer.muse_glimmer import (
-    config_registry as muse_glimmer_recipes,
-)
-from torchtitan.experiments.graph_trainer.qwen3 import config_registry as qwen3_recipes
 
 # TODO: Re-enable after regional_inductor can trace the CP load balancer's
 # index-rearrange constants; it currently raises a FunctionalTensor error.
@@ -107,8 +103,8 @@ def deepseek_v3_fused_mla_swiglu_fsdp_tp_ep():
         "cuda_graph_pass",
     ]
     config.override.imports = [
-        "torchtitan.overrides.fused_mla.fused_mla",
-        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan_recipes.overrides.fused_mla.fused_mla",
+        "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -261,7 +257,7 @@ def muse_glimmer_fsdp_tp():
 
 
 def llama3_fsdp_tp_async_tp():
-    config = llama3_recipes.graph_trainer_llama3_8b(seq_len=512)
+    config = graph_trainer_llama3_8b(seq_len=512)
     config.compile.enable_async_tensor_parallel = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 1024
     config.parallelism.data_parallel_shard_degree = 4

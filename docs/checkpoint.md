@@ -5,13 +5,13 @@ You may want to enable checkpointing in `torchtitan` for better fault tolerance 
 ## A general guide to use checkpoints during training
 
 1. ENABLE CHECKPOINTING
-In your config_registry function, configure the checkpoint settings:
+In your recipe function, configure the checkpoint settings:
 ```python
 checkpointer=CheckpointManager.Config(
     interval=500,
 ),
 ```
-Checkpointing is configured in the config registry rather than on the CLI.
+Checkpointing is configured in the recipe rather than on the CLI.
 
 2. SAVE MODEL ONLY
 By setting `last_save_model_only` to `True`, the checkpoint will only contain the model and exclude the optimizer state and extra train states, resulting in a smaller checkpoint size.
@@ -69,7 +69,7 @@ Sometimes one needs to create a seed checkpoint to initialize a model from step 
 E.g. it is hard, if not impossible, for meta initialization on multiple devices to reproduce the initialization on a single device.
 A seed checkpoint does initialization of the model on a single CPU, and can be loaded from another job on an arbitrary number of GPUs via DCP resharding.
 
-To create a seed checkpoint, define a config registry entry with
+To create a seed checkpoint, define a recipe with
 `create_seed_checkpoint=True`, a non-`None` `checkpointer`, and every
 parallelism degree set to 1. Then run that configuration on one device.
 
@@ -78,7 +78,7 @@ parallelism degree set to 1. Then run that configuration on one device.
 ### HuggingFace
 `torchtitan` offers two ways to work with Hugging Face models: either by directly saving and loading a Hugging Face checkpoint during training, or by using an example conversion script to directly reformat the model weights on cpu.
 
-1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the config registry. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
+1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the recipe. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
 
 2. To directly reformat the weights without the need to run a training loop, run the corresponding conversion script. The naming scheme is `torchtitan`-centric, e.g. convert_from_hf means convert hf->tt. `convert_ema_to_hf` exports the EMA weights instead of the trained ones, from the same checkpoint; it takes the same arguments and errors out if the checkpoint holds no EMA state. Note that `last_save_model_only` (the default) writes only model weights at the last step, so export the EMA from an interval checkpoint, or set it to `False`.
 

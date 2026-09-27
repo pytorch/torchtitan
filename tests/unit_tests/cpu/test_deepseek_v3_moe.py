@@ -21,7 +21,7 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
-from torchtitan.models.deepseek_v3 import deepseekv3_configs, model_registry
+from torchtitan.models.deepseek_v3 import build_model_config, MODEL_FLAVORS
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 from torchtitan.models.deepseek_v3.mtp import MTPTransformerBlock
 from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
@@ -61,7 +61,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         )
 
     def test_mtp_mask_remains_replicated_at_block_boundary(self):
-        config = model_registry(
+        config = build_model_config(
             "debugmodel",
             seq_len=128,
             num_mtp_layers=1,
@@ -92,7 +92,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         )
 
     def test_model_config_uses_deepseek_v3_router(self):
-        config = model_registry(
+        config = build_model_config(
             "236B",
             seq_len=2048,
         )
@@ -109,7 +109,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertIs(type(shared_experts.w2), SharedExpertRowParallelLinear.Config)
 
     def test_attention_owns_input_gather_and_wo_owns_output_reduction(self):
-        build_config, _ = deepseekv3_configs["debugmodel"]
+        build_config, _ = MODEL_FLAVORS["debugmodel"]
         config = build_config(
             attn_backend="flex",
             seq_len=128,

@@ -25,17 +25,17 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.common_fsdp import FSDPTest
+from torchtitan_recipes.tests.graph_trainer import numerics as graph_trainer_numerics
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer import simple_fsdp
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
-from torchtitan.experiments.graph_trainer.tests import numerics_configs
 from torchtitan.models.common.linear import GroupedLinear, Linear
 
 
 STEPS = 20
-NUMERICS_CONFIG_MODULE = numerics_configs.__name__
+NUMERICS_CONFIG_MODULE = graph_trainer_numerics.__name__
 
 
 def run_loss_compare(

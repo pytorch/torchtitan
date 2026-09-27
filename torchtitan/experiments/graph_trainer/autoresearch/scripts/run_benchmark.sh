@@ -13,7 +13,7 @@ set -e
 
 start_time=$(date +%s)
 
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_autoresearch ./run_train.sh \
+NGPU=8 MODULE=torchtitan_recipes.graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_autoresearch ./run_train.sh \
     "$@" \
     > run.log 2>&1
 

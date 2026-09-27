@@ -10,8 +10,8 @@ import importlib
 
 import pytest
 
-_ALPHABET = "torchtitan.rl.examples.alphabet_sort.config_registry"
-_SEARCH = "torchtitan.rl.examples.search_r1.config_registry"
+_ALPHABET = "torchtitan_recipes.rl.alphabet_sort"
+_SEARCH = "torchtitan_recipes.rl.search_r1"
 
 
 @pytest.mark.parametrize(

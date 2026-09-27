@@ -54,7 +54,7 @@ export NCCL_BUFFSIZE=2097152
 #export TORCH_DIST_INIT_BARRIER=1
 export FI_EFA_SET_CUDA_SYNC_MEMOPS=0
 
-MODULE=${MODULE:-"llama3"}
+MODULE=${MODULE:-"torchtitan_recipes.tests.models.llama3"}
 CONFIG=${CONFIG:-"llama3_debugmodel"}
 
 dcgmi profile --pause

@@ -9,12 +9,9 @@ from types import SimpleNamespace
 
 import torch
 from torchtitan.components.data import GrainDataLoader
-from torchtitan.models.flux.config_registry import (
-    flux_debugmodel,
-    flux_dev,
-    flux_schnell,
-)
 from torchtitan.models.flux.flux_datasets import FluxSampleProcessor
+from torchtitan_recipes.models.flux import flux_dev, flux_schnell
+from torchtitan_recipes.tests.models.flux import flux_debugmodel
 
 
 class TestFluxDataLoader(unittest.TestCase):

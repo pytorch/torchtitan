@@ -5,11 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.config.transform import BatchInvariantFlexConverter
-from torchtitan.models.llama3 import model_registry
+from torchtitan.models.llama3 import build_model_config
 
 
 def test_batch_invariant_flex_converter_pins_kernel_options():
-    model = model_registry("debugmodel", attn_backend="flex")
+    model = build_model_config("debugmodel", attn_backend="flex")
 
     converted = BatchInvariantFlexConverter.Config().build().convert(model)
 

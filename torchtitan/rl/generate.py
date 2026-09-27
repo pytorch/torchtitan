@@ -8,7 +8,7 @@
 """
 Example inference script using TorchTitan models with vLLM LLMEngine.
 
-This script uses the RL unified config_registry to configure both
+This script uses an RL recipe to configure both
 the vLLM engine and sampling parameters.
 
 Run: torchrun --nproc_per_node=4 \
@@ -24,6 +24,7 @@ import os
 # See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+from torchtitan_recipes.rl import alphabet_sort as recipes
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.logger import init_logger
@@ -33,7 +34,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
-from torchtitan.rl.examples.alphabet_sort import config_registry
 from torchtitan.rl.model.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         default="rl_grpo_qwen3_0_6b_varlen",
-        help="RL config_registry function to instantiate.",
+        help="RL recipe function to instantiate.",
     )
     parser.add_argument(
         "--prompt",
@@ -77,7 +77,7 @@ def _parse_args() -> argparse.Namespace:
 def generate() -> None:
     args = _parse_args()
 
-    config_factory = getattr(config_registry, args.config, None)
+    config_factory = getattr(recipes, args.config, None)
     if not callable(config_factory):
         raise ValueError(f"Unknown RL config {args.config!r}")
     config = config_factory()

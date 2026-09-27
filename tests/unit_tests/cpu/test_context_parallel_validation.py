@@ -23,7 +23,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         from torchtitan.models.common.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
-        from torchtitan.models.llama3.config_registry import (
+        from torchtitan_recipes.tests.models.llama3 import (
             llama3_debugmodel,
             llama3_debugmodel_varlen_attn,
         )
@@ -88,7 +88,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         n_kv_heads: int | None = None,
     ):
         from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+        from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
         config = llama3_debugmodel(seq_len=512)
         attention = config.model.layers[0].attention
@@ -199,7 +199,7 @@ class TestHeadDivisibility(unittest.TestCase):
     def _config(
         *, inner_attention=None, cp: int = 1, tp: int = 1, n_heads: int, n_kv_heads: int
     ):
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+        from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
         config = llama3_debugmodel(seq_len=512)
         attention = config.model.layers[0].attention
@@ -233,10 +233,10 @@ class TestShippedCpRecipes(unittest.TestCase):
     """Validate every shipped CP recipe after construction."""
 
     _MODULES = (
-        "torchtitan_recipes.muse_glimmer",
-        "torchtitan_recipes.tests.models",
-        "torchtitan_recipes.tests.features",
-        "torchtitan_recipes.tests.h100",
+        "torchtitan_recipes.models.muse_glimmer",
+        "torchtitan_recipes.tests.suites.models",
+        "torchtitan_recipes.tests.suites.features",
+        "torchtitan_recipes.tests.suites.h100",
     )
 
     @classmethod
@@ -272,7 +272,7 @@ class TestShippedCpRecipes(unittest.TestCase):
         from torchtitan.models.common.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
-        from torchtitan.models.deepseek_v3.config_registry import (
+        from torchtitan_recipes.tests.models.deepseek_v3 import (
             deepseek_v3_debugmodel_mtp,
         )
 

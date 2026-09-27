@@ -71,7 +71,14 @@ class _ScaledLinear(Linear):
 
 def test_no_float8_by_default():
     config_loader = ConfigLoader()
-    config = config_loader.load(["--module", "llama3", "--config", "llama3_debugmodel"])
+    config = config_loader.load(
+        [
+            "--module",
+            "torchtitan_recipes.tests.models.llama3",
+            "--config",
+            "llama3_debugmodel",
+        ]
+    )
     model_config = config.model
     assert not has_quantization(model_config)
     # All Linear.Config instances should remain Linear.Config
@@ -269,11 +276,16 @@ def test_nvfp4_converter_preserves_tensor_parallel_role(
     assert issubclass(converted._owner, parallel_cls)
 
 
-def test_float8_applied_by_model_registry():
+def test_float8_applied_by_build_model_config():
     pytest.importorskip("torchao")
     config_loader = ConfigLoader()
     config = config_loader.load(
-        ["--module", "llama3", "--config", "llama3_debugmodel_float8_emulate_lora"]
+        [
+            "--module",
+            "torchtitan_recipes.tests.models.llama3",
+            "--config",
+            "llama3_debugmodel_float8_emulate_lora",
+        ]
     )
     model_config = config.model
     assert has_quantization(model_config)
@@ -299,8 +311,16 @@ def test_float8_applied_by_model_registry():
 @pytest.mark.parametrize(
     "module, recipe, expected_num_layers",
     [
-        ("llama3", "llama3_debugmodel_nvfp4", 6),
-        ("qwen3", "qwen3_debugmodel_nvfp4", 8),
+        (
+            "torchtitan_recipes.tests.models.llama3",
+            "llama3_debugmodel_nvfp4",
+            6,
+        ),
+        (
+            "torchtitan_recipes.tests.models.qwen3",
+            "qwen3_debugmodel_nvfp4",
+            8,
+        ),
     ],
 )
 def test_nvfp4_converter_targets_layers_not_lm_head(
@@ -359,10 +379,26 @@ def test_nvfp4_bf16_tail_fqns():
 @pytest.mark.parametrize(
     "module, recipe, expected_cutoff",
     [
-        ("llama3", "llama3_debugmodel_first_85_pct_layers_nvfp4", 5),
-        ("llama3", "llama3_8b_first_85_pct_layers_nvfp4", 27),
-        ("qwen3", "qwen3_debugmodel_first_85_pct_layers_nvfp4", 6),
-        ("qwen3", "qwen3_8b_first_85_pct_layers_nvfp4", 30),
+        (
+            "torchtitan_recipes.tests.models.llama3",
+            "llama3_debugmodel_first_85_pct_layers_nvfp4",
+            5,
+        ),
+        (
+            "torchtitan_recipes.tests.models.llama3",
+            "llama3_8b_first_85_pct_layers_nvfp4",
+            27,
+        ),
+        (
+            "torchtitan_recipes.tests.models.qwen3",
+            "qwen3_debugmodel_first_85_pct_layers_nvfp4",
+            6,
+        ),
+        (
+            "torchtitan_recipes.tests.models.qwen3",
+            "qwen3_8b_first_85_pct_layers_nvfp4",
+            30,
+        ),
     ],
 )
 def test_nvfp4_first_85_pct_layers_converts_only_leading_layers(
@@ -492,12 +528,30 @@ def test_nvfp4_parallel_build_preserves_collective_boundary(parallel_cls):
 @pytest.mark.parametrize(
     "module, recipe",
     [
-        ("llama3", "llama3_debugmodel_nvfp4"),
-        ("llama3", "llama3_debugmodel_first_85_pct_layers_nvfp4"),
-        ("llama3", "llama3_8b_first_85_pct_layers_nvfp4"),
-        ("qwen3", "qwen3_debugmodel_nvfp4"),
-        ("qwen3", "qwen3_debugmodel_first_85_pct_layers_nvfp4"),
-        ("qwen3", "qwen3_8b_first_85_pct_layers_nvfp4"),
+        (
+            "torchtitan_recipes.tests.models.llama3",
+            "llama3_debugmodel_nvfp4",
+        ),
+        (
+            "torchtitan_recipes.tests.models.llama3",
+            "llama3_debugmodel_first_85_pct_layers_nvfp4",
+        ),
+        (
+            "torchtitan_recipes.tests.models.llama3",
+            "llama3_8b_first_85_pct_layers_nvfp4",
+        ),
+        (
+            "torchtitan_recipes.tests.models.qwen3",
+            "qwen3_debugmodel_nvfp4",
+        ),
+        (
+            "torchtitan_recipes.tests.models.qwen3",
+            "qwen3_debugmodel_first_85_pct_layers_nvfp4",
+        ),
+        (
+            "torchtitan_recipes.tests.models.qwen3",
+            "qwen3_8b_first_85_pct_layers_nvfp4",
+        ),
     ],
 )
 def test_nvfp4_recipes_parse(monkeypatch, module, recipe):
@@ -519,7 +573,9 @@ def test_nvfp4_recipes_parse(monkeypatch, module, recipe):
 def test_qwen3_recipes_resolve(monkeypatch, recipe):
     _nvfp4_linear_cls()
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    config = ConfigLoader().load(["--module", "qwen3", "--config", recipe])
+    config = ConfigLoader().load(
+        ["--module", "torchtitan_recipes.tests.models.qwen3", "--config", recipe]
+    )
     assert type(config.model).__qualname__ == "Qwen3Model.Config"
     if recipe == "qwen3_8b_first_85_pct_layers_nvfp4":
         assert isinstance(config.dataloader, GrainDataLoader.Config)
@@ -578,7 +634,12 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
     config = ConfigLoader().load(
-        ["--module", "llama3", "--config", "llama3_debugmodel_nvfp4"]
+        [
+            "--module",
+            "torchtitan_recipes.tests.models.llama3",
+            "--config",
+            "llama3_debugmodel_nvfp4",
+        ]
     )
     model_config = config.model
     model = model_config.build()
@@ -925,19 +986,19 @@ def test_builtin_mxfp8_configs_assign_input_activation_format_for_backward(
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     if config_factory == "llama3":
-        from torchtitan.models.llama3.config_registry import (
+        from torchtitan_recipes.tests.models.llama3 import (
             llama3_debugmodel_mxfp8 as build_config,
         )
     elif config_factory == "llama3_graph":
-        from torchtitan.experiments.graph_trainer.llama3.config_registry import (
+        from torchtitan_recipes.tests.graph_trainer.llama3 import (
             graph_trainer_llama3_debugmodel_mxfp8 as build_config,
         )
     elif config_factory == "deepseek_v3":
-        from torchtitan.models.deepseek_v3.config_registry import (
+        from torchtitan_recipes.tests.models.deepseek_v3 import (
             deepseek_v3_debugmodel_mxfp8 as build_config,
         )
     else:
-        from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+        from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
             graph_trainer_deepseek_v3_debugmodel_mxfp8 as build_config,
         )
 

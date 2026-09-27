@@ -12,12 +12,12 @@ import torch
 import torch.nn.functional as F
 from torchtitan.config import ParallelismConfig
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.muse_glimmer import model_registry
+from torchtitan.models.muse_glimmer import build_model_config
 
 
 class TestMuseGlimmerConditionalVision(unittest.TestCase):
     def test_runtime_sharding_includes_owned_vision_modules(self):
-        config = model_registry("debugmodel_mm", seq_len=8)
+        config = build_model_config("debugmodel_mm", seq_len=8)
         assert config.vision_encoder is not None
         assert config.vision_adapter is not None
         self.assertIsNone(config.vision_encoder.sharding_config)
@@ -48,7 +48,7 @@ class TestMuseGlimmerConditionalVision(unittest.TestCase):
                 SimpleNamespace(),
             )
 
-        model = model_registry("debugmodel_mm", seq_len=8).build()
+        model = build_model_config("debugmodel_mm", seq_len=8).build()
         model.init_states()
         hidden_TD = torch.randn(4, model.config.dim, requires_grad=True)
         encoder_outputs = []

@@ -11,14 +11,14 @@ from torchtitan.config import TrainingConfig
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.param_init import skip_param_init
-from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.trainer import Trainer
 
 
 def _make_config(enable_weight_tying: bool = False) -> Llama3Model.Config:
     # Start from the standard debugmodel config and adjust weight tying.
-    build_config, max_context_length = llama3_configs["debugmodel"]
+    build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
     config = build_config(attn_backend="flex", seq_len=max_context_length)
     # Replace tok_embeddings param_init based on weight tying flag.
     import dataclasses

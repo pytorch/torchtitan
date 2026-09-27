@@ -239,7 +239,7 @@ class Controller(Configurable):
 
     Example:
 
-        config = config_registry.rl_grpo_qwen3_0_6b_varlen()
+        config = recipes.rl_grpo_qwen3_0_6b_varlen()
         controller = config.build()
         trainer_mesh = ...        # provisioned by the caller (see train.py)
         generator_meshes = ...
@@ -254,8 +254,7 @@ class Controller(Configurable):
         """Top-level config for RL training."""
 
         model: Decoder.Config | None = None
-        """Model config for the trainer and the generator. Set programmatically via
-        config_registry (not from CLI)."""
+        """Model config shared by the trainer and generator."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""

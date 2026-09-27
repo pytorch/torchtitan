@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torchtitan_recipes.tests.b200 as recipes
+import torchtitan_recipes.tests.suites.b200 as recipes
 
 from tests.integration_tests import IntegrationTestDefinition
 

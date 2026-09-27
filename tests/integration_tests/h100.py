@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torchtitan_recipes.tests.h100 as recipes
-from torchtitan.models.llama3.config_registry import llama3_debugmodel_float8
+import torchtitan_recipes.tests.suites.h100 as recipes
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_float8
 
 from tests.integration_tests import IntegrationTestDefinition
 
@@ -14,7 +14,7 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
     """
     Build the list of integration tests that need H100-class hardware.
 
-    Each entry names one configuration per run; see ``torchtitan_recipes.tests.h100``.
+    Each entry names one configuration per run; see ``torchtitan_recipes.tests.suites.h100``.
     """
     return [
         IntegrationTestDefinition(

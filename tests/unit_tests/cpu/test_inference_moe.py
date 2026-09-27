@@ -23,16 +23,16 @@ from torchtitan.models.common.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
 )
-from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
-from torchtitan.overrides.moe_token_dispatcher import deepep_override
+from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
+from torchtitan_recipes.overrides.moe_token_dispatcher import deepep_override
 
 _DIM = 16
 _HIDDEN = 32
 _E = 4
 
-_FUSED_SWIGLU = "torchtitan.overrides.fused_swiglu.fused_swiglu"
+_FUSED_SWIGLU = "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"
 _DEEPEP_OVERRIDE = (
-    "torchtitan.overrides.moe_token_dispatcher.deepep_override",
+    "torchtitan_recipes.overrides.moe_token_dispatcher.deepep_override",
     {"cuda_graph_compatible": True},
 )
 
@@ -42,8 +42,8 @@ _DEEPEP_OVERRIDE = (
 _OVERRIDES = {
     key: _REGISTRY[key]
     for key in (
-        "torchtitan.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan.overrides.moe_token_dispatcher.deepep_override",
+        "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan_recipes.overrides.moe_token_dispatcher.deepep_override",
     )
     if key in _REGISTRY
 }

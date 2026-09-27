@@ -71,12 +71,12 @@ class FluxModel(BaseModel):
         qkv_bias: bool = True
         autoencoder: AutoEncoder.Config = field(default_factory=AutoEncoder.Config)
 
-        # Text encoder configs, set by the model registry. The trainer can
+        # Text encoder configs, set by the model flavor. The trainer can
         # override version and random_init when it builds the encoders.
         clip_encoder: FluxEmbedder.Config
         t5_encoder: FluxEmbedder.Config
 
-        # Sub-component configs (all required — set by the model registry)
+        # Sub-component configs (all required -- set by the model flavor)
         pe_config: EmbedND.Config
         time_in_config: MLPEmbedder.Config
         vector_in_config: MLPEmbedder.Config

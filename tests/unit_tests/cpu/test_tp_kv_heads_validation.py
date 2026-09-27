@@ -33,7 +33,8 @@ try:
         Linear,
         RMSNorm,
     )
-    from torchtitan.models.llama3 import Llama3Model, Llama3TransformerBlock
+    from torchtitan.models.llama3 import Llama3Model
+    from torchtitan.models.llama3.model import Llama3TransformerBlock
 
     _IMPORTS_OK = True
 except Exception:

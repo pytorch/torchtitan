@@ -30,12 +30,12 @@ def _build_config_modules():
     try:
         from torchtitan.config.parallelism import ParallelismConfig
         from torchtitan.distributed.parallelism_context import ParallelismContext
-        from torchtitan.models.qwen3_5 import model_registry
+        from torchtitan.models.qwen3_5 import build_model_config
     except ModuleNotFoundError as exc:
         raise unittest.SkipTest(
             f"Qwen3.5 optional dependency unavailable: {exc.name}"
         ) from exc
-    return model_registry, ParallelismContext, ParallelismConfig
+    return build_model_config, ParallelismContext, ParallelismConfig
 
 
 class _RecordingLayer(nn.Module):
@@ -65,10 +65,14 @@ class _RecordingLayer(nn.Module):
 
 class TestQwen35MRoPEPositions(unittest.TestCase):
     def _build_stub_model(self):
-        model_registry, ParallelismContext, ParallelismConfig = _build_config_modules()
+        (
+            build_model_config,
+            ParallelismContext,
+            ParallelismConfig,
+        ) = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex
         # compile) so the pipeline runs on CPU.
-        model = model_registry("debugmodel", attn_backend="varlen").build()
+        model = build_model_config("debugmodel", attn_backend="varlen").build()
         sink: dict = {}
         for key in list(model.layers.keys()):
             model.layers[key] = _RecordingLayer(sink)

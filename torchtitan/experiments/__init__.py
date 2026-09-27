@@ -3,23 +3,3 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-
-_supported_experiments = frozenset(
-    [
-        "graph_trainer.llama3",
-        "graph_trainer.deepseek_v3",
-        "graph_trainer.qwen3",
-        "graph_trainer.muse_glimmer",
-        "transformers_modeling_backend",
-        "autoparallel.llama3",
-        "autoparallel.local_map_deepseek_v3",
-        "torchft.llama3",
-        "rl",
-        # RL examples own a config_registry under rl/examples/<module path>;
-        # listed here so `--module <module path>` resolves (see ConfigLoader).
-        "alphabet_sort",
-        "dapo_math",
-        "search_r1",
-        "verifiers.dapo_math",
-    ]
-)

@@ -310,25 +310,6 @@ assert set(NoColor.__dataclass_fields__.keys()) == set(
 ), "NoColor must have the same fields as Color."
 
 
-def check_if_feature_in_pytorch(
-    feature_name: str,
-    pull_request: str,
-    min_nightly_version: str | None = None,
-) -> None:
-    if "git" in torch.__version__:  # pytorch is built from source
-        # notify users to check if the pull request is included in their pytorch
-        logger.warning(
-            "Detected that the pytorch is built from source. Please make sure the PR "
-            f"({pull_request}) is included in pytorch for correct {feature_name}."
-        )
-    elif min_nightly_version is not None and torch.__version__ < min_nightly_version:
-        logger.warning(
-            f"Detected that the pytorch version {torch.__version__} is older than "
-            f"{min_nightly_version}. Please upgrade a newer version to include the "
-            f"change in ({pull_request}) for correct {feature_name}."
-        )
-
-
 @contextlib.contextmanager
 def set_default_dtype(dtype: torch.dtype) -> Generator[None, None, None]:
     """

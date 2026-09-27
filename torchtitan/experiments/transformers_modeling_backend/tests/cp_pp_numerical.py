@@ -37,7 +37,7 @@ import torch
 
 from scripts._checkpoint_test_config import configure_checkpoint
 
-from torchtitan.experiments.transformers_modeling_backend.config_registry import (
+from torchtitan_recipes.tests.transformers_modeling_backend import (
     transformers_modeling_backend_debugmodel,
 )
 

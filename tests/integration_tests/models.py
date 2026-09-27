@@ -5,11 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import torchtitan_recipes.tests.models as recipes
+import torchtitan_recipes.tests.suites.models as recipes
 
-from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
-from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
-from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
+from torchtitan_recipes.tests.models.gpt_oss import gpt_oss_debugmodel_flex
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 from tests.integration_tests import IntegrationTestDefinition
 
@@ -143,7 +143,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
             # The Helion fused cos/sin RoPE kernel is CUDA-only and its autotuned
             # configs are tuned for NVIDIA H100; skip on ROCm where it is
-            # unvalidated (see torchtitan/overrides/helion_rope.py).
+            # unvalidated (see torchtitan_recipes/overrides/helion_rope.py).
             skip_rocm_test=True,
         ),
         # Integration Test Cases for Qwen3.5

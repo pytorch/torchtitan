@@ -216,7 +216,7 @@ configured.
 OTEL_METRICS_EXPORTER=jsonl \
 VLLM_LOG_STATS_INTERVAL=10 \
 python -m torchtitan.rl.train \
-  --module dapo_math \
+  --module torchtitan_recipes.rl.dapo_math \
   --config rl_dapo_qwen3_4b_math_8k
 ```
 
@@ -234,7 +234,7 @@ OTEL_METRICS_EXPORTER=otlp \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 VLLM_LOG_STATS_INTERVAL=10 \
 python -m torchtitan.rl.train \
-  --module dapo_math \
+  --module torchtitan_recipes.rl.dapo_math \
   --config rl_dapo_qwen3_4b_math_8k
 ```
 

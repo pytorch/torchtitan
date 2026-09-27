@@ -178,7 +178,7 @@ def main() -> None:
     p.add_argument("load_commit", help="Commit that loads the checkpoint (new code)")
     p.add_argument("--steps", type=int, default=100, help="Total training steps")
     p.add_argument("--resume-step", type=int, default=50, help="Checkpoint/resume step")
-    p.add_argument("--module", default="llama3")
+    p.add_argument("--module", default="torchtitan_recipes.tests.models.llama3")
     p.add_argument("--config", default="llama3_debugmodel")
     p.add_argument("--ngpus", type=int, default=8)
     p.add_argument("--output-folder", default="")

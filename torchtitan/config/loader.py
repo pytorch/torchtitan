@@ -65,7 +65,7 @@ class ConfigLoader:
         parser.add_argument(
             "--module",
             required=True,
-            help="Config module shorthand or fully qualified Python module.",
+            help="Fully qualified Python module containing the config factory.",
         )
         parser.add_argument(
             "--config",
@@ -105,45 +105,18 @@ class ConfigLoader:
 
     @staticmethod
     def _load_config(module_name: str, config_name: str) -> Configurable.Config:
-        """Call ``config_name`` from a built-in shorthand or Python module."""
-        from torchtitan.experiments import _supported_experiments
-        from torchtitan.models import _supported_models
-
-        all_supported = _supported_models | _supported_experiments
-        candidates = (
-            (
-                f"torchtitan.models.{module_name}.config_registry",
-                f"torchtitan.experiments.{module_name}.config_registry",
-                f"torchtitan.rl.examples.{module_name}.config_registry",
+        """Call ``config_name`` from an importable Python module."""
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError as error:
+            missing_module = error.name is not None and (
+                error.name == module_name or module_name.startswith(f"{error.name}.")
             )
-            if module_name in all_supported
-            else (f"{module_name}.config_registry", module_name)
-        )
-
-        module = None
-        module_path = None
-        import_errors: list[ImportError] = []
-        for candidate in candidates:
-            try:
-                module = importlib.import_module(candidate)
-                module_path = candidate
-                break
-            except ImportError as error:
-                missing_candidate = error.name is not None and (
-                    error.name == candidate or candidate.startswith(f"{error.name}.")
-                )
-                if not missing_candidate:
-                    raise
-                import_errors.append(error)
-
-        if module is None:
-            message = (
-                f"Cannot import config module {module_name!r}. Tried: "
-                f"{', '.join(candidates)}."
-            )
-            if module_name in all_supported:
-                message += f" Supported shorthands: {sorted(all_supported)}"
-            raise ImportError(message) from import_errors[-1]
+            if not missing_module:
+                raise
+            raise ImportError(
+                f"Cannot import config module {module_name!r}."
+            ) from error
 
         config_fn = getattr(module, config_name, None)
         if config_fn is None or not callable(config_fn):
@@ -155,13 +128,13 @@ class ConfigLoader:
                 and name[0].islower()
             ]
             raise ValueError(
-                f"Config function {config_name!r} not found in {module_path}. "
+                f"Config function {config_name!r} not found in {module_name}. "
                 f"Available config functions: {available}"
             )
         config = config_fn()
         if not isinstance(config, Configurable.Config):
             raise TypeError(
-                f"{module_path}.{config_name} must return Configurable.Config, "
+                f"{module_name}.{config_name} must return Configurable.Config, "
                 f"got {type(config).__qualname__}."
             )
         return config

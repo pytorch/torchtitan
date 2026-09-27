@@ -40,16 +40,16 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
-    model_registry as dsv3_model_registry,
+    build_model_config as build_deepseek_v3_model_config,
 )
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
 )
 from torchtitan.experiments.graph_trainer.llama3 import (
-    model_registry as llama3_model_registry,
+    build_model_config as build_llama3_model_config,
 )
 from torchtitan.experiments.graph_trainer.qwen3 import (
-    model_registry as qwen3_model_registry,
+    build_model_config as build_qwen3_model_config,
 )
 from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
     build_minimal_trainer,
@@ -101,10 +101,10 @@ _EAGER_GOLDEN_SKIP_REASON = (
 class BitwiseDeterministicBase(unittest.TestCase):
     """Base class for bitwise determinism tests.
 
-    Subclasses must set `model_registry` to the appropriate model registry function.
+    Subclasses must set `build_model_config` to the appropriate model config builder.
     """
 
-    model_registry: Callable
+    build_model_config: Callable
     annotate_model: Callable
     model_flavor: str
     # The unsuffixed subclasses use SDPA (a test-only backend that exercises the
@@ -134,7 +134,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
 
         _set_deterministic()
-        self.model_config = self.model_registry(
+        self.model_config = self.build_model_config(
             self.model_flavor,
             attn_backend=self.attn_backend,
             seq_len=SEQ_LEN,
@@ -388,7 +388,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
 class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 debug model."""
 
-    model_registry = staticmethod(llama3_model_registry)
+    build_model_config = staticmethod(build_llama3_model_config)
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
@@ -455,7 +455,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
 
-    model_registry = staticmethod(dsv3_model_registry)
+    build_model_config = staticmethod(build_deepseek_v3_model_config)
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
@@ -523,7 +523,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     Triton kernels and produces bitwise identical results to eager.
     """
 
-    model_registry = staticmethod(llama3_model_registry)
+    build_model_config = staticmethod(build_llama3_model_config)
     model_flavor = "debugmodel"
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_graph_trainer_model)
@@ -591,7 +591,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     Triton kernels and produces bitwise identical results to eager.
     """
 
-    model_registry = staticmethod(dsv3_model_registry)
+    build_model_config = staticmethod(build_deepseek_v3_model_config)
     model_flavor = "debugmodel"
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_graph_trainer_model)
@@ -710,7 +710,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
 class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Qwen3 MoE debug model."""
 
-    model_registry = staticmethod(qwen3_model_registry)
+    build_model_config = staticmethod(build_qwen3_model_config)
     model_flavor = "debugmodel_moe"
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
@@ -778,7 +778,7 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     Triton kernels and produces bitwise identical results to eager.
     """
 
-    model_registry = staticmethod(qwen3_model_registry)
+    build_model_config = staticmethod(build_qwen3_model_config)
     model_flavor = "debugmodel_moe"
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_graph_trainer_model)

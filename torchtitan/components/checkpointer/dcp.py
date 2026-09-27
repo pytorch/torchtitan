@@ -68,10 +68,6 @@ class AsyncMode(str, enum.Enum):
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
 
 
-class SaveDone:
-    pass
-
-
 class _FilesystemCheckpointStorage:
     """``CheckpointStorage`` backed by ``torchtitan.tools.filesystem``.
 

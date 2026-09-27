@@ -283,9 +283,7 @@ class HFTransformerModel(BaseModel):
 
             assert model_config is not None, "model_config is required"
 
-            from torchtitan.experiments.transformers_modeling_backend import (
-                TitanMoeModelConfig,
-            )
+            from .flavors import TitanMoeModelConfig
 
             self.is_moe = isinstance(model_config, TitanMoeModelConfig)
 

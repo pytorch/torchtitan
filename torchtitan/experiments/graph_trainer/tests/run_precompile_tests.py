@@ -30,12 +30,11 @@ from dataclasses import dataclass
 
 from tests.integration_tests import get_importable_config_module
 
-from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
-    graph_trainer_deepseek_v3_debugmodel,
+from torchtitan_recipes.tests.graph_trainer.precompile import (
+    deepseek_v3_precompile_fsdp_tp_ep,
+    llama3_precompile_fsdp_tp,
 )
-from torchtitan.experiments.graph_trainer.llama3.config_registry import (
-    graph_trainer_llama3_debugmodel_sdpa,
-)
+
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.observability.logging import init_logger
 
@@ -51,28 +50,6 @@ class PrecompileTestDefinition:
     test_name: str
     ngpu: int = 8
     disabled: bool = False
-
-
-def llama3_precompile_fsdp_tp() -> GraphTrainer.Config:
-    config = graph_trainer_llama3_debugmodel_sdpa()
-    config.compile.precompile_artifact_dir = os.environ[
-        "TORCHTITAN_PRECOMPILE_ARTIFACT_DIR"
-    ]
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.tensor_parallel_degree = 4
-    return config
-
-
-def deepseek_v3_precompile_fsdp_tp_ep() -> GraphTrainer.Config:
-    config = graph_trainer_deepseek_v3_debugmodel()
-    config.training.disable_cuda_graphs = True
-    config.compile.precompile_artifact_dir = os.environ[
-        "TORCHTITAN_PRECOMPILE_ARTIFACT_DIR"
-    ]
-    config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 4
-    return config
 
 
 def _build_precompile_tests() -> list[PrecompileTestDefinition]:
