@@ -12,7 +12,6 @@ Tensor shape suffixes:
     K: input features
 """
 
-import weakref
 from dataclasses import dataclass
 from typing import Literal
 
@@ -80,7 +79,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         weight_scale_dgrad_swizzled: torch.Tensor,
         bias_N: torch.Tensor | None,
         input_activation_format_for_backward: InputActivationFormatForBackward,
-        weight_param_ref: "weakref.ReferenceType[torch.Tensor] | None",
+        weight_param: torch.Tensor | None,
     ) -> torch.Tensor:
         # FPROP always consumes rowwise MXFP8. WGRAD can either retain the
         # original BF16 input and quantize it columnwise in backward, or retain
@@ -197,11 +196,12 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         ctx.requires_wgrad = requires_wgrad
         ctx.input_activation_format_for_backward = input_activation_format_for_backward
         ctx.has_bias = bias_N is not None
-        ctx.weight_param_ref = weight_param_ref
+        # Kept on ctx rather than saved: backward needs this exact parameter
+        # object, and saved-tensor hooks may unpack a different one. A leaf
+        # parameter does not reference its graph, so this forms no cycle.
+        ctx.weight_param = weight_param
         # False for a stacked weight, which arrives as a flattened view.
-        ctx.weight_is_param = (
-            weight_param_ref is not None and weight_param_ref() is weight_NK
-        )
+        ctx.weight_is_param = weight_param is weight_NK
 
         return output_MN[:num_rows].reshape(*input_shape[:-1], weight_NK.shape[0])
 
@@ -295,9 +295,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
                     swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
                 )
-                weight_param = (
-                    ctx.weight_param_ref() if ctx.weight_param_ref is not None else None
-                )
+                weight_param = ctx.weight_param
                 # A traced execution has no parameter reference. The weight is
                 # BF16, as forward checked, and AccumulateGrad casts to the
                 # parameter's grad_dtype.
@@ -471,11 +469,8 @@ class MXFP8Linear(Linear):
         # Dynamo sets is_compiling; GraphTrainer's make_fx tracer does not, so
         # ask the proxy mode as well. A traced backward cannot represent this
         # read-and-clear of parameter.grad, so it uses an ordinary WGRAD.
-        # The reference is weak because saved-tensor hooks may repack a saved
-        # tensor into a different object, and a strong ctx reference would make
-        # the autograd node own the parameter.
         is_tracing = torch.compiler.is_compiling() or get_proxy_mode() is not None
-        weight_param_ref = None if is_tracing else weakref.ref(physical_weight)
+        weight_param = None if is_tracing else physical_weight
         output = _MXFP8LinearFunction.apply(
             input,
             weight_NK,
@@ -485,6 +480,6 @@ class MXFP8Linear(Linear):
             operands.weight_scale_dgrad_swizzled,
             bias,
             self.input_activation_format_for_backward,
-            weight_param_ref,
+            weight_param,
         )
         return output
