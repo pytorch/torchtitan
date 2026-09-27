@@ -105,9 +105,7 @@ def qwen35_debugmodel_varlen_attn(
 def qwen35_debugmodel_moe(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = model_registry(
-        "debugmodel_moe", enable_sp=True, seq_len=seq_len, moe_comm_backend="standard"
-    )
+    model_config = model_registry("debugmodel_moe", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -153,7 +151,6 @@ def qwen35_debugmodel_moe_float8_lora(
         "debugmodel_moe",
         enable_sp=True,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         converters=[
             Float8LinearConverter.Config(
                 emulate=False,
@@ -343,9 +340,7 @@ def qwen35_27b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = model_registry(
-        "35B-A3B", enable_sp=True, seq_len=seq_len, moe_comm_backend="standard"
-    )
+    model_config = model_registry("35B-A3B", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -381,9 +376,7 @@ def qwen35_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_122b_a10b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = model_registry(
-        "122B-A10B", enable_sp=True, seq_len=seq_len, moe_comm_backend="standard"
-    )
+    model_config = model_registry("122B-A10B", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -410,7 +403,7 @@ def qwen35_122b_a10b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
-            tensor_parallel_degree=4,
+            tensor_parallel_degree=2,
             expert_parallel_degree=8,
         ),
         checkpointer=None,
@@ -419,9 +412,7 @@ def qwen35_122b_a10b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen35_397b_a17b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = model_registry(
-        "397B-A17B", enable_sp=True, seq_len=seq_len, moe_comm_backend="standard"
-    )
+    model_config = model_registry("397B-A17B", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -448,7 +439,7 @@ def qwen35_397b_a17b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=-1,
-            tensor_parallel_degree=8,
+            tensor_parallel_degree=2,
             expert_parallel_degree=16,
         ),
         checkpointer=None,

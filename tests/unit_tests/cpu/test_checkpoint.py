@@ -25,7 +25,6 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
-import tyro
 from torch.distributed.checkpoint.api import CheckpointException
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
@@ -204,10 +203,7 @@ class TestCheckpointManager(unittest.TestCase):
         annotation = typing.get_type_hints(TrainingEngine.Config, include_extras=True)[
             "checkpointer"
         ]
-        self.assertEqual(
-            typing.get_args(annotation)[0], CheckpointManager.Config | None
-        )
-        self.assertIn(tyro.conf.AvoidSubcommands, annotation.__metadata__)
+        self.assertEqual(annotation, CheckpointManager.Config | None)
         checkpointer_field = next(
             field
             for field in fields(TrainingEngine.Config)

@@ -12,7 +12,6 @@ TorchTitan models for vLLM.
 """
 
 import dataclasses
-from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -30,7 +29,6 @@ from torchtitan.config import (
     OverrideConfig,
     TrainingConfig,
 )
-from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
@@ -331,41 +329,11 @@ class VLLMModelWrapper(Module):
             enable_sequence_parallel=training_parallelism.enable_sequence_parallel,
         )
 
-        # Fill sharding configs on the config BEFORE build so every sub-module
-        # is constructed with its ShardingConfig attached (required by the
-        # declarative model.parallelize() API). This also gives the replacement
-        # attention and GDN configs their rank-local compute boundaries.
-        # Provides the generic config shape (has .parallelism) so
-        # update_from_config can extract parallelism uniformly.
-        @dataclass(kw_only=True, slots=True)
-        class _InferenceConfig:
-            parallelism: ParallelismConfig
-            # TODO: Replace this synthetic TrainingConfig with an inference-specific
-            # capacity input once update_from_config accepts the runtime token bound.
-            training: TrainingConfig
-
-        self.config.update_from_config(
-            config=_InferenceConfig(
-                parallelism=training_parallelism,
-                training=TrainingConfig(
-                    num_tokens_per_microbatch_per_dp_rank=(
-                        vllm_config.scheduler_config.max_num_batched_tokens
-                    ),
-                    # Use the scheduler bound as a synthetic sequence length solely
-                    # to derive the per-rank EP buffer capacity.
-                    max_context_length=vllm_config.scheduler_config.max_num_batched_tokens,
-                ),
-            )
-        )
-
-        # Apply config overrides (e.g. the Triton SwiGLU activation) after
-        # update_from_config (which fills the sharding the override factories
-        # read) and before build
         if override.imports:
             apply_overrides(override, self.config)
 
         # Build model on meta device to avoid allocating full model on every GPU
-        with torch.device("meta"):
+        with self.parallelism_context.activate_spmd(), torch.device("meta"):
             self.model = self.config.build()
 
         self.model = self.model.parallelize(

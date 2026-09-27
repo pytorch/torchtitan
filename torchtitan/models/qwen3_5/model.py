@@ -323,43 +323,6 @@ class Qwen35Model(MultimodalModel):
     class Config(Decoder.Config):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                dn_cfg = next(
-                    (
-                        layer_cfg.delta_net
-                        for layer_cfg in self.layers
-                        if layer_cfg.delta_net is not None
-                    ),
-                    None,
-                )
-                if dn_cfg is not None:
-                    n_key_heads = dn_cfg.in_proj_q.out_features // dn_cfg.key_head_dim
-                    n_value_heads = (
-                        dn_cfg.in_proj_v.out_features // dn_cfg.value_head_dim
-                    )
-                    if n_key_heads % tp != 0 or n_value_heads % tp != 0:
-                        raise ValueError(
-                            f"tensor_parallel_degree ({tp}) must divide "
-                            f"n_key_heads ({n_key_heads}) and "
-                            f"n_value_heads ({n_value_heads})."
-                        )
-
-            set_qwen35_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -393,6 +356,36 @@ class Qwen35Model(MultimodalModel):
             return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import (
+            spmd_dense_sp_enabled,
+            spmd_mesh_size,
+            spmd_sparse_mesh,
+        )
+
+        tp = spmd_mesh_size("tp")
+        if tp > 1:
+            delta_net = next(
+                (layer.delta_net for layer in config.layers if layer.delta_net),
+                None,
+            )
+            if delta_net is not None:
+                num_key_heads = (
+                    delta_net.in_proj_q.out_features // delta_net.key_head_dim
+                )
+                num_value_heads = (
+                    delta_net.in_proj_v.out_features // delta_net.value_head_dim
+                )
+                if num_key_heads % tp != 0 or num_value_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor parallel degree ({tp}) must divide "
+                        f"num_key_heads ({num_key_heads}) and "
+                        f"num_value_heads ({num_value_heads})."
+                    )
+        set_qwen35_sharding_config(
+            config,
+            enable_sp=spmd_dense_sp_enabled(),
+            enable_ep=spmd_sparse_mesh() is not None,
+        )
         super().__init__(config)
 
         self.vision_encoder = (

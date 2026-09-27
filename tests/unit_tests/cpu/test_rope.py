@@ -273,12 +273,15 @@ class TestYaRNScaling(unittest.TestCase):
         self.assertFalse(torch.equal(yarn.cache[1], unscaled.cache[1]))
 
     def test_deepseek_mscale_applies_below_original_sequence_length(self):
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3 import deepseekv3_configs, model_registry
         from torchtitan.models.deepseek_v3.model import Attention
 
-        build_config, max_context_length = deepseekv3_configs["debugmodel"]
-        model_config = build_config(
-            "flex", "standard", enable_sp=True, seq_len=max_context_length
+        _, max_context_length = deepseekv3_configs["debugmodel"]
+        model_config = model_registry(
+            "debugmodel",
+            attn_backend="flex",
+            enable_sp=True,
+            seq_len=max_context_length,
         )
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, Attention.Config)

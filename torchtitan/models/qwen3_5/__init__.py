@@ -402,8 +402,6 @@ def _build_qwen35_moe_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3.5 models with shared expert."""
     layers = []
@@ -457,8 +455,6 @@ def _build_qwen35_moe_layers(
                         num_experts=num_experts,
                         top_k=top_k,
                         param_init=_depth_experts_init(layer_id),
-                        comm_backend=moe_comm_backend,
-                        non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
                     shared_experts=_shared_experts_config(
                         dim=dim,
@@ -538,7 +534,6 @@ def _debugmodel(
 
 def _debugmodel_moe(
     attn_backend: str,
-    moe_comm_backend: str = "standard",
     *,
     enable_sp: bool,
     seq_len: int,
@@ -588,7 +583,6 @@ def _debugmodel_moe(
             n_value_heads=4,
             key_head_dim=128,
             value_head_dim=128,
-            moe_comm_backend=moe_comm_backend,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=256,
@@ -905,7 +899,6 @@ def _27b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Con
 
 def _35b_a3b(
     attn_backend: str,
-    moe_comm_backend: str = "standard",
     *,
     enable_sp: bool,
     seq_len: int,
@@ -955,7 +948,6 @@ def _35b_a3b(
             n_value_heads=32,
             key_head_dim=128,
             value_head_dim=128,
-            moe_comm_backend=moe_comm_backend,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
@@ -973,7 +965,6 @@ def _35b_a3b(
 
 def _122b_a10b(
     attn_backend: str,
-    moe_comm_backend: str = "standard",
     *,
     enable_sp: bool,
     seq_len: int,
@@ -1023,7 +1014,6 @@ def _122b_a10b(
             n_value_heads=64,
             key_head_dim=128,
             value_head_dim=128,
-            moe_comm_backend=moe_comm_backend,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
@@ -1041,7 +1031,6 @@ def _122b_a10b(
 
 def _397b_a17b(
     attn_backend: str,
-    moe_comm_backend: str = "standard",
     *,
     enable_sp: bool,
     seq_len: int,
@@ -1091,7 +1080,6 @@ def _397b_a17b(
             n_value_heads=64,
             key_head_dim=128,
             value_head_dim=128,
-            moe_comm_backend=moe_comm_backend,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
@@ -1127,7 +1115,6 @@ def model_registry(
     enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen35Model.Config:
     get_config, max_context_len = qwen3_5_configs[flavor]
@@ -1141,11 +1128,6 @@ def model_registry(
         attn_backend=attn_backend,
         enable_sp=enable_sp,
         seq_len=context_len,
-        **(
-            {"moe_comm_backend": moe_comm_backend}
-            if moe_comm_backend is not None
-            else {}
-        ),
     )
     if converters is not None:
         validate_converter_compatibility(converters)

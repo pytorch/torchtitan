@@ -37,6 +37,6 @@ def test_compile_config_rejects_unknown_component() -> None:
 def test_compile_config_async_tp_requires_model_compile() -> None:
     with pytest.raises(
         ValueError,
-        match="Async TP requires 'model' in --compile.components",
+        match="Async TP requires 'model' in compile.components",
     ):
         CompileConfig(enable_async_tensor_parallel=True, components=["loss"])

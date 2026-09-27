@@ -29,7 +29,7 @@ from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.models.qwen3_5 import Qwen35Model, qwen3_5_configs
+from torchtitan.models.qwen3_5 import model_registry, Qwen35Model
 from torchtitan.tools import utils
 
 CONFIGS = [
@@ -53,12 +53,9 @@ def run_worker(args):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    build_config, max_context_length = qwen3_5_configs["debugmodel_moe"]
-    config = build_config(
-        attn_backend="flex",
-        moe_comm_backend="standard",
-        enable_sp=True,
-        seq_len=max_context_length,
+    seq_len = 128
+    config = model_registry(
+        "debugmodel_moe", attn_backend="flex", enable_sp=True, seq_len=seq_len
     )
 
     parallelism_context = ParallelismContext(
@@ -80,25 +77,14 @@ def run_worker(args):
     )
     training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=1 * 128,
-        max_context_length=128,
+        max_context_length=seq_len,
         steps=1,
         mixed_precision_param="bfloat16",
         mixed_precision_reduce="float32",
     )
 
-    config.update_from_config(
-        config=type(
-            "C",
-            (),
-            {
-                "training": training,
-                "parallelism": parallelism,
-                "debug": type("D", (), {"moe_force_load_balance": False})(),
-            },
-        )(),
-    )
-
-    model = config.build()
+    with parallelism_context.activate_spmd():
+        model = config.build()
     model.to_empty(device="cuda")
     model.init_weights(buffer_device=torch.device("cuda"))
 
@@ -112,7 +98,6 @@ def run_worker(args):
     )
 
     torch.manual_seed(seed)
-    seq_len = 128
     tokens = torch.randint(0, 248320, (1, seq_len), device="cuda")
     dist.broadcast(tokens, src=0)
 

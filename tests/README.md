@@ -217,7 +217,7 @@ pytest -s tests/unit_tests/gpu/ -m multi_gpu
 To run a specific test file:
 
 ```bash
-pytest -s tests/unit_tests/cpu/test_config_manager.py
+pytest -s tests/unit_tests/cpu/test_config_loader.py
 ```
 
 ### Running Specific Test Functions in Unit Tests
@@ -225,5 +225,5 @@ pytest -s tests/unit_tests/cpu/test_config_manager.py
 To run a specific test function:
 
 ```bash
-pytest -s tests/unit_tests/cpu/test_config_manager.py::TestConfigManager::test_cli_overrides
+pytest -s tests/unit_tests/cpu/test_config_loader.py::test_operational_overrides
 ```

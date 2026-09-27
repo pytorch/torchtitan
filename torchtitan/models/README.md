@@ -13,8 +13,8 @@ The folder should be organized as follows
   - Define a Model class inheriting from a base model (e.g. `Decoder` from `torchtitan/models/common/decoder.py`).
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
     - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
-    - `update_from_config()` updates the model config from training configs (e.g. syncing seq_len, handling hardware-specific settings).
   - `__init__()` consumes the `Config` to build the model.
+    - Topology-dependent sharding is configured here from the active `ParallelismContext`.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model config registry. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, router, grouped-linear, and expert-activation modules.
 - `state_dict_adapter.py`
@@ -26,7 +26,9 @@ The folder should be organized as follows
   - This is optional for offline exploration.
 - `sharding.py`
   - Define `set_<model>_sharding_config(config, *, enable_sp, ...)` that populates `sharding_config` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention local SPMD regions are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
-  - Call the helper from `Model.Config.update_from_config()` so placements depend on the trainer's `parallelism` settings.
+  - Call the helper from the model constructor. Model construction runs inside
+    `ParallelismContext.activate_spmd()`, so placements can use the active mesh
+    axes without coupling the model config to the trainer config.
   - Reuse shared helpers from `torchtitan/models/common/decoder_sharding.py` (`set_decoder_sharding_config`, `set_dense_ffn_sharding`, `set_gqa_attention_sharding`, `norm_config`, `dense_param_placement`, `dense_activation_placement`) where possible.
   - Declare the mesh axes in canonical outer-to-inner SPMD order: `(dp, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, edp_shard, ep)` for sparse (MoE expert weights). `Module._parallelize` resolves the mesh from the declared axes.
 - `model.py`

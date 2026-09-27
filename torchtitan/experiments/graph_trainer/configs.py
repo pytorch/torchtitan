@@ -154,7 +154,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.
-    Example: --compile.disable_passes custom_codegen_pass,cuda_graph_pass"""
+    Example: ``["custom_codegen_pass", "cuda_graph_pass"]``."""
 
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
@@ -254,27 +254,27 @@ def validate_ep_overlap_config(
     chunk_dim = ep_overlap_config.chunk_dim
     if chunk_dim not in ("batch", "seq"):
         raise ValueError(
-            "--compile.ep_overlap.chunk_dim must be 'batch' or 'seq' when "
-            "--compile.ep_overlap.enabled is set"
+            "compile.ep_overlap.chunk_dim must be 'batch' or 'seq' when "
+            "compile.ep_overlap.enabled is set"
         )
 
     chunk_strategy = ep_overlap_config.strategy
     if chunk_strategy not in ("eager", "graph"):
         raise ValueError(
-            "--compile.ep_overlap.strategy must be 'eager' or 'graph' when "
-            "--compile.ep_overlap.enabled is set"
+            "compile.ep_overlap.strategy must be 'eager' or 'graph' when "
+            "compile.ep_overlap.enabled is set"
         )
 
     module_fqn = ep_overlap_config.module_fqn
     if module_fqn not in SUPPORTED_EP_OVERLAP_MODULE_FQNS:
         raise ValueError(
-            "--compile.ep_overlap.module_fqn must be either 'layers.*' "
+            "compile.ep_overlap.module_fqn must be either 'layers.*' "
             "or 'layers.*.moe' for ep_overlap"
         )
     if chunk_dim == "seq" and module_fqn != MOE_BLOCK_FQN:
         raise ValueError(
-            "--compile.ep_overlap.chunk_dim seq is only supported with "
-            "--compile.ep_overlap.module_fqn layers.*.moe"
+            "compile.ep_overlap.chunk_dim='seq' is only supported with "
+            "compile.ep_overlap.module_fqn='layers.*.moe'"
         )
 
     return chunk_dim, chunk_strategy, module_fqn

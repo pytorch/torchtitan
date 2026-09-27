@@ -327,8 +327,6 @@ def _make_v4_moe_config(
     route_norm: bool,
     route_scale: float,
     load_balance_coeff: float,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None,
 ):
     return MoE.Config(
         num_experts=num_experts,
@@ -354,8 +352,6 @@ def _make_v4_moe_config(
             num_experts=num_experts,
             top_k=top_k,
             param_init=_depth_experts_init(layer_id),
-            comm_backend=moe_comm_backend,
-            non_blocking_capacity_factor=non_blocking_capacity_factor,
         ),
         shared_experts=(
             make_shared_expert_ffn_config(
@@ -413,8 +409,6 @@ def _build_v4_layers(
     route_norm: bool,
     route_scale: float,
     load_balance_coeff: float,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None,
     rope: RoPE.Config,
     rope_compress: RoPE.Config,
     hc_mult: int = 4,
@@ -474,8 +468,6 @@ def _build_v4_layers(
                 route_norm=route_norm,
                 route_scale=route_scale,
                 load_balance_coeff=load_balance_coeff,
-                moe_comm_backend=moe_comm_backend,
-                non_blocking_capacity_factor=non_blocking_capacity_factor,
             )
 
         layers.append(
@@ -620,8 +612,6 @@ def _build_mtp_layers(
 
 
 def _debugmodel(
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
     n_mtp_layers: int = 0,
     *,
     enable_sp: bool,
@@ -699,8 +689,6 @@ def _debugmodel(
         route_norm=route_norm,
         route_scale=route_scale,
         load_balance_coeff=load_balance_coeff,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=rope,
         rope_compress=rope_compress,
         hc_mult=hc_mult,
@@ -755,8 +743,6 @@ def _debugmodel(
 
 
 def _deepseek_v4_flash(
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
     n_mtp_layers: int = 0,
     *,
     enable_sp: bool,
@@ -834,8 +820,6 @@ def _deepseek_v4_flash(
         route_norm=route_norm,
         route_scale=route_scale,
         load_balance_coeff=load_balance_coeff,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=rope,
         rope_compress=rope_compress,
         hc_mult=hc_mult,
@@ -890,8 +874,6 @@ def _deepseek_v4_flash(
 
 
 def _deepseek_v4_pro(
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
     n_mtp_layers: int = 0,
     *,
     enable_sp: bool,
@@ -969,8 +951,6 @@ def _deepseek_v4_pro(
         route_norm=route_norm,
         route_scale=route_scale,
         load_balance_coeff=load_balance_coeff,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=rope,
         rope_compress=rope_compress,
         hc_mult=hc_mult,
@@ -1036,8 +1016,6 @@ def model_registry(
     *,
     enable_sp: bool,
     seq_len: int | None = None,
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
     n_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> DeepSeekV4Model.Config:
@@ -1055,8 +1033,6 @@ def model_registry(
         )
     config = get_config(
         enable_sp=enable_sp,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         n_mtp_layers=n_mtp_layers,
         seq_len=context_len,
     )

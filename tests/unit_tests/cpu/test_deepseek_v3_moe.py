@@ -94,7 +94,6 @@ class TestDeepSeekV3Router(unittest.TestCase):
         config = model_registry(
             "236B",
             enable_sp=True,
-            moe_comm_backend="standard",
             seq_len=2048,
         )
 
@@ -113,7 +112,6 @@ class TestDeepSeekV3Router(unittest.TestCase):
         build_config, _ = deepseekv3_configs["debugmodel"]
         config = build_config(
             attn_backend="flex",
-            moe_comm_backend="standard",
             enable_sp=True,
             seq_len=128,
         )

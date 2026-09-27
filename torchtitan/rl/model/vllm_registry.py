@@ -230,9 +230,8 @@ def register_to_vllm(
         checkpointer_config: Optional CheckpointManager configuration for
             initial weight loading. Pass ``None`` for the RL loop, where
             weights arrive from TorchStore.
-        override: Config overrides applied to the generator's model config after
-            ``update_from_config`` and before build (empty ``OverrideConfig`` for
-            no overrides).
+        override: Config overrides applied to the generator's model config before
+            model finalization and build (empty ``OverrideConfig`` for no overrides).
     """
     from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger

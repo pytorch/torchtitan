@@ -41,12 +41,7 @@ from torchtitan.models.common.moe import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.common.token_dispatcher import (
-    AllToAllTokenDispatcher,
-    DeepEPTokenDispatcher,
-    HybridEPTokenDispatcher,
-    LocalTokenDispatcher,
-)
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.module import Module
 
 
@@ -366,67 +361,6 @@ def make_router_config(
     )
 
 
-def make_token_dispatcher_config(
-    *,
-    num_experts: int,
-    top_k: int,
-    comm_backend: str,
-    hidden_dim: int,
-    non_blocking_capacity_factor: float | None = None,
-    num_max_tokens_per_rank: int | None = None,
-    cuda_graph_compatible: bool = False,
-) -> LocalTokenDispatcher.Config:
-    """Build the appropriate token dispatcher config.
-
-    Returns the right Config subclass based on comm_backend:
-    - "standard": Uses PyTorch all-to-all collectives (falls back to local
-      dispatch when EP=1, i.e. ep_mesh is None at runtime)
-    - "deepep": Uses DeepEP custom kernels for H100/NVLink Switch
-    - "hybridep": Uses HybridEP with TMA optimization for GB200/NVLink72
-
-    DeepEP/HybridEP requires installation:
-    https://github.com/deepseek-ai/DeepEP
-
-    For HybridEP, SM configuration can be set via environment variables:
-    - HYBRIDEP_NUM_SMS_DISPATCH (default: 16)
-    - HYBRIDEP_NUM_SMS_COMBINE (default: 16)
-    """
-    # TODO(unify-ep-dispatch-knobs): unify the per-backend static-shape/CUDA graph knobs --
-    # HybridEP non_blocking_capacity_factor vs DeepEP cuda_graph_compatible + num_max_tokens_per_rank.
-    if comm_backend == "deepep":
-        # DeepEP v2: a single ElasticBuffer handles training and inference. ``hidden_dim``
-        # (model dim) sizes the buffer; wire_meshes creates it eagerly. ``cuda_graph_compatible``
-        # selects the static no-host-sync expand layout (set on the generator by the
-        # deepep_override). ``num_max_tokens_per_rank`` is the hard per-rank input-token
-        # bound. Runtime config derives it from the fixed training shape or inference
-        # scheduler/CUDA graph limits before the dispatcher is built.
-        return DeepEPTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            hidden_dim=hidden_dim,
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-            cuda_graph_compatible=cuda_graph_compatible,
-        )
-    elif comm_backend == "hybridep":
-        return HybridEPTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-            non_blocking_capacity_factor=non_blocking_capacity_factor,
-            hidden_dim=hidden_dim,
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-        )
-    elif comm_backend == "standard":
-        return AllToAllTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=top_k,
-        )
-    else:
-        raise ValueError(
-            f"Unknown comm_backend: '{comm_backend}'. "
-            "Must be one of 'standard', 'deepep', or 'hybridep'."
-        )
-
-
 def make_routed_experts_config(
     *,
     dim: int,
@@ -434,10 +368,6 @@ def make_routed_experts_config(
     num_experts: int,
     top_k: int,
     param_init: dict[str, Callable],
-    comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
-    num_max_tokens_per_rank: int | None = None,
-    cuda_graph_compatible: bool = False,
 ) -> RoutedExperts.Config:
     """Build routed experts with structured gate/up and down projections."""
     missing = {"w1_EFD", "w2_EDF", "w3_EFD"} - param_init.keys()
@@ -460,13 +390,8 @@ def make_routed_experts_config(
             out_features=dim,
             param_init={"weight": param_init["w2_EDF"]} if param_init else None,
         ),
-        token_dispatcher=make_token_dispatcher_config(
+        token_dispatcher=AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            comm_backend=comm_backend,
-            non_blocking_capacity_factor=non_blocking_capacity_factor,
-            hidden_dim=dim,
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-            cuda_graph_compatible=cuda_graph_compatible,
         ),
     )

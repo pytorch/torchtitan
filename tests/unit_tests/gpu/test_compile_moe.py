@@ -50,7 +50,7 @@ class TestApplyCompile(unittest.TestCase):
     def test_async_tp_requires_model_compile(self):
         with self.assertRaisesRegex(
             ValueError,
-            "Async TP requires 'model' in --compile.components",
+            "Async TP requires 'model' in compile.components",
         ):
             CompileConfig(
                 enable_async_tensor_parallel=True,

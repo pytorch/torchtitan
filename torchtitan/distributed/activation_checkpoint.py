@@ -10,13 +10,12 @@
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Annotated, cast
+from typing import cast
 
 import torch
 import torch._functorch.config
 import torch.nn as nn
 import torch_remat as remat
-import tyro
 from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
@@ -425,13 +424,6 @@ class MemoryBudgetAC(ActivationCheckpointing):
         logger.info(f"Selected {config.memory_budget} budget option")
 
 
-# Trainer config field type: select a policy via tyro subcommand, or ``None`` to
-# disable activation checkpointing. Explicit subcommand names are required because
-# every nested Config class is named "Config" and would otherwise collide.
 ActivationCheckpointingConfig = (
-    Annotated[SelectiveAC.Config, tyro.conf.subcommand("selective")]
-    | Annotated[RegionAC.Config, tyro.conf.subcommand("region")]
-    | Annotated[FullAC.Config, tyro.conf.subcommand("full")]
-    | Annotated[MemoryBudgetAC.Config, tyro.conf.subcommand("memory-budget")]
-    | Annotated[None, tyro.conf.subcommand("none")]
+    SelectiveAC.Config | RegionAC.Config | FullAC.Config | MemoryBudgetAC.Config | None
 )

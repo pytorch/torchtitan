@@ -104,10 +104,10 @@ jobs:
         python scripts/rl/loss_compare.py \
           --hf-assets-path "$MODEL_PATH" \
           --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
+          --module alphabet_sort \
           --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
           --import-result "$LOSS_FILE" \
-          --assert-equal \
-          --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --num_generators 1'
+          --assert-equal
 
         # HF adapter layout regression uses two CPU/Gloo ranks.
         python -m pytest tests/unit_tests/rl/test_vllm_wrapper.py -v

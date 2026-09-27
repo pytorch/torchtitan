@@ -93,13 +93,11 @@ import math
 import time
 import warnings
 from dataclasses import dataclass, field, replace
-from typing import Annotated
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
 import torchstore as ts
-import tyro
 
 from monarch.actor import ProcMesh, this_host
 from monarch.spmd import setup_torch_elastic_env_async
@@ -253,7 +251,7 @@ class Controller(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model: Annotated[Decoder.Config | None, tyro.conf.Suppress] = None
+        model: Decoder.Config | None = None
         """Model config for the trainer and the generator. Set programmatically via
         config_registry (not from CLI)."""
 
@@ -284,7 +282,7 @@ class Controller(Configurable):
         )
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
-        compile: Annotated[CompileConfig | None, tyro.conf.AvoidSubcommands] = None
+        compile: CompileConfig | None = None
         """torch.compile config shared by trainer and generator."""
 
         trainer: Trainer.Config

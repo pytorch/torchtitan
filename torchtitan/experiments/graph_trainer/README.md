@@ -42,15 +42,23 @@ MODULE=graph_trainer.qwen3 CONFIG=graph_trainer_qwen3_14b ./run_train.sh
 
 ### Configuring Parallelism
 
-#### Training Llama3-8B with 2D parallelism (FSDP and TP)
-```bash
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --parallelism.data_parallel_shard_degree=4 --parallelism.tensor_parallel_degree=2
-```
-#### Training DeepSeek-v3-16B with 3D parallelism (FSDP, TP, and EP)
+Put parallelism choices in a recipe. For example:
 
-```bash
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh --parallelism.data_parallel_shard_degree=4 --parallelism.tensor_parallel_degree=2 --parallelism.expert_parallel_degree=2
+```python
+from torchtitan.experiments.graph_trainer.llama3.config_registry import (
+    graph_trainer_llama3_8b,
+)
+
+def llama3_8b_fsdp4_tp2():
+    config = graph_trainer_llama3_8b()
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.tensor_parallel_degree = 2
+    return config
 ```
+
+Launch it with `NGPU=8 MODULE=my_graph_configs
+CONFIG=llama3_8b_fsdp4_tp2 ./run_train.sh`. Use the same pattern for EP and
+other parallel axes.
 
 ### GraphPP Pipeline Parallelism
 
@@ -65,14 +73,13 @@ Design references:
 - GraphPP RFC: https://github.com/pytorch/torchtitan/issues/3780
 - CUDA-graph-compatible GraphPP RFC: https://github.com/pytorch/torchtitan/issues/3820
 
-```bash
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel ./run_train.sh \
-  --training.disable_cuda_graphs \
-  --parallelism.pipeline_parallel_degree 2 \
-  --parallelism.num_pp_microbatches 8 \
-  --parallelism.pipeline_parallel_schedule Interleaved1F1B \
-  --parallelism.data_parallel_shard_degree 4 \
-  --parallelism.expert_parallel_degree 2
+```python
+config.training.disable_cuda_graphs = True
+config.parallelism.pipeline_parallel_degree = 2
+config.parallelism.num_pp_microbatches = 8
+config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+config.parallelism.data_parallel_shard_degree = 4
+config.parallelism.expert_parallel_degree = 2
 ```
 
 Supported runtime schedules include `Interleaved1F1B`, `ZBVZeroBubble`, and
@@ -101,32 +108,19 @@ and EP-overlap annotations will be composed with GraphPP in a later PR.
 
 ### Compiler Optimizations
 
-GraphTrainer has a built-in pass pipeline controlled by dedicated flags.
+GraphTrainer has a built-in pass pipeline controlled by its compile config.
 
-```bash
-# Full Inductor compilation (default is regional — compiles only tagged regions)
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.inductor_compilation full
-
-# Numerics-changing optimizations (e.g. RMSNorm Inductor fusion)
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.numerics_changing_optim
-
-# Full recompute while saving selected module operations
-MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_671b ./run_train.sh \
-  --compile.memory_policy full \
-  --compile.full_recompute_save_ops \
-  'layers.*.moe.router.gate::aten.mm.dtype | layers.*.attention.wkv_a::aten.mm.default'
-
-# CPU activation offloading
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.memory_policy cpu_offload_all
-
-# Disable CUDA graphs (for debugging)
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.disable_passes cuda_graph_pass
-
-# Disable specific passes by name
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.disable_passes custom_codegen_pass,cuda_graph_pass
-
-# Disable all graph passes (for debugging)
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh --compile.no-enable_passes
+```python
+config.compile.inductor_compilation = "full"
+config.compile.numerics_changing_optim = True
+config.compile.memory_policy = "full"
+config.compile.full_recompute_save_ops = (
+    "layers.*.moe.router.gate::aten.mm.dtype | "
+    "layers.*.attention.wkv_a::aten.mm.default"
+)
+config.compile.disable_passes = ["custom_codegen_pass", "cuda_graph_pass"]
+# To disable every optional pass:
+config.compile.enable_passes = False
 ```
 
 ### Expert Parallel Overlap
@@ -135,24 +129,22 @@ EP overlap is an experimental graph-trainer optimization for MoE models with
 real expert-parallel collectives. Enable it only with
 `expert_parallel_degree > 1`:
 
-```bash
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
-    ./run_train.sh \
-    --compile.ep_overlap.enabled \
-    --compile.ep_overlap.strategy graph \
-    --compile.ep_overlap.chunk_dim batch \
-    --compile.ep_overlap.module_fqn layers.* \
-    --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.expert_parallel_degree 2
+```python
+config.compile.ep_overlap.enabled = True
+config.compile.ep_overlap.strategy = "graph"
+config.compile.ep_overlap.chunk_dim = "batch"
+config.compile.ep_overlap.module_fqn = "layers.*"
+config.parallelism.data_parallel_shard_degree = 4
+config.parallelism.expert_parallel_degree = 2
 ```
 
 Supported graph-chunking selections are:
 
-- `--compile.ep_overlap.chunk_dim batch --compile.ep_overlap.module_fqn layers.*`
+- `chunk_dim="batch", module_fqn="layers.*"`
   for transformer-block chunking.
-- `--compile.ep_overlap.chunk_dim batch --compile.ep_overlap.module_fqn layers.*.moe`
+- `chunk_dim="batch", module_fqn="layers.*.moe"`
   for MoE-only batch chunking.
-- `--compile.ep_overlap.chunk_dim seq --compile.ep_overlap.module_fqn layers.*.moe`
+- `chunk_dim="seq", module_fqn="layers.*.moe"`
   for MoE-only sequence chunking.
 
 Graph chunking intentionally couples the tracer and EP-overlap passes through
@@ -175,25 +167,17 @@ Current limitations:
 
 GraphTrainer can use AutoParallel to solve SPMD placement for supported models,
 then trace and compile the placed model through the regular GraphRuntime flow.
-Enable it with `--compile.enable_autoparallel`.
+Enable it with `config.compile.enable_autoparallel = True` in the recipe.
 
 Llama 3 debug model:
 
-```bash
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel ./run_train.sh \
-  --compile.enable_autoparallel \
-  --parallelism.data_parallel_shard_degree 2 \
-  --parallelism.tensor_parallel_degree 2
-```
+The tested Llama 3 layout also sets data-parallel sharding and tensor
+parallelism to 2 in that recipe.
 
 DeepSeek V3 debug model:
 
-```bash
-MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel ./run_train.sh \
-  --compile.enable_autoparallel \
-  --parallelism.data_parallel_shard_degree 4 \
-  --parallelism.expert_parallel_degree 2
-```
+The tested DeepSeek V3 layout uses data-parallel sharding 4 and expert
+parallelism 2.
 
 AutoParallel is only responsible for producing the placed model. After that,
 GraphTrainer captures the full train step with `minimal_fx_tracer` and applies
@@ -213,7 +197,8 @@ than requiring bitwise-identical losses.
 Pre-compile lets you compile AOT graphs on a single GPU and save them to disk,
 then load them on all ranks during training — skipping compilation entirely.
 This uses compile-on-one-rank (CooR) to produce a rank-agnostic artifact.
-Setting `--compile.precompile_artifact_dir` enables precompile in both steps.
+Setting `compile.precompile_artifact_dir` in the selected recipe enables
+precompile in both steps.
 
 **Artifact ephemerality:** Precompiled artifacts are tied to the exact PyTorch
 version, CUDA version, model architecture, and parallelism configuration used
@@ -222,45 +207,13 @@ Stale artifacts are detected automatically via config fingerprinting and
 will raise an error at load time. Delete old artifacts and re-run
 precompile when upgrading PyTorch or changing the model/parallelism setup.
 
-#### Llama3 (dense model)
+The integration runner contains complete Llama 3 and DeepSeek V3 precompile
+recipes and runs both the single-process compile and distributed training
+phases:
 
 ```bash
-# Step 1: precompile on a single process (needs only 1 GPU)
-python -m torchtitan.experiments.graph_trainer.precompile_main \
-    --module graph_trainer.llama3 \
-    --config graph_trainer_llama3_debugmodel \
-    --compile.precompile_artifact_dir /tmp/precompile_artifacts \
-    --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2
-
-# Step 2: load and train with torchrun (uses all GPUs)
-# Uses run_train_precompile.sh which passes --virtual-local-rank to torchrun.
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
-    ./torchtitan/experiments/graph_trainer/run_train_precompile.sh \
-    --compile.precompile_artifact_dir /tmp/precompile_artifacts \
-    --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2
-```
-
-#### DeepSeek-v3 (MoE model with expert parallelism)
-
-```bash
-# Step 1: precompile on a single process (needs only 1 GPU)
-python -m torchtitan.experiments.graph_trainer.precompile_main \
-    --module graph_trainer.deepseek_v3 \
-    --config graph_trainer_deepseek_v3_debugmodel \
-    --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
-    --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 4
-
-# Step 2: load and train with torchrun (uses all GPUs)
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
-    ./torchtitan/experiments/graph_trainer/run_train_precompile.sh \
-    --compile.precompile_artifact_dir /tmp/dsv3_precompile_artifacts \
-    --parallelism.data_parallel_shard_degree 4 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree 4
+python -m torchtitan.experiments.graph_trainer.tests.run_precompile_tests \
+    /tmp/precompile_test --ngpu 8
 ```
 
 <details>

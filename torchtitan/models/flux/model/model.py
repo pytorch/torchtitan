@@ -84,11 +84,6 @@ class FluxModel(BaseModel):
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
 
-        def update_from_config(self, *, config, **kwargs) -> None:
-            from torchtitan.models.flux.sharding import set_flux_sharding_config
-
-            set_flux_sharding_config(self)
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -159,6 +154,9 @@ class FluxModel(BaseModel):
             return nparams, num_flops_per_token
 
     def __init__(self, config: Config):
+        from torchtitan.models.flux.sharding import set_flux_sharding_config
+
+        set_flux_sharding_config(config)
         super().__init__()
 
         self.in_channels = config.in_channels

@@ -9,10 +9,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated
 
 import torch
-import tyro
 
 from torchtitan.components.loss import BaseLoss, compute_logprobs
 from torchtitan.config import CompileConfig
@@ -59,7 +57,7 @@ class DAPOLoss(BaseLoss):
         """Upper clip: the ratio is clamped to ``<= 1 + ratio_clip_high``. Set larger
         than ``ratio_clip_low`` for DAPO "clip-higher" (e.g. 0.28)."""
 
-        global_vocab_size: Annotated[int | None, tyro.conf.Suppress] = None
+        global_vocab_size: int | None = None
         """Full vocabulary size from the model spec, set when building RL configs.
         Leave unset for batch-invariant mode to retain the full-gather path."""
 

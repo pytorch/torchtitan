@@ -7,12 +7,11 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Annotated, Any, cast
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
-import tyro
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
@@ -85,15 +84,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         without a full LR decay. Unset (None) means EMA is disabled."""
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
-        checkpointer: Annotated[
-            CheckpointManager.Config | None, tyro.conf.AvoidSubcommands
-        ] = None
+        checkpointer: CheckpointManager.Config | None = None
         activation_checkpoint: ActivationCheckpointingConfig = field(
             default_factory=SelectiveAC.Config
         )
         profiler: Profiler.Config = field(default_factory=Profiler.Config)
-        # Suppressed because replay is enabled programmatically in recipes.
-        sdc_replayer: Annotated[SDCReplayer.Config | None, tyro.conf.Suppress] = None
+        sdc_replayer: SDCReplayer.Config | None = None
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
@@ -108,7 +104,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "SPMD typechecking is not supported with pipeline parallelism. "
                     "Validate the same config without PP "
-                    "(--parallelism.pipeline_parallel_degree 1)."
+                    "(parallelism.pipeline_parallel_degree=1)."
                 )
 
             if self.parallelism.num_pp_microbatches <= 0:
@@ -271,6 +267,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             buffer_device = None
 
         with (
+            self.parallelism_context.activate_spmd(),
             torch.device("meta"),
             utils.set_default_dtype(TORCH_DTYPE_MAP[self.config.training.dtype]),
         ):

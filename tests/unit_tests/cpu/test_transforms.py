@@ -11,6 +11,7 @@ import unittest
 from dataclasses import dataclass
 
 import torchtitan.config.transform as transform_api
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
@@ -19,6 +20,8 @@ from torchtitan.config.transform import (
     LinearLoRAHandler,
     LoRATransform,
     ModelConfigTransform,
+    ModelConfigTransformContext,
+    TokenDispatcherTransform,
     transform_model_config_,
 )
 from torchtitan.models.common.async_linear import (
@@ -32,7 +35,13 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+
+_CONTEXT = ModelConfigTransformContext(
+    training=TrainingConfig(), parallelism=ParallelismConfig()
+)
 
 
 def _llama3_cp_ready():
@@ -40,7 +49,7 @@ def _llama3_cp_ready():
     from torchtitan.models.llama3.config_registry import llama3_debugmodel
 
     config = llama3_debugmodel()
-    config.model = model_registry("debugmodel", attn_backend="flex")
+    config.model = model_registry("debugmodel", attn_backend="flex", seq_len=512)
     config.parallelism.context_parallel_degree = 2
     config.training.max_context_length = 512
     return config
@@ -49,7 +58,8 @@ def _llama3_cp_ready():
 class _Record(ModelConfigTransform):
     order: list[str] = []
 
-    def transform(self, model):
+    def transform(self, model, *, context):
+        del context
         _Record.order.append(type(self).__qualname__)
         return model
 
@@ -82,7 +92,8 @@ class _Loose(_Record):
 
 
 class _Boom(ModelConfigTransform):
-    def transform(self, model):
+    def transform(self, model, *, context):
+        del context
         model.layers[0].attention.inner_attention.block_size = (1, 1)
         raise ValueError("boom")
 
@@ -182,6 +193,7 @@ class TestTransformModel(unittest.TestCase):
         model_config = transform_model_config_(
             model_config,
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            context=_CONTEXT,
         )
         inner = model_config.layers[0].attention.inner_attention
         self.assertIsInstance(inner, KVAllGatherCPFlexInnerAttention.Config)
@@ -196,6 +208,7 @@ class TestTransformModel(unittest.TestCase):
         transform_model_config_(
             model_config,
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            context=_CONTEXT,
         )
 
     def test_orders_transforms(self):
@@ -203,8 +216,42 @@ class TestTransformModel(unittest.TestCase):
         transform_model_config_(
             self._spec(),
             [_Third(), _First(), _Second()],
+            context=_CONTEXT,
         )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
+
+    def test_token_dispatcher_transform_uses_training_context(self):
+        from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
+
+        config = deepseek_v3_debugmodel()
+        config.parallelism.expert_parallel_degree = 2
+        config.parallelism.tensor_parallel_degree = 2
+        config.training.disable_cuda_graphs = True
+        transformed = apply_transforms(
+            config,
+            [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)],
+        )
+
+        dispatchers = [
+            routed_experts.token_dispatcher
+            for _, routed_experts, _, _ in transformed.model.traverse(
+                RoutedExperts.Config
+            )
+        ]
+        self.assertTrue(dispatchers)
+        self.assertTrue(
+            all(
+                isinstance(dispatcher, DeepEPTokenDispatcher.Config)
+                for dispatcher in dispatchers
+            )
+        )
+        self.assertTrue(
+            all(
+                dispatcher.num_max_tokens_per_rank
+                == config.training.num_tokens_per_microbatch_per_dp_rank // 2
+                for dispatcher in dispatchers
+            )
+        )
 
 
 class TestContextParallelTransform(unittest.TestCase):
@@ -361,7 +408,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "converted w13 projections"):
             AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
-                config
+                config, context=_CONTEXT
             )
 
     def test_async_transform_skips_invariant_row_parallel_linear(self):
@@ -373,7 +420,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
 
         transformed = AsyncTensorParallelTransform(
             enable_sequence_parallel=True
-        ).transform(config)
+        ).transform(config, context=_CONTEXT)
 
         self.assertIs(type(transformed), InvariantRowParallelLinear.Config)
 
@@ -387,6 +434,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
                     AsyncTensorParallelTransform(enable_sequence_parallel=True),
                     LoRATransform(handlers=(LinearLoRAHandler(),)),
                 ],
+                context=_CONTEXT,
             )
 
 

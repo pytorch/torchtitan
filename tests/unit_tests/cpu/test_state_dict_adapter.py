@@ -137,7 +137,6 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
             attn_backend="flex",
-            moe_comm_backend="standard",
             enable_sp=True,
             seq_len=max_context_length,
         )
@@ -180,7 +179,6 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         build_config, _ = deepseekv3_configs["debugmodel"]
         config = build_config(
             attn_backend="flex",
-            moe_comm_backend="standard",
             enable_sp=True,
             seq_len=128,
             num_mtp_layers=1,
@@ -308,9 +306,7 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
 class GptOssStateDictAdapterTest(unittest.TestCase):
     def test_full_model_roundtrip_preserves_all_expert_weights(self) -> None:
         build_config, _ = gptoss_configs["debugmodel"]
-        config = build_config(
-            moe_comm_backend="standard", attn_backend="flex", seq_len=128
-        )
+        config = build_config(attn_backend="flex", seq_len=128)
         # Keep the real four-layer model structure while making expert tensors
         # small enough for a CPU unit test.
         for layer_config in config.layers:

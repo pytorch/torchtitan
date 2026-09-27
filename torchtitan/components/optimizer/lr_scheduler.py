@@ -55,7 +55,7 @@ class LRSchedulersContainer(Stateful, Configurable):
     class Config(Configurable.Config):
         warmup_steps: int = 200
         """
-        Steps for lr scheduler warmup, normally 1/5 of --training.steps
+        Steps for lr scheduler warmup, normally 1/5 of training.steps.
         """
 
         total_steps: int | None = None

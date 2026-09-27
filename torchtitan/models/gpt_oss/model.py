@@ -212,23 +212,6 @@ class GptOssModel(Decoder):
         dim: int = 2880
         vocab_size: int = 201088
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
-
-            set_gpt_oss_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -246,6 +229,17 @@ class GptOssModel(Decoder):
             return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import (
+            spmd_dense_sp_enabled,
+            spmd_sparse_mesh,
+        )
+        from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
+
+        set_gpt_oss_sharding_config(
+            config,
+            enable_sp=spmd_dense_sp_enabled(),
+            enable_ep=spmd_sparse_mesh() is not None,
+        )
         super().__init__(config)
 
     def parallelize(

@@ -70,3 +70,29 @@ def llama3_torchft_debugmodel(
         ),
         validator=None,
     )
+
+
+def llama3_torchft_integration_test() -> FaultTolerantTrainer.Config:
+    config = llama3_torchft_debugmodel(seq_len=2048)
+    config.training.steps = 10
+    config.fault_tolerance.enable = True
+    config.fault_tolerance.replica_id = 0
+    config.fault_tolerance.group_size = 8
+    return config
+
+
+def _llama3_torchft_replica(replica_id: int) -> FaultTolerantTrainer.Config:
+    config = llama3_torchft_debugmodel()
+    config.parallelism.data_parallel_shard_degree = 4
+    config.fault_tolerance.enable = True
+    config.fault_tolerance.replica_id = replica_id
+    config.fault_tolerance.group_size = 2
+    return config
+
+
+def llama3_torchft_replica_0() -> FaultTolerantTrainer.Config:
+    return _llama3_torchft_replica(0)
+
+
+def llama3_torchft_replica_1() -> FaultTolerantTrainer.Config:
+    return _llama3_torchft_replica(1)

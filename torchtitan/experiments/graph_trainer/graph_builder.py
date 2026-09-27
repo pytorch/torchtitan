@@ -1991,7 +1991,7 @@ class GraphTrainerStageGraphProvider:
             "GraphPP compiles extracted stage graphs with use_cuda_graph=False "
             "even though cuda_graph_pass is enabled. CUDA graph capture needs "
             "a separate GraphPP runtime integration. Pass "
-            "--compile.disable_passes cuda_graph_pass to silence this warning.",
+            "Add 'cuda_graph_pass' to compile.disable_passes to silence this warning.",
             stacklevel=3,
         )
         self._warned_cuda_graph = True

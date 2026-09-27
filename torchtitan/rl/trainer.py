@@ -87,10 +87,8 @@ class Trainer(Configurable):
 
         self.config = config
 
-        model_config.update_from_config(config=config)
         if config.override.imports:
             apply_overrides(config.override, model_config)
-        config.__post_init__()
 
         validate_model_training_config(
             model_config,

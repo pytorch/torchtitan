@@ -5,15 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Unit tests for TP-degree / n_kv_heads divisibility validation in model configs.
+Unit tests for TP-degree / n_kv_heads divisibility validation.
 
 Covers Issue #2574: models with GQA (n_kv_heads < n_heads) would crash deep in
 the forward pass when tensor_parallel_degree > n_kv_heads. The fix adds an
-early ValueError in update_from_config for llama3, qwen3, and gpt_oss.
+early ValueError while validating the complete trainer config.
 """
 
 import unittest
-from types import SimpleNamespace
 
 try:
     import sys
@@ -24,7 +23,9 @@ try:
         sys.modules["triton"] = MagicMock()
         sys.modules["triton.language"] = MagicMock()
 
+    from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
+    from torchtitan.config.validation import validate_model_training_config
     from torchtitan.models.common import (
         ComplexRoPE,
         compute_ffn_hidden_dim,
@@ -43,13 +44,19 @@ _N_LAYERS = 2
 _VOCAB_SIZE = 2048
 
 
-def _make_trainer_config(tp: int, seq_len: int = 2048):
-    """Minimal config stub with just the fields update_from_config reads."""
-    training = SimpleNamespace(seq_len=seq_len)
-    parallelism = ParallelismConfig(
-        tensor_parallel_degree=tp,
+def _validate(config: "Llama3Model.Config", tp: int) -> None:
+    validate_model_training_config(
+        config,
+        parallelism=ParallelismConfig(tensor_parallel_degree=tp),
+        training=TrainingConfig(
+            max_context_length=config.max_context_length,
+            disable_cuda_graphs=True,
+        ),
+        debug=DebugConfig(),
+        activation_checkpoint=None,
+        compile_config=None,
+        max_num_documents=None,
     )
-    return SimpleNamespace(training=training, parallelism=parallelism)
 
 
 def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":
@@ -104,7 +111,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
 
 @unittest.skipUnless(_IMPORTS_OK, "torchtitan model imports not available")
 class TestTPKVHeadsValidation(unittest.TestCase):
-    """Validate that update_from_config rejects configs where n_heads or
+    """Validate that config checking rejects models where n_heads or
     n_kv_heads are not divisible by tensor_parallel_degree."""
 
     # ------------------------------------------------------------------
@@ -115,7 +122,7 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         """n_kv_heads=2, tp=4 → fractional KV heads per rank → ValueError."""
         cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
         with self.assertRaises(ValueError):
-            cfg.update_from_config(config=_make_trainer_config(tp=4))
+            _validate(cfg, tp=4)
 
     # ------------------------------------------------------------------
     # n_heads not divisible by TP  →  should raise
@@ -125,26 +132,26 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         """n_heads=2, tp=4 -> fractional Q heads per rank -> ValueError."""
         cfg = _make_llama3_config(n_heads=2, n_kv_heads=2)
         with self.assertRaises(ValueError):
-            cfg.update_from_config(config=_make_trainer_config(tp=4))
+            _validate(cfg, tp=4)
 
     # ------------------------------------------------------------------
     # Valid configs  →  should not raise
     # ------------------------------------------------------------------
 
     def test_llama3_valid_gqa_does_not_raise(self):
-        """n_kv_heads=8, n_heads=16, tp=4 → both divisible → no error."""
+        """n_kv_heads=8, n_heads=16, tp=4 -> both divisible -> no error."""
         cfg = _make_llama3_config(n_heads=16, n_kv_heads=8)
-        cfg.update_from_config(config=_make_trainer_config(tp=4))
+        _validate(cfg, tp=4)
 
     def test_llama3_mha_none_kv_heads_does_not_raise(self):
-        """n_kv_heads=None (MHA, falls back to n_heads=16), tp=4 → no error."""
+        """n_kv_heads=None (MHA, falls back to n_heads=16), tp=4 -> no error."""
         cfg = _make_llama3_config(n_heads=16, n_kv_heads=None)
-        cfg.update_from_config(config=_make_trainer_config(tp=4))
+        _validate(cfg, tp=4)
 
     def test_llama3_tp1_skips_check(self):
         """tp=1 -> valid GQA head counts do not raise."""
         cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
-        cfg.update_from_config(config=_make_trainer_config(tp=1))
+        _validate(cfg, tp=1)
 
 
 if __name__ == "__main__":

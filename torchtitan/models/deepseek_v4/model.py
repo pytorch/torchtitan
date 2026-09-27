@@ -164,43 +164,6 @@ class DeepSeekV4Model(Decoder):
         hc_head: HcHead.Config
         mtp_layers: list["MTPBlock.Config"] | None = None
 
-        def update_from_config(self, *, config, **kwargs):
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            if self.mtp_layers is not None and parallelism.pipeline_parallel_degree > 1:
-                raise NotImplementedError(
-                    "DeepSeek V4 MTP does not support pipeline parallelism yet."
-                )
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                for i in range(self.n_layers):
-                    layer_cfg = self.layers[i]
-                    n_heads = layer_cfg.attention.n_heads
-                    if n_heads % tp != 0:
-                        raise ValueError(
-                            f"n_heads ({n_heads}) must be divisible by tp ({tp})"
-                        )
-                    n_groups = layer_cfg.attention.n_groups
-                    if n_groups % tp != 0:
-                        raise ValueError(
-                            f"n_groups ({n_groups}) must be divisible by tp ({tp})"
-                        )
-
-            if parallelism.context_parallel_degree > 1:
-                raise NotImplementedError(
-                    "Context Parallel is not yet supported for DeepSeek V4 sparse attention."
-                )
-
-            from .sharding import set_deepseek_v4_sharding_config
-
-            set_deepseek_v4_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -252,6 +215,35 @@ class DeepSeekV4Model(Decoder):
             return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import (
+            spmd_dense_sp_enabled,
+            spmd_mesh_size,
+            spmd_sparse_mesh,
+        )
+        from .sharding import set_deepseek_v4_sharding_config
+
+        tp = spmd_mesh_size("tp")
+        if tp > 1:
+            for layer in config.layers[: config.n_layers]:
+                num_heads = layer.attention.n_heads
+                if num_heads % tp != 0:
+                    raise ValueError(
+                        f"n_heads ({num_heads}) must be divisible by tp ({tp})"
+                    )
+                num_groups = layer.attention.n_groups
+                if num_groups % tp != 0:
+                    raise ValueError(
+                        f"n_groups ({num_groups}) must be divisible by tp ({tp})"
+                    )
+        if spmd_mesh_size("cp") > 1:
+            raise NotImplementedError(
+                "Context Parallel is not yet supported for DeepSeek V4 sparse attention."
+            )
+        set_deepseek_v4_sharding_config(
+            config,
+            enable_sp=spmd_dense_sp_enabled(),
+            enable_ep=spmd_sparse_mesh() is not None,
+        )
         super().__init__(config)
         cfg = config
 

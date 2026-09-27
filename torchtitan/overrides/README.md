@@ -186,7 +186,7 @@ kwargs to the target as `target=<json-object>` (quote it as a single shell token
 
 ```bash
 torchtitan_train --module llama3 --config llama3_8b \
-    --override.imports 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
+    --override 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
 JSON keeps the values typed (numbers, `null`, strings, nesting), so the same
@@ -199,22 +199,21 @@ the override package and defeat the no-touch goal.
 ```bash
 # Replace the torch-native SwiGLU activation with the Triton implementation:
 torchtitan_train --module llama3 --config llama3_8b \
-    --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
+    --override torchtitan.overrides.fused_swiglu.fused_swiglu
 
 # Async tensor-parallel linear subclasses are preserved by the same override:
 torchtitan_train --module llama3 --config llama3_debugmodel_dist_gemm \
-    --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
+    --override torchtitan.overrides.fused_swiglu.fused_swiglu
 
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one
 # shell token (my_pkg.triton_rope.triton_rope is a placeholder for your override):
 torchtitan_train --module llama3 --config llama3_8b \
-    --override.imports 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
+    --override 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
 ### Application
 
-In `Trainer.__init__`, after `model_config.update_from_config()` (which sets
-sharding config on the pre-override modules) and before any component is built:
+In `Trainer.__init__`, before any component is built:
 
 1. Import each target's module — this triggers its `@override` decorators.
 2. Resolve the *active* set: for each `module.function` target, the single
@@ -261,7 +260,7 @@ def vendor_x_moe(cfg: MoE.Config) -> "VendorXFusedMoE.Config":
 ```bash
 pip install torchtitan-vendor-x
 torchtitan_train --module deepseek_v3 --config dsv3_671B \
-    --override.imports vendor_x.overrides.vendor_x_moe
+    --override vendor_x.overrides.vendor_x_moe
 ```
 
 ### Version compatibility
@@ -486,7 +485,7 @@ for the full recipe.
 - `torchtitan/overrides/offset_rmsnorm.py` — replaces Qwen3.5
   `OffsetRMSNorm` with fused Triton forward and backward kernels while preserving
   the stock zero-centered weight and checkpoint layout. Activate it with
-  `--override.imports torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm`.
+  `--override torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm`.
 
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
 shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real
@@ -500,7 +499,7 @@ RoPE is an ordinary component override.
 | `torchtitan/config/override.py` | The mechanism: `OverrideConfig`, `Override`, `override`, `derive`, `apply_overrides`, `clear_overrides`. |
 | `torchtitan/config/__init__.py` | Re-exports the override API. |
 | `torchtitan/protocols/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
-| `torchtitan/trainer.py` | Holds the `override` config field; applies overrides after `update_from_config`, before builds. |
+| `torchtitan/trainer.py` | Holds the `override` config field and applies recipe-provided overrides before builds. |
 | `torchtitan/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
 | `tests/unit_tests/cpu/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 

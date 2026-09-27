@@ -56,7 +56,6 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
             # This test only checks expert-param sharding (no forward), so the
             # attention backend is irrelevant; use the default flex backend
             attn_backend="flex",
-            moe_comm_backend="standard",
             rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=4096,

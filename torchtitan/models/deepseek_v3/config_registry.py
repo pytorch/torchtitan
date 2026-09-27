@@ -14,10 +14,12 @@ from torchtitan.components.optimizer import (
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
+    apply_transforms,
     Float8GroupedLinearConverter,
     Float8LinearConverter,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
+    TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
@@ -25,6 +27,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
@@ -163,10 +166,17 @@ def deepseek_v3_debugmodel_hybridep(
         "debugmodel",
         enable_sp=True,
         seq_len=seq_len,
-        moe_comm_backend="hybridep",
-        non_blocking_capacity_factor=1.0,
     )
-    return config
+    config.parallelism.expert_parallel_degree = 2
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                kwargs={"non_blocking_capacity_factor": 1.0},
+            )
+        ],
+    )
 
 
 def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
@@ -215,11 +225,17 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
         enable_sp=True,
         seq_len=seq_len,
         attn_backend="flex",
-        moe_comm_backend="hybridep",
-        non_blocking_capacity_factor=1.0,
     )
     config.training.disable_cuda_graphs = False
-    return config
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                kwargs={"non_blocking_capacity_factor": 1.0},
+            )
+        ],
+    )
 
 
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:

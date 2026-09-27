@@ -319,22 +319,6 @@ class MuseGlimmerModel(MultimodalModel):
         vision_encoder: MuseGlimmerVisionEncoder.Config | None = None
         vision_adapter: MuseGlimmerVisionAdapter.Config | None = None
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            from .sharding import set_muse_glimmer_sharding_config
-
-            set_muse_glimmer_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -367,6 +351,13 @@ class MuseGlimmerModel(MultimodalModel):
             return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
+        from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled
+        from .sharding import set_muse_glimmer_sharding_config
+
+        set_muse_glimmer_sharding_config(
+            config,
+            enable_sp=spmd_dense_sp_enabled(),
+        )
         super().__init__(config)
         # LLM-side multimodal injection modules (None for the text-only model).
         self.vision_projection = (

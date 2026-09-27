@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
-
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
     ConcatThenSplitPackingConfig,
@@ -32,21 +30,22 @@ from . import model_registry
 from .tokenizer import HFBackendTokenizer
 
 
-@dataclass(kw_only=True, slots=True)
-class TransformersBackendConfig(Trainer.Config):
-    hf_model: str = ""
-    """HuggingFace model ID (e.g., 'Qwen/Qwen2.5-7B')"""
-
-
 def transformers_modeling_backend_debugmodel(
     seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> TransformersBackendConfig:
-    model_config = model_registry("debugmodel", seq_len=seq_len)
-    return TransformersBackendConfig(
-        loss=CrossEntropyLoss.Config(),
+    *,
+    deterministic: bool = False,
+) -> Trainer.Config:
+    hf_model = "Qwen/Qwen3-4B-Instruct-2507"
+    model_config = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+        hf_model=hf_model,
+        deterministic=deterministic,
+    )
+    return Trainer.Config(
+        loss=CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size),
         hf_assets_path="./tests/assets/tokenizer",
-        hf_model="Qwen/Qwen3-4B-Instruct-2507",
-        debug=DebugConfig(print_config=True),
+        debug=DebugConfig(print_config=True, deterministic=deterministic),
         model=model_config,
         profiler=Profiler.Config(profile_freq=5),
         optimizer=OptimizersContainer.Config(
@@ -77,21 +76,34 @@ def transformers_modeling_backend_debugmodel(
 
 def transformers_modeling_backend_debugmodel_compile(
     seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> TransformersBackendConfig:
-    config = transformers_modeling_backend_debugmodel(seq_len=seq_len)
+    *,
+    deterministic: bool = False,
+) -> Trainer.Config:
+    config = transformers_modeling_backend_debugmodel(
+        seq_len=seq_len,
+        deterministic=deterministic,
+    )
     config.compile = CompileConfig()
     return config
 
 
 def transformers_modeling_backend_debugmodel_moe(
     seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> TransformersBackendConfig:
-    return TransformersBackendConfig(
-        loss=CrossEntropyLoss.Config(),
+    *,
+    deterministic: bool = False,
+) -> Trainer.Config:
+    hf_model = "Qwen/Qwen3-30B-A3B"
+    model_config = model_registry(
+        "debugmodel_moe",
+        seq_len=seq_len,
+        hf_model=hf_model,
+        deterministic=deterministic,
+    )
+    return Trainer.Config(
+        loss=CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size),
         hf_assets_path="./tests/assets/tokenizer",
-        hf_model="Qwen/Qwen3-30B-A3B",
-        debug=DebugConfig(print_config=True),
-        model=model_registry("debugmodel_moe", seq_len=seq_len),
+        debug=DebugConfig(print_config=True, deterministic=deterministic),
+        model=model_config,
         profiler=Profiler.Config(profile_freq=5),
         optimizer=OptimizersContainer.Config(
             optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -121,19 +133,26 @@ def transformers_modeling_backend_debugmodel_moe(
 
 def transformers_modeling_backend_debugmodel_moe_compile(
     seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> TransformersBackendConfig:
-    config = transformers_modeling_backend_debugmodel_moe(seq_len=seq_len)
+    *,
+    deterministic: bool = False,
+) -> Trainer.Config:
+    config = transformers_modeling_backend_debugmodel_moe(
+        seq_len=seq_len,
+        deterministic=deterministic,
+    )
     config.compile = CompileConfig()
     return config
 
 
 def transformers_modeling_backend_full_moe(
     seq_len: int = 2048,
-) -> TransformersBackendConfig:
-    return TransformersBackendConfig(
-        hf_model="Qwen/Qwen3-30B-A3B",
+) -> Trainer.Config:
+    hf_model = "Qwen/Qwen3-30B-A3B"
+    model_config = model_registry("full_moe", seq_len=seq_len, hf_model=hf_model)
+    return Trainer.Config(
+        loss=CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size),
         debug=DebugConfig(print_config=True),
-        model=model_registry("full_moe", seq_len=seq_len),
+        model=model_config,
         profiler=Profiler.Config(profile_freq=5),
         optimizer=OptimizersContainer.Config(
             optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -163,11 +182,11 @@ def transformers_modeling_backend_full_moe(
 
 def transformers_modeling_backend_full(
     seq_len: int = 2048,
-) -> TransformersBackendConfig:
-    model_config = model_registry("full", seq_len=seq_len)
-    return TransformersBackendConfig(
-        loss=CrossEntropyLoss.Config(),
-        hf_model="Qwen/Qwen3-4B-Instruct-2507",
+) -> Trainer.Config:
+    hf_model = "Qwen/Qwen3-4B-Instruct-2507"
+    model_config = model_registry("full", seq_len=seq_len, hf_model=hf_model)
+    return Trainer.Config(
+        loss=CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size),
         debug=DebugConfig(print_config=True),
         model=model_config,
         profiler=Profiler.Config(profile_freq=5),
@@ -199,7 +218,7 @@ def transformers_modeling_backend_full(
 
 def transformers_modeling_backend_sft_full(
     seq_len: int = 2048,
-) -> TransformersBackendConfig:
+) -> Trainer.Config:
     """SFT config with real HF pretrained weights loaded via initial_load_in_hf."""
 
     def process_sample(sample):
@@ -208,11 +227,12 @@ def transformers_modeling_backend_sft_full(
             {"role": "assistant", "content": sample["answer"]},
         ]
 
-    return TransformersBackendConfig(
-        loss=CrossEntropyLoss.Config(),
+    hf_model = "Qwen/Qwen3-0.6B"
+    model_config = model_registry("sft_full", seq_len=seq_len, hf_model=hf_model)
+    return Trainer.Config(
+        loss=CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size),
         hf_assets_path="./tests/assets/qwen3_0.6b",
-        hf_model="Qwen/Qwen3-0.6B",
-        model=model_registry("sft_full", seq_len=seq_len),
+        model=model_config,
         tokenizer=HFBackendTokenizer.Config(),
         optimizer=OptimizersContainer.Config(
             optimizers=[AdamW.Config(pattern=r".*", lr=2e-5)]
@@ -259,7 +279,7 @@ def transformers_modeling_backend_sft_full(
 
 def transformers_modeling_backend_sft_debugmodel(
     seq_len: int = 1024,
-) -> TransformersBackendConfig:
+) -> Trainer.Config:
     """SFT debug config for the transformers backend."""
 
     def process_sample(sample):
@@ -268,11 +288,12 @@ def transformers_modeling_backend_sft_debugmodel(
             {"role": "assistant", "content": sample["answer"]},
         ]
 
-    return TransformersBackendConfig(
-        loss=CrossEntropyLoss.Config(),
+    hf_model = "Qwen/Qwen3-4B-Instruct-2507"
+    model_config = model_registry("sft_debugmodel", seq_len=seq_len, hf_model=hf_model)
+    return Trainer.Config(
+        loss=CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size),
         hf_assets_path="./tests/assets/tokenizer",
-        hf_model="Qwen/Qwen3-4B-Instruct-2507",
-        model=model_registry("sft_debugmodel", seq_len=seq_len),
+        model=model_config,
         tokenizer=HFBackendTokenizer.Config(),
         optimizer=OptimizersContainer.Config(
             optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]

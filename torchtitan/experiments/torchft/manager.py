@@ -42,8 +42,8 @@ class TorchFTManager(Configurable):
         enable: bool = False
         """
         Enable TorchFT integration. When TorchFT is enabled, HSDP will be used.
-        And --fault_tolerance.data_parallel_replicate_degree should be 1 and
-        --fault_tolerance.group_size will be used to control the maximum
+        Also, fault_tolerance.data_parallel_replicate_degree should be 1 and
+        fault_tolerance.group_size controls the maximum
         replicate group size as the replicate group size is dynamic.
         Note that this is still an experimental feature.
         """

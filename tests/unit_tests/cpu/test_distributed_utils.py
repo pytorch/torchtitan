@@ -49,13 +49,32 @@ def test_init_distributed_configures_pipeline_per_edge_p2p(
     with (
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torchtitan.distributed.utils.init_fake_mode"),
-        patch.object(dist_utils.dist_config, "pipeline_per_edge_p2p", not expected),
+        patch.object(
+            dist_utils,
+            "dist_config",
+            SimpleNamespace(pipeline_per_edge_p2p=not expected),
+        ),
     ):
         init_distributed(
             CommConfig(backend="fake"),
             pipeline_parallel_degree=pipeline_parallel_degree,
         )
         assert dist_utils.dist_config.pipeline_per_edge_p2p is expected
+
+
+def test_init_distributed_allows_missing_pipeline_per_edge_p2p(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NGPU", "1")
+    config_without_option = SimpleNamespace()
+    with (
+        patch("torch.distributed.is_initialized", return_value=False),
+        patch("torchtitan.distributed.utils.init_fake_mode"),
+        patch.object(dist_utils, "dist_config", config_without_option),
+    ):
+        init_distributed(CommConfig(backend="fake"), pipeline_parallel_degree=1)
+
+    assert not hasattr(config_without_option, "pipeline_per_edge_p2p")
 
 
 def test_fake_pg_defaults_to_spmd_rank_zero(monkeypatch: pytest.MonkeyPatch) -> None:

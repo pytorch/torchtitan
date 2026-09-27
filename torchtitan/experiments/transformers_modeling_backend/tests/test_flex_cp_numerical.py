@@ -29,6 +29,7 @@ from torchtitan.distributed.context_parallel import (
     HeadTailCPLoadBalancer,
     PTRRFlexAttentionCPLoadBalancer,
 )
+from torchtitan.experiments.transformers_modeling_backend import model_registry
 from torchtitan.experiments.transformers_modeling_backend.config_registry import (
     transformers_modeling_backend_debugmodel,
     transformers_modeling_backend_debugmodel_moe,
@@ -78,22 +79,29 @@ def main():
 
     # Build the job config, tweak for a small deterministic run.
     cfg = (
-        transformers_modeling_backend_debugmodel_moe()
+        transformers_modeling_backend_debugmodel_moe(
+            seq_len=args.seq_len,
+            deterministic=True,
+        )
         if args.moe
-        else transformers_modeling_backend_debugmodel()
+        else transformers_modeling_backend_debugmodel(
+            seq_len=args.seq_len,
+            deterministic=True,
+        )
     )
-    cfg.hf_model = args.hf_model
-    cfg.training.max_context_length = args.seq_len
+    cfg.model = model_registry(
+        "debugmodel_moe" if args.moe else "debugmodel",
+        seq_len=args.seq_len,
+        hf_model=args.hf_model,
+    )
     cfg.training.num_tokens_per_microbatch_per_dp_rank = args.bs * args.seq_len
     # fp32 compute so any CP discrepancy isn't masked by bf16 FSDP mixed precision.
     cfg.training.mixed_precision_param = "float32"
     cfg.parallelism.context_parallel_degree = cp
     cfg.debug.seed = 42
-    cfg.debug.deterministic = True
 
     def build_model(swap_moe=False):
         model_config = cfg.model
-        model_config.update_from_config(config=cfg)
         with torch.device(device):
             m = model_config.build()
         m.to(device)

@@ -138,11 +138,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
         self.model_config = self.model_registry(
             self.model_flavor,
             attn_backend=self.attn_backend,
+            seq_len=SEQ_LEN,
             **self.model_registry_kwargs,
         )
-        # Match Trainer.__init__: model configs consume runtime settings before
-        # build. DSv3 uses the synced RoPE length to decide YaRN scaling.
-        runtime_config = Trainer.Config(
+        Trainer.Config(
             model=self.model_config,
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=NUM_TOKENS,
@@ -153,13 +152,12 @@ class BitwiseDeterministicBase(unittest.TestCase):
             checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=SEED, deterministic=True),
         )
-        self.model_config.update_from_config(config=runtime_config)
         # Auxiliary losses normalize by the step's global valid-token count,
         # which the trainer sets before the first forward; this test plays that
         # role so the DeepSeek-v3 flavors' aux loss can run.
         AuxLoss.set_step_denominator(torch.tensor(NUM_TOKENS))
         vocab_size = self.model_config.vocab_size
-        with torch.device("meta"):
+        with self.parallelism_context.activate_spmd(), torch.device("meta"):
             model = self.model_config.build()
         model.to_empty(device="cuda")
         with torch.no_grad():
@@ -260,7 +258,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         Traces the model, saves the FX graph artifact to a temp dir,
         loads it back, then runs forward-backward-optimizer steps using
         the loaded artifact — identical to what happens during
-        torchrun training with --compile.precompile_artifact_dir.
+        torchrun training with compile.precompile_artifact_dir configured.
         """
         from torchtitan.experiments.graph_trainer.graph_builder import make_fwd_bwd_step
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (

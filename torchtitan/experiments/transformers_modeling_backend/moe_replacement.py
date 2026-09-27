@@ -284,9 +284,6 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     # Load balance coefficient
     load_balance_coeff = getattr(config, "load_balance_coeff", 1e-3)
 
-    # Comm backend
-    comm_backend = getattr(config, "comm_backend", "standard")
-
     # Shared experts
     shared_expert_info = _probe_shared_experts(moe_block, config)
 
@@ -301,7 +298,6 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
         "num_expert_groups": num_expert_groups,
         "num_limited_groups": num_limited_groups,
         "load_balance_coeff": load_balance_coeff,
-        "comm_backend": comm_backend,
         "shared_expert_info": shared_expert_info,
     }
 
@@ -443,8 +439,6 @@ def _probe_layer_level_moe(layer: nn.Module, config) -> dict:
     num_expert_groups = getattr(config, "n_group", None)
     num_limited_groups = getattr(config, "topk_group", None)
     load_balance_coeff = getattr(config, "load_balance_coeff", 1e-3)
-    comm_backend = getattr(config, "comm_backend", "standard")
-
     # Dense MLP is the shared expert
     mlp = getattr(layer, "mlp", None)
     shared_expert_info = None
@@ -471,7 +465,6 @@ def _probe_layer_level_moe(layer: nn.Module, config) -> dict:
         "num_expert_groups": num_expert_groups,
         "num_limited_groups": num_limited_groups,
         "load_balance_coeff": load_balance_coeff,
-        "comm_backend": comm_backend,
         "shared_expert_info": shared_expert_info,
     }
 
@@ -529,7 +522,6 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_experts=params["num_experts"],
         top_k=params["top_k"],
         param_init=_get_expert_param_init(),
-        comm_backend=params["comm_backend"],
     )
 
     shared_experts = None

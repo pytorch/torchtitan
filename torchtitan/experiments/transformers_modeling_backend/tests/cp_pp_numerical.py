@@ -22,7 +22,7 @@ HFTransformerModel.forward.
 
 The real CP+PP path can only be exercised through the trainer/pipeline runtime,
 so this orchestrates subprocess launches at different GPU counts (1/2/4) -- it
-cannot be expressed in the single-``ngpu`` OverrideDefinitions framework.
+cannot be expressed in the single-``ngpu`` IntegrationTestDefinition framework.
 
 Usage: python -m torchtitan.experiments.transformers_modeling_backend.tests.cp_pp_numerical
 """
@@ -37,18 +37,47 @@ import torch
 
 from scripts._checkpoint_test_config import configure_checkpoint
 
-_MODULE = "torchtitan_recipes.tests.transformers_modeling_backend"
-# cp=2; seq_len 256 -> 2 flex Q-blocks so ptrr (blocks % cp == 0) holds; 1 step;
-# fp32 so CP/PP reduction-order noise isn't masked by bf16. Small on purpose.
-_COMMON = (
-    "--parallelism.context_parallel_degree 2 "
-    "--training.num_tokens_per_microbatch_per_dp_rank 1024 "
-    "--training.max_context_length 256 --training.steps 1 "
-    "--training.mixed_precision_param float32 --debug.seed 42 --debug.deterministic"
+from torchtitan.experiments.transformers_modeling_backend.config_registry import (
+    transformers_modeling_backend_debugmodel,
 )
-# The flex BlockMask requires the ptrr CP load balancer.
-_CONFIG = "transformers_backend_dense_cp_pp"
+
+_MODULE = "torchtitan.experiments.transformers_modeling_backend.tests.cp_pp_numerical"
 _TOL = 2e-2  # bf16/flex reduction-order noise (fp32 run is ~5e-7 in practice)
+
+
+def _numerics_config():
+    # seq_len=256 gives two flex Q blocks, so ptrr is divisible by CP=2.
+    config = transformers_modeling_backend_debugmodel(
+        seq_len=256,
+        deterministic=True,
+    )
+    config.training.steps = 1
+    config.training.mixed_precision_param = "float32"
+    config.debug.seed = 42
+    return config
+
+
+def hf_backend_seed_numerics():
+    return _numerics_config()
+
+
+def hf_backend_cp_numerics():
+    config = _numerics_config()
+    config.training.num_tokens_per_microbatch_per_dp_rank = 1024
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = "ptrr"
+    return config
+
+
+def hf_backend_cp_pp_numerics():
+    config = _numerics_config()
+    config.training.num_tokens_per_microbatch_per_dp_rank = 256
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = "ptrr"
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 4
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    return config
 
 
 def _run(cmd: str, env: dict | None = None) -> None:
@@ -67,10 +96,10 @@ def _run(cmd: str, env: dict | None = None) -> None:
         raise RuntimeError(f"Command failed (rc={result.returncode}): {cmd}")
 
 
-def _torchrun(ngpu: int, module: str, config: str, extra: str) -> str:
+def _torchrun(ngpu: int, module: str, config: str, output_dir: str) -> str:
     return (
         f"torchrun --nproc_per_node={ngpu} --role rank -m torchtitan.train "
-        f"--module {module} --config {config} {extra}"
+        f"--module {module} --config {config} --output-dir {output_dir}"
     )
 
 
@@ -118,8 +147,7 @@ def _compare(ref_dir: str, cp_pp_dir: str) -> None:
 
 
 def _run_case(work: str) -> None:
-    config = _CONFIG
-    print(f"\n==== CP+PP numerical (config={config}) ====")
+    print("\n==== CP+PP numerical (balancer=ptrr) ====")
     seed = os.path.join(work, "seed")
     co, pp = os.path.join(work, "co"), os.path.join(work, "pp")
     os.makedirs(co, exist_ok=True)
@@ -130,7 +158,7 @@ def _run_case(work: str) -> None:
     seed_module, seed_config = configure_checkpoint(
         seed_env,
         module=_MODULE,
-        config=config,
+        config="hf_backend_seed_numerics",
         mode="seed",
     )
     _run(
@@ -138,12 +166,7 @@ def _run_case(work: str) -> None:
             1,
             seed_module,
             seed_config,
-            "--parallelism.data_parallel_shard_degree 1 "
-            "--parallelism.tensor_parallel_degree 1 "
-            "--parallelism.pipeline_parallel_degree 1 "
-            "--parallelism.context_parallel_degree 1 "
-            "--parallelism.expert_parallel_degree 1 "
-            f"--dump_folder {seed}",
+            seed,
         ),
         env=seed_env,
     )
@@ -151,7 +174,7 @@ def _run_case(work: str) -> None:
     load_module, load_config = configure_checkpoint(
         load_env,
         module=_MODULE,
-        config=config,
+        config="hf_backend_cp_numerics",
         mode="load",
         initial_load_path=f"{seed}/checkpoint/step-0",
     )
@@ -161,26 +184,28 @@ def _run_case(work: str) -> None:
             2,
             load_module,
             load_config,
-            f"{_COMMON} --parallelism.data_parallel_shard_degree 1 "
-            "--parallelism.pipeline_parallel_degree 1 "
-            f"--dump_folder {os.path.join(work, 'out_co')}",
+            os.path.join(work, "out_co"),
         ),
         env={**load_env, "HF_BACKEND_LOGIT_DUMP": co},
     )
 
+    pp_env: dict[str, str] = {}
+    pp_module, pp_config = configure_checkpoint(
+        pp_env,
+        module=_MODULE,
+        config="hf_backend_cp_pp_numerics",
+        mode="load",
+        initial_load_path=f"{seed}/checkpoint/step-0",
+    )
     print("  [3/4] CP+PP run (cp=2, pp=2)")
     _run(
         _torchrun(
             4,
-            load_module,
-            load_config,
-            f"{_COMMON} --parallelism.pipeline_parallel_degree 2 "
-            f"--parallelism.num_pp_microbatches 4 "
-            f"--training.num_tokens_per_microbatch_per_dp_rank 256 "
-            f"--parallelism.pipeline_parallel_schedule 1F1B "
-            f"--dump_folder {os.path.join(work, 'out_pp')}",
+            pp_module,
+            pp_config,
+            os.path.join(work, "out_pp"),
         ),
-        env={**load_env, "HF_BACKEND_LOGIT_DUMP": pp},
+        env={**pp_env, "HF_BACKEND_LOGIT_DUMP": pp},
     )
 
     print("  [4/4] compare logits")

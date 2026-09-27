@@ -4,13 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.config.transform import MXFP8GroupedLinearConverter
+from torchtitan.config.transform import (
+    apply_transforms,
+    MXFP8GroupedLinearConverter,
+    TokenDispatcherTransform,
+)
 from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
@@ -62,10 +67,16 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
         "debugmodel",
         enable_sp=True,
         seq_len=config.training.max_context_length,
-        moe_comm_backend="hybridep",
-        non_blocking_capacity_factor=1.0,
     )
-    return config
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                kwargs={"non_blocking_capacity_factor": 1.0},
+            )
+        ],
+    )
 
 
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:

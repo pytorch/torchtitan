@@ -6,12 +6,13 @@
 
 import unittest
 import unittest.mock
-from types import SimpleNamespace
 
 import torch
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.qwen3 import model_registry
+from torchtitan.trainer import Trainer
 
 
 class TestTokenDispatcherModule(unittest.TestCase):
@@ -29,17 +30,22 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
     @staticmethod
     def _config(ep: int, tp: int = 1):
         model_config = model_registry("debugmodel_moe")
-        runtime_config = SimpleNamespace(
-            parallelism=ParallelismConfig(
-                expert_parallel_degree=ep,
-                tensor_parallel_degree=tp,
-            )
+        runtime_config = Trainer.Config(
+            model=model_config,
+            training=TrainingConfig(
+                max_context_length=model_config.max_context_length,
+                disable_cuda_graphs=True,
+            ),
+        )
+        runtime_config.parallelism = ParallelismConfig(
+            expert_parallel_degree=ep,
+            tensor_parallel_degree=tp,
         )
         return model_config, runtime_config
 
     def test_all_moe_layers_divisible(self):
         model_config, runtime_config = self._config(ep=8)
-        model_config.update_from_config(config=runtime_config)
+        runtime_config.__post_init__()
 
     def test_later_moe_layer_not_divisible(self):
         model_config, runtime_config = self._config(ep=8)
@@ -51,7 +57,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             ValueError,
             r"layers\.1\.moe\.num_experts \(63\).*expert_parallel_degree \(8\)",
         ):
-            model_config.update_from_config(config=runtime_config)
+            runtime_config.__post_init__()
 
     def test_tensor_parallel_requires_expert_parallel(self):
         model_config, runtime_config = self._config(ep=1, tp=2)
@@ -60,28 +66,33 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             ValueError,
             r"expert_parallel_degree \(1\).*tensor_parallel_degree \(2\)",
         ):
-            model_config.update_from_config(config=runtime_config)
+            runtime_config.__post_init__()
 
         self.assertEqual(runtime_config.parallelism.expert_parallel_degree, 1)
 
     def test_tensor_parallel_preserves_explicit_expert_parallel(self):
         model_config, runtime_config = self._config(ep=4, tp=2)
-        model_config.update_from_config(config=runtime_config)
+        runtime_config.__post_init__()
 
         self.assertEqual(runtime_config.parallelism.expert_parallel_degree, 4)
 
     def test_moe_without_tensor_parallel_preserves_sequence_parallel_config(self):
         model_config, runtime_config = self._config(ep=1, tp=1)
-        model_config.update_from_config(config=runtime_config)
+        runtime_config.__post_init__()
 
         self.assertTrue(runtime_config.parallelism.enable_sequence_parallel)
 
     def test_dense_tensor_parallel_does_not_require_expert_parallel(self):
         model_config = model_registry("debugmodel")
-        runtime_config = SimpleNamespace(
-            parallelism=ParallelismConfig(tensor_parallel_degree=2)
+        runtime_config = Trainer.Config(
+            model=model_config,
+            training=TrainingConfig(
+                max_context_length=model_config.max_context_length,
+                disable_cuda_graphs=True,
+            ),
+            parallelism=ParallelismConfig(tensor_parallel_degree=2),
         )
-        model_config.update_from_config(config=runtime_config)
+        runtime_config.__post_init__()
 
         self.assertEqual(runtime_config.parallelism.expert_parallel_degree, 1)
         self.assertTrue(runtime_config.parallelism.enable_sequence_parallel)

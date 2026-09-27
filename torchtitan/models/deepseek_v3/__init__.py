@@ -228,8 +228,6 @@ def build_mla_moe_layers(
     router_route_norm: bool = False,
     aux_loss_coeff: float | None = None,
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None,
     linear_init: dict[str, Callable],
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
@@ -297,8 +295,6 @@ def build_mla_moe_layers(
                     num_experts=num_experts,
                     top_k=router_top_k,
                     param_init=depth_experts_init(layer_id),
-                    comm_backend=moe_comm_backend,
-                    non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),
                 shared_experts=make_shared_expert_ffn_config(
                     dim=dim,
@@ -377,8 +373,6 @@ def _build_mtp_layers(
 
 def _debugmodel(
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
     *,
     enable_sp: bool,
@@ -416,8 +410,6 @@ def _debugmodel(
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
@@ -454,8 +446,6 @@ def _debugmodel(
 
 def _16b(
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
     *,
     enable_sp: bool,
@@ -493,8 +483,6 @@ def _16b(
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
@@ -531,8 +519,6 @@ def _16b(
 
 def _236b(
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
     *,
     enable_sp: bool,
@@ -573,8 +559,6 @@ def _236b(
         router_route_scale=16.0,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
@@ -611,8 +595,6 @@ def _236b(
 
 def _671b(
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
     *,
     enable_sp: bool,
@@ -654,8 +636,6 @@ def _671b(
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
@@ -704,8 +684,6 @@ def model_registry(
     enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
@@ -719,8 +697,6 @@ def model_registry(
     config = get_config(
         enable_sp=enable_sp,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         num_mtp_layers=num_mtp_layers,
         seq_len=context_len,
     )

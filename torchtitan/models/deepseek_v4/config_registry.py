@@ -70,6 +70,16 @@ def deepseek_v4_debugmodel(
     )
 
 
+def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
+    config = deepseek_v4_debugmodel()
+    config.training.steps = 1
+    config.metrics.log_freq = 1
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    return config
+
+
 def deepseek_v4_mtp_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:

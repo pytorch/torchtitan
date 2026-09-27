@@ -165,7 +165,7 @@ def resolve_graph_runtime_gradient_accumulation_policy(
         if fsdp_enabled and not extract_fsdp_grad_reduction:
             raise ValueError(
                 "WGrad accumulation fusion with FSDP requires "
-                "--compile.fsdp_gradient_sync_mode deferred_as_schedule_stage"
+                "compile.fsdp_gradient_sync_mode='deferred_as_schedule_stage'"
             )
 
     auto_accumulate_in_graph = num_microbatches > 1 and (
@@ -331,13 +331,13 @@ def _validate_graph_pp_config(
 ) -> None:
     if compile_config.precompile_artifact_dir:
         raise ValueError(
-            "GraphPP does not support --compile.precompile_artifact_dir yet. "
+            "GraphPP does not support compile.precompile_artifact_dir yet. "
             "Trace and graph construction are stage-local runtime operations."
         )
     if parallelism.fsdp_reshard_after_forward == "always":
         raise ValueError(
             "GraphPP assumes ZeRO-2 style FSDP with "
-            "--parallelism.fsdp_reshard_after_forward default/never, not always."
+            "parallelism.fsdp_reshard_after_forward='default'/'never', not 'always'."
         )
     schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
     if not issubclass(schedule_class, _PipelineScheduleRuntime):
@@ -408,13 +408,13 @@ def _make_spmd_graph_runtime(
     if requires_graph_extraction and compile_config.ep_overlap.enabled:
         raise ValueError(
             "GraphRuntime scheduled SPMD graph extraction does not support "
-            "--compile.ep_overlap.enabled yet. The EP-overlap graph rewrites "
+            "compile.ep_overlap.enabled yet. The EP-overlap graph rewrites "
             "have not been validated with extracted runtime callables."
         )
     if requires_graph_extraction and compile_config.memory_policy == "sac_and_offload":
         raise ValueError(
             "GraphRuntime scheduled SPMD graph extraction does not support "
-            "--compile.memory_policy sac_and_offload yet. Graph extraction "
+            "compile.memory_policy='sac_and_offload' yet. Graph extraction "
             "must preserve offload and reload pairs."
         )
     if (

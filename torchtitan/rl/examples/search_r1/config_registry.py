@@ -7,7 +7,7 @@
 """Config entry points for the Search-R1 example.
 
 These set the full Search-R1 recipe entirely from the example's config — the core
-defaults are unchanged, so every other config keeps vanilla GRPO. ``ConfigManager``
+defaults are unchanged, so every other config keeps vanilla GRPO. ``ConfigLoader``
 discovers these directly from the example module::
 
     --module search_r1 \\
@@ -30,8 +30,14 @@ from torchtitan.components.optimizer import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import CompileConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import (
+    apply_transforms,
+    ModelConfigTransformContext,
+    TokenDispatcherTransform,
+)
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.muse_glimmer import model_registry as muse_glimmer_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
@@ -211,7 +217,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         "30B-A3B",
         seq_len=seq_len,
         attn_backend="varlen",
-        moe_comm_backend="deepep",
     )
 
     # Same opt-in throughput overrides as rl_grpo_qwen3_30b_a3b_varlen_perf, applied
@@ -291,7 +296,14 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
     # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
     config.generator.max_num_batched_tokens = 2048  # TODO: TBD
-    return config
+    return apply_transforms(
+        config,
+        [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)],
+        context=ModelConfigTransformContext(
+            training=config.trainer.training,
+            parallelism=config.trainer.parallelism,
+        ),
+    )
 
 
 def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:

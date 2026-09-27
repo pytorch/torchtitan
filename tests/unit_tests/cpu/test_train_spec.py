@@ -23,9 +23,6 @@ class FakeModel(BaseModel):
     class Config(BaseModel.Config):
         hidden: int = 8
 
-        def update_from_config(self, *, config, **kwargs):
-            pass
-
         def get_nparams_and_flops(self, model, seq_len):
             return 0, 0
 

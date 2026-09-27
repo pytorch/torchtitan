@@ -33,7 +33,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         ).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
-        model=model_registry("debugmodel"),
+        model=model_registry("debugmodel", seq_len=2048),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
     )

@@ -34,7 +34,6 @@ QWEN3_8_SPECIAL_TOKENS = dict(QWEN3_5_SPECIAL_TOKENS)
 
 def _qwen3_8_2_4t_a95b(
     attn_backend: str,
-    moe_comm_backend: str = "standard",
     *,
     enable_sp: bool,
     seq_len: int,
@@ -84,7 +83,6 @@ def _qwen3_8_2_4t_a95b(
             n_value_heads=128,
             key_head_dim=128,
             value_head_dim=128,
-            moe_comm_backend=moe_comm_backend,
         ),
     )
 
@@ -103,7 +101,6 @@ def model_registry(
     enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen35Model.Config:
     get_config, max_context_len = qwen3_8_configs[flavor]
@@ -117,11 +114,6 @@ def model_registry(
         attn_backend=attn_backend,
         enable_sp=enable_sp,
         seq_len=context_len,
-        **(
-            {"moe_comm_backend": moe_comm_backend}
-            if moe_comm_backend is not None
-            else {}
-        ),
     )
     if converters is not None:
         validate_converter_compatibility(converters)

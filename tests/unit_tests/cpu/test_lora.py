@@ -14,12 +14,13 @@ import torch
 import torch.nn.functional as F
 import torchtitan.config.transform.quantization as quantization_transform
 
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigLoader, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     Float8LinearConverter,
     GroupedLinearLoRAHandler,
     LinearLoRAHandler,
     LoRATransform,
+    ModelConfigTransformContext,
     transform_model_config_,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -49,6 +50,9 @@ from torchtitan.trainer import Trainer
 
 LINEAR_LORA_HANDLERS = (LinearLoRAHandler(),)
 GROUPED_LINEAR_LORA_HANDLERS = (GroupedLinearLoRAHandler(),)
+_CONTEXT = ModelConfigTransformContext(
+    training=TrainingConfig(), parallelism=ParallelismConfig()
+)
 
 
 def test_qwen35_moe_float8_lora_model_config(monkeypatch):
@@ -58,7 +62,7 @@ def test_qwen35_moe_float8_lora_model_config(monkeypatch):
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     config = cast(
         Trainer.Config,
-        ConfigManager().parse_args(
+        ConfigLoader().load(
             [
                 "--module",
                 "qwen3_5",
@@ -119,6 +123,7 @@ def test_lora_model_builds():
                 target_modules=["wqkv", "wo"],
             )
         ],
+        context=_CONTEXT,
     )
     model = model_config.build()
     model.init_states()
@@ -171,6 +176,7 @@ def test_lora_forward():
                 target_modules=["wqkv", "wo"],
             )
         ],
+        context=_CONTEXT,
     )
     model = model_config.build()
     model.init_states()
@@ -660,6 +666,7 @@ def test_multiple_lora_transforms_conflict():
                     target_modules=["wo"],
                 ),
             ],
+            context=_CONTEXT,
         )
 
 

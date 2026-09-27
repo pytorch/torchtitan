@@ -18,8 +18,9 @@ This demonstrates:
 
 Command to run:
 python3 -m torchtitan.rl.train \
-    --module alphabet_sort --config rl_grpo_qwen3_0_6b_varlen \
-    --hf_assets_path=<path_to_model_checkpoint>
+    --module my_rl_configs --config rl_grpo_qwen3_0_6b_varlen
+
+Set ``hf_assets_path`` in ``my_rl_configs.py`` to the model checkpoint path.
 """
 
 import asyncio
@@ -29,7 +30,7 @@ from dataclasses import dataclass
 
 from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
 
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigLoader
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
@@ -252,7 +253,7 @@ def spawn_proc_mesh(
 
 async def main():
     init_logger()
-    config = ConfigManager().parse_args()
+    config = ConfigLoader().load()
     assert isinstance(config, Controller.Config)
     sl.init_structured_logger(
         source="rl_controller",

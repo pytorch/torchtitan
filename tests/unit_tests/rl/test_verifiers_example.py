@@ -19,7 +19,7 @@ import verifiers.v1 as vf
 
 from torchtitan.components.renderer import RenderersConfigAdapter
 
-from torchtitan.config.manager import ConfigManager
+from torchtitan.config import ConfigLoader
 from torchtitan.rl.examples.dapo_math import DapoMathSample
 from torchtitan.rl.examples.verifiers import VerifiersRollouter, VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.dapo_math import data
@@ -93,7 +93,7 @@ def test_verifiers_environment_uses_no_sandbox() -> None:
 
 
 def test_verifiers_config_keeps_dapo_training_recipe() -> None:
-    config = ConfigManager().parse_args(
+    config = ConfigLoader().load(
         [
             "--module",
             "verifiers.dapo_math",

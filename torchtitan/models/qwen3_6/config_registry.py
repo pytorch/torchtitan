@@ -97,9 +97,7 @@ def qwen36_debugmodel_varlen_attn(
 def qwen36_debugmodel_moe(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = model_registry(
-        "debugmodel_moe", enable_sp=True, seq_len=seq_len, moe_comm_backend="standard"
-    )
+    model_config = model_registry("debugmodel_moe", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -172,9 +170,7 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
 
 
 def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = model_registry(
-        "35B-A3B", enable_sp=True, seq_len=seq_len, moe_comm_backend="standard"
-    )
+    model_config = model_registry("35B-A3B", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(

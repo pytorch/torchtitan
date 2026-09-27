@@ -20,7 +20,7 @@ from torchtitan.models.common.linear import (
 )
 from torchtitan.protocols.module import Module
 
-from .base import convert_config_type, ModelConfigTransform
+from .base import convert_config_type, ModelConfigTransform, ModelConfigTransformContext
 from .lora import LoRATransform
 
 __all__ = ["AsyncTensorParallelTransform"]
@@ -32,7 +32,13 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
 
     enable_sequence_parallel: bool
 
-    def transform(self, model: Module.Config) -> Module.Config:
+    def transform(
+        self,
+        model: Module.Config,
+        *,
+        context: ModelConfigTransformContext | None = None,
+    ) -> Module.Config:
+        del context
         if not self.enable_sequence_parallel:
             raise ValueError("Async tensor parallelism requires sequence parallelism.")
 

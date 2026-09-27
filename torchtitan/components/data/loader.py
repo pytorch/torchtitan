@@ -9,10 +9,9 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from typing import Any
 
 import grain.python as grain
-import tyro
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
 
@@ -47,7 +46,7 @@ class BaseDataLoader(Stateful, ABC, Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        max_num_documents: Annotated[int | None, tyro.conf.Suppress] = None
+        max_num_documents: int | None = None
         """Maximum non-padding document segments in one local token microbatch."""
 
         def __post_init__(self) -> None:
@@ -67,20 +66,16 @@ class GrainDataLoader(BaseDataLoader):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
-        dataset: Annotated[DatasetConfig, tyro.conf.Suppress]
-        collator: Annotated[Collator.Config, tyro.conf.Suppress] = field(
-            default_factory=TextCollator.Config
-        )
+        dataset: DatasetConfig
+        collator: Collator.Config = field(default_factory=TextCollator.Config)
         seed: int = 42
-        shuffle: Annotated[bool, tyro.conf.Suppress] = True
-        repeat: Annotated[bool, tyro.conf.Suppress] = True
-        streaming_shuffle_buffer_size: Annotated[int, tyro.conf.Suppress] = 1_000
+        shuffle: bool = True
+        repeat: bool = True
+        streaming_shuffle_buffer_size: int = 1_000
         """Streaming rows retained per rank for approximate shuffling."""
-        read_options: Annotated[grain.ReadOptions, tyro.conf.Suppress] = field(
-            default_factory=grain.ReadOptions
-        )
+        read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
-        num_prefetch_microbatches: Annotated[int, tyro.conf.Suppress] = 2
+        num_prefetch_microbatches: int = 2
         """Collated microbatches queued per rank for trainer consumption."""
 
     def __init__(

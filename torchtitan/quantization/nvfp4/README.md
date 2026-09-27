@@ -57,23 +57,20 @@ particularly Appendix D. Switching to Higher Precision
 
 ### Llama 3 8B Usage
 
-Use the `llama3_8b_first_85_pct_layers_nvfp4` config for the supported Llama 3 8B recipe:
+Derive a recipe from `llama3_8b_first_85_pct_layers_nvfp4` and set the run
+parameters in Python:
 
-```bash
-torchrun --standalone --nproc_per_node 4 \
-  -m torchtitan.train \
-  --module llama3 \
-  --config llama3_8b_first_85_pct_layers_nvfp4 \
-  --parallelism.tensor_parallel_degree 1 \
-  --parallelism.data_parallel_shard_degree 4 \
-  --training.num_tokens_per_microbatch_per_dp_rank 65536 \
-  --training.max_context_length 2048 \
-  --training.steps 763 \
-  --dataloader.dataset c4 \
-  --metrics.log_freq 10 \
-  --optimizer.param-groups.0.optimizer-kwargs.lr 0.0003 \
-  --hf-assets-path ./tests/assets/tokenizer
+```python
+config = llama3_8b_first_85_pct_layers_nvfp4(seq_len=2048)
+config.parallelism.data_parallel_shard_degree = 4
+config.training.num_tokens_per_microbatch_per_dp_rank = 65536
+config.training.steps = 763
+config.metrics.log_freq = 10
+config.optimizer.optimizers[0].lr = 3e-4
 ```
+
+Expose that function from your config module and select it with `--module` and
+`--config`.
 
 For the 32-layer Llama 3 8B model, layers 0-26 use NVFP4 and layers 27-31 remain bf16.
 

@@ -19,7 +19,7 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigLoader
 from torchtitan.config.transform import (
     Float8LinearConverter,
     MXFP8LinearConverter,
@@ -69,10 +69,8 @@ class _ScaledLinear(Linear):
 
 
 def test_no_float8_by_default():
-    config_manager = ConfigManager()
-    config = config_manager.parse_args(
-        ["--module", "llama3", "--config", "llama3_debugmodel"]
-    )
+    config_loader = ConfigLoader()
+    config = config_loader.load(["--module", "llama3", "--config", "llama3_debugmodel"])
     model_config = config.model
     assert not has_quantization(model_config)
     # All Linear.Config instances should remain Linear.Config
@@ -269,8 +267,8 @@ def test_nvfp4_converter_preserves_tensor_parallel_role(
 
 def test_float8_applied_by_model_registry():
     pytest.importorskip("torchao")
-    config_manager = ConfigManager()
-    config = config_manager.parse_args(
+    config_loader = ConfigLoader()
+    config = config_loader.load(
         ["--module", "llama3", "--config", "llama3_debugmodel_float8_emulate_lora"]
     )
     model_config = config.model
@@ -314,8 +312,8 @@ def test_nvfp4_converter_targets_layers_not_lm_head(
     # config-tree transform under test).
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
 
-    config_manager = ConfigManager()
-    config = config_manager.parse_args(["--module", module, "--config", recipe])
+    config_loader = ConfigLoader()
+    config = config_loader.load(["--module", module, "--config", recipe])
     model_config = config.model
     assert has_quantization(model_config)
 
@@ -375,7 +373,7 @@ def test_nvfp4_first_85_pct_layers_converts_only_leading_layers(
 
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
 
-    config = ConfigManager().parse_args(["--module", module, "--config", recipe])
+    config = ConfigLoader().load(["--module", module, "--config", recipe])
     model_config = config.model
     n_layers = len(model_config.layers)
     cutoff = n_layers - math.ceil(n_layers * 0.15)
@@ -503,7 +501,7 @@ def test_nvfp4_recipes_parse(monkeypatch, module, recipe):
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     base_args = ["--module", module, "--config", recipe]
 
-    ConfigManager().parse_args(base_args)
+    ConfigLoader().load(base_args)
 
 
 @pytest.mark.parametrize(
@@ -517,7 +515,7 @@ def test_nvfp4_recipes_parse(monkeypatch, module, recipe):
 def test_qwen3_recipes_resolve(monkeypatch, recipe):
     _nvfp4_linear_cls()
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    config = ConfigManager().parse_args(["--module", "qwen3", "--config", recipe])
+    config = ConfigLoader().load(["--module", "qwen3", "--config", recipe])
     assert type(config.model).__qualname__ == "Qwen3Model.Config"
     if recipe == "qwen3_8b_first_85_pct_layers_nvfp4":
         assert isinstance(config.dataloader, GrainDataLoader.Config)
@@ -576,7 +574,7 @@ def test_nvfp4_hf_export_strips_buffers(monkeypatch):
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
-    config = ConfigManager().parse_args(
+    config = ConfigLoader().load(
         ["--module", "llama3", "--config", "llama3_debugmodel_nvfp4"]
     )
     model_config = config.model

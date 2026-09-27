@@ -35,7 +35,6 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
         model_registry(
             "debugmodel_moe",
             enable_sp=enable_sp,
-            moe_comm_backend="standard",
         ),
     )
     moe = config.layers[0].moe
@@ -181,13 +180,7 @@ def test_qwen35_registry_keeps_released_flavors() -> None:
 
 @pytest.mark.parametrize("flavor", sorted(qwen3_5_configs))
 def test_qwen35_registry_builds_every_flavor(flavor: str) -> None:
-    config = model_registry(
-        flavor,
-        enable_sp=True,
-        moe_comm_backend=(
-            "standard" if flavor == "debugmodel_moe" or "-A" in flavor else None
-        ),
-    )
+    config = model_registry(flavor, enable_sp=True)
 
     assert isinstance(config, Qwen35Model.Config)
 
@@ -205,7 +198,7 @@ def test_qwen35_keeps_small_dense_and_moe_models() -> None:
     dense_config = cast(Qwen35Model.Config, model_registry("0.8B", enable_sp=True))
     moe_config = cast(
         Qwen35Model.Config,
-        model_registry("35B-A3B", enable_sp=True, moe_comm_backend="standard"),
+        model_registry("35B-A3B", enable_sp=True),
     )
 
     assert dense_config.dim == 1024

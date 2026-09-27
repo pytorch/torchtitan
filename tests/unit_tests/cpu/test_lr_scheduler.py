@@ -12,7 +12,7 @@ from torch.optim import Adam
 
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.components.optimizer.lr_scheduler import LRSchedulersContainer
-from torchtitan.config import ConfigManager
+from torchtitan.models.llama3.config_registry import llama3_debugmodel
 
 
 class TestLRScheduler(unittest.TestCase):
@@ -46,39 +46,16 @@ class TestLRScheduler(unittest.TestCase):
         decay_type=None,
         min_lr_factor=None,
     ):
-        # Create a trainer config with the specified parameters
-        args = [
-            "--module",
-            "llama3",
-            "--config",
-            "llama3_debugmodel",
-            "--training.steps",
-            str(training_steps),
-        ]
-
-        args += (
-            ["--lr_scheduler.warmup_steps", str(warmup_steps)]
-            if warmup_steps is not None
-            else []
-        )
-        args += (
-            ["--lr_scheduler.decay_ratio", str(decay_ratio)]
-            if decay_ratio is not None
-            else []
-        )
-        args += (
-            ["--lr_scheduler.decay_type", decay_type] if decay_type is not None else []
-        )
-        args += (
-            ["--lr_scheduler.min_lr_factor", str(min_lr_factor)]
-            if min_lr_factor is not None
-            else []
-        )
-
-        config_manager = ConfigManager()
-        # Create base config with parameters passed directly
-        config = config_manager.parse_args(args)
-
+        config = llama3_debugmodel()
+        config.training.steps = training_steps
+        if warmup_steps is not None:
+            config.lr_scheduler.warmup_steps = warmup_steps
+        if decay_ratio is not None:
+            config.lr_scheduler.decay_ratio = decay_ratio
+        if decay_type is not None:
+            config.lr_scheduler.decay_type = decay_type
+        if min_lr_factor is not None:
+            config.lr_scheduler.min_lr_factor = min_lr_factor
         return config
 
     def test_linear_warmup_decay(self):

@@ -34,6 +34,7 @@ from torchtitan.models.common.linear import (
 from torchtitan.models.common.moe import (
     MicrobatchWiseLoadBalanceLoss,
     MoE,
+    RoundRobinTokenChoiceTopKRouter,
     TokenChoiceTopKRouter,
 )
 from torchtitan.models.common.moe_sharding import (
@@ -123,6 +124,21 @@ class TestMoE(unittest.TestCase):
                 gate=RouterGateLinear.Config(in_features=4, out_features=4),
             )
 
+    def test_round_robin_router_balances_assignments(self):
+        router = RoundRobinTokenChoiceTopKRouter.Config(
+            num_experts=4,
+            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            score_func=Sigmoid.Config(),
+            top_k=2,
+        ).build()
+
+        _, topk_expert_ids_TK, _ = router(torch.randn(4, 4))
+
+        torch.testing.assert_close(
+            topk_expert_ids_TK,
+            torch.tensor([[0, 1], [2, 3], [0, 1], [2, 3]]),
+        )
+
     def test_routed_experts_use_configured_activation(self):
         """Routed experts build and execute their configured binary activation."""
         activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=25.0)
@@ -132,7 +148,6 @@ class TestMoE(unittest.TestCase):
             num_experts=2,
             top_k=1,
             param_init={},
-            comm_backend="standard",
         )
         config.activation_fn = activation_fn
         experts = config.build()
@@ -151,7 +166,6 @@ class TestMoE(unittest.TestCase):
                 num_experts=2,
                 top_k=1,
                 param_init={},
-                comm_backend="standard",
             ),
             output_postprocess=RMSNorm.Config(normalized_shape=4),
         )
@@ -291,7 +305,6 @@ class TestMoE(unittest.TestCase):
                 num_experts=num_experts,
                 top_k=top_k,
                 param_init={},
-                comm_backend="standard",
             ),
         ).build()
         with torch.no_grad():
