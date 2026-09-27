@@ -548,11 +548,8 @@ def test_mxfp8_fused_wgrad_accum_folds_into_the_running_gradient(
     """A later backward accumulates into the existing .grad in place.
 
     Neither contribution may be lost or counted twice, and AccumulateGrad must
-    reattach the same buffer rather than copy it. A stacked weight with a
-    non-BF16 grad_dtype reaches its parameter through a view that rounds the
-    gradient to BF16, so it must take the ordinary WGRAD path instead.
+    reattach the same buffer rather than copy it.
     """
-    is_fused = num_linears == 1 or grad_dtype == torch.bfloat16
     torch.manual_seed(0)
     linear = _make_mxfp8_linear_for_wgrad_accum(num_linears, grad_dtype)
     x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
@@ -577,9 +574,8 @@ def test_mxfp8_fused_wgrad_accum_folds_into_the_running_gradient(
     after_one = running_grad.clone()
 
     linear(x).backward(grad_out)
-    assert num_scaled_addmm_calls == int(is_fused)
-    if is_fused:
-        assert linear.weight.grad.data_ptr() == running_grad.data_ptr()
+    assert num_scaled_addmm_calls == 1
+    assert linear.weight.grad.data_ptr() == running_grad.data_ptr()
     assert linear.weight.grad.shape == linear.weight.shape
     assert linear.weight.grad.dtype == grad_dtype
     # Same input and grad twice, so the running gradient must have doubled.

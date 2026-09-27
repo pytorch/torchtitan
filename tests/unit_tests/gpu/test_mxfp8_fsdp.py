@@ -522,7 +522,7 @@ def _run_fused_wgrad_accum(
     equal two single-microbatch ones.
 
     ``grad_dtype=None`` leaves the unsharded parameter's default grad_dtype
-    (its BF16 dtype). Otherwise it is set by hand after the first unshard,
+    (its BF16 dtype). Otherwise it is set by hand after an explicit unshard,
     standing in for FSDP setting grad_dtype to the reduce dtype.
     """
     os.environ["MASTER_ADDR"] = "localhost"
@@ -551,11 +551,11 @@ def _run_fused_wgrad_accum(
         linear.set_is_last_backward(False)
         linear.set_reshard_after_backward(False)
         linear.set_requires_gradient_sync(False)
-        output = linear(x)
         if grad_dtype is not None:
             # RAF=False keeps this unsharded parameter for both microbatches.
+            linear.unshard()
             linear.weight.grad_dtype = grad_dtype
-        output.sum().backward()
+        linear(x).sum().backward()
         linear.set_is_last_backward(True)
         linear.set_reshard_after_backward(True)
         linear.set_requires_gradient_sync(True)
