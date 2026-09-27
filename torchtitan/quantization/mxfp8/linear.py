@@ -471,7 +471,10 @@ class MXFP8Linear(Linear):
         # read-and-clear of parameter.grad, so it uses an ordinary WGRAD.
         # TODO(anijain2305): add a GraphTrainer graph pass that rewrites the
         # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
+        # SimpleFSDP hands forward a parametrization output rather than the
+        # leaf, whose .grad autograd never populates.
         is_tracing = torch.compiler.is_compiling() or get_proxy_mode() is not None
+        accumulate_into_weight_grad = not is_tracing and physical_weight.is_leaf
         output = _MXFP8LinearFunction.apply(
             input,
             physical_weight,
@@ -481,6 +484,6 @@ class MXFP8Linear(Linear):
             operands.weight_scale_dgrad_swizzled,
             bias,
             self.input_activation_format_for_backward,
-            not is_tracing,
+            accumulate_into_weight_grad,
         )
         return output

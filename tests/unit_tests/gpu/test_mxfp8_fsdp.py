@@ -511,6 +511,7 @@ def _run_fused_wgrad_accum(
     port: int,
     reduce_dtype: torch.dtype,
     grad_dtype: torch.dtype | None,
+    expected_num_scaled_addmm_calls: int,
 ) -> None:
     """Test WGRAD accumulation across PP-style microbatches under FSDP.
 
@@ -521,8 +522,8 @@ def _run_fused_wgrad_accum(
     ordinary WGRAD must run instead. Either way the reduced gradient must
     equal two single-microbatch ones.
 
-    ``grad_dtype=None`` leaves the unsharded parameter's default grad_dtype
-    (its BF16 dtype). Otherwise it is set by hand after an explicit unshard,
+    ``grad_dtype=None`` leaves whatever grad_dtype FSDP gives the unsharded
+    parameter. Otherwise it is set by hand after an explicit unshard, e.g.
     standing in for FSDP setting grad_dtype to the reduce dtype.
     """
     os.environ["MASTER_ADDR"] = "localhost"
@@ -561,9 +562,9 @@ def _run_fused_wgrad_accum(
         linear.set_requires_gradient_sync(True)
         linear(x).sum().backward()
 
-        effective_grad_dtype = grad_dtype or torch.bfloat16
-        expected_num_calls = 1 if effective_grad_dtype == reduce_dtype else 0
-        assert num_scaled_addmm_calls == expected_num_calls, num_scaled_addmm_calls
+        assert (
+            num_scaled_addmm_calls == expected_num_scaled_addmm_calls
+        ), num_scaled_addmm_calls
         torch.testing.assert_close(
             linear.weight.grad.to_local().float(), expected, rtol=2e-2, atol=2e-2
         )
@@ -573,18 +574,41 @@ def _run_fused_wgrad_accum(
 
 
 @pytest.mark.parametrize(
-    ("reduce_dtype", "grad_dtype"),
+    ("reduce_dtype", "grad_dtype", "expected_num_scaled_addmm_calls"),
     [
-        (torch.bfloat16, None),
-        (torch.float32, None),
-        (torch.float32, torch.float32),
+        pytest.param(torch.bfloat16, None, 1, id="bf16-reduce"),
+        # FSDP moves each BF16 gradient into its own FP32 accumulator.
+        pytest.param(torch.float32, torch.bfloat16, 0, id="fp32-reduce-bf16-grad"),
+        pytest.param(torch.float32, torch.float32, 1, id="fp32-reduce-fp32-grad"),
+        # TODO(anijain2305): FSDP leaves the unsharded parameter's grad_dtype
+        # at its BF16 dtype today and accumulates in FP32 separately, so the
+        # fused path does not fire. A pending PyTorch PR makes FSDP set
+        # grad_dtype to reduce_dtype, removing that separate accumulation.
+        # Remove the xfail once it lands.
+        pytest.param(
+            torch.float32,
+            None,
+            1,
+            id="fp32-reduce-default-grad",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="FSDP does not yet set grad_dtype to reduce_dtype",
+            ),
+        ),
     ],
-    ids=["bf16-reduce", "fp32-reduce-bf16-grad", "fp32-reduce-fp32-grad"],
 )
-def test_mxfp8_fsdp_fused_wgrad_accum(reduce_dtype, grad_dtype):
+def test_mxfp8_fsdp_fused_wgrad_accum(
+    reduce_dtype, grad_dtype, expected_num_scaled_addmm_calls
+):
     mp.spawn(
         _run_fused_wgrad_accum,
-        args=(2, get_free_port(), reduce_dtype, grad_dtype),
+        args=(
+            2,
+            get_free_port(),
+            reduce_dtype,
+            grad_dtype,
+            expected_num_scaled_addmm_calls,
+        ),
         nprocs=2,
         join=True,
     )

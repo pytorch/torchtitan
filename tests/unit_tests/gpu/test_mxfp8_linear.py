@@ -569,13 +569,15 @@ def test_mxfp8_fused_wgrad_accum_folds_into_the_running_gradient(
 
     linear(x).backward(grad_out)
     assert num_scaled_addmm_calls == 0
-    running_grad = linear.weight.grad
-    assert running_grad.dtype == grad_dtype
-    after_one = running_grad.clone()
+    assert linear.weight.grad.dtype == grad_dtype
+    after_one = linear.weight.grad.clone()
+    # Keep only the address: holding a reference to the running gradient would
+    # make AccumulateGrad clone the returned buffer instead of stealing it.
+    running_grad_ptr = linear.weight.grad.data_ptr()
 
     linear(x).backward(grad_out)
     assert num_scaled_addmm_calls == 1
-    assert linear.weight.grad.data_ptr() == running_grad.data_ptr()
+    assert linear.weight.grad.data_ptr() == running_grad_ptr
     assert linear.weight.grad.shape == linear.weight.shape
     assert linear.weight.grad.dtype == grad_dtype
     # Same input and grad twice, so the running gradient must have doubled.
