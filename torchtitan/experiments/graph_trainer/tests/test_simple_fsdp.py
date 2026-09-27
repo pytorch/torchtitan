@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from torchtitan.config.configs import TrainingConfig
+from torchtitan.config.training import TrainingConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
 

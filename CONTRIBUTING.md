@@ -51,7 +51,7 @@ Note: To accelerate contributions to and innovations around `torchtitan`, we are
   - After the model change, it should still load the original checkpoint correctly.
   - Document the reasons for the code change, similar to [composability.md](docs/composability.md).
 - Keep code modularized, especially for [train.py](torchtitan/train.py), so that it remains easy to copy-paste into a minimal code example. If necessary create separate functions/files.
-- The command-line options are frozen: no new `--section.option` flags. A knob that changes the model goes in the model config (dataclass), which is already off the command line. One that belongs to a component goes in that component's config (dataclass), and one with no other owner goes in [configs.py](torchtitan/config/configs.py) after checking with the maintainers. Both need `tyro.conf.Suppress`, since a field there is a command-line option unless you annotate it. See [the configuration doc](torchtitan/config/README.md).
+- The command-line options are frozen: no new `--section.option` flags. A knob that changes the model goes in the model config (dataclass), which is already off the command line. One that belongs to a component goes in that component's config (dataclass), and one with no other owner goes in an appropriate module under [torchtitan/config](torchtitan/config/) after checking with the maintainers. Both need `tyro.conf.Suppress`, since a field there is a command-line option unless you annotate it. See [the configuration doc](torchtitan/config/README.md).
 
 ### Proof of Value
 

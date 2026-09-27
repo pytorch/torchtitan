@@ -23,7 +23,7 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable
-from torchtitan.config.configs import CompileConfig
+from torchtitan.config.compile import CompileConfig
 from torchtitan.config.override import apply_overrides
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
