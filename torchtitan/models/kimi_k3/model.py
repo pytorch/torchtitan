@@ -11,11 +11,17 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    FullAC,
+    RegionAC,
+    SelectiveAC,
+)
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -194,6 +200,20 @@ def _apply_attention_residual(
     return output_TD.to(values_TND.dtype)
 
 
+def _checkpointed_attention_residual(
+    name: str,
+    partial_block_TD: torch.Tensor | None,
+    blocks_TD: list[torch.Tensor],
+    projection: Linear,
+    norm: RMSNorm,
+) -> torch.Tensor:
+    args = (partial_block_TD, blocks_TD, projection, norm)
+    inputs = blocks_TD if partial_block_TD is None else [*blocks_TD, partial_block_TD]
+    if torch.is_grad_enabled() and any(t.requires_grad for t in inputs):
+        return remat.checkpoint(region_name=name)(_apply_attention_residual)(*args)
+    return _apply_attention_residual(*args)
+
+
 class KimiK3TransformerBlock(Module):
     """Hybrid KDA/MLA decoder block with Kimi attention residuals."""
 
@@ -254,6 +274,22 @@ class KimiK3TransformerBlock(Module):
         )
         self.ffn_res_norm = config.ffn_res_norm.build()
         self.ffn_res_proj = config.ffn_res_proj.build()
+        # False when an activation-checkpointing policy wraps the whole block.
+        self.checkpoint_residual = True
+
+    def _attention_residual(
+        self,
+        name: str,
+        partial_block_TD: torch.Tensor | None,
+        blocks_TD: list[torch.Tensor],
+        projection: Linear,
+        norm: RMSNorm,
+    ) -> torch.Tensor:
+        """Attention residual whose fp32 intermediates are recomputed in backward."""
+        args = (partial_block_TD, blocks_TD, projection, norm)
+        if not self.checkpoint_residual:
+            return _apply_attention_residual(*args)
+        return _checkpointed_attention_residual(name, *args)
 
     def forward(
         self,
@@ -274,7 +310,8 @@ class KimiK3TransformerBlock(Module):
             h_TD = x_TD
         else:
             assert self.attention_res_norm is not None
-            h_TD = _apply_attention_residual(
+            h_TD = self._attention_residual(
+                "attention_res",
                 partial_block_TD,
                 blocks_TD,
                 self.attention_res_proj,
@@ -291,7 +328,8 @@ class KimiK3TransformerBlock(Module):
             h_TD = self.delta_attention(h_TD, layer_mask, positions)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
 
-        h_TD = _apply_attention_residual(
+        h_TD = self._attention_residual(
+            "ffn_res",
             prefix_sum_TD,
             blocks_TD,
             self.ffn_res_proj,
@@ -418,6 +456,13 @@ class KimiK3Model(MultimodalModel):
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)
             if ac_config is not None:
+                if isinstance(
+                    ac_config, (SelectiveAC.Config, FullAC.Config, RegionAC.Config)
+                ):
+                    # These policies checkpoint each whole block, residual math included.
+                    for block in self.layers.values():
+                        assert isinstance(block, KimiK3TransformerBlock)
+                        block.checkpoint_residual = False
                 policy = ac_config.build(dump_folder=dump_folder)
                 policy.apply(self)
                 if self.vision_encoder is not None:
@@ -605,7 +650,8 @@ class KimiK3Model(MultimodalModel):
             if not blocks_TD:
                 return h_TD, h_TD.unsqueeze(1)[:, :0]
             return h_TD, torch.stack(blocks_TD, dim=1)
-        h_TD = _apply_attention_residual(
+        h_TD = _checkpointed_attention_residual(
+            "output_res",
             h_TD,
             blocks_TD,
             self.output_res_proj,
