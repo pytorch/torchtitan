@@ -32,6 +32,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     VarlenInnerAttention,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -319,7 +320,9 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(type(layer.attention.inner_attention))
+                else attention_metadata.get(
+                    type(cast(TransformerBlock, layer).attention.inner_attention)
+                )
             )
             x = layer(
                 x,

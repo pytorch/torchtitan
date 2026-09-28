@@ -13,6 +13,7 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -29,13 +30,8 @@ from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMetadata,
     BaseAttention,
-    create_varlen_metadata_for_document,
-    FlexInnerAttention,
-    FlexAttentionMetadata,
-    InnerAttention,
     local_head_split,
     VarlenAttentionMetadata,
-    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -147,7 +143,7 @@ class Qwen35Attention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
@@ -230,7 +226,7 @@ class Qwen35TransformerBlock(Module):
         else:
             assert config.delta_net is not None
             self.attn = config.delta_net.build()
-            self.attention_metadata_key = type(self.attn)
+            self.attention_metadata_key = type(self.attn.inner_gated_delta_net)
 
         self.moe_enabled = config.moe is not None
         if self.moe_enabled:
@@ -246,7 +242,7 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -502,69 +498,6 @@ class Qwen35Model(MultimodalModel):
         labels = input_dict.pop("labels")
         return inputs, labels, input_dict
 
-    def get_attention_metadata(
-        self,
-        positions: torch.Tensor,
-        *,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> AttentionMetadata:
-        attn_config = self.config.first_attention
-
-        # Multimodal padding uses position 0 for every padded token. A real
-        # document start is position 0 followed by position 1; keep index 0 as
-        # the first start. This avoids routing a single padded sample through
-        # the varlen kernel while retaining boundaries between packed samples.
-        followed_by_one = torch.cat(
-            [
-                positions[1:] == 1,
-                torch.zeros(1, dtype=torch.bool, device=positions.device),
-            ]
-        )
-        first_token = torch.arange(positions.shape[0], device=positions.device) == 0
-        sequence_starts = ((positions == 0) & followed_by_one) | first_token
-        sequence_positions = torch.where(sequence_starts, 0, 1)
-        deltanet_metadata = create_varlen_metadata_for_document(
-            sequence_positions,
-            padding_mask=padding_mask,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-        )
-        if (
-            max_num_documents is None
-            and deltanet_metadata.cu_seq_q.numel() == 2
-            and not (
-                attn_config is not None
-                and isinstance(attn_config.inner_attention, VarlenInnerAttention.Config)
-            )
-        ):
-            deltanet_metadata = None
-
-        attention_metadata: dict[
-            type[Module], FlexAttentionMetadata | VarlenAttentionMetadata
-        ] = {}
-        if deltanet_metadata is not None:
-            attention_metadata[GatedDeltaNet] = deltanet_metadata
-
-        if attn_config is None:
-            return attention_metadata
-        if isinstance(attn_config.inner_attention, VarlenInnerAttention.Config):
-            # Under varlen both consumers read the same document offsets.
-            assert deltanet_metadata is not None
-            backend = attn_config.inner_attention._owner
-            assert backend is not None and issubclass(backend, InnerAttention)
-            attention_metadata[backend] = deltanet_metadata
-        else:
-            full_attention_metadata = super().get_attention_metadata(
-                positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-            attention_metadata.update(full_attention_metadata)
-        return attention_metadata
-
     def _get_vision_embeds(
         self,
         pixel_values: torch.Tensor,
@@ -716,7 +649,9 @@ class Qwen35Model(MultimodalModel):
             x = layer(
                 x,
                 (
-                    attention_metadata.get(layer.attention_metadata_key)
+                    attention_metadata.get(
+                        cast(Qwen35TransformerBlock, layer).attention_metadata_key
+                    )
                     if attention_metadata is not None
                     else None
                 ),

@@ -16,7 +16,7 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
+from torchtitan.models.qwen3_5.gdn import InnerGatedDeltaNet
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -168,9 +168,8 @@ class ReferenceGatedDeltaKernel(nn.Module):
 
 
 class TestQwen35DeltaNetVarlen(unittest.TestCase):
-    def test_flex_masks_ignore_padding_position_resets(self):
+    def test_padding_mask_separates_padding_segment(self):
         try:
-            from torchtitan.models.common.decoder import Decoder
             from torchtitan.models.qwen3_5 import MODEL_FLAVORS
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
@@ -180,16 +179,20 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         with torch.device("meta"):
             build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
             model = build_config("flex", seq_len=max_context_length).build()
-        positions = torch.tensor([0, 1, 2, 0, 0], dtype=torch.int32)
+        positions = torch.tensor([0, 1, 2, 0, 1], dtype=torch.int32)
+        padding_mask = torch.tensor([False, False, False, True, True])
 
-        with mock.patch.object(Decoder, "get_attention_metadata", return_value={}):
-            attention_metadata = model.get_attention_metadata(positions)
+        attention_metadata = model.get_attention_metadata(
+            positions, padding_mask=padding_mask
+        )
 
-        self.assertNotIn(GatedDeltaNet, attention_metadata)
+        torch.testing.assert_close(
+            attention_metadata[InnerGatedDeltaNet].cu_seq_q,
+            torch.tensor([0, 3, 5], dtype=torch.int32),
+        )
 
     def test_flex_masks_include_delta_net_varlen_metadata(self):
         try:
-            from torchtitan.models.common.decoder import Decoder
             from torchtitan.models.qwen3_5 import MODEL_FLAVORS
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
@@ -208,15 +211,15 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
         with mock.patch.object(
-            Decoder,
-            "get_attention_metadata",
-            return_value={full_attention_backend: full_attention_mask},
+            full_attention_backend,
+            "build_attention_metadata",
+            return_value=full_attention_mask,
         ):
             attention_metadata = model.get_attention_metadata(positions)
 
         self.assertIs(attention_metadata[full_attention_backend], full_attention_mask)
         torch.testing.assert_close(
-            attention_metadata[GatedDeltaNet].cu_seq_q,
+            attention_metadata[InnerGatedDeltaNet].cu_seq_q,
             torch.tensor([0, 2, 5], dtype=torch.int32),
         )
 
@@ -448,12 +451,12 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             if layer.full_attn
         )
         self.assertIsInstance(masks, dict)
-        self.assertEqual(set(masks.keys()), {flex_backend, GatedDeltaNet})
+        self.assertEqual(set(masks.keys()), {flex_backend, InnerGatedDeltaNet})
         self.assertIsInstance(masks[flex_backend], BlockMask)
-        self.assertIsInstance(masks[GatedDeltaNet], VarlenAttentionMetadata)
+        self.assertIsInstance(masks[InnerGatedDeltaNet], VarlenAttentionMetadata)
         # Three packed documents have lengths 3, 2, and 5.
         torch.testing.assert_close(
-            masks[GatedDeltaNet].cu_seq_q,
+            masks[InnerGatedDeltaNet].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
@@ -461,11 +464,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         metadata_keys = {
             layer.attention_metadata_key for layer in flex_model.layers.values()
         }
-        self.assertEqual(metadata_keys, {flex_backend, GatedDeltaNet})
+        self.assertEqual(metadata_keys, {flex_backend, InnerGatedDeltaNet})
         for layer in flex_model.layers.values():
             self.assertEqual(
                 layer.attention_metadata_key,
-                flex_backend if layer.full_attn else GatedDeltaNet,
+                flex_backend if layer.full_attn else InnerGatedDeltaNet,
             )
 
         varlen_model = build_model_config("debugmodel", attn_backend="varlen").build()
@@ -476,10 +479,14 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             if layer.full_attn
         )
         self.assertIsInstance(varlen_masks, dict)
-        self.assertIs(varlen_masks[varlen_backend], varlen_masks[GatedDeltaNet])
-        self.assertIsInstance(varlen_masks[GatedDeltaNet], VarlenAttentionMetadata)
+        self.assertIsInstance(varlen_masks[varlen_backend], VarlenAttentionMetadata)
         torch.testing.assert_close(
-            varlen_masks[GatedDeltaNet].cu_seq_q,
+            varlen_masks[varlen_backend].cu_seq_q,
+            varlen_masks[InnerGatedDeltaNet].cu_seq_q,
+        )
+        self.assertIsInstance(varlen_masks[InnerGatedDeltaNet], VarlenAttentionMetadata)
+        torch.testing.assert_close(
+            varlen_masks[InnerGatedDeltaNet].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
@@ -491,12 +498,12 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         ]
         deltanet_only_model = deltanet_only_config.build()
         deltanet_only_masks = deltanet_only_model.get_attention_metadata(positions)
-        self.assertEqual(set(deltanet_only_masks.keys()), {GatedDeltaNet})
+        self.assertEqual(set(deltanet_only_masks.keys()), {InnerGatedDeltaNet})
         self.assertIsInstance(
-            deltanet_only_masks[GatedDeltaNet], VarlenAttentionMetadata
+            deltanet_only_masks[InnerGatedDeltaNet], VarlenAttentionMetadata
         )
         torch.testing.assert_close(
-            deltanet_only_masks[GatedDeltaNet].cu_seq_q,
+            deltanet_only_masks[InnerGatedDeltaNet].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 

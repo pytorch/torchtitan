@@ -6,9 +6,10 @@
 
 """Context-parallel transform."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
-from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention import BaseAttention, InnerAttention
 from torchtitan.models.common.cp_attention import CPInnerAttention
 from torchtitan.protocols.module import Module
 
@@ -19,23 +20,24 @@ __all__ = ["ContextParallelTransform"]
 
 @dataclass(kw_only=True, slots=True)
 class ContextParallelTransform(ModelConfigTransform):
-    """Run attention under context parallelism.
+    """Convert configured inner-attention types to CP inner-attention types."""
 
-    Replace every inner attention with ``inner_attention`` while preserving its
-    config.
-
-    TODO(fegin): support one kernel per attention type, for models that mix
-    them.
-    """
-
-    inner_attention: type[Module]
-    """Replacement inner attention; must inherit ``CPInnerAttention``."""
+    inner_attention_map: Mapping[type[InnerAttention], type[InnerAttention]]
+    """Map each inner-attention type to its CP inner-attention type."""
 
     def __post_init__(self) -> None:
-        if not issubclass(self.inner_attention, CPInnerAttention):
-            raise ValueError(
-                f"{self.inner_attention.__qualname__} must inherit CPInnerAttention."
-            )
+        if not self.inner_attention_map:
+            raise ValueError("inner_attention_map must not be empty.")
+        for inner_attention, cp_inner_attention in self.inner_attention_map.items():
+            if not issubclass(inner_attention, InnerAttention):
+                raise ValueError(
+                    f"{inner_attention.__qualname__} must inherit InnerAttention."
+                )
+            if not issubclass(cp_inner_attention, CPInnerAttention):
+                raise ValueError(
+                    f"{cp_inner_attention.__qualname__} must inherit "
+                    "CPInnerAttention."
+                )
 
     def transform(
         self,
@@ -46,7 +48,17 @@ class ContextParallelTransform(ModelConfigTransform):
         del context
         for _, traversed, _, _ in model.traverse(BaseAttention.Config):
             attention = traversed
+            inner_attention = attention.inner_attention._owner
+            assert inner_attention is not None and issubclass(
+                inner_attention, InnerAttention
+            )
+            if inner_attention not in self.inner_attention_map:
+                raise ValueError(
+                    "No CP inner attention configured for "
+                    f"{inner_attention.__qualname__}."
+                )
             attention.inner_attention = convert_config_type(
-                attention.inner_attention, self.inner_attention
+                attention.inner_attention,
+                self.inner_attention_map[inner_attention],
             )
         return model

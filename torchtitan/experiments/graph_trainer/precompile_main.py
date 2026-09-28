@@ -260,7 +260,9 @@ def _precompile_aot_fx_trace(
         if isinstance(
             inner_attention, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
         ):
-            extra_kwargs["attention_metadata"] = cast(Decoder, model).get_attention_metadata(
+            extra_kwargs["attention_metadata"] = cast(
+                Decoder, model
+            ).get_attention_metadata(
                 positions=positions,
             )
 

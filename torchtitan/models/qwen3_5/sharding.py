@@ -59,9 +59,10 @@ DP = MeshAxisName.DP
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
-from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
+from torchtitan.models.qwen3_5.gdn import InnerGatedDeltaNet
 
 if TYPE_CHECKING:
+    from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
     from torchtitan.models.qwen3_5.model import (
         Qwen35Attention,
         Qwen35Model,
@@ -79,7 +80,7 @@ def annotate_deltanet_cu_seqlens(
     dict, so it is unreachable by name through ``input_sharding``; the caller
     invokes this under the dense SPMD mesh.
     """
-    deltanet_metadata = attention_metadata.get(GatedDeltaNet)
+    deltanet_metadata = attention_metadata.get(InnerGatedDeltaNet)
     if not isinstance(deltanet_metadata, VarlenAttentionMetadata):
         return
     deltanet_metadata.annotate_spmd_types()

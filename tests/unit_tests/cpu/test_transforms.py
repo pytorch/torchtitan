@@ -28,8 +28,16 @@ from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
-from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    SlidingWindowFlexInnerAttention,
+)
+from torchtitan.models.common.cp_attention import (
+    KVAllGatherCPFlexInnerAttention,
+    KVAllGatherCPSlidingWindowFlexInnerAttention,
+    UlyssesCPFlexInnerAttention,
+    UlyssesCPSlidingWindowFlexInnerAttention,
+)
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
@@ -173,7 +181,13 @@ class TestAtomicApplication(unittest.TestCase):
         config = _llama3_cp_ready()
         result = apply_transforms(
             config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
         )
         self.assertIsNot(result, config)
         original = config.model.layers[0].attention.inner_attention
@@ -193,7 +207,13 @@ class TestTransformModel(unittest.TestCase):
         model_config = self._spec()
         model_config = transform_model_config_(
             model_config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
             context=_CONTEXT,
         )
         inner = model_config.layers[0].attention.inner_attention
@@ -208,7 +228,13 @@ class TestTransformModel(unittest.TestCase):
         model_config = self._spec()
         transform_model_config_(
             model_config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
             context=_CONTEXT,
         )
 
@@ -268,7 +294,13 @@ class TestContextParallelTransform(unittest.TestCase):
 
         result = apply_transforms(
             config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
         )
 
         swapped = result.model.layers[0].attention.inner_attention
@@ -278,7 +310,100 @@ class TestContextParallelTransform(unittest.TestCase):
 
     def test_rejects_a_kernel_that_is_not_context_parallel(self):
         with self.assertRaisesRegex(ValueError, "must inherit CPInnerAttention"):
-            ContextParallelTransform(inner_attention=FlexInnerAttention)
+            ContextParallelTransform(
+                inner_attention_map={FlexInnerAttention: FlexInnerAttention}
+            )
+
+    def test_preserves_gpt_oss_sliding_window_backend(self):
+        from torchtitan.models.gpt_oss import build_model_config
+
+        model = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
+        self.assertIsInstance(
+            model.layers[0].attention.inner_attention,
+            SlidingWindowFlexInnerAttention.Config,
+        )
+        self.assertIsInstance(
+            model.layers[1].attention.inner_attention,
+            FlexInnerAttention.Config,
+        )
+
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                SlidingWindowFlexInnerAttention: (
+                    KVAllGatherCPSlidingWindowFlexInnerAttention
+                ),
+            }
+        ).transform(model)
+
+        self.assertIsInstance(
+            model.layers[0].attention.inner_attention,
+            KVAllGatherCPSlidingWindowFlexInnerAttention.Config,
+        )
+        self.assertIsInstance(
+            model.layers[1].attention.inner_attention,
+            KVAllGatherCPFlexInnerAttention.Config,
+        )
+
+    def test_rejects_missing_attention_backend_override(self):
+        from torchtitan.models.gpt_oss import build_model_config
+
+        model = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
+        transform = ContextParallelTransform(
+            inner_attention_map={FlexInnerAttention: KVAllGatherCPFlexInnerAttention}
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "No CP inner attention configured for SlidingWindowFlexInnerAttention",
+        ):
+            transform.transform(model)
+
+    def test_preserves_muse_glimmer_sliding_window_backend(self):
+        from torchtitan.models.muse_glimmer import build_model_config
+
+        for transform, expected_backends in (
+            (
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                        SlidingWindowFlexInnerAttention: (
+                            KVAllGatherCPSlidingWindowFlexInnerAttention
+                        ),
+                    }
+                ),
+                {
+                    KVAllGatherCPFlexInnerAttention.Config,
+                    KVAllGatherCPSlidingWindowFlexInnerAttention.Config,
+                },
+            ),
+            (
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: UlyssesCPFlexInnerAttention,
+                        SlidingWindowFlexInnerAttention: (
+                            UlyssesCPSlidingWindowFlexInnerAttention
+                        ),
+                    }
+                ),
+                {
+                    UlyssesCPFlexInnerAttention.Config,
+                    UlyssesCPSlidingWindowFlexInnerAttention.Config,
+                },
+            ),
+        ):
+            model = build_model_config("debugmodel", attn_backend="flex", seq_len=128)
+            self.assertEqual(
+                {type(layer.attention.inner_attention) for layer in model.layers},
+                {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config},
+            )
+
+            transform.transform(model)
+
+            self.assertEqual(
+                {type(layer.attention.inner_attention) for layer in model.layers},
+                expected_backends,
+            )
 
     def test_lora_runs_after_context_parallelism(self):
         transform_cls = getattr(transform_api, "LoRATransform", None)
@@ -297,7 +422,9 @@ class TestContextParallelTransform(unittest.TestCase):
                     target_modules=["wqkv", "wo"],
                 ),
                 ContextParallelTransform(
-                    inner_attention=KVAllGatherCPFlexInnerAttention
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
                 ),
             ],
         )

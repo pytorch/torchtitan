@@ -83,7 +83,6 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
             input_ids_T: Token IDs of shape ``[T]`` used by hash routing.
             attention_metadata: Optional document offsets consumed by sparse
                 attention.
-                ignore it and build masks internally.
             positions: Optional position IDs of shape ``[T]``.
 
         Returns:
@@ -287,7 +286,9 @@ class DeepSeekV4Model(Decoder):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(type(layer.attention.inner_attention))
+                else attention_metadata.get(
+                    type(cast(TransformerBlock, layer).attention.inner_attention)
+                )
             )
             h = layer(
                 h,
@@ -340,7 +341,7 @@ class DeepSeekV4Model(Decoder):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    type(mtp_block.attention.inner_attention)
+                    type(cast(TransformerBlock, mtp_block).attention.inner_attention)
                 )
             )
             prev_hc_hidden, prediction_hidden = mtp_block(

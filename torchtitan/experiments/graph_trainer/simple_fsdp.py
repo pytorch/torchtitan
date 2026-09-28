@@ -501,16 +501,19 @@ def data_parallel(
                 #     unsafe=True,
                 # )
 
-        _register_parametrization(
-            mod,
-            list(params_dict.keys()),
-            lambda param_name: ReplicateComputation(
-                param_fqn=(f"{module_fqn}.{param_name}" if module_fqn else param_name),
-                device_mesh=device_mesh,
-                param_sharding=param_shardings[param_name],
-                mode=mode,
-                mp_policy=mp_policy,
-                non_dp_mesh_types=param_non_dp_mesh_types.get(param_name, {}),
-            ),
-        )
+        if params_dict:
+            _register_parametrization(
+                mod,
+                list(params_dict.keys()),
+                lambda param_name: ReplicateComputation(
+                    param_fqn=(
+                        f"{module_fqn}.{param_name}" if module_fqn else param_name
+                    ),
+                    device_mesh=device_mesh,
+                    param_sharding=param_shardings[param_name],
+                    mode=mode,
+                    mp_policy=mp_policy,
+                    non_dp_mesh_types=param_non_dp_mesh_types.get(param_name, {}),
+                ),
+            )
     return model

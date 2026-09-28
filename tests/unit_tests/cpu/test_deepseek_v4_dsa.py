@@ -13,9 +13,8 @@ from unittest.mock import patch
 
 import torch
 
-from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.deepseek_v4.compressor import Indexer
-from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
 
 
@@ -54,18 +53,21 @@ class TestIndexerSelect(unittest.TestCase):
 
 
 class TestDSVPackedDocuments(unittest.TestCase):
-    def test_get_attention_masks_builds_document_offsets(self):
+    def test_get_attention_metadata_builds_document_offsets(self):
         # Documents start where positions reset; the padding tail is its own segment.
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 0, 1])
         padding_mask = torch.tensor([False] * 8 + [True] * 2)
-        masks = DeepSeekV4Model.get_attention_masks(
-            None, positions, padding_mask=padding_mask
-        )
-        self.assertIsInstance(masks, VarlenMetadata)
-        self.assertEqual(masks.cu_seq_q.tolist(), [0, 3, 8, 10])
+        with torch.device("meta"):
+            config = config_registry.deepseek_v4_debugmodel(seq_len=128)
+            config.model.set_sharding_(config.parallelism)
+            model = config.model.build()
+        metadata = model.get_attention_metadata(positions, padding_mask=padding_mask)
+        self.assertTrue(metadata)
+        for value in metadata.values():
+            self.assertIsInstance(value, VarlenAttentionMetadata)
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 3, 8, 10])
 
     def test_preprocess_inputs_passes_document_offsets(self):
-        # The shared decoder hook skips get_attention_masks for non-Flex cores.
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
             config.model.set_sharding_(config.parallelism)
@@ -79,7 +81,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
         with patch(
             "torchtitan.models.common.decoder.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
-        ), patch.object(VarlenMetadata, "annotate_spmd_types"):
+        ):
             _, _, kwargs = model.preprocess_inputs(
                 input_dict,
                 parallelism_context=SimpleNamespace(
@@ -87,7 +89,10 @@ class TestDSVPackedDocuments(unittest.TestCase):
                 ),
                 parallelism=SimpleNamespace(),
             )
-        self.assertEqual(kwargs["attention_masks"].cu_seq_q.tolist(), [0, 64, 128])
+        metadata = kwargs["attention_metadata"]
+        self.assertTrue(metadata)
+        for value in metadata.values():
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 64, 128])
 
     def test_packed_attention_matches_each_document_alone(self):
         """Packed documents must not see each other through the sliding window,
@@ -112,29 +117,36 @@ class TestDSVPackedDocuments(unittest.TestCase):
             ([300, 37, 150, 5], "packed alone"),
         ):
             positions = torch.cat([torch.arange(n) for n in lengths])
-            masks = DeepSeekV4Model.get_attention_masks(None, positions)
             for attention_config in attention_configs.values():
                 attention = attention_config.build().double()
+                backend = type(attention.inner_attention)
+                metadata = backend.build_attention_metadata(
+                    positions,
+                    config=attention_config.inner_attention,
+                )
                 for param in attention.parameters():
                     torch.nn.init.normal_(param, std=0.1)
                 x = torch.randn(len(positions), model_config.dim, dtype=torch.float64)
                 name = type(attention.inner_attention).__name__
                 with self.subTest(lengths=lengths, attention=name):
-                    packed = attention(x, attention_masks=masks, positions=positions)
+                    packed = attention(
+                        x, attention_metadata=metadata, positions=positions
+                    )
                     docs = []
                     for x_doc in x.split(lengths):
                         doc_positions = torch.arange(len(x_doc))
-                        doc_masks = (
+                        doc_metadata = (
                             None
                             if reference == "unpacked"
-                            else DeepSeekV4Model.get_attention_masks(
-                                None, doc_positions
+                            else backend.build_attention_metadata(
+                                doc_positions,
+                                config=attention_config.inner_attention,
                             )
                         )
                         docs.append(
                             attention(
                                 x_doc,
-                                attention_masks=doc_masks,
+                                attention_metadata=doc_metadata,
                                 positions=doc_positions,
                             )
                         )

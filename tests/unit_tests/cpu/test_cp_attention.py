@@ -8,6 +8,7 @@
 
 import unittest
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest import mock
 
 import spmd_types as spmd
@@ -24,19 +25,30 @@ from torchtitan.distributed.context_parallel import (
 )
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    InnerAttention,
+    SlidingWindowFlexInnerAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.cp_attention import (
     CPInnerAttention,
     KVAllGatherCPFlexInnerAttention,
+    KVAllGatherCPSlidingWindowFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
     UlyssesCPInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
 
 class TestKernelSelection(unittest.TestCase):
+    def test_cp_kernel_base_is_an_inner_attention(self):
+        self.assertTrue(issubclass(CPInnerAttention, InnerAttention))
+        self.assertTrue(issubclass(CPInnerAttention.Config, InnerAttention.Config))
+
     def test_cp_kernel_is_a_flex_kernel(self):
         config = KVAllGatherCPFlexInnerAttention.Config()
         self.assertIsInstance(config, CPInnerAttention.Config)
@@ -46,6 +58,11 @@ class TestKernelSelection(unittest.TestCase):
         config = KVAllGatherCPFlexInnerAttention.Config(block_size=256)
         self.assertEqual(config.block_size, 256)
 
+    def test_sliding_cp_kernel_is_a_sliding_flex_kernel(self):
+        config = KVAllGatherCPSlidingWindowFlexInnerAttention.Config(window_size=128)
+        self.assertIsInstance(config, CPInnerAttention.Config)
+        self.assertIsInstance(config, SlidingWindowFlexInnerAttention.Config)
+
     def test_cp_kernel_is_not_an_attention_backend(self):
         with self.assertRaisesRegex(ValueError, "Unknown backend"):
             get_attention_config("allgather_cp_flex")
@@ -53,61 +70,10 @@ class TestKernelSelection(unittest.TestCase):
     def test_plain_flex_is_not_a_cp_kernel(self):
         self.assertNotIsInstance(get_attention_config("flex"), CPInnerAttention.Config)
 
-    def test_all_gather_prepares_only_block_masks(self):
-        block_mask = object.__new__(BlockMask)
-        sliding_block_mask = object.__new__(BlockMask)
-        attention_metadata = {
-            "quadratic_attention": block_mask,
-            "sliding_attention": sliding_block_mask,
-        }
-        sharded_block_mask = object.__new__(BlockMask)
-        sharded_sliding_block_mask = object.__new__(BlockMask)
-        permutation = torch.arange(8).unsqueeze(0)
-        with mock.patch.object(
-            KVAllGatherCPFlexInnerAttention,
-            "_shard_block_mask",
-            side_effect=(sharded_block_mask, sharded_sliding_block_mask),
-        ) as shard_block_mask:
-            result = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
-                attention_metadata,
-                permutation=permutation,
-            )
-
-        assert isinstance(result, dict)
-        self.assertIs(result["quadratic_attention"], sharded_block_mask)
-        self.assertIs(result["sliding_attention"], sharded_sliding_block_mask)
-        self.assertEqual(
-            shard_block_mask.call_args_list,
-            [
-                mock.call(
-                    block_mask,
-                    permutation=permutation,
-                ),
-                mock.call(
-                    sliding_block_mask,
-                    permutation=permutation,
-                ),
-            ],
-        )
-
-    def test_all_gather_prepares_single_block_mask(self):
-        block_mask = object.__new__(BlockMask)
-        sharded_block_mask = object.__new__(BlockMask)
-        permutation = torch.arange(8).unsqueeze(0)
-        with mock.patch.object(
-            KVAllGatherCPFlexInnerAttention,
-            "_shard_block_mask",
-            return_value=sharded_block_mask,
-        ) as shard_block_mask:
-            result = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
-                block_mask,
-                permutation=permutation,
-            )
-
-        self.assertIs(result, sharded_block_mask)
-        shard_block_mask.assert_called_once_with(
-            block_mask,
-            permutation=permutation,
+    def test_all_gather_backends_share_metadata_preparation(self):
+        self.assertIs(
+            KVAllGatherCPSlidingWindowFlexInnerAttention.prepare_cp_metadata,
+            KVAllGatherCPFlexInnerAttention.prepare_cp_metadata,
         )
 
 
@@ -128,6 +94,80 @@ class TestFluxCpSharding(unittest.TestCase):
 
 
 class TestDecoderCpSharding(unittest.TestCase):
+    def _assert_selected_ptrr_metadata(
+        self,
+        *,
+        attention_metadata,
+        expected_metadata,
+    ):
+        sliding_config = KVAllGatherCPSlidingWindowFlexInnerAttention.Config(
+            window_size=128
+        )
+        model = SimpleNamespace(
+            config=SimpleNamespace(
+                first_attention=SimpleNamespace(inner_attention=sliding_config),
+                traverse=lambda *_args, **_kwargs: (),
+            )
+        )
+        load_balancer = mock.Mock()
+        load_balancer.generate_permutation.return_value = None
+        load_balancer_config = PTRRFlexAttentionCPLoadBalancer.Config()
+        parallelism = SimpleNamespace(
+            context_parallel_load_balancer=load_balancer_config
+        )
+        input_dict = {
+            "input": torch.arange(8),
+            "attention_metadata": attention_metadata,
+        }
+
+        with mock.patch.object(
+            PTRRFlexAttentionCPLoadBalancer.Config,
+            "build",
+            return_value=load_balancer,
+        ) as build_load_balancer, mock.patch.object(
+            context_parallel,
+            "get_cp_input_seq_len",
+            return_value=8,
+        ), mock.patch.object(
+            context_parallel,
+            "shard_tensors",
+            return_value=input_dict,
+        ):
+            Decoder._cp_shard(
+                cast(Any, model),
+                input_dict,
+                input_shardings=decoder_input_sharding(),
+                parallelism_context=cast(Any, SimpleNamespace()),
+                parallelism=cast(Any, parallelism),
+            )
+
+        build_load_balancer.assert_called_once_with(
+            seq_len=8,
+            attention_metadata=expected_metadata,
+        )
+
+    def test_ptrr_uses_sliding_metadata_when_full_metadata_is_absent(self):
+        sliding_metadata = object.__new__(BlockMask)
+
+        self._assert_selected_ptrr_metadata(
+            attention_metadata={
+                KVAllGatherCPSlidingWindowFlexInnerAttention: sliding_metadata
+            },
+            expected_metadata=sliding_metadata,
+        )
+
+    def test_ptrr_prefers_full_metadata(self):
+        full_metadata = object.__new__(BlockMask)
+        sliding_metadata = object.__new__(BlockMask)
+
+        self._assert_selected_ptrr_metadata(
+            attention_metadata={
+                KVAllGatherCPFlexInnerAttention: full_metadata,
+                KVAllGatherCPSlidingWindowFlexInnerAttention: sliding_metadata,
+            },
+            expected_metadata=full_metadata,
+        )
+
     def test_config_builds_selected_load_balancer(self):
         input_T = torch.arange(8)
         block_mask = object.__new__(BlockMask)
@@ -303,30 +343,6 @@ class TestDecoderCpSharding(unittest.TestCase):
             create_load_balancer.call_args_list,
             [mock.call(first_mask, 2), mock.call(second_mask, 2)],
         )
-
-    def test_ptrr_uses_configured_mask_key(self):
-        input_T = torch.arange(8)
-        first_mask = object.__new__(BlockMask)
-        selected_mask = object.__new__(BlockMask)
-        cp_group = SimpleNamespace(size=lambda: 2)
-        config = PTRRFlexAttentionCPLoadBalancer.Config(mask_key="selected")
-
-        with mock.patch(
-            "torchtitan.distributed.context_parallel._PTRRLoadBalancer"
-        ) as create_load_balancer, mock.patch(
-            "torchtitan.distributed.context_parallel.spmd_mesh_group",
-            return_value=cp_group,
-        ):
-            load_balancer = config.build(
-                seq_len=input_T.shape[0],
-                attention_metadata={
-                    "first": first_mask,
-                    "selected": selected_mask,
-                },
-            )
-            load_balancer.generate_permutation()
-
-        create_load_balancer.assert_called_once_with(selected_mask, 2)
 
 
 class _FakeMesh:

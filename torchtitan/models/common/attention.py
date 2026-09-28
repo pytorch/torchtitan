@@ -12,7 +12,7 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
@@ -57,6 +57,7 @@ __all__ = [
     "InnerAttention",
     "QKVLinear",
     "ScaledDotProductInnerAttention",
+    "SlidingWindowFlexInnerAttention",
     "VarlenInnerAttention",
     "VarlenAttentionMetadata",
     "create_attention_mask",
@@ -94,14 +95,6 @@ class VarlenAttentionMetadata(NamedTuple):
         spmd.assert_type(self.cu_seq_q, self._OFFSETS_SPMD_TYPE)
         if self.cu_seq_k is not self.cu_seq_q:
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
-
-
-# Mapping (not dict) lets covariant value types accept dictionaries containing
-# one or more BlockMasks.
-FlexAttentionMetadata = Mapping[str, BlockMask] | BlockMask
-AttentionMetadata = Mapping[
-    type[Module], FlexAttentionMetadata | VarlenAttentionMetadata
-]
 
 
 @spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
@@ -152,10 +145,17 @@ class InnerAttention(Module):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> FlexAttentionMetadata | VarlenAttentionMetadata | None:
-        """Build metadata consumed by this backend, if any."""
+    ) -> "BlockMask | VarlenAttentionMetadata | None":
+        """Build metadata consumed by this inner attention, if any.
+
+        Inner attentions that do not require metadata inherit the default
+        ``None`` result.
+        """
         del positions, config, padding_mask, max_num_documents, max_context_length
         return None
+
+
+AttentionMetadata = Mapping[type[InnerAttention], BlockMask | VarlenAttentionMetadata]
 
 
 class VarlenInnerAttention(InnerAttention):
@@ -316,27 +316,13 @@ class FlexInnerAttention(InnerAttention):
     ) -> BlockMask:
         """Build the standard document-causal FlexAttention BlockMask."""
         del padding_mask, max_num_documents, max_context_length
-        return FlexInnerAttention.build_attention_metadata_from_mask_mods(
-            positions,
-            config=config,
-            mask_mods=[
-                get_causal_mask_mod(),
-                get_efficient_causal_mask_mod_for_packed_document(positions),
-            ],
-        )
-
-    @staticmethod
-    def build_attention_metadata_from_mask_mods(
-        positions: torch.Tensor,
-        *,
-        config: InnerAttention.Config,
-        mask_mods: Sequence[_mask_mod_signature],
-    ) -> BlockMask:
-        """Build the BlockMask consumed by FlexAttention."""
         assert isinstance(config, FlexInnerAttention.Config)
         seq_len = positions.shape[0]
         return create_attention_mask(
-            and_masks(*mask_mods),
+            and_masks(
+                get_causal_mask_mod(),
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+            ),
             1,
             None,
             seq_len,
@@ -469,6 +455,47 @@ class FlexInnerAttention(InnerAttention):
             return out_THV
         lse_TH = aux.lse.squeeze(0).transpose(0, 1)
         return out_transform(out_THV, lse_TH)
+
+
+class SlidingWindowFlexInnerAttention(FlexInnerAttention):
+    """FlexAttention backend with a causal sliding-window mask."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FlexInnerAttention.Config):
+        window_size: int
+
+    @staticmethod
+    def build_attention_metadata(
+        positions: torch.Tensor,
+        *,
+        config: InnerAttention.Config,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> BlockMask:
+        """Build the document-causal sliding-window FlexAttention BlockMask."""
+        del padding_mask, max_num_documents, max_context_length
+        assert isinstance(config, SlidingWindowFlexInnerAttention.Config)
+        seq_len = positions.shape[0]
+        return create_attention_mask(
+            and_masks(
+                get_causal_mask_mod(),
+                get_efficient_causal_mask_mod_for_packed_document(positions),
+                get_sliding_window_mask_mod(config.window_size),
+            ),
+            1,
+            None,
+            seq_len,
+            seq_len,
+            device=positions.device,
+            BLOCK_SIZE=config.block_size,
+            # when separate_full_blocks = True, kernel iterates through
+            # full blocks first (blocks where all elements are unmasked)
+            # but which blocks are "full" vs "partial" changes depending
+            # on the particular batch
+            # for batch invariance, we disable this optimization
+            separate_full_blocks=not is_in_batch_invariant_mode(),
+        )
 
 
 # TODO: Verify whether SDPA support can be removed without losing performance
@@ -797,6 +824,7 @@ class BaseAttention(Module):
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
 
+
 class QKVLinear(Module):
     """Single fused linear projection, split along R dimension.
 
@@ -936,7 +964,7 @@ class GQAttention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         xq_THK, xk_THK, xv_THV = remat.region(

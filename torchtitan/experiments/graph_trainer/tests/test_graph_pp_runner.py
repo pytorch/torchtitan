@@ -506,7 +506,10 @@ class GraphRuntimeTraceTest(unittest.TestCase):
     def test_split_block_mask_batch_offset_is_dynamic_for_replay(self) -> None:
         _, kwargs_mbs = normalize_graph_pp_microbatch_inputs(
             [(), ()],
-            [{"attention_metadata": mask} for mask in _split_batch_offset_block_masks()],
+            [
+                {"attention_metadata": mask}
+                for mask in _split_batch_offset_block_masks()
+            ],
         )
         mask0 = kwargs_mbs[0]["attention_metadata"]
         mask1 = kwargs_mbs[1]["attention_metadata"]

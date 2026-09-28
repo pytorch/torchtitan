@@ -140,11 +140,11 @@ def generate() -> None:
         gpu_memory_utilization=gen_config.gpu_memory_limit,
         enforce_eager=gen_config.cuda_graph.mode == "NONE",
         attention_config=AttentionConfig(
-                backend=(
-                    AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(attention_backend, FlexInnerAttention.Config)
-                    else AttentionBackendEnum.CUSTOM
-                ),
+            backend=(
+                AttentionBackendEnum.FLEX_ATTENTION
+                if isinstance(attention_backend, FlexInnerAttention.Config)
+                else AttentionBackendEnum.CUSTOM
+            ),
         ),
         disable_log_stats=False,
     )

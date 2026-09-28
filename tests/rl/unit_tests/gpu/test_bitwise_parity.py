@@ -50,7 +50,6 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.tensor import distribute_tensor, DTensor
-from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
@@ -65,12 +64,7 @@ from torchtitan.distributed.spmd_types import (
     plain_tensor_to_dtensor_state_dict,
     spmd_mesh_group,
 )
-from torchtitan.models.common.attention import (
-    create_attention_mask,
-    FlexInnerAttention,
-    get_causal_mask_mod,
-    get_document_mask_mod,
-)
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.model.vllm_registry import (
@@ -332,8 +326,8 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     Mirrors the trainer's flex attention path: pack documents into a single
     row, pad each document to block-aligned boundaries in batch-invariant
-    mode, create a BlockMask via ``get_document_mask_mod`` +
-    ``get_causal_mask_mod``, and extract per-document logprobs.
+    mode, build backend-specific attention metadata, and extract per-document
+    logprobs.
     """
     inner_attn = model.config.layers[0].attention.inner_attention
     assert isinstance(inner_attn, FlexInnerAttention.Config)
@@ -359,19 +353,11 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     packed_ids = torch.cat(parts)
     positions = torch.cat(pos_parts)
 
-    mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
+    attention_metadata = model.get_attention_metadata(positions)
 
-    attention_metadata = create_attention_mask(
-        and_masks(*mask_mods),
-        1,
-        None,
-        positions.shape[0],
-        positions.shape[0],
-        BLOCK_SIZE=block_size,
-        separate_full_blocks=not batch_invariant,
+    logits = model(
+        packed_ids, attention_metadata=attention_metadata, positions=positions
     )
-
-    logits = model(packed_ids, attention_metadata=attention_metadata, positions=positions)
 
     # Build pre-shifted labels matching the trainer convention:
     # labels[i] = packed_ids[i+1] for valid positions, IGNORE_INDEX otherwise.
@@ -408,7 +394,9 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     # Hybrid models may require different metadata for each attention type.
     attention_metadata = model.get_attention_metadata(positions)
 
-    logits = model(packed_ids, attention_metadata=attention_metadata, positions=positions)
+    logits = model(
+        packed_ids, attention_metadata=attention_metadata, positions=positions
+    )
 
     # Build pre-shifted labels matching the trainer convention:
     # labels[i] = packed_ids[i+1] within each segment, IGNORE_INDEX otherwise.
