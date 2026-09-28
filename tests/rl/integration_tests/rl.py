@@ -89,23 +89,22 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_fsdp2_gen_tp2_compile",
             ngpu=8,
         ),
-        # TODO: rl_grpo_gpt_oss_debug_varlen uses DeepEP with FULL CUDA graphs,
-        # which A10G CI cannot run, so this test uses the all-to-all variant
-        # without CUDA graphs. Move GPT-OSS RL coverage to distributed MoE +
-        # GB200 tests. GB200/H100 DeepEP capacity is limited, so those RL
-        # end-to-end tests cannot run continuously.
         OverrideDefinitions(
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_gpt_oss_debug_varlen_a2a",
+                    "--config rl_grpo_gpt_oss_debug_varlen_no_compile",
                     "--async-loop.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--trainer.parallelism.tensor_parallel_degree 4",
                     "--trainer.parallelism.expert_parallel_degree 4",
                     "--trainer.parallelism.data_parallel_shard_degree 1",
                     "--generator.parallelism.tensor_parallel_degree 4",
+                    "--generator.parallelism.expert_parallel_degree 4",
                     "--generator.parallelism.data_parallel_degree 1",
+                    # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
+                    # CUDA-graph-compatible distributed MoE token dispatcher.
+                    "--generator.cuda_graph.mode NONE",
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
