@@ -12,11 +12,10 @@ artifact from a single process, which can then be loaded by all ranks
 during torchrun training. This avoids the need to run torchrun with N
 GPUs just for precompilation.
 
-Usage (aot_fx_trace mode):
+Usage:
     python -m torchtitan.experiments.graph_trainer.precompile_main \
         --module graph_trainer.llama3 \
         --config graph_trainer_llama3_debugmodel \
-        --compile.mode aot_fx_trace \
         --compile.precompile_artifact_dir /tmp/fx_trace_artifacts
 """
 
@@ -210,13 +209,13 @@ def _precompile_aot_fx_trace(
     tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
+    from torchtitan.experiments.graph_trainer.graph_builder import make_fwd_bwd_step
     from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
         get_spmd_precompile_meshes,
         precompile_fx_trace_save,
     )
-    from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
     loss_fn = config.loss.build(compile_config=compile_config)
     _prepare_loss_for_precompile(model, loss_fn)
@@ -261,7 +260,8 @@ def _precompile_aot_fx_trace(
                 positions=positions,
             )
 
-    # TODO: Add CP support — call prepare_context_parallel_input here
+    # TODO: Add CP support by generating a permutation and
+    # sharding inputs here.
     # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
     # dimension, matching the trainer's preprocess_inputs path.
     if parallel_dims.cp_enabled:
@@ -358,13 +358,6 @@ def main():
     init_logger()
     config_manager = ConfigManager()
     config = config_manager.parse_args()
-
-    mode = config.compile.mode
-    if mode != "aot_fx_trace":
-        raise ValueError(
-            f"precompile_main only supports --compile.mode aot_fx_trace, "
-            f"got '{mode}'."
-        )
 
     (
         model,

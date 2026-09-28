@@ -19,13 +19,8 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import (
-    CompileConfig,
-    DebugConfig,
-    OverrideConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, DebugConfig, OverrideConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     BatchInvariantFlexConverter,
     LMHeadCastConverter,
@@ -261,7 +256,6 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
     config.async_loop.target_offpolicy_steps = 0
-    config.async_loop.window_fraction = None
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -440,7 +434,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             # Batch invariance: strict on-policy so trainer/generator logprobs
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
-            window_fraction=None,
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
@@ -751,7 +744,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
             ),
         ]
     )
-    config.generator.cuda_graph = VLLMCudaGraphConfig(mode="FULL_AND_PIECEWISE")
+    config.generator.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
     # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
     # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
     config.generator.max_num_batched_tokens = 2048
@@ -789,7 +782,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
             # Batch invariance: strict on-policy so trainer/generator logprobs
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
-            window_fraction=None,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
@@ -982,7 +974,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
             # Batch invariance: strict on-policy so trainer/generator logprobs
             # stay bitwise-identical every step.
             target_offpolicy_steps=0,
-            window_fraction=None,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
@@ -1040,6 +1031,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
 def _qwen3_5_rl_model_registry(
     flavor: str,
     *,
+    enable_sp: bool,
     seq_len: int,
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
@@ -1052,7 +1044,11 @@ def _qwen3_5_rl_model_registry(
     converters = list(converters or [])
     converters.append(LMHeadCastConverter.Config())
     return qwen3_5_model_registry(
-        flavor, seq_len=seq_len, attn_backend=attn_backend, converters=converters
+        flavor,
+        enable_sp=enable_sp,
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        converters=converters,
     )
 
 
@@ -1061,7 +1057,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = _qwen3_5_rl_model_registry(
-        "9B", seq_len=seq_len, attn_backend="varlen"
+        "9B", enable_sp=True, seq_len=seq_len, attn_backend="varlen"
     )
     return Controller.Config(
         model=model_config,
@@ -1106,8 +1102,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            # GDN decode supports full capture; prefill breaks into eager pieces.
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL_AND_PIECEWISE"),
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
@@ -1125,11 +1120,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
 def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5-9B GRPO with matching TP=2."""
     config = rl_grpo_qwen3_5_9b_varlen()
-    config.async_loop = dataclasses.replace(
-        config.async_loop,
-        target_offpolicy_steps=0,
-        window_fraction=None,
-    )
+    config.async_loop = dataclasses.replace(config.async_loop, target_offpolicy_steps=0)
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -1151,7 +1142,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = _qwen3_5_rl_model_registry(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel", enable_sp=True, seq_len=seq_len, attn_backend="varlen"
     )
     return Controller.Config(
         model=model_config,
@@ -1195,7 +1186,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
-            cuda_graph=VLLMCudaGraphConfig(mode="FULL_AND_PIECEWISE"),
+            cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=2,
@@ -1213,11 +1204,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
 def rl_grpo_qwen3_5_debug_varlen_batch_invariant() -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5 GRPO config for CI."""
     config = rl_grpo_qwen3_5_debug_varlen()
-    config.async_loop = dataclasses.replace(
-        config.async_loop,
-        target_offpolicy_steps=0,
-        window_fraction=None,
-    )
+    config.async_loop = dataclasses.replace(config.async_loop, target_offpolicy_steps=0)
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -1241,7 +1228,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     seq_len = 65536
     config = rl_grpo_qwen3_5_9b_varlen()
     config.model = _qwen3_5_rl_model_registry(
-        "27B", seq_len=seq_len, attn_backend="varlen"
+        "27B", enable_sp=True, seq_len=seq_len, attn_backend="varlen"
     )
     config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3.6-27B"
     perf_imports = ["torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm"]

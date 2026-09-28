@@ -15,7 +15,8 @@ import torch._dynamo
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import (
@@ -111,8 +112,6 @@ class Attention(BaseAttention):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        num_tokens = x.shape[0]
-
         q, k, v = self.qkv_linear(x)
 
         q, k = self.rope(q, k, positions)
@@ -128,7 +127,7 @@ class Attention(BaseAttention):
         )
 
         # Reshape and project output
-        output = output.reshape(num_tokens, -1).contiguous()
+        output = output.reshape(output.shape[0], -1).contiguous()
         return self.wo(output)
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:

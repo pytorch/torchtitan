@@ -36,7 +36,10 @@ from .tensor import (
 )
 
 
-__all__ = ["InputActivationFormatForBackward", "MXFP8Linear"]
+__all__ = [
+    "InputActivationFormatForBackward",
+    "MXFP8Linear",
+]
 
 # Activation and gradient quantization takes a scaling mode; the 32x32 weight
 # cast hardcodes RCEIL. Pin the two to match, so both operands of a GEMM round
@@ -348,7 +351,12 @@ class MXFP8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
         physical_weight = self.weight
         local_out_features = physical_weight.shape[-2]
         if local_out_features % _MXFP8_BLOCK_SIZE:
@@ -358,16 +366,15 @@ class MXFP8Linear(Linear):
                 "Linear out_features or TP degree so quantization blocks do "
                 "not span projection boundaries."
             )
-
+        # Always a plain tensor: spmd_types carries TP and EP as annotations
+        # instead of wrapping the weight as a model-parallel DTensor.
+        weight_NK = weight
         # __init__ installs a _LinearShardedTensorWithMXFP8Compute, but that is
         # not what forward usually sees. Under FSDP the post-all-gather hook has
         # already replaced it for this unshard lifetime with the storage-free
         # _UnshardedFSDPTensor holding the quantized operands, so the weight
         # arrives here already quantized and the type identifies which state we
         # are in.
-        # spmd_types carries TP and EP as annotations instead of wrapping the
-        # weight as a model-parallel DTensor.
-        weight_NK, bias_N = self._flatten_weight_and_bias()
         if isinstance(physical_weight, _UnshardedFSDPTensor):
             # Read operands from the physical wrapper. Dynamo can source the
             # module parameter, but not a temporary tensor-subclass view of it.
@@ -401,7 +408,7 @@ class MXFP8Linear(Linear):
             operands.weight_scale_fprop_swizzled,
             operands.weight_qdata_dgrad_NK,
             operands.weight_scale_dgrad_swizzled,
-            bias_N,
+            bias,
             self.input_activation_format_for_backward,
         )
-        return self._unflatten_output(output)
+        return output
