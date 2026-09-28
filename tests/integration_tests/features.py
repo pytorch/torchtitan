@@ -152,24 +152,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
             use_real_pg=True,
         ),
-        # TODO: Disabled with the FlexInnerAttention default (SDPA is no longer a
-        # language-model backend). Zero-bubble / multi schedules split backward
-        # and call torch's stage_backward_input, which runs
-        # _get_grad_fn_or_grad_acc (t.requires_grad) over every stage input —
-        # including the forwarded FlexInnerAttention BlockMask, which is not a Tensor
-        # ("'BlockMask' object has no attribute 'requires_grad'"). Full-backward
-        # schedules (1F1B/GPipe/Interleaved1F1B) are unaffected. Re-enable once
-        # stage_backward_input skips non-tensor stage inputs upstream.
-        # (VarlenInnerAttention's tensor-based metadata would sidestep this, but
-        # varlen requires flash_attn_interface/FA3, which the core integration
-        # CI does not install; SDPA is no longer a core LM backend. So the
-        # upstream stage_backward_input fix is the path here.)
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_pp4_zero_bubble],
             test_descr="PP looped zero bubble test",
             test_name="pp_looped_zero_bubble",
             ngpu=4,
-            disabled=True,
             use_real_pg=True,
         ),
         OverrideDefinitions(
@@ -177,19 +164,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="PP zero bubble test (v shaped)",
             test_name="pp_zbv",
             ngpu=2,
-            disabled=True,
             use_real_pg=True,
         ),
-        # TODO: Disabled for the same reason as the zero-bubble PP tests above:
-        # the custom CSV schedule splits backward (separate input-grad step),
-        # so stage_backward_input chokes on the forwarded FlexInnerAttention
-        # BlockMask. Re-enable once stage_backward_input skips non-tensor inputs.
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_pp2_custom_csv],
             test_descr="PP with custom pipeline schedule loaded from CSV file",
             test_name="pp_custom_csv",
             ngpu=2,
-            disabled=True,
             use_real_pg=True,
         ),
         OverrideDefinitions(

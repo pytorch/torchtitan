@@ -15,7 +15,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.qwen3.model import Qwen3Model
 
@@ -135,9 +135,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     @with_comms
     def test_with_ep_fsdp_gt_num_experts_shards_feature_dimensions(self):
         """Sparse FSDP also falls back to each projection's feature dim."""
-        # edp_mesh: 2D mesh [efsdp=4, ep=2], dp_mesh: 1D mesh [8]
+        # edp_mesh: 2D mesh [edp_shard=4, ep=2], dp_mesh: 1D mesh [8]
         edp_mesh = init_device_mesh(
-            self.device_type, (4, 2), mesh_dim_names=("efsdp", "ep")
+            self.device_type, (4, 2), mesh_dim_names=("edp_shard", "ep")
         )
         dp_mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
@@ -167,7 +167,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             layer_config.moe.routed_experts.w2.in_features = 16
         model = config.build().to(self.device_type)
         edp_mesh = init_device_mesh(
-            self.device_type, (4, 2), mesh_dim_names=("efsdp", "ep")
+            self.device_type, (4, 2), mesh_dim_names=("edp_shard", "ep")
         )
         dp_mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)
@@ -281,7 +281,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         from torchtitan.models.llama3 import model_registry
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=2,
             cp=1,
@@ -291,8 +291,8 @@ class TestLinearStackingDistributed(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=True,
         )
-        parallel_dims.build_mesh()
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        parallelism_context.build_mesh()
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
 
         sharded_config = model_registry("debugmodel")
         sharded_config.layers[0].feed_forward.w13.param_init = fused_gate_up_param_init(
@@ -302,7 +302,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         set_llama3_sharding_config(sharded_config, enable_sp=True)
         with torch.device("meta"):
             sharded = sharded_config.build()
-        sharded._parallelize(parallel_dims)
+        sharded._parallelize(parallelism_context)
         apply_fsdp_to_decoder(
             sharded,
             dp_mesh,
@@ -331,7 +331,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
             set_deepseek_v4_sharding_config,
         )
 
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=2,
             cp=1,
@@ -341,12 +341,12 @@ class TestLinearStackingDistributed(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=True,
         )
-        parallel_dims.build_mesh()
+        parallelism_context.build_mesh()
         config = model_registry("debugmodel", enable_sp=True)
         set_deepseek_v4_sharding_config(config, enable_sp=True, enable_ep=True)
         model = config.build().to(self.device_type)
 
-        model._parallelize(parallel_dims)
+        model._parallelize(parallelism_context)
 
         self.assertEqual(model.layers["0"].attention.attn_sink.weight.ndim, 2)
 

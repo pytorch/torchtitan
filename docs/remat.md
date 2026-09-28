@@ -1,8 +1,10 @@
 # `torch_remat` activation checkpointing
 
-TorchTitan's full, selective, and configurable region activation-checkpointing
-policies use `torch_remat` to checkpoint each transformer block. Operations
-outside saved regions are recomputed during backward.
+TorchTitan's selective and configurable region activation-checkpointing policies
+use `torch_remat` to checkpoint each transformer block. Operations outside saved
+regions are recomputed during backward. `FullAC` continues to use PyTorch's
+native selective checkpointing so registered ordered effects are saved rather
+than replayed.
 
 ## Motivation
 
@@ -14,10 +16,9 @@ surface is visible next to the operations it controls, and configurations refer
 to stable model concepts such as attention projections instead of individual
 ATen operators.
 
-The policies differ only in which optional regions they retain:
+The policies are:
 
-- `FullAC` retains none and recomputes the full block except mandatory
-  correctness regions.
+- `FullAC` recomputes pure block operations while preserving registered effects.
 - `SelectiveAC` retains every model-declared region and recomputes operations
   outside those regions.
 - `RegionAC` uses an explicit `save_regions` pattern list.
@@ -170,9 +171,10 @@ boundary permits.
 
 ## Random state
 
-All `torch_remat` policies require `preserve_rng_state=False`. Random state
+`SelectiveAC` and `RegionAC` require `preserve_rng_state=False`. Random state
 that can advance inside a saved region must instead be managed with an explicit
-`torch_remat.RecomputeStateHook`.
+`torch_remat.RecomputeStateHook`. `FullAC` retains PyTorch's native RNG-state
+handling.
 
 ## Forward side effects
 

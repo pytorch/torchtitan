@@ -82,6 +82,13 @@ MODULE=torchft.llama3 CONFIG=llama3_torchft_debugmodel CUDA_VISIBLE_DEVICES=4,5,
 
 For complete configuration options, run `NGPU=1 ./run_train.sh --help`.
 
+For all training modes:
+
+- `--fault_tolerance.no-use_async_quorum`: Run the quorum synchronously, so the
+  step waits for the quorum, including any state export or load it performs for
+  healing, before the forward and backward passes. By default the quorum runs in
+  the background of the step.
+
 [Optional] Only for semi-synchronous training:
 
 - `--fault_tolerance.sync_steps`: The number of training steps before synchronization.

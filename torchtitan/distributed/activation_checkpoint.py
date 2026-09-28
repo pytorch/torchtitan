@@ -17,12 +17,26 @@ import torch._functorch.config
 import torch.nn as nn
 import torch_remat as remat
 import tyro
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+    checkpoint_wrapper as ptd_checkpoint_wrapper,
+)
+from torch.utils.checkpoint import (
+    CheckpointPolicy,
+    create_selective_checkpoint_contexts,
+)
 
 from torchtitan.config import Configurable
 from torchtitan.protocols.module import Module
 
 
 logger = logging.getLogger(__name__)
+
+
+def _full_ac_policy(
+    _ctx: object, _op: object, *_args: object, **_kwargs: object
+) -> CheckpointPolicy:
+    """Recompute pure operations while PyTorch preserves registered effects."""
+    return CheckpointPolicy.PREFER_RECOMPUTE
 
 
 def _disable_dynamo_lru_cache() -> None:
@@ -177,15 +191,24 @@ class _RematAC(ActivationCheckpointing):
         )
 
 
-class FullAC(_RematAC):
-    """Recompute each transformer block except correctness-critical regions."""
+class FullAC(ActivationCheckpointing):
+    """Recompute pure block operations while preserving registered effects."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(_RematAC.Config):
+    class Config(ActivationCheckpointing.Config):
         pass
 
-    def _get_save_patterns(self) -> list[str]:
-        return []
+    def _wrap_block(
+        self, module: nn.Module, *, base_fqn: str | None = None
+    ) -> nn.Module:
+        return ptd_checkpoint_wrapper(
+            module,
+            context_fn=lambda: create_selective_checkpoint_contexts(_full_ac_policy),
+            preserve_rng_state=self.config.preserve_rng_state,
+            determinism_check=self.config.determinism_check,
+            early_stop=True,
+            debug=self.config.debug,
+        )
 
 
 class SelectiveAC(_RematAC):

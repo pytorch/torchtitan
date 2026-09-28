@@ -31,7 +31,6 @@ from torchtitan.components.optimizer.utils import (
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
-    build_dist_muon,
     ComputeLayout,
     Owned,
 )
@@ -86,7 +85,7 @@ class TestDistMuon(DTensorTestBase):
         ):
             redistributed_fqn = "layers.0.redistributed"
             local_blocks_fqn = "layers.0.local_blocks"
-            return build_dist_muon(
+            return DistMuon(
                 [
                     {
                         "params": [redistributed, local_blocks],
@@ -297,7 +296,7 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             distribute_tensor(value.clone(), mesh, storage_placements)
         )
         fqn = "layers.0.feed_forward.w13.weight"
-        optimizer = build_dist_muon(
+        optimizer = DistMuon(
             [{"params": [parameter], "param_names": [fqn]}],
             compute_sharding_by_fqn={
                 fqn: ComputeLayout(
@@ -389,18 +388,18 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         return "cuda"
 
     @with_comms
-    def test_preserves_ep_shard_during_efsdp_redistribution(self):
+    def test_preserves_ep_shard_during_edp_shard_redistribution(self):
         lr = 0.03
         weight_decay = 0.2
         mesh = init_device_mesh(
             self.device_type,
             (2, 2),
-            mesh_dim_names=("efsdp", "ep"),
+            mesh_dim_names=("edp_shard", "ep"),
         )
         num_experts = 3
         self.assertLess(
             num_experts,
-            mesh["efsdp"].size() * mesh["ep"].size(),
+            mesh["edp_shard"].size() * mesh["ep"].size(),
         )
         device = torch.device(self.device_type, self.rank)
         value = (
@@ -416,7 +415,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         fqn = "layers.0.routed_experts.w13.weight"
 
         def make_optimizer(param, shard_order_by_tensor_dim):
-            return build_dist_muon(
+            return DistMuon(
                 [{"params": [param], "param_names": [fqn]}],
                 lr=lr,
                 weight_decay=weight_decay,
@@ -426,7 +425,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
                 compute_sharding_by_fqn={
                     fqn: ComputeLayout(
                         shardings_by_mesh_axis={
-                            "efsdp": Shard(0),
+                            "edp_shard": Shard(0),
                             "ep": Shard(0),
                         },
                         shard_order_by_tensor_dim=shard_order_by_tensor_dim,
@@ -435,13 +434,13 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
                 bucket_configs=[BucketConfig(patterns=(fqn,))],
             )
 
-        expected_shard_order = {0: ("ep", "efsdp")}
-        # The storage-mesh order shards over EFSDP first, which loses the exact
+        expected_shard_order = {0: ("ep", "edp_shard")}
+        # The storage-mesh order shards over edp_shard first, which loses the exact
         # EP-axis ownership that the redistribution has to preserve.
-        for default_order in ({}, {0: ("efsdp", "ep")}):
+        for default_order in ({}, {0: ("edp_shard", "ep")}):
             with self.assertRaisesRegex(
                 ValueError,
-                r"must declare shard_order_by_tensor_dim=\{0: \('ep', 'efsdp'\)\}",
+                r"must declare shard_order_by_tensor_dim=\{0: \('ep', 'edp_shard'\)\}",
             ):
                 make_optimizer(parameter, default_order)
 
@@ -458,22 +457,22 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
 
         mesh_coordinate = mesh.get_coordinate()
         assert mesh_coordinate is not None
-        efsdp_coordinate, ep_coordinate = mesh_coordinate
+        edp_shard_coordinate, ep_coordinate = mesh_coordinate
         ep_num_experts, ep_offset = Shard.local_shard_size_and_offset(
             num_experts,
             mesh["ep"].size(),
             ep_coordinate,
         )
-        efsdp_num_experts, efsdp_offset = Shard.local_shard_size_and_offset(
+        edp_shard_num_experts, edp_shard_offset = Shard.local_shard_size_and_offset(
             ep_num_experts,
-            mesh["efsdp"].size(),
-            efsdp_coordinate,
+            mesh["edp_shard"].size(),
+            edp_shard_coordinate,
         )
-        compute_offset = ep_offset + efsdp_offset
+        compute_offset = ep_offset + edp_shard_offset
         expected_compute = grad.narrow(
             0,
             compute_offset,
-            efsdp_num_experts,
+            edp_shard_num_experts,
         ).contiguous()
         expected_direction = grad.clone().mul_(0.5).add_(0.25)
         expected_parameter = value.clone().mul_(1 - lr * weight_decay)
@@ -517,7 +516,7 @@ class TestDistMuonInitialExpertStorageContract(DTensorTestBase):
         compute_ready_local = value.narrow(
             0,
             compute_offset,
-            efsdp_num_experts,
+            edp_shard_num_experts,
         ).contiguous()
         # The compute-ready storage already carries the declared shard order.
         compute_ready_parameter = torch.nn.Parameter(

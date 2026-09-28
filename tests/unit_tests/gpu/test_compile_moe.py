@@ -62,8 +62,8 @@ class TestApplyCompile(unittest.TestCase):
         compile_config = CompileConfig(
             enable_async_tensor_parallel=True,
         )
-        parallel_dims = MagicMock(tp_enabled=True)
-        tp_mesh = parallel_dims.get_dense_tp_mesh.return_value
+        parallelism_context = MagicMock(tp_enabled=True)
+        tp_mesh = parallelism_context.get_dense_tp_mesh.return_value
         tp_mesh.get_group.return_value.group_name = "tp_group"
         previous_micro_pipeline_tp = torch._inductor.config._micro_pipeline_tp
 
@@ -77,7 +77,7 @@ class TestApplyCompile(unittest.TestCase):
                 apply_compile(
                     model,
                     compile_config=compile_config,
-                    parallel_dims=parallel_dims,
+                    parallelism_context=parallelism_context,
                 )
 
             enable_symm_mem.assert_called_once_with("tp_group")

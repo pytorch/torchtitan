@@ -16,9 +16,10 @@ import torch.nn.functional as F
 import torch_remat as remat
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_dense_sp_enabled,
@@ -429,7 +430,7 @@ class MuseGlimmerModel(MultimodalModel):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: CompileConfig | None,
@@ -437,14 +438,14 @@ class MuseGlimmerModel(MultimodalModel):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> MuseGlimmerModel:
-        if self.vision_encoder is not None and parallel_dims.tp_enabled:
-            assert self.vision_encoder.num_heads % parallel_dims.tp == 0, (
+        if self.vision_encoder is not None and parallelism_context.tp_enabled:
+            assert self.vision_encoder.num_heads % parallelism_context.tp == 0, (
                 f"vision num_heads ({self.vision_encoder.num_heads}) must be "
-                f"divisible by TP degree ({parallel_dims.tp})"
+                f"divisible by TP degree ({parallelism_context.tp})"
             )
 
         return super().parallelize(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,
@@ -455,9 +456,9 @@ class MuseGlimmerModel(MultimodalModel):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -467,12 +468,11 @@ class MuseGlimmerModel(MultimodalModel):
         del kwargs
         from .sharding import vision_bank_indices_placement
 
-        batch: dict[str, Any] = dict(input_dict)
-        pixel_values = batch.get("pixel_values")
-        grid_thw = batch.get("grid_thw")
-        pixel_values_videos = batch.get("pixel_values_videos")
-        grid_thw_videos = batch.get("grid_thw_videos")
-        special_tokens = batch.get("special_tokens")
+        pixel_values = input_dict.get("pixel_values")
+        grid_thw = input_dict.get("grid_thw")
+        pixel_values_videos = input_dict.get("pixel_values_videos")
+        grid_thw_videos = input_dict.get("grid_thw_videos")
+        special_tokens = input_dict.get("special_tokens")
         has_images = pixel_values is not None
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError(
@@ -497,53 +497,58 @@ class MuseGlimmerModel(MultimodalModel):
                     "'image_id' entry was not provided."
                 )
             if self.tok_embeddings is not None:
-                batch["vision_bank_indices_T"] = build_vision_bank_indices(
-                    batch["input"],
+                input_dict["vision_bank_indices_T"] = build_vision_bank_indices(
+                    input_dict["input"],
                     placeholder_id=special_tokens["image_id"],
                 )
-        batch.pop("special_tokens", None)
+        input_dict.pop("special_tokens", None)
 
-        positions = batch.get("positions", None)
-        padding_mask = batch.pop("padding_mask", None)
+        positions = input_dict.get("positions", None)
+        padding_mask = input_dict.pop("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                batch["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
                     max_context_length=max_context_length,
                 )
 
-        input_sharding = {
+        input_shardings = {
             **decoder_input_sharding(),
             **multimodal_input_sharding(include_cp_axis=True),
         }
-        input_sharding["vision_bank_indices_T"] = vision_bank_indices_placement(
+        input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel
         )
-        if parallel_dims.cp_enabled:
-            batch = self._cp_shard_inputs(
-                batch, input_sharding, parallel_dims, parallelism
+        if parallelism_context.cp_enabled:
+            input_dict = self._cp_shard(
+                input_dict,
+                input_shardings=input_shardings,
+                parallelism_context=parallelism_context,
+                parallelism=parallelism,
             )
         if (
             parallelism.enable_sequence_parallel
-            and parallel_dims.tp_enabled
-            and "vision_bank_indices_T" in batch
+            and parallelism_context.tp_enabled
+            and "vision_bank_indices_T" in input_dict
         ):
-            batch["vision_bank_indices_T"] = spmd.shard(
-                batch["vision_bank_indices_T"],
-                parallel_dims.get_dense_tp_mesh().get_group(),
+            input_dict["vision_bank_indices_T"] = spmd.shard(
+                input_dict["vision_bank_indices_T"],
+                parallelism_context.get_dense_tp_mesh().get_group(),
                 src=spmd.I,
                 dst=spmd.S(0),
             )
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        input_dict = annotate_input_spmd_types(
+            parallelism_context, input_dict, input_shardings
+        )
 
-        inputs = batch.pop("input")
-        labels = batch.pop("labels")
-        return inputs, labels, batch
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        return inputs, labels, input_dict
 
     def _get_vision_features(
         self,

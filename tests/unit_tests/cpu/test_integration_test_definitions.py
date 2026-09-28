@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
 from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
@@ -95,6 +96,20 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
     )
 
 
+def test_split_backward_pp_cases_exercise_varlen_cuda_graphs() -> None:
+    tests_by_name = {test.test_name: test for test in build_features_test_list()}
+
+    for test_name in ("pp_looped_zero_bubble", "pp_zbv", "pp_custom_csv"):
+        test = tests_by_name[test_name]
+        config = test.configs[0]()
+        assert not test.disabled
+        assert not config.training.disable_cuda_graphs
+        assert isinstance(
+            config.model.layers[0].attention.inner_attention,
+            VarlenInnerAttention.Config,
+        )
+
+
 def test_llama3_debug_config_defaults_to_short_context() -> None:
     config = llama3_debugmodel()
 
@@ -135,6 +150,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
 
 def test_b200_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in build_b200_tests_list()} == {
+        "kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
         "kimi_k3_mm",
         "kimi_k3_mm_muon",
         "mxfp8_linear_fsdp",

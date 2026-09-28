@@ -41,7 +41,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "checkpointer.load_only",
         "checkpointer.load_step",
         "comm.init_timeout_seconds",
-        "comm.mode",
+        "comm.backend",
         "comm.save_traces_file_prefix",
         "comm.save_traces_folder",
         "comm.trace_buf_size",
@@ -136,28 +136,22 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "metrics.log_freq",
         "metrics.save_for_all_ranks",
         "metrics.save_tb_folder",
-        "optimizer.implementation",
-        "optimizer.optimizer_factory_kwargs_by_name",
-        "optimizer.param_groups",
-        "optimizer.param_groups.optimizer_kwargs",
-        "optimizer.param_groups.optimizer_name",
-        "optimizer.param_groups.pattern",
         "override.imports",
         "parallelism.context_parallel_degree",
-        "parallelism.context_parallel_load_balancer",
-        "parallelism.context_parallel_ptrr_mask_key",
         "parallelism.data_parallel_replicate_degree",
         "parallelism.data_parallel_shard_degree",
         "parallelism.enable_fsdp_symm_mem",
         "parallelism.enable_sequence_parallel",
         "parallelism.expert_parallel_degree",
         "parallelism.fsdp_reshard_after_forward",
-        "parallelism.module_fqns_per_model_part",
         "parallelism.pipeline_parallel_degree",
         "parallelism.pipeline_parallel_first_stage_less_layers",
         "parallelism.pipeline_parallel_last_stage_less_layers",
         "parallelism.pipeline_parallel_layers_per_stage",
+        "parallelism.pipeline_parallel_module_fqns_per_model_part",
         "parallelism.num_pp_microbatches",
+        "parallelism.pp_max_unsharded_active_stages",
+        "parallelism.pp_num_unshard_lookahead_factor",
         "parallelism.pipeline_parallel_schedule",
         "parallelism.pipeline_parallel_schedule_csv",
         "parallelism.tensor_parallel_degree",
@@ -311,9 +305,8 @@ def _subclasses(config_cls: type) -> set[type]:
 def _config_types(field_type) -> set[type]:
     """The config classes a field may hold, unwrapping Annotated and generics.
 
-    Both unions and containers expand. tyro indexes a ``list[ParamGroupConfig]``
-    per element, so ``--optimizer.param-groups.0.optimizer-kwargs.lr`` is a real
-    option; the index is dropped here and the element's fields are recorded once.
+    Both unions and containers expand. Tyro indexes configurable list elements;
+    the index is dropped here and the element's fields are recorded once.
 
     Subclasses expand too, because a field declared as a component base holds
     whichever implementation the configuration picked -- ``loss.mtp_scale``

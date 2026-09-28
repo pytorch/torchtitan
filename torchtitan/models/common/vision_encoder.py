@@ -28,7 +28,7 @@ import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
