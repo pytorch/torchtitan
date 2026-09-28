@@ -29,13 +29,13 @@ from torch import nn
 def _build_config_modules():
     try:
         from torchtitan.config.parallelism import ParallelismConfig
-        from torchtitan.distributed.parallel_dims import ParallelDims
+        from torchtitan.distributed.parallelism_context import ParallelismContext
         from torchtitan.models.qwen3_5 import model_registry
     except ModuleNotFoundError as exc:
         raise unittest.SkipTest(
             f"Qwen3.5 optional dependency unavailable: {exc.name}"
         ) from exc
-    return model_registry, ParallelDims, ParallelismConfig
+    return model_registry, ParallelismContext, ParallelismConfig
 
 
 class _RecordingLayer(nn.Module):
@@ -65,7 +65,7 @@ class _RecordingLayer(nn.Module):
 
 class TestQwen35MRoPEPositions(unittest.TestCase):
     def _build_stub_model(self):
-        model_registry, ParallelDims, ParallelismConfig = _build_config_modules()
+        model_registry, ParallelismContext, ParallelismConfig = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex
         # compile) so the pipeline runs on CPU.
         model = model_registry(
@@ -74,7 +74,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         sink: dict = {}
         for key in list(model.layers.keys()):
             model.layers[key] = _RecordingLayer(sink)
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
             cp=1,
@@ -85,21 +85,22 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             enable_sequence_parallel=False,
         )
         parallelism = ParallelismConfig()
-        return model, sink, parallel_dims, parallelism
+        return model, sink, parallelism_context, parallelism
 
-    def _run(self, model, parallel_dims, parallelism, input_dict):
+    def _run(self, model, parallelism_context, parallelism, input_dict):
         with patch(
             "torchtitan.models.qwen3_5.model.annotate_input_spmd_types",
-            side_effect=lambda _parallel_dims, batch, _input_sharding: batch,
-        ), patch(
-            "torchtitan.models.qwen3_5.model.dist_utils.get_spmd_context",
-            side_effect=lambda **kwargs: contextlib.nullcontext(),
+            side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
+        ), patch.object(
+            parallelism_context,
+            "activate_spmd",
+            return_value=contextlib.nullcontext(),
         ), patch(
             "torchtitan.models.qwen3_5.model.annotate_deltanet_cu_seqlens"
         ):
             inputs, _labels, batch = model.preprocess_inputs(
                 input_dict,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 parallelism=parallelism,
             )
         with torch.no_grad():
@@ -107,7 +108,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         return batch
 
     def test_text_batch_routes_1d_positions_to_layers(self):
-        model, sink, parallel_dims, parallelism = self._build_stub_model()
+        model, sink, parallelism_context, parallelism = self._build_stub_model()
         # Folded 1D token stream packing docs of length 3, 2, and 5.
         positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3, 4], dtype=torch.int32)
         input_dict = {
@@ -116,7 +117,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             "labels": torch.zeros(10),
         }
 
-        batch = self._run(model, parallel_dims, parallelism, input_dict)
+        batch = self._run(model, parallelism_context, parallelism, input_dict)
 
         # No mrope: layers see the plain 1D positions.
         self.assertTrue(torch.equal(sink["positions"], positions))
@@ -127,7 +128,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         )
 
     def test_multimodal_batch_routes_mrope_to_layers(self):
-        model, sink, parallel_dims, parallelism = self._build_stub_model()
+        model, sink, parallelism_context, parallelism = self._build_stub_model()
         positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3, 4], dtype=torch.int32)
         # Folded (num_tokens, 3) T/H/W positions whose H/W channels differ from
         # the 1D positions, so routing the wrong tensor to the layers is
@@ -142,7 +143,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             "labels": torch.zeros(10),
         }
 
-        batch = self._run(model, parallel_dims, parallelism, input_dict)
+        batch = self._run(model, parallelism_context, parallelism, input_dict)
 
         # mrope present: layers see the (num_tokens, 3) mrope positions, not the
         # 1D positions.
@@ -156,7 +157,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         )
 
     def test_padding_mask_routes_to_layers(self):
-        model, sink, parallel_dims, parallelism = self._build_stub_model()
+        model, sink, parallelism_context, parallelism = self._build_stub_model()
         positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 0, 1, 2], dtype=torch.int32)
         padding_mask = torch.tensor([False] * 7 + [True] * 3)
         input_dict = {
@@ -166,7 +167,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             "padding_mask": padding_mask,
         }
 
-        batch = self._run(model, parallel_dims, parallelism, input_dict)
+        batch = self._run(model, parallelism_context, parallelism, input_dict)
 
         torch.testing.assert_close(batch["padding_mask"], padding_mask)
         torch.testing.assert_close(sink["padding_mask"], padding_mask)

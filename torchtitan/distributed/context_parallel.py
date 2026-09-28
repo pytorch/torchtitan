@@ -26,7 +26,7 @@ from torch.distributed.tensor.experimental._attention import (
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config.configurable import Configurable
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     _per_axis_types,
     current_spmd_mesh,

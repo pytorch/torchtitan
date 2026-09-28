@@ -82,7 +82,7 @@ class TestLoss(unittest.TestCase):
         model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
         with patch(
             "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
-            side_effect=lambda _parallel_dims, batch, _input_sharding: batch,
+            side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
         ):
             input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
                 {
@@ -91,7 +91,7 @@ class TestLoss(unittest.TestCase):
                     "positions": positions,
                     "padding_mask": padding_mask,
                 },
-                parallel_dims=SimpleNamespace(cp_enabled=False),
+                parallelism_context=SimpleNamespace(cp_enabled=False),
                 parallelism=SimpleNamespace(),
                 max_num_documents=2,
                 max_context_length=8,
