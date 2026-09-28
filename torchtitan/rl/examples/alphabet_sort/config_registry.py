@@ -357,8 +357,14 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     )
 
 
-def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
-    """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
+def rl_grpo_gpt_oss_debug_varlen_all_to_all() -> Controller.Config:
+    """Small GPT-OSS debug config (random init) on the standard all-to-all EP backend.
+
+    Runs on GPUs without DeepEP (e.g. A10G CI). The all-to-all dispatcher syncs
+    token counts to the host, which CUDA graph capture rejects, so the generator
+    runs without CUDA graphs. ``rl_grpo_gpt_oss_debug_varlen`` is the DeepEP
+    variant with FULL CUDA graphs.
+    """
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = gpt_oss_model_registry(
@@ -376,7 +382,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
                 drop_zero_std_reward_groups=False,
             ),
         ),
-        compile=CompileConfig(backend="aot_eager"),
+        compile=None,
         rollouter=_alphabet_sort_rollouter_config(),
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
@@ -416,8 +422,6 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
                 tensor_parallel_degree=4,
                 expert_parallel_degree=4,
             ),
-            # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
-            # distributed MoE token dispatcher is enabled for GPT-OSS.
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             checkpointer=None,
             sampling=SamplingConfig(
@@ -429,9 +433,34 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
     )
 
 
-def rl_grpo_gpt_oss_debug_varlen_no_compile() -> Controller.Config:
-    config = rl_grpo_gpt_oss_debug_varlen()
-    config.compile = None
+def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
+    """Small GPT-OSS debug config (random init) on DeepEP with FULL CUDA graphs.
+
+    Requires Hopper or GB200 GPUs with ``deep_ep`` installed. MoE models need
+    EP >= TP, and the standard all-to-all dispatcher cannot be captured in a
+    CUDA graph, so this recipe uses DeepEP: the trainer takes the compact,
+    host-synced dispatch path, and the generator overrides its dispatchers to
+    the static CUDA-graph-compatible layout and captures FULL CUDA graphs.
+    Per-layer compile is disabled because DeepEP training does not support it.
+    """
+    config = rl_grpo_gpt_oss_debug_varlen_all_to_all()
+    config.model = gpt_oss_model_registry(
+        "debugmodel",
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="varlen",
+        moe_comm_backend="deepep",
+    )
+    config.generator.override = OverrideConfig(
+        imports=[
+            (
+                "torchtitan.overrides.moe_token_dispatcher.deepep_override",
+                {"cuda_graph_compatible": True},
+            ),
+        ]
+    )
+    config.generator.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
+    # vLLM's per-step token budget, which also sizes DeepEP's per-rank buffer.
+    config.generator.max_num_batched_tokens = 2048
     return config
 
 

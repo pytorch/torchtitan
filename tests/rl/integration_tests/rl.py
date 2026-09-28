@@ -89,11 +89,16 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             "rl_grpo_fsdp2_gen_tp2_compile",
             ngpu=8,
         ),
+        # TODO: rl_grpo_gpt_oss_debug_varlen uses DeepEP with FULL CUDA graphs,
+        # which A10G CI cannot run, so this test uses the all-to-all variant
+        # without CUDA graphs. Move GPT-OSS RL coverage to distributed MoE +
+        # GB200 tests. GB200/H100 DeepEP capacity is limited, so those RL
+        # end-to-end tests cannot run continuously.
         OverrideDefinitions(
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_gpt_oss_debug_varlen_no_compile",
+                    "--config rl_grpo_gpt_oss_debug_varlen_all_to_all",
                     "--async-loop.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--trainer.parallelism.tensor_parallel_degree 4",
