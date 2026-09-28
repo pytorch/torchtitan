@@ -134,7 +134,9 @@ def test_pp_forward_backward_microbatch_group_returns_sentinel_without_last_stag
         SimpleNamespace(
             pp_has_last_stage=False,
             pp_schedule=SimpleNamespace(step=lambda **kwargs: None),
-            parallel_dims=SimpleNamespace(),
+            parallelism_context=SimpleNamespace(
+                activate_spmd=lambda **kwargs: contextlib.nullcontext(),
+            ),
             config=SimpleNamespace(
                 debug=SimpleNamespace(spmd_typechecking=False),
             ),
@@ -142,11 +144,6 @@ def test_pp_forward_backward_microbatch_group_returns_sentinel_without_last_stag
             _pp_loss_sentinel_on_non_last_stage=sentinel,
         ),
     )
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        lambda **kwargs: contextlib.nullcontext(),
-    )
-
     loss = TrainingEngine._pp_forward_backward_microbatch_group(
         trainer,
         inputs=None,
@@ -183,18 +180,15 @@ def test_pp_forward_backward_microbatch_group_releases_consumed_loss_graphs(
         SimpleNamespace(
             pp_has_last_stage=True,
             pp_schedule=SimpleNamespace(step=schedule_step),
-            parallel_dims=SimpleNamespace(),
+            parallelism_context=SimpleNamespace(
+                activate_spmd=lambda **kwargs: contextlib.nullcontext(),
+            ),
             config=SimpleNamespace(
                 debug=SimpleNamespace(spmd_typechecking=False),
             ),
             device=torch.device("cpu"),
         ),
     )
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        lambda **kwargs: contextlib.nullcontext(),
-    )
-
     reporting_loss = TrainingEngine._pp_forward_backward_microbatch_group(
         trainer,
         inputs=[(torch.ones(1),), (torch.ones(1),)],
@@ -239,7 +233,12 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
             pp_has_first_stage=True,
             pp_has_last_stage=True,
             model_parts=[_FakeModel()],
-            parallel_dims=SimpleNamespace(pp_enabled=True, cp=1),
+            parallelism_context=SimpleNamespace(
+                pp_enabled=True,
+                cp=1,
+                dp_replicate_enabled=False,
+                activate_spmd=spmd_context,
+            ),
             max_num_documents=4,
             preprocess_inputs_kwargs={},
             config=SimpleNamespace(
@@ -269,11 +268,6 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
             }
         ),
     ]
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        spmd_context,
-    )
-
     [(arg_mbs, kwarg_mbs, target_mbs)] = TrainingEngine._preprocess_microbatch_groups(
         trainer, [microbatches]
     )
@@ -297,6 +291,11 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> Non
     trainer = cast(
         TrainingEngine,
         SimpleNamespace(
+            parallelism_context=SimpleNamespace(
+                pp_enabled=True,
+                cp=1,
+                activate_spmd=lambda **kwargs: contextlib.nullcontext(),
+            ),
             pp_has_first_stage=True,
             pp_has_last_stage=True,
             model_parts=[
@@ -308,7 +307,6 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> Non
                     )
                 )
             ],
-            parallel_dims=SimpleNamespace(pp_enabled=True, cp=1),
             max_num_documents=None,
             preprocess_inputs_kwargs={},
             config=SimpleNamespace(
@@ -326,11 +324,6 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> Non
         {"input": torch.tensor([1]), "labels": torch.tensor([1])},
         {"advantages": torch.tensor([0.1])},
     )
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        lambda **kwargs: contextlib.nullcontext(),
-    )
-
     with pytest.raises(ValueError, match="pipeline parallelism"):
         TrainingEngine._preprocess_microbatch_groups(
             trainer,
@@ -359,11 +352,11 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     engine = object.__new__(TrainingEngine)
     engine.model_parts = [_FakeModel()]
     engine.max_num_documents = 4
-    engine.parallel_dims = SimpleNamespace(
+    engine.parallelism_context = SimpleNamespace(
         pp_enabled=False,
         cp=1,
-        fsdp_enabled=False,
         dp_replicate_enabled=False,
+        activate_spmd=contextlib.nullcontext,
     )
     engine.config = SimpleNamespace(
         parallelism=SimpleNamespace(
@@ -396,11 +389,6 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
         )
         for index in range(2)
     ]
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        lambda **kwargs: contextlib.nullcontext(),
-    )
-
     result = TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[microbatch] for microbatch in microbatches],
@@ -426,7 +414,7 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
         assert model_kwargs == {"positions": 1}
         assert labels.numel() == 7
     assert captured["preprocess_kwargs"] == {
-        "parallel_dims": engine.parallel_dims,
+        "parallelism_context": engine.parallelism_context,
         "parallelism": engine.config.parallelism,
         "max_num_documents": 4,
         "max_context_length": 2048,
@@ -539,7 +527,7 @@ def test_training_engine_owns_gradient_accumulation_cuda_graph_warmup() -> None:
                     fsdp_reshard_after_forward="never",
                 ),
             ),
-            parallel_dims=SimpleNamespace(pp_enabled=False, fsdp_enabled=True),
+            parallelism_context=SimpleNamespace(pp_enabled=False),
             _forward_backward_body=eager_forward_backward,
         ),
     )
@@ -606,7 +594,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
                     fsdp_defer_gradient_reduction=False,
                 ),
             ),
-            parallel_dims=SimpleNamespace(pp_enabled=False),
+            parallelism_context=SimpleNamespace(pp_enabled=False),
             _forward_backward_body=eager_forward_backward,
         ),
     )
@@ -656,7 +644,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
                 get_metrics=MagicMock(return_value={}),
                 step=MagicMock(),
             ),
-            parallel_dims=SimpleNamespace(
+            parallelism_context=SimpleNamespace(
                 dp_enabled=False,
                 pp_enabled=False,
                 dp_cp_enabled=False,
@@ -723,7 +711,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
             fsdp_reshard_after_forward="default",
         ),
     )
-    engine.parallel_dims = SimpleNamespace(fsdp_enabled=False)
+    engine.parallelism_context = SimpleNamespace()
     engine.device = torch.device("cpu")
     engine.gc_handler = SimpleNamespace(run=MagicMock())
     engine.optimizers = SimpleNamespace(zero_grad=MagicMock())
@@ -762,7 +750,7 @@ def test_replay_failure_propagates_from_engine():
             fsdp_reshard_after_forward="default",
         ),
     )
-    engine.parallel_dims = SimpleNamespace(fsdp_enabled=False)
+    engine.parallelism_context = SimpleNamespace()
     engine.device = torch.device("cpu")
     engine.gc_handler = SimpleNamespace(run=MagicMock())
     engine.optimizers = SimpleNamespace(zero_grad=MagicMock())
@@ -899,7 +887,7 @@ def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
-            parallel_dims=SimpleNamespace(pp_enabled=False),
+            parallelism_context=SimpleNamespace(pp_enabled=False),
             config=SimpleNamespace(
                 training=SimpleNamespace(disable_cuda_graphs=False),
                 sdc_replayer=None,
@@ -949,8 +937,7 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
                 ),
                 sdc_replayer=None,
             ),
-            parallel_dims=SimpleNamespace(
-                fsdp_enabled=True,
+            parallelism_context=SimpleNamespace(
                 pp_enabled=False,
             ),
             _forward_backward_body=forward_backward_body,
@@ -1007,10 +994,9 @@ def _run_forward_backward_recording_all_reduce(
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
-            parallel_dims=SimpleNamespace(
+            parallelism_context=SimpleNamespace(
                 pp_enabled=False,
                 dp_replicate_enabled=dp_replicate_enabled,
-                fsdp_enabled=True,
             ),
             model_parts=[part],
             _non_pp_forward_backward_microbatch=MagicMock(
@@ -1055,7 +1041,7 @@ def test_pp_hsdp_skips_replicate_all_reduce_until_last_accum_group(
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
-            parallel_dims=SimpleNamespace(
+            parallelism_context=SimpleNamespace(
                 pp_enabled=True,
                 dp_replicate_enabled=True,
             ),
@@ -1093,10 +1079,9 @@ def test_fsdp_gradient_accumulation_reduction_policy(
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
-            parallel_dims=SimpleNamespace(
+            parallelism_context=SimpleNamespace(
                 pp_enabled=False,
                 dp_replicate_enabled=False,
-                fsdp_enabled=True,
             ),
             model_parts=[fsdp_root],
             _non_pp_forward_backward_microbatch=MagicMock(
@@ -1136,10 +1121,9 @@ def test_pp_gradient_accumulation_finalization_policy(
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
-            parallel_dims=SimpleNamespace(
+            parallelism_context=SimpleNamespace(
                 pp_enabled=True,
                 dp_replicate_enabled=False,
-                fsdp_enabled=True,
             ),
             model_parts=[],
             _pp_forward_backward_microbatch_group=pp_forward_backward,

@@ -222,7 +222,7 @@ def register_to_vllm(
         model_config: TorchTitan decoder model config.
         parallelism: Inference parallelism configuration. The wrapper
             translates it to a full ``ParallelismConfig`` to build
-            ``ParallelDims``; the caller is responsible for translating the
+            ``ParallelismContext``; the caller is responsible for translating the
             relevant fields (TP, EP) to ``EngineArgs`` so vLLM's own world
             layout matches.
         compile_config: torch.compile config applied per-layer by the

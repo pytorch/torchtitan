@@ -607,12 +607,14 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                     )
 
     def test_precompile_rejects_scheduled_joint_graphs(self) -> None:
-        parallel_dims = types.SimpleNamespace(pp_enabled=False, fsdp_enabled=False)
+        parallelism_context = types.SimpleNamespace(
+            pp_enabled=False, fsdp_enabled=False
+        )
         with self.assertRaisesRegex(ValueError, "in-graph gradient accumulation"):
             make_graph_runtime(
                 [mock.Mock()],
                 num_microbatches=2,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 parallelism=ParallelismConfig(),
                 compile_config=GraphTrainerCompileConfig(
                     precompile_artifact_dir="artifacts"
@@ -678,7 +680,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 loss_fn=loss_fn,
                 compile_config=compile_config,
                 trainer_config=trainer_config,
-                parallel_dims=types.SimpleNamespace(),
+                parallelism_context=types.SimpleNamespace(),
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerJointStageGraphs)
@@ -721,7 +723,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 loss_fn=loss_fn,
                 compile_config=compile_config,
                 trainer_config=trainer_config,
-                parallel_dims=types.SimpleNamespace(),
+                parallelism_context=types.SimpleNamespace(),
                 accumulate_gradients_in_graph=True,
             )
 

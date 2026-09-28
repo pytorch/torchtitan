@@ -89,7 +89,7 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
             model,
             first_stage_module_fqns=model.pipeline_first_stage_module_fqns,
             last_stage_module_fqns=model.pipeline_last_stage_module_fqns,
-            parallel_dims=kwargs["parallel_dims"],
+            parallelism_context=kwargs["parallelism_context"],
             parallelism=parallelism,
             model_config=kwargs["model_config"],
         )
@@ -103,7 +103,9 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
     stages = _swap_in_attn_res_stages(pp_schedule)
     stage_to_rank = dict(stages[0].stage_index_to_group_rank)
     if attn_res_cache:
-        _require_loop_style(pp_schedule, stage_to_rank, kwargs["parallel_dims"].pp)
+        _require_loop_style(
+            pp_schedule, stage_to_rank, kwargs["parallelism_context"].pp
+        )
     model_config = kwargs["model_config"]
     layer_cfgs = model_config.layers
     n_layers = len(layer_cfgs)
