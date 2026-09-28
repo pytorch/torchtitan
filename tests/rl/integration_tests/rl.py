@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 _KEEP_ZERO_STD_REWARD_GROUPS = (
     "--async-loop.training-sample-builder.no-drop-zero-std-reward-groups"
 )
-_VLLM_GPU_MEMORY_LIMIT = "--generator.gpu-memory-limit 0.89"
+_VLLM_GPU_MEMORY_LIMIT = "--generator.gpu-memory-limit 0.8"
 
 
 def build_rl_test_list() -> list[OverrideDefinitions]:
@@ -102,6 +102,9 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.parallelism.tensor_parallel_degree 4",
                     "--generator.parallelism.expert_parallel_degree 4",
                     "--generator.parallelism.data_parallel_degree 1",
+                    # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
+                    # CUDA-graph-compatible distributed MoE token dispatcher.
+                    "--generator.cuda_graph.mode NONE",
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
