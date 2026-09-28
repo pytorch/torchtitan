@@ -15,9 +15,8 @@ import torch.nn as nn
 
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import DebugConfig, TrainingConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
-from torchtitan.distributed.utils import get_spmd_context
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     maybe_register_blockmask_pytree_node,
@@ -51,7 +50,7 @@ from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 @contextmanager
-def single_device_parallel_dims() -> Iterator[ParallelDims]:
+def single_device_parallelism_context() -> Iterator[ParallelismContext]:
     """Provide a real rank-1 mesh for tests that exercise model preprocessing."""
     owns_process_group = not dist.is_initialized()
     if owns_process_group:
@@ -63,7 +62,7 @@ def single_device_parallel_dims() -> Iterator[ParallelDims]:
         )
 
     try:
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
             cp=1,
@@ -73,8 +72,8 @@ def single_device_parallel_dims() -> Iterator[ParallelDims]:
             world_size=1,
             enable_sequence_parallel=False,
         )
-        parallel_dims.build_mesh()
-        yield parallel_dims
+        parallelism_context.build_mesh()
+        yield parallelism_context
     finally:
         if owns_process_group:
             dist.destroy_process_group()
@@ -98,7 +97,7 @@ def build_minimal_trainer(
     compile_numerics_changing_optim: bool = False,
     tokenizer=None,
     fsdp_reshard_after_forward: str = "default",
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> Trainer:
     """Build the minimal Trainer/GraphTrainer needed for single-GPU test steps."""
     trainer = object.__new__(trainer_cls)
@@ -106,7 +105,7 @@ def build_minimal_trainer(
     trainer.engine = engine = object.__new__(engine_cls)
     engine.model_parts = [model]
     engine.loss_fn = CrossEntropyLoss.Config().build()
-    engine.parallel_dims = parallel_dims
+    engine.parallelism_context = parallelism_context
     engine.model_config = model_config
     engine.device = torch.device("cuda")
     engine.preprocess_inputs_kwargs = {}
@@ -187,10 +186,7 @@ def build_minimal_trainer(
             if engine._traced_step is None:
                 maybe_register_blockmask_pytree_node()
                 fwd_bwd_fn = make_fwd_bwd_step(model, engine.loss_fn)
-                with get_spmd_context(
-                    parallel_dims=parallel_dims,
-                    spmd_typechecking=False,
-                ):
+                with parallelism_context.activate_spmd():
                     engine._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,
@@ -210,7 +206,7 @@ def build_minimal_trainer(
                     passes = pipeline_fn(
                         engine._traced_step,
                         trainer.config,
-                        parallel_dims=engine.parallel_dims,
+                        parallelism_context=engine.parallelism_context,
                     )
                 else:
                     passes = construct_mandatory_graph_passes()

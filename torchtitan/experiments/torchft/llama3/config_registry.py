@@ -7,7 +7,7 @@
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optimization import (
-    default_adamw,
+    AdamW,
     LRSchedulersContainer,
     Optimization,
 )
@@ -46,7 +46,7 @@ def llama3_torchft_debugmodel(
         model=model_config,
         optimization=Optimization.Config(
             optimizer=TorchFTOptimizersContainer.Config(
-                param_groups=default_adamw(lr=8e-4).param_groups
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,

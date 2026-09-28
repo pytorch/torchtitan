@@ -14,6 +14,7 @@ from unittest import mock
 
 import pytest
 import tyro
+from torchtitan.components.optimization import default_adamw
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ConfigManager, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -283,7 +284,7 @@ class TestConfigManager(unittest.TestCase):
             ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
         config.optimization.enable_cuda_graph = True
-        config.optimization.optimizer.implementation = "foreach"
+        config.optimization.optimizer = default_adamw(fused=False, foreach=True)
 
         config.__post_init__()
 

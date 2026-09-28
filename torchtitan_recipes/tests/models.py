@@ -417,8 +417,7 @@ def kimi_k2_5_debugmodel_muon_fsdp8_ep8() -> Trainer.Config:
 def kimi_k2_5_debugmodel_seed_checkpoint() -> Trainer.Config:
     """Use the same Kimi model with an optimizer safe for unsharded setup."""
     config = kimi_k2_5_debugmodel_muon_fsdp8_ep8()
-    config.optimization.optimizer = default_adamw()
-    config.optimization.optimizer.implementation = "for-loop"
+    config.optimization.optimizer = default_adamw(fused=False, foreach=False)
     return config
 
 

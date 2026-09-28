@@ -186,7 +186,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 num_tokens_per_train_step=2,
             ),
         )
-        engine.parallel_dims = SimpleNamespace(
+        engine.parallelism_context = SimpleNamespace(
             pp_enabled=False,
             dp_replicate=1,
             dp_shard=1,
@@ -215,7 +215,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         make_runtime.assert_called_once_with(
             engine.model_parts[0],
             gradient_accumulation_steps=2,
-            parallel_dims=engine.parallel_dims,
+            parallelism_context=engine.parallelism_context,
             parallelism=engine.config.parallelism,
             compile_config=engine.config.compile,
             device=engine.device,
@@ -245,7 +245,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 num_tokens_per_microbatch_per_dp_rank=1,
             ),
         )
-        engine.parallel_dims = SimpleNamespace(pp_enabled=False, cp=1)
+        engine.parallelism_context = SimpleNamespace(pp_enabled=False, cp=1)
         engine.model_parts = [model]
         engine.device = torch.device("cpu")
         engine.max_num_documents = None
@@ -1096,23 +1096,19 @@ class TestReparametrizeOptimizer(unittest.TestCase):
     DTYPE = torch.float32
 
     def test_titan_optimizers_container(self):
-        from torchtitan.components.optimization import (
-            OptimizersContainer,
-            ParamGroupConfig,
-        )
+        from torchtitan.components.optimization import AdamW, OptimizersContainer
 
         torch.manual_seed(0)
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         container = OptimizersContainer(
             OptimizersContainer.Config(
-                param_groups=[
-                    ParamGroupConfig(
+                optimizers=[
+                    AdamW.Config(
                         pattern=r".*",
-                        optimizer_name="AdamW",
-                        optimizer_kwargs={"lr": 1e-3},
+                        lr=1e-3,
+                        fused=False,
                     )
                 ],
-                implementation="for-loop",
             ),
             model_parts=[model],
         )
@@ -1994,9 +1990,9 @@ class TestTraceFSDP(FSDPTest):
         return min(torch.cuda.device_count(), 4)
 
     def _setup(self):
-        from torchtitan.distributed import ParallelDims
+        from torchtitan.distributed import ParallelismContext
 
-        self.parallel_dims = ParallelDims(
+        self.parallelism_context = ParallelismContext(
             dp_shard=-1,
             dp_replicate=1,
             cp=1,
@@ -2030,7 +2026,7 @@ class TestTraceFSDP(FSDPTest):
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
 
         model_ref = create_model(config_cls, model_config, "cuda", dtype)
         model_test = create_model(config_cls, model_config, "cuda", dtype)
@@ -2307,12 +2303,14 @@ class TestTraceContextParallel(FSDPTest):
                         all_gather_pg_names_before_sdpa.append(node.args[2])
 
                 cp_pg_name = (
-                    trainer.engine.parallel_dims.get_mesh("cp").get_group().group_name
-                    if trainer.engine.parallel_dims.cp_enabled
+                    trainer.engine.parallelism_context.get_mesh("cp")
+                    .get_group()
+                    .group_name
+                    if trainer.engine.parallelism_context.cp_enabled
                     else None
                 )
                 fsdp_pg_name = (
-                    get_simple_fsdp_mesh(trainer.engine.parallel_dims)
+                    get_simple_fsdp_mesh(trainer.engine.parallelism_context)
                     .get_group()
                     .group_name
                 )
@@ -2367,7 +2365,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         return min(torch.cuda.device_count(), 4)
 
     def test_peak_memory_identical_fsdp(self):
-        from torchtitan.distributed import ParallelDims
+        from torchtitan.distributed import ParallelismContext
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
         from torchtitan.models.llama3 import llama3_configs, Llama3Model
 
@@ -2379,7 +2377,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         torch.use_deterministic_algorithms(True)
 
         try:
-            parallel_dims = ParallelDims(
+            parallelism_context = ParallelismContext(
                 dp_shard=-1,
                 dp_replicate=1,
                 cp=1,
@@ -2393,7 +2391,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
                 get_simple_fsdp_mesh,
             )
 
-            fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
+            fsdp_mesh = get_simple_fsdp_mesh(parallelism_context)
 
             model_backward = create_model(Llama3Model, config, "cuda", torch.bfloat16)
             model_grad = create_model(Llama3Model, config, "cuda", torch.bfloat16)

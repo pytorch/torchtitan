@@ -9,7 +9,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -198,8 +198,9 @@ class EMA(OptimizersContainer):
         # see state_dict() below) iterate self.optimizers and merge each
         # one's FQN-keyed flat dict, so folding _buffer_optimizers in here is
         # what gives buffer EMA the same "ema" checkpoint key as parameters.
-        self.optimizers: list[_EMAParamOptimizer] = (
-            self._param_optimizers + self._buffer_optimizers
+        self.optimizers = cast(
+            list[Optimizer],
+            self._param_optimizers + self._buffer_optimizers,
         )
         low_precision = sorted(
             {

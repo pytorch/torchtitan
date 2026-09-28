@@ -27,7 +27,7 @@ from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.components.loss import cross_entropy_loss
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer import simple_fsdp
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
@@ -1016,7 +1016,7 @@ class TestSimpleFSDP(FSDPTest):
         else:
             raise ValueError(f"Unsupported mode {self.mode}")
 
-        self.parallel_dims = ParallelDims(
+        self.parallelism_context = ParallelismContext(
             dp_shard=data_parallel_shard_degree,
             dp_replicate=data_parallel_replicate_degree,
             cp=1,
@@ -1034,7 +1034,9 @@ class TestSimpleFSDP(FSDPTest):
         return model, inputs, labels
 
     def run_fsdp2(self, model, inputs, labels, epoch=20):
-        fully_shard(model, mesh=self.parallel_dims.get_mesh(self.dp_mesh_dim_names))
+        fully_shard(
+            model, mesh=self.parallelism_context.get_mesh(self.dp_mesh_dim_names)
+        )
         optim = self.optimizer(model.parameters(), lr=1e-4)
         losses = []
         for _ in range(epoch):
@@ -1049,7 +1051,7 @@ class TestSimpleFSDP(FSDPTest):
     def run_simple_fsdp(self, model, inputs, labels, epoch=20):
         model = data_parallel(
             model,
-            device_mesh=self.parallel_dims.get_mesh(self.dp_mesh_dim_names),
+            device_mesh=self.parallelism_context.get_mesh(self.dp_mesh_dim_names),
             mode=self.mode,
         )
         optim = self.optimizer(model.parameters(), lr=1e-4)
@@ -1066,7 +1068,7 @@ class TestSimpleFSDP(FSDPTest):
     def run_simple_fsdp_compiled_aot_eager(self, model, inputs, labels, epoch=20):
         model = data_parallel(
             model,
-            device_mesh=self.parallel_dims.get_mesh(self.dp_mesh_dim_names),
+            device_mesh=self.parallelism_context.get_mesh(self.dp_mesh_dim_names),
             mode=self.mode,
         )
         # TODO: Add "inductor" backend when it's numerical issues are fixed

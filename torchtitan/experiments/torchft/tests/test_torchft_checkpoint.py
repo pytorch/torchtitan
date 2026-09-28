@@ -23,11 +23,7 @@ from torch.utils.data import DataLoader
 
 from torchtitan.components.checkpointer import CheckpointManager
 
-from torchtitan.components.optimization import (
-    EMA,
-    LRSchedulersContainer,
-    ParamGroupConfig,
-)
+from torchtitan.components.optimization import AdamW, EMA, LRSchedulersContainer
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
@@ -266,12 +262,12 @@ class TestFTCheckpointManager(unittest.TestCase):
         ft_manager.manager.should_commit.return_value = True
         optimizers = TorchFTOptimizersContainer(
             TorchFTOptimizersContainer.Config(
-                implementation="for-loop",
-                param_groups=[
-                    ParamGroupConfig(
+                optimizers=[
+                    AdamW.Config(
                         pattern=r".*",
-                        optimizer_name="AdamW",
-                        optimizer_kwargs={"lr": 0.08, "weight_decay": 0.0},
+                        lr=0.08,
+                        weight_decay=0.0,
+                        fused=False,
                     )
                 ],
             ),

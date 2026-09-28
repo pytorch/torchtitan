@@ -7,6 +7,7 @@
 import functools
 import logging
 import math
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, cast, Literal
@@ -241,12 +242,24 @@ class LRSchedulersContainer(Stateful, Configurable):
     def get_metrics(self) -> dict[str, float]:
         """Return learning rates keyed by optimizer (and param-group index)."""
         metrics = {}
-        for scheduler, last_lrs in zip(
-            self.schedulers, self.get_host_lrs_per_scheduler(), strict=True
-        ):
+        optimizer_counts = Counter(
+            type(scheduler.optimizer).__name__ for scheduler in self.schedulers
+        )
+        optimizer_indices: defaultdict[str, int] = defaultdict(int)
+        for scheduler in self.schedulers:
             opt_name = type(scheduler.optimizer).__name__
+            optimizer_index = optimizer_indices[opt_name]
+            optimizer_indices[opt_name] += 1
+            last_lrs = scheduler.get_last_host_lrs()
             for i, lr_val in enumerate(last_lrs):
-                key = f"lr/{opt_name}" if len(last_lrs) == 1 else f"lr/{opt_name}/{i}"
+                if optimizer_counts[opt_name] > 1:
+                    key = f"lr/{opt_name}/{optimizer_index}"
+                    if len(last_lrs) > 1:
+                        key = f"{key}/{i}"
+                else:
+                    key = (
+                        f"lr/{opt_name}" if len(last_lrs) == 1 else f"lr/{opt_name}/{i}"
+                    )
                 metrics[key] = lr_val
         return metrics
 

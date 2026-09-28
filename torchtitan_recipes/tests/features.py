@@ -23,6 +23,7 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.optimization import default_adamw
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig
@@ -436,7 +437,7 @@ def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
     config.training.mixed_precision_reduce = "float32"
-    config.optimization.optimizer.implementation = "fused_opt_states_bf16"
+    config.optimization.optimizer = default_adamw(moment_dtype="bfloat16")
     return config
 
 

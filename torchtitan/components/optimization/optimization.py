@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.config import Configurable
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.cuda_graph import (
     cuda_graphs_supported,
     NUM_CUDA_GRAPH_WARMUP_STEPS,
@@ -62,13 +62,13 @@ class Optimization(Configurable):
         config: Config,
         *,
         model_parts: list[nn.Module],
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training_steps: int,
         pp_has_last_stage: bool,
         optimizer_build_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
-        self.parallel_dims = parallel_dims
+        self.parallelism_context = parallelism_context
         self.pp_has_last_stage = pp_has_last_stage
         self.parameters = [
             parameter
@@ -127,19 +127,19 @@ class Optimization(Configurable):
             self.parameters,
             self.config.max_norm,
             foreach=True,
-            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
-            ep_enabled=self.parallel_dims.ep_enabled,
+            pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
+            ep_enabled=self.parallelism_context.ep_enabled,
         )
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
-        if not self.parallel_dims.pp_enabled or self.pp_has_last_stage:
-            loss_mesh = self.parallel_dims.get_optional_mesh("loss")
+        if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:
+            loss_mesh = self.parallelism_context.get_optional_mesh("loss")
             if loss_mesh is not None:
                 torch.distributed.all_reduce(
                     loss_is_finite,
                     op=torch.distributed.ReduceOp.MIN,
                     group=loss_mesh.get_group(),
                 )
-        pp_mesh = self.parallel_dims.get_optional_mesh("pp")
+        pp_mesh = self.parallelism_context.get_optional_mesh("pp")
         if pp_mesh is not None:
             torch.distributed.all_reduce(
                 loss_is_finite,

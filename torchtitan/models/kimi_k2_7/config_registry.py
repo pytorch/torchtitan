@@ -16,10 +16,11 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimization import (
+    AdamW,
+    DistMuon,
     LRSchedulersContainer,
     Optimization,
     OptimizersContainer,
-    ParamGroupConfig,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import CompileConfig, TrainingConfig
@@ -31,7 +32,7 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     Owned,
 )
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
@@ -286,17 +287,17 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
         )
 
     # Preserve exact EP-first DTensor ownership. If an EP-local expert count is
-    # smaller than the EFSDP size, add balanced rank assignment only after
-    # benchmarks show that the fixed nonempty EFSDP coordinates are a hotspot.
+    # smaller than the edp_shard size, add balanced rank assignment only after
+    # benchmarks show that the fixed nonempty edp_shard coordinates are a hotspot.
     return ComputeLayout(
         shardings_by_mesh_axis={
-            MeshAxisName.EFSDP.value: Shard(0),
+            MeshAxisName.EDP_SHARD.value: Shard(0),
             MeshAxisName.EP.value: Shard(0),
         },
-        # EP splits the expert dimension first, then EFSDP repartitions each
+        # EP splits the expert dimension first, then edp_shard repartitions each
         # EP-local expert domain, which reverses the storage-mesh axis order.
         shard_order_by_tensor_dim={
-            0: (MeshAxisName.EP.value, MeshAxisName.EFSDP.value),
+            0: (MeshAxisName.EP.value, MeshAxisName.EDP_SHARD.value),
         },
     )
 
@@ -364,15 +365,6 @@ def _dist_muon_optimizer(
         "w2": owned,
     }
     num_layers = len(model_config.layers)
-    muon_kwargs = {
-        "lr": muon_lr,
-        "weight_decay": 0.1,
-        "foreach": False,
-        # Kimi K2 uses 0.2 * sqrt(max(rows, columns))
-        # for shape-consistent AdamW-scale updates instead of Muon's original
-        # aspect-ratio scaling.
-        "adjust_lr_fn": "match_rms_adamw",
-    }
     adamw_kwargs = {
         "lr": adamw_lr,
         "betas": (0.9, 0.95),
@@ -455,27 +447,27 @@ def _dist_muon_optimizer(
         r")$"
     )
     return OptimizersContainer.Config(
-        implementation="foreach",
-        param_groups=[
-            ParamGroupConfig(
+        optimizers=[
+            DistMuon.Config(
                 pattern=muon_pattern,
-                optimizer_name="DistMuon",
-                optimizer_kwargs=muon_kwargs,
+                bucket_configs=tuple(bucket_configs),
+                compute_sharding_by_fqn=compute_sharding_by_fqn,
+                lr=muon_lr,
+                weight_decay=0.1,
+                # Kimi K2 uses 0.2 * sqrt(max(rows, columns)) for
+                # shape-consistent AdamW-scale updates instead of Muon's
+                # original aspect-ratio scaling.
+                adjust_lr_fn="match_rms_adamw",
             ),
             # The remaining parameters are embeddings, norms, biases, LM head,
             # and the vision tower.
-            ParamGroupConfig(
+            AdamW.Config(
                 pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs=adamw_kwargs,
+                foreach=True,
+                fused=False,
+                **adamw_kwargs,
             ),
         ],
-        optimizer_factory_kwargs_by_name={
-            "DistMuon": {
-                "bucket_configs": tuple(bucket_configs),
-                "compute_sharding_by_fqn": compute_sharding_by_fqn,
-            }
-        },
     )
 
 
@@ -489,22 +481,27 @@ def _align_dist_muon_expert_compute_layouts(
     The registry builds compute layouts from the recipe's declared parallelism,
     but the CLI can still override ``expert_parallel_degree`` afterwards. That
     override decides whether routed experts use the 1D ``dp_shard`` layout or
-    the 2D EP/EFSDP layout, so their layouts have to be rebuilt here.
+    the 2D ep/edp_shard layout, so their layouts have to be rebuilt here.
     """
     # TODO: Remove this function once parallelism can no longer be overridden
     # from the CLI; the registry layouts are then already final.
-    factory_kwargs_by_name = {
-        name: dict(factory_kwargs)
-        for name, factory_kwargs in (
-            optimizer_config.optimizer_factory_kwargs_by_name.items()
-        )
-    }
-    dist_muon_kwargs = factory_kwargs_by_name.get("DistMuon")
-    if dist_muon_kwargs is None:
+    dist_muon_index = next(
+        (
+            index
+            for index, config in enumerate(optimizer_config.optimizers)
+            if isinstance(config, DistMuon.Config)
+        ),
+        None,
+    )
+    if dist_muon_index is None:
         return optimizer_config
+    dist_muon_config = cast(
+        DistMuon.Config,
+        optimizer_config.optimizers[dist_muon_index],
+    )
     compute_sharding_by_fqn = cast(
         dict[str, ComputeLayout],
-        dist_muon_kwargs["compute_sharding_by_fqn"],
+        dist_muon_config.compute_sharding_by_fqn,
     )
     per_expert = _per_expert_compute_layout(parallelism)
     aligned_shardings = {}
@@ -518,10 +515,14 @@ def _align_dist_muon_expert_compute_layouts(
     if not changed:
         return optimizer_config
 
-    dist_muon_kwargs["compute_sharding_by_fqn"] = aligned_shardings
+    optimizers = list(optimizer_config.optimizers)
+    optimizers[dist_muon_index] = replace(
+        dist_muon_config,
+        compute_sharding_by_fqn=aligned_shardings,
+    )
     return replace(
         optimizer_config,
-        optimizer_factory_kwargs_by_name=factory_kwargs_by_name,
+        optimizers=optimizers,
     )
 
 

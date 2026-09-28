@@ -18,7 +18,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, CompileConfig, Configurable
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
@@ -84,16 +84,18 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
         self.ft_manager = self.fault_tolerance.build()
-        self.parallel_dims = ParallelDims.from_config(config.parallelism, topology)
+        self.parallelism_context = ParallelismContext.from_config(
+            config.parallelism, topology
+        )
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq,
             debug=config.training.gc_debug,
         )
         dist_utils.set_determinism(
-            self.parallel_dims,
+            self.parallelism_context,
             self.device,
             config.debug,
-            distinct_seed_mesh_dims=["pp"],
+            distinct_seed_mesh_axes=["pp"],
         )
         self.device_memory_monitor = build_device_memory_monitor()
 
@@ -122,7 +124,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         )
         self.optimization = self.config.optimization.build(
             model_parts=self.model_parts,
-            parallel_dims=self.parallel_dims,
+            parallelism_context=self.parallelism_context,
             training_steps=self.config.training.steps,
             pp_has_last_stage=self.pp_has_last_stage,
             optimizer_build_kwargs=optimizer_build_kwargs,
@@ -130,7 +132,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         self.model_cls._register_optimizer_hooks(
             self.optimization.optimizers,
             self.model_parts,
-            self.parallel_dims,
+            self.parallelism_context,
         )
 
     def _initialize_checkpointer(
@@ -182,13 +184,13 @@ class FaultTolerantTrainer(Configurable):
             fault_tolerance=config.fault_tolerance,
         )
         engine = self.engine
-        parallel_dims = engine.parallel_dims
+        parallelism_context = engine.parallelism_context
 
         # Logging needs to happen after distributed initialization.
         config.maybe_log()
 
-        if parallel_dims.dp_enabled:
-            dp_mesh = parallel_dims.get_mesh("dp")
+        if parallelism_context.dp_enabled:
+            dp_mesh = parallelism_context.get_mesh("dp")
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
             dp_degree, dp_rank = 1, 0
@@ -202,7 +204,9 @@ class FaultTolerantTrainer(Configurable):
         )
 
         num_pp_microbatches = (
-            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+            config.parallelism.num_pp_microbatches
+            if parallelism_context.pp_enabled
+            else 1
         )
         # build dataloader
         num_tokens_per_microbatch = (
@@ -218,7 +222,7 @@ class FaultTolerantTrainer(Configurable):
 
         # metrics logging (FT addition: ft_enable, ft_replica_id)
         self.metrics_processor = config.metrics.build(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             device_memory_monitor=engine.device_memory_monitor,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
@@ -250,7 +254,7 @@ class FaultTolerantTrainer(Configurable):
             config.fault_tolerance.enable
             and cuda_graphs_supported()
             and not config.training.disable_cuda_graphs
-            and parallel_dims.fsdp_enabled
+            and parallelism_context.fsdp_enabled
             and self.gradient_accumulation_steps > 1
         ):
             raise ValueError(
@@ -264,9 +268,9 @@ class FaultTolerantTrainer(Configurable):
             create_seed_checkpoint=config.create_seed_checkpoint,
         )
 
-        if parallel_dims.pp_enabled:
+        if parallelism_context.pp_enabled:
             ensure_pp_loss_visible(
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
@@ -293,7 +297,7 @@ class FaultTolerantTrainer(Configurable):
                     engine.pp_has_first_stage,
                     engine.pp_has_last_stage,
                 )
-                if parallel_dims.pp_enabled
+                if parallelism_context.pp_enabled
                 else (None, None, None)
             )
 
@@ -303,7 +307,7 @@ class FaultTolerantTrainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.max_context_length,
@@ -351,9 +355,9 @@ class FaultTolerantTrainer(Configurable):
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
-        parallel_dims = engine.parallel_dims
-        # Each group contains one complete PP schedule step, or one
-        # local forward/backward when PP is disabled.
+        parallelism_context = engine.parallelism_context
+        # All groups form one optimizer step. Each microbatch group forms one
+        # complete PP step, or one local forward/backward when PP is disabled.
         microbatch_groups: list[list[TrainingMicrobatch]] = []
         local_valid_tokens = 0
         for _ in range(self.gradient_accumulation_steps):
@@ -371,8 +375,8 @@ class FaultTolerantTrainer(Configurable):
             dtype=torch.int64,
             device=engine.device,
         )
-        if parallel_dims.dp_enabled:
-            dp_mesh = parallel_dims.get_mesh("dp")
+        if parallelism_context.dp_enabled:
+            dp_mesh = parallelism_context.get_mesh("dp")
             global_valid_tokens = dist_utils.dist_sum_tensor(
                 global_valid_tokens, dp_mesh
             )
@@ -390,10 +394,10 @@ class FaultTolerantTrainer(Configurable):
 
         accumulated_loss = forward_backward_result.loss
 
-        if parallel_dims.dp_cp_enabled:
+        if parallelism_context.dp_cp_enabled:
             # FT addition: use ft_manager.loss_sync_pg for extra process group
             ft_pg = engine.ft_manager.loss_sync_pg
-            loss_mesh = parallel_dims.get_optional_mesh("loss")
+            loss_mesh = parallelism_context.get_optional_mesh("loss")
 
             # For global_avg_loss, we want the average loss across all ranks:
             # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -429,7 +433,7 @@ class FaultTolerantTrainer(Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             "lr": lr,
-            **collect_aux_loss_metrics(engine.parallel_dims),
+            **collect_aux_loss_metrics(engine.parallelism_context),
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
@@ -502,7 +506,7 @@ class FaultTolerantTrainer(Configurable):
                 if engine.num_completed_steps == 1:
                     dist_utils.set_pg_timeouts(
                         timeout=timedelta(seconds=config.comm.train_timeout_seconds),
-                        parallel_dims=engine.parallel_dims,
+                        parallelism_context=engine.parallelism_context,
                     )
 
         if torch.distributed.get_rank() == 0:

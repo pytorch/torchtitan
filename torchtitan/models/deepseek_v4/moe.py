@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group, spmd_sparse_mesh
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
 

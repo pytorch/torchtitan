@@ -46,7 +46,7 @@ def test_optimization_builds_owned_components(enable_cuda_graph: bool) -> None:
         optimization = Optimization(
             config,
             model_parts=[model],
-            parallel_dims=MagicMock(),
+            parallelism_context=MagicMock(),
             training_steps=10,
             pp_has_last_stage=True,
         )
@@ -97,7 +97,7 @@ def test_optimization_cuda_graph_falls_back_for_unsupported_device(
         optimization = Optimization(
             config,
             model_parts=[model],
-            parallel_dims=MagicMock(),
+            parallelism_context=MagicMock(),
             training_steps=10,
             pp_has_last_stage=True,
         )

@@ -8,20 +8,22 @@ from .ema import EMA
 from .lr_scheduler import LRSchedulersContainer
 from .optimization import Optimization
 from .optimizer import (
+    Adam,
+    AdamW,
+    BaseOptimizer,
     default_adamw,
+    DistMuon,
     OptimizersContainer,
-    ParamGroupConfig,
-    register_moe_load_balancing_hook,
-    register_moe_quantile_balancing_hook,
 )
 
 __all__ = [
+    "Adam",
+    "AdamW",
+    "BaseOptimizer",
+    "default_adamw",
+    "DistMuon",
     "EMA",
     "LRSchedulersContainer",
     "OptimizersContainer",
     "Optimization",
-    "ParamGroupConfig",
-    "default_adamw",
-    "register_moe_load_balancing_hook",
-    "register_moe_quantile_balancing_hook",
 ]

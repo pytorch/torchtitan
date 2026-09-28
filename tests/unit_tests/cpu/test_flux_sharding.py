@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import spmd_types as spmd
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.flux.sharding import set_flux_inner_attention_local_spmd
 
 

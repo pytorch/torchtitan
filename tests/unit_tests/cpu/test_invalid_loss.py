@@ -47,18 +47,18 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.gc_handler = MagicMock()
         trainer._deferred_cuda_graph_options = None
 
-        parallel_dims = MagicMock()
-        parallel_dims.dp_enabled = False
-        parallel_dims.pp_enabled = False
-        parallel_dims.dp_cp_enabled = False
-        parallel_dims.ep_enabled = False
-        parallel_dims.dp_replicate_enabled = False
-        parallel_dims.get_optional_mesh.return_value = None
-        trainer.parallel_dims = parallel_dims
+        parallelism_context = MagicMock()
+        parallelism_context.dp_enabled = False
+        parallelism_context.pp_enabled = False
+        parallelism_context.dp_cp_enabled = False
+        parallelism_context.ep_enabled = False
+        parallelism_context.dp_replicate_enabled = False
+        parallelism_context.get_optional_mesh.return_value = None
+        trainer.parallelism_context = parallelism_context
 
         optimization = object.__new__(Optimization)
         optimization.config = SimpleNamespace(max_norm=1.0)
-        optimization.parallel_dims = parallel_dims
+        optimization.parallelism_context = parallelism_context
         optimization.pp_has_last_stage = True
         optimization.parameters = []
         optimization.optimizers = MagicMock()
