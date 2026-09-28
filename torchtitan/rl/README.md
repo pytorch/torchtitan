@@ -18,7 +18,8 @@ Note: Unified-model performance varies by model, input shape, and parallelism: i
 
 | Hardware | Integration Tests | Unit Tests |
 | --- | --- | --- |
-| NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) | [![RL Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_tests_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_tests_rl.yaml?query=branch%3Amain) |
+| CPU | | [![RL CPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml?query=branch%3Amain) |
+| NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) | [![RL GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml?query=branch%3Amain) |
 
 ## Model support
 
