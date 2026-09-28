@@ -17,9 +17,9 @@ keeping the fused implementation as an opt-in override.
 The fused forward and backward algorithms are adapted from the MIT-licensed FLA
 AttnRes operator introduced in
 https://github.com/fla-org/flash-linear-attention/pull/878.
-This implementation directly consumes TorchTitan's ``[T, N, D]`` residual bank
-and optional ``[T, D]`` partial residual, avoiding a concatenation or layout
-conversion.
+The kernels read a ``[T, N, D]`` residual bank and an optional ``[T, D]`` partial
+residual. ``TritonAttentionResidual`` stacks its list of sources into the bank and
+keeps the sources, not the bank, for backward.
 
 Activate with::
 
@@ -788,6 +788,71 @@ def attention_residual_op(
     return output_TD
 
 
+@spmd.register_local_autograd_function
+class _AttentionResidualOverSources(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        projection_weight_1D: torch.Tensor,
+        norm_weight_D: torch.Tensor,
+        eps: float,
+        *sources_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        (
+            output_TD,
+            rstd_NT,
+            logits_NT,
+            lse_T,
+        ) = _attention_residual_forward_local_without_partial(
+            torch.stack(sources_TD, dim=1),
+            projection_weight_1D,
+            norm_weight_D,
+            eps,
+        )
+        ctx.save_for_backward(
+            projection_weight_1D,
+            norm_weight_D,
+            rstd_NT,
+            logits_NT,
+            lse_T,
+            *sources_TD,
+        )
+        return output_TD
+
+    @staticmethod
+    def backward(ctx, grad_output_TD: torch.Tensor):
+        (
+            projection_weight_1D,
+            norm_weight_D,
+            rstd_NT,
+            logits_NT,
+            lse_T,
+            *sources_TD,
+        ) = ctx.saved_tensors
+        block_residual_TND = torch.stack(sources_TD, dim=1)
+        (
+            _,
+            grad_block_residual_TND,
+            grad_projection_weight_1D,
+            grad_norm_weight_D,
+        ) = _attention_residual_backward_op(
+            grad_output_TD,
+            block_residual_TND.new_empty((0, block_residual_TND.shape[-1])),
+            block_residual_TND,
+            projection_weight_1D,
+            norm_weight_D,
+            rstd_NT,
+            logits_NT,
+            lse_T,
+        )
+        return (
+            grad_projection_weight_1D,
+            grad_norm_weight_D,
+            None,
+            *grad_block_residual_TND.unbind(1),
+        )
+
+
 class TritonAttentionResidual(AttentionResidual):
     """Kimi K3 attention residual aggregation implemented with Triton."""
 
@@ -800,19 +865,14 @@ class TritonAttentionResidual(AttentionResidual):
 
     def __call__(
         self,
-        partial_block_TD: torch.Tensor | None,
-        block_residual_TND: torch.Tensor,
+        sources_TD: list[torch.Tensor],
         projection: Linear,
         norm: RMSNorm,
     ) -> torch.Tensor:
         assert projection.bias is None
         assert norm.eps is not None
-        return attention_residual_op(
-            partial_block_TD,
-            block_residual_TND,
-            projection.weight,
-            norm.weight,
-            norm.eps,
+        return _AttentionResidualOverSources.apply(
+            projection.weight, norm.weight, norm.eps, *sources_TD
         )
 
 
