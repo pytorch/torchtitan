@@ -19,6 +19,7 @@ from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhauste
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, CompileConfig, Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
+from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
@@ -248,6 +249,16 @@ class FaultTolerantTrainer(Configurable):
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
             num_tokens_per_dp_rank * dp_degree
         )
+        if (
+            config.fault_tolerance.enable
+            and cuda_graphs_supported()
+            and not config.training.disable_cuda_graphs
+            and parallelism_context.fsdp_enabled
+            and self.gradient_accumulation_steps > 1
+        ):
+            raise ValueError(
+                "TorchFT does not support CUDA-graphed FSDP gradient accumulation."
+            )
 
         engine.initialize(
             compile_config=config.compile,
@@ -369,25 +380,10 @@ class FaultTolerantTrainer(Configurable):
                 global_valid_tokens, dp_mesh
             )
 
-        global_valid_tokens = engine.prepare_step(
-            global_valid_tokens,
-            num_accumulation_steps=self.gradient_accumulation_steps,
+        forward_backward_result = engine.forward_backward(
+            microbatch_groups=microbatch_groups,
+            global_valid_tokens=global_valid_tokens,
         )
-
-        accumulated_loss: torch.Tensor | None = None
-        for fwd_bwd_index, microbatch_group in enumerate(microbatch_groups):
-            detached_loss = engine.forward_backward_microbatch(
-                microbatch_group=microbatch_group,
-                global_valid_tokens=global_valid_tokens,
-                accumulation_index=fwd_bwd_index,
-            )
-            if should_log:
-                if accumulated_loss is None:
-                    # Take ownership before the next replay overwrites the
-                    # graph-owned output. Later losses accumulate in place.
-                    accumulated_loss = detached_loss.clone()
-                else:
-                    accumulated_loss.add_(detached_loss)
 
         grad_norm = engine.optimizer_step()
 
@@ -395,7 +391,7 @@ class FaultTolerantTrainer(Configurable):
         if not should_log:
             return
 
-        assert accumulated_loss is not None
+        accumulated_loss = forward_backward_result.loss
 
         if parallelism_context.dp_cp_enabled:
             # FT addition: use ft_manager.loss_sync_pg for extra process group
