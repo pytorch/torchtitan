@@ -69,10 +69,17 @@ jobs:
         # TorchStore is not on PyPI; do not let its dependencies change torch.
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
 
-        # TODO: test_gdn_full_runner_matches_eager skips here because
-        # TORCHTITAN_QWEN3_5_0_8B_HF_PATH is unset. The Hugging Face Qwen3.5-0.8B
-        # checkpoint ties its embeddings, and the torchtitan 0.8B config does not
-        # enable weight tying yet, so loading it fails on the missing lm_head.
+        # Exercise both GDN eager-vs-CUDA-graph modes with real tied HF weights.
+        # The shared HF cache is read-only, so download to a writable runner cache.
+        export TORCHTITAN_QWEN3_5_0_8B_HF_PATH="$(python -c '
+        import os
+        from huggingface_hub import snapshot_download
+
+        print(snapshot_download(
+            "Qwen/Qwen3.5-0.8B",
+            cache_dir=os.path.join(os.environ["RUNNER_TEMP"], "rl-hf-cache"),
+        ))
+        ')"
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
         pytest tests/rl/unit_tests/gpu -m "not multi_gpu" --strict-markers --durations=20 -vv
