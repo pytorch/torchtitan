@@ -86,6 +86,8 @@ For complete configuration options, run `NGPU=1 ./run_train.sh --help`.
 
 - `--fault_tolerance.sync_steps`: The number of training steps before synchronization.
 - `--fault_tolerance.semi_sync_method`: Synchronization method (e.g., "local_sgd", "diloco")
+- `--fault_tolerance.local_sgd_offload_to_cpu`: Stage LocalSGD averaged
+  parameters on CPU until the synchronization quorum commits.
 
 For more semi-synchronouse configuration options, see [config/job_config.py](config/job_config.py).
 
