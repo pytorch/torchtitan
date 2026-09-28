@@ -37,7 +37,7 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_parameter_gradient,
     BOXED_CODEGEN_META,
@@ -1301,7 +1301,7 @@ def construct_joint_train_step_passes(
     traced: TracedResult,
     trainer_config: "GraphTrainer.Config",
     *,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     use_graph_trainer_cuda_graph: bool,
 ) -> list[Callable]:
     """Construct passes using the full config available to the PP=1 caller."""
@@ -1310,7 +1310,7 @@ def construct_joint_train_step_passes(
             return construct_default_graph_passes(
                 traced,
                 trainer_config,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
             )
         return []
     if not trainer_config.compile.enable_passes:
@@ -1318,19 +1318,19 @@ def construct_joint_train_step_passes(
 
     pipeline_fn = PASS_PIPELINE_REGISTRY.get(trainer_config.compile.pass_pipeline)
     if pipeline_fn is not None:
-        return pipeline_fn(traced, trainer_config, parallel_dims=parallel_dims)
+        return pipeline_fn(traced, trainer_config, parallelism_context=parallelism_context)
 
     if use_graph_trainer_cuda_graph:
         return construct_default_graph_passes(
             traced,
             trainer_config,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
         )
 
     return compile_time_passes(
         traced,
         trainer_config,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
     )
 
 
@@ -1344,7 +1344,7 @@ def _build_joint_stage_graph(
     loss_fn: Callable,
     compile_config: GraphTrainerCompileConfig,
     trainer_config: "GraphTrainer.Config",
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     extract_fsdp_param_unshard: bool = False,
     extract_fsdp_grad_reduction: bool = False,
     accumulate_gradients_in_graph: bool = False,
@@ -1383,13 +1383,13 @@ def _build_joint_stage_graph(
                 f"'{compile_config.precompile_artifact_dir}/"
                 f"{_FX_TRACE_ARTIFACT_KEY}.bin'. Run precompile_main first."
             )
-        runtime_meshes = get_spmd_precompile_meshes(parallel_dims)
+        runtime_meshes = get_spmd_precompile_meshes(parallelism_context)
         traced = precompile_fx_trace_load(
             storage,
             expected_fingerprint=compute_config_fingerprint(
                 stage.submod,
                 compile_config,
-                parallel_dims,
+                parallelism_context,
             ),
             example_inputs=flatten_runtime_inputs(
                 stage.submod,
@@ -1434,7 +1434,7 @@ def _build_joint_stage_graph(
         passes = construct_joint_train_step_passes(
             traced,
             trainer_config,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             use_graph_trainer_cuda_graph=trainer_config.training.disable_cuda_graphs,
         )
         traced.gm = apply_graph_passes(
@@ -1973,7 +1973,7 @@ class GraphTrainerStageGraphProvider:
     accumulate_gradients_in_graph: bool = False
     fuse_wgrad_accumulation: bool = False
     trainer_config: "GraphTrainer.Config | None" = None
-    parallel_dims: ParallelDims | None = None
+    parallelism_context: ParallelismContext | None = None
     _warned_cuda_graph: bool = False
     # Calling convention:
     # key = (forward_stage_index, backward_stage_index); the graph is reused
@@ -2046,7 +2046,7 @@ class GraphTrainerStageGraphProvider:
                 ctx.losses,
             )
         if self.trainer_config is not None:
-            if len(graph_stages) != 1 or self.parallel_dims is None:
+            if len(graph_stages) != 1 or self.parallelism_context is None:
                 raise ValueError(
                     "Joint forward/backward requires one stage and parallel dims"
                 )
@@ -2061,7 +2061,7 @@ class GraphTrainerStageGraphProvider:
                     loss_fn=self.loss_fn,
                     compile_config=self.compile_config,
                     trainer_config=self.trainer_config,
-                    parallel_dims=self.parallel_dims,
+                    parallelism_context=self.parallelism_context,
                     extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
                     extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
                     accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,

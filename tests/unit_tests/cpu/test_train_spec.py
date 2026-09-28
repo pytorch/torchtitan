@@ -46,7 +46,9 @@ class FakeModel(BaseModel):
         pass
 
     @classmethod
-    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
         def hook(optimizer, args, kwargs):
             cls.hook_called = True
 

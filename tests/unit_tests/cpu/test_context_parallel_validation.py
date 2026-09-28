@@ -173,7 +173,7 @@ class TestGptOssUlysses(unittest.TestCase):
                         first_full_attention_backend=inner_attention.Config()
                     )
                 ),
-                parallel_dims=SimpleNamespace(cp_enabled=True),
+                parallelism_context=SimpleNamespace(cp_enabled=True),
                 training=None,
                 parallelism=None,
                 compile_config=None,

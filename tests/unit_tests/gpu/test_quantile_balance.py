@@ -17,7 +17,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.components.optimizer import AdamW, OptimizersContainer
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common import RouterGateLinear, Sigmoid
 from torchtitan.models.common.decoder_sharding import (
@@ -48,7 +48,7 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
     @with_comms
     def test_distributed_quantile_balancing(self) -> None:
         device = torch.device(self.device_type, self.rank)
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=self.world_size,
             cp=1,
@@ -58,8 +58,8 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=False,
         )
-        parallel_dims.build_mesh()
-        dense_mesh = parallel_dims.spmd_dense_mesh()
+        parallelism_context.build_mesh()
+        dense_mesh = parallelism_context.spmd_dense_mesh()
 
         model = nn.Module()
         moe_layers = []
@@ -204,7 +204,7 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
         register_moe_quantile_balancing_hook(
             optimizers,
             [model],
-            parallel_dims,
+            parallelism_context,
         )
 
         optimizers.step()

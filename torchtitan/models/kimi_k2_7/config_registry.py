@@ -31,7 +31,7 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     Owned,
 )
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
@@ -278,17 +278,17 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
         )
 
     # Preserve exact EP-first DTensor ownership. If an EP-local expert count is
-    # smaller than the EFSDP size, add balanced rank assignment only after
-    # benchmarks show that the fixed nonempty EFSDP coordinates are a hotspot.
+    # smaller than the edp_shard size, add balanced rank assignment only after
+    # benchmarks show that the fixed nonempty edp_shard coordinates are a hotspot.
     return ComputeLayout(
         shardings_by_mesh_axis={
-            MeshAxisName.EFSDP.value: Shard(0),
+            MeshAxisName.EDP_SHARD.value: Shard(0),
             MeshAxisName.EP.value: Shard(0),
         },
-        # EP splits the expert dimension first, then EFSDP repartitions each
+        # EP splits the expert dimension first, then edp_shard repartitions each
         # EP-local expert domain, which reverses the storage-mesh axis order.
         shard_order_by_tensor_dim={
-            0: (MeshAxisName.EP.value, MeshAxisName.EFSDP.value),
+            0: (MeshAxisName.EP.value, MeshAxisName.EDP_SHARD.value),
         },
     )
 
@@ -472,7 +472,7 @@ def _align_dist_muon_expert_compute_layouts(
     The registry builds compute layouts from the recipe's declared parallelism,
     but the CLI can still override ``expert_parallel_degree`` afterwards. That
     override decides whether routed experts use the 1D ``dp_shard`` layout or
-    the 2D EP/EFSDP layout, so their layouts have to be rebuilt here.
+    the 2D ep/edp_shard layout, so their layouts have to be rebuilt here.
     """
     # TODO: Remove this function once parallelism can no longer be overridden
     # from the CLI; the registry layouts are then already final.

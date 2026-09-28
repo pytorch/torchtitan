@@ -93,7 +93,7 @@ class FakeMoEModel(nn.Module):
             self.mtp_layers.append(FakeMoEBlock(mtp_load_balance_coeff, [3, 1]))
 
 
-class FakeParallelDims:
+class FakeParallelismContext:
     ep_enabled = False
     tp = 1
 
@@ -169,7 +169,7 @@ def _run_torchft_moe_load_balancing_step(rank, store_path):
             ft_manager=SimpleNamespace(manager=manager, use_async_quorum=True),
         )
         register_moe_load_balancing_hook(
-            container, [model], FakeParallelDims(loss_mesh=loss_mesh)
+            container, [model], FakeParallelismContext(loss_mesh=loss_mesh)
         )
 
         container.zero_grad()
@@ -306,7 +306,7 @@ class TestOptimizerConfig(unittest.TestCase):
         register_moe_load_balancing_hook(
             container,
             [model],
-            FakeParallelDims(),
+            FakeParallelismContext(),
         )
 
         container.step()
@@ -342,7 +342,7 @@ class TestOptimizerConfig(unittest.TestCase):
             register_moe_load_balancing_hook(
                 container,
                 [model],
-                FakeParallelDims(),
+                FakeParallelismContext(),
             )
 
     def test_moe_load_balancing_updates_mtp_layers(self):
@@ -353,7 +353,7 @@ class TestOptimizerConfig(unittest.TestCase):
             ],
         )
         container = config.build(model_parts=[model])
-        register_moe_load_balancing_hook(container, [model], FakeParallelDims())
+        register_moe_load_balancing_hook(container, [model], FakeParallelismContext())
 
         container.step()
 

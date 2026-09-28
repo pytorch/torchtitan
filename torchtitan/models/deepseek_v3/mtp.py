@@ -18,7 +18,7 @@ from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
 from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     current_spmd_mesh,
@@ -269,7 +269,7 @@ class MTPDecoder(Decoder):
     def _apply_fsdp(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
     ) -> None:
@@ -278,17 +278,17 @@ class MTPDecoder(Decoder):
             resolve_sparse_fsdp_mesh,
         )
 
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
         apply_fsdp_to_mtp_decoder(
             self,
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
+            pp_enabled=parallelism_context.pp_enabled,
             cpu_offload=training.enable_cpu_offload,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
+            ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
@@ -299,7 +299,7 @@ class MTPDecoder(Decoder):
         self,
         input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -360,15 +360,15 @@ class MTPDecoder(Decoder):
                     max_context_length=max_context_length,
                 )
 
-        if parallel_dims.cp_enabled:
+        if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
                 input_shardings=input_shardings,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 parallelism=parallelism,
             )
         input_dict = annotate_input_spmd_types(
-            parallel_dims, input_dict, input_shardings
+            parallelism_context, input_dict, input_shardings
         )
 
         main_tokens = input_dict.pop("input")

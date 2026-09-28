@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.attention import HybridAttentionMetadata, VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
