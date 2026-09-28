@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
+from torchtitan.distributed.local_compile import local_compile
 
 
 class BinaryActivationFn(Function[torch.Tensor], ABC):
@@ -134,6 +135,7 @@ class SwiGLU(BinaryActivationFn):
     def __init__(self, config: Config) -> None:
         pass
 
+    @local_compile("swiglu", batch_invariant=True)
     def __call__(
         self,
         gate: torch.Tensor,
