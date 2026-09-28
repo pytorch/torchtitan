@@ -330,6 +330,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
+                expert_parallel_degree=2,
             ),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
@@ -348,7 +349,11 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
                 tensor_parallel_degree=4,
+                expert_parallel_degree=4,
             ),
+            # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
+            # distributed MoE token dispatcher is enabled for GPT-OSS.
+            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -489,6 +494,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
+                expert_parallel_degree=2,
                 enable_sequence_parallel=False,
             ),
             checkpointer=None,
@@ -508,7 +514,11 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 # degree changes reduction order / sharding in the parallel
                 # matmuls and attention, which batch-invariant ops do not undo.
                 tensor_parallel_degree=2,
+                expert_parallel_degree=2,
             ),
+            # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
+            # distributed MoE token dispatcher is enabled for GPT-OSS.
+            cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
