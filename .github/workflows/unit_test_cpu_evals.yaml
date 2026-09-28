@@ -1,0 +1,49 @@
+name: Evals CPU Unit Test
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'torchtitan/experiments/evals/**'
+      - '.github/workflows/unit_test_cpu_evals.yaml'
+  pull_request:
+    paths:
+      - 'torchtitan/experiments/evals/**'
+      - '.github/workflows/unit_test_cpu_evals.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: unit-test-evals-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Setup python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cpu
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+          python -m pip install -r torchtitan/experiments/evals/requirements.txt
+          python -m pip install -e . --no-deps
+
+      - name: Run evals unit tests
+        run: |
+          python -m pytest torchtitan/experiments/evals/tests --durations=20 -vv

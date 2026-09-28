@@ -1,0 +1,3 @@
+# Pinned so eval numbers stay comparable across checkpoints and runs; bump
+# deliberately and note it, since task and metric definitions can change.
+lm_eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@d6de81643928d653435c431bae19945d41d32520

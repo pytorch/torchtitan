@@ -1,0 +1,125 @@
+# MMLU, 5-shot (the standard base-model setting), accuracy weighted by
+# subject size like lm-eval's own mmlu group. Few-shot is set per subject
+# because lm-eval creates a group cycle when num_fewshot is overridden on
+# the nested mmlu group itself.
+group: trainstation_mmlu
+task:
+  - task: mmlu_abstract_algebra
+    num_fewshot: 5
+  - task: mmlu_anatomy
+    num_fewshot: 5
+  - task: mmlu_astronomy
+    num_fewshot: 5
+  - task: mmlu_business_ethics
+    num_fewshot: 5
+  - task: mmlu_clinical_knowledge
+    num_fewshot: 5
+  - task: mmlu_college_biology
+    num_fewshot: 5
+  - task: mmlu_college_chemistry
+    num_fewshot: 5
+  - task: mmlu_college_computer_science
+    num_fewshot: 5
+  - task: mmlu_college_mathematics
+    num_fewshot: 5
+  - task: mmlu_college_medicine
+    num_fewshot: 5
+  - task: mmlu_college_physics
+    num_fewshot: 5
+  - task: mmlu_computer_security
+    num_fewshot: 5
+  - task: mmlu_conceptual_physics
+    num_fewshot: 5
+  - task: mmlu_econometrics
+    num_fewshot: 5
+  - task: mmlu_electrical_engineering
+    num_fewshot: 5
+  - task: mmlu_elementary_mathematics
+    num_fewshot: 5
+  - task: mmlu_formal_logic
+    num_fewshot: 5
+  - task: mmlu_global_facts
+    num_fewshot: 5
+  - task: mmlu_high_school_biology
+    num_fewshot: 5
+  - task: mmlu_high_school_chemistry
+    num_fewshot: 5
+  - task: mmlu_high_school_computer_science
+    num_fewshot: 5
+  - task: mmlu_high_school_european_history
+    num_fewshot: 5
+  - task: mmlu_high_school_geography
+    num_fewshot: 5
+  - task: mmlu_high_school_government_and_politics
+    num_fewshot: 5
+  - task: mmlu_high_school_macroeconomics
+    num_fewshot: 5
+  - task: mmlu_high_school_mathematics
+    num_fewshot: 5
+  - task: mmlu_high_school_microeconomics
+    num_fewshot: 5
+  - task: mmlu_high_school_physics
+    num_fewshot: 5
+  - task: mmlu_high_school_psychology
+    num_fewshot: 5
+  - task: mmlu_high_school_statistics
+    num_fewshot: 5
+  - task: mmlu_high_school_us_history
+    num_fewshot: 5
+  - task: mmlu_high_school_world_history
+    num_fewshot: 5
+  - task: mmlu_human_aging
+    num_fewshot: 5
+  - task: mmlu_human_sexuality
+    num_fewshot: 5
+  - task: mmlu_international_law
+    num_fewshot: 5
+  - task: mmlu_jurisprudence
+    num_fewshot: 5
+  - task: mmlu_logical_fallacies
+    num_fewshot: 5
+  - task: mmlu_machine_learning
+    num_fewshot: 5
+  - task: mmlu_management
+    num_fewshot: 5
+  - task: mmlu_marketing
+    num_fewshot: 5
+  - task: mmlu_medical_genetics
+    num_fewshot: 5
+  - task: mmlu_miscellaneous
+    num_fewshot: 5
+  - task: mmlu_moral_disputes
+    num_fewshot: 5
+  - task: mmlu_moral_scenarios
+    num_fewshot: 5
+  - task: mmlu_nutrition
+    num_fewshot: 5
+  - task: mmlu_philosophy
+    num_fewshot: 5
+  - task: mmlu_prehistory
+    num_fewshot: 5
+  - task: mmlu_professional_accounting
+    num_fewshot: 5
+  - task: mmlu_professional_law
+    num_fewshot: 5
+  - task: mmlu_professional_medicine
+    num_fewshot: 5
+  - task: mmlu_professional_psychology
+    num_fewshot: 5
+  - task: mmlu_public_relations
+    num_fewshot: 5
+  - task: mmlu_security_studies
+    num_fewshot: 5
+  - task: mmlu_sociology
+    num_fewshot: 5
+  - task: mmlu_us_foreign_policy
+    num_fewshot: 5
+  - task: mmlu_virology
+    num_fewshot: 5
+  - task: mmlu_world_religions
+    num_fewshot: 5
+aggregate_metric_list:
+  - metric: acc
+    weight_by_size: true
+metadata:
+  version: 0

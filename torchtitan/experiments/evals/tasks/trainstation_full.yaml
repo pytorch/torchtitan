@@ -1,0 +1,13 @@
+# Standard base-model suite for milestone checkpoints. Log-likelihood tasks
+# only; generative tasks (GSM8K, HumanEval, ...) are not supported yet.
+group: trainstation_full
+task:
+  - trainstation_quick
+  - arc_challenge
+  - winogrande
+  - boolq
+  - openbookqa
+  - sciq
+  - trainstation_mmlu
+metadata:
+  version: 0

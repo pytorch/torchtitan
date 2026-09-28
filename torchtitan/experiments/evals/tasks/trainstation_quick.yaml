@@ -1,0 +1,11 @@
+# Fast pretraining signal for every checkpoint: held-out bits-per-byte plus
+# zero-shot cloze-style multiple choice. Log-likelihood tasks only.
+group: trainstation_quick
+task:
+  - wikitext
+  - lambada_openai
+  - hellaswag
+  - arc_easy
+  - piqa
+metadata:
+  version: 0
