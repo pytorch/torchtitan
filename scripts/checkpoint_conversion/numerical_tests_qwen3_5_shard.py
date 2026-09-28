@@ -25,7 +25,8 @@ from typing import cast
 import torch
 import torch.distributed as dist
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.models.qwen3_5 import Qwen35Model, qwen3_5_configs
@@ -54,7 +55,10 @@ def run_worker(args):
 
     build_config, max_context_length = qwen3_5_configs["debugmodel_moe"]
     config = build_config(
-        attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+        attn_backend="flex",
+        moe_comm_backend="standard",
+        enable_sp=True,
+        seq_len=max_context_length,
     )
 
     parallel_dims = ParallelDims(

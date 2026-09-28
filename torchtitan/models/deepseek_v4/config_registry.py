@@ -7,7 +7,8 @@
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
@@ -24,7 +25,7 @@ from .mtp import MTPLoss
 def deepseek_v4_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = model_registry("debugmodel", seq_len=seq_len)
+    model_config = model_registry("debugmodel", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -66,7 +67,9 @@ def deepseek_v4_debugmodel(
 def deepseek_v4_mtp_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = model_registry("debugmodel", seq_len=seq_len, n_mtp_layers=1)
+    model_config = model_registry(
+        "debugmodel", enable_sp=True, seq_len=seq_len, n_mtp_layers=1
+    )
     return Trainer.Config(
         loss=MTPLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
@@ -104,7 +107,7 @@ def deepseek_v4_mtp_debugmodel(
 
 
 def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
-    model_config = model_registry("deepseek_v4_flash", seq_len=seq_len)
+    model_config = model_registry("deepseek_v4_flash", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -144,7 +147,7 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
 
 
 def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
-    model_config = model_registry("deepseek_v4_pro", seq_len=seq_len)
+    model_config = model_registry("deepseek_v4_pro", enable_sp=True, seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(

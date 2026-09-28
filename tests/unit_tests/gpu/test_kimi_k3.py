@@ -9,7 +9,7 @@ import unittest
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.config_registry import _dist_muon_optimizer
 from torchtitan.models.kimi_k3.kda import KDAKernel
@@ -23,6 +23,7 @@ def _small_model_config() -> KimiK3Model.Config:
     return _kimi_k3_config(
         max_context_length=128,
         dim=dim,
+        enable_sp=False,
         vocab_size=32,
         num_layers=2,
         full_attention_layers={1},
@@ -163,9 +164,8 @@ class TestKimiK3(unittest.TestCase):
         )
 
     @unittest.skipIf(
-        not torch.cuda.is_available()
-        or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)},
-        "Attention Gym KDA requires CUDA capability 10.0 or 10.3.",
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0),
+        "Attention Gym KDA requires CUDA capability 9.0 or newer.",
     )
     def test_attention_gym_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
