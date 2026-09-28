@@ -62,10 +62,8 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
         "HF_HUB_OFFLINE": "1",
     }
     results = []
-    # Compare a second eager launch if the regular kernels are nondeterministic.
-    modes = ("eager", "full", "eager") if not batch_invariant else ("eager", "full")
-    for index, mode in enumerate(modes):
-        output = tmp_path / f"{index}-{mode}.json"
+    for mode in ("eager", "full"):
+        output = tmp_path / f"{mode}.json"
         command = ["timeout", "--kill-after=5s", "180s", sys.executable]
         command += "-m torch.distributed.run --standalone --nproc-per-node=1".split()
         command += [
@@ -93,8 +91,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
                 pytrace=False,
             )
         results.append(json.loads(output.read_text()))
-    eager, full = results[:2]
-    eager_repeat = results[2] if not batch_invariant else None
+    eager, full = results
     # Real packed recurrence ran eagerly and was captured for FULL replay.
     assert [False, "PACKED"] in eager["recurrent_calls"]
     assert [True, "PACKED"] in full["recurrent_calls"]
@@ -125,18 +122,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
                 ),
             }
     if mismatches:
-        repeat_summary = None
-        if eager_repeat is not None:
-            repeat_summary = {
-                "outputs_equal": eager["outputs"] == eager_repeat["outputs"],
-                "states_equal": eager["states"] == eager_repeat["states"],
-                "dispatch_equal": eager["dispatch"] == eager_repeat["dispatch"],
-            }
-        pytest.fail(
-            f"eager/FULL completion mismatches: {mismatches}; "
-            f"eager/eager repeat: {repeat_summary}",
-            pytrace=False,
-        )
+        pytest.fail(f"eager/FULL completion mismatches: {mismatches}", pytrace=False)
     assert eager["states"] == full["states"]
     assert all(step["mode"] == "NONE" for step in eager["dispatch"])
     replayed = [step for step in full["dispatch"] if step["mode"] == "FULL"]
