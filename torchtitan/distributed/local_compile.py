@@ -16,12 +16,17 @@ import torch
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 
+DEFAULT_LOCAL_COMPILE_REGIONS = ("gated_rmsnorm", "loss", "offset_rmsnorm")
+
+
 @dataclass(kw_only=True, slots=True)
 class LocalCompileConfig:
-    regions: list[str] = field(default_factory=lambda: ["gated_rmsnorm", "loss"])
+    regions: list[str] = field(
+        default_factory=lambda: list(DEFAULT_LOCAL_COMPILE_REGIONS)
+    )
     """Named regions to compile independently with ``torch.compile``.
 
-    Gated RMSNorm and loss compilation are enabled by default.
+    Gated RMSNorm, loss, and Offset RMSNorm compilation are enabled by default.
     FlexAttention manages its own compilation and is not controlled by this list.
     """
 
@@ -41,7 +46,10 @@ class LocalCompileConfig:
                 bind_local_compile_fn(self)
 
 
-_LOCAL_COMPILE_CALLBACKS: dict[str, list[Callable[[LocalCompileConfig], None]]] = {}
+# Pre-register default region names so validation does not depend on model imports.
+_LOCAL_COMPILE_CALLBACKS: dict[str, list[Callable[[LocalCompileConfig], None]]] = {
+    name: [] for name in DEFAULT_LOCAL_COMPILE_REGIONS
+}
 
 
 def local_compile(

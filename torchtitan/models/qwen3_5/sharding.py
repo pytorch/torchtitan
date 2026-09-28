@@ -90,6 +90,7 @@ def _qk_norm_sharding() -> ShardingConfig:
         in_dst_shardings={"input": head_plc},
         out_src_shardings=head_plc,
         out_dst_shardings=head_plc,
+        local_spmd=True,
     )
 
 
@@ -98,6 +99,7 @@ def _decoder_norm_sharding(activation_layout: SpmdType) -> ShardingConfig:
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
         in_src_shardings={"input": activation_layout},
         out_src_shardings=activation_layout,
+        local_spmd=True,
     )
 
 
@@ -116,6 +118,8 @@ def set_qwen35_sharding_config(
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs."""
     set_decoder_sharding_config(config, enable_sp=enable_sp)
+    assert config.norm.sharding_config is not None
+    config.norm.sharding_config.local_spmd = True
     layer_input_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
@@ -163,6 +167,7 @@ def _set_qwen35_layer_sharding(
         attention_input_layout
     )
     layer_cfg.ffn_norm.sharding_config = norm_config(enable_sp=enable_sp)
+    layer_cfg.ffn_norm.sharding_config.local_spmd = True
 
     if layer_cfg.attention is not None:
         _set_full_attention_sharding(
