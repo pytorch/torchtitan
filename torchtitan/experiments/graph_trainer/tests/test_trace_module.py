@@ -226,7 +226,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
     def test_aot_fx_runs_multi_microbatch_group_through_graph_runtime(self):
         from types import SimpleNamespace
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
 
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 
@@ -245,7 +245,11 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 num_tokens_per_microbatch_per_dp_rank=1,
             ),
         )
-        engine.parallel_dims = SimpleNamespace(pp_enabled=False, cp=1)
+        engine.parallelism_context = SimpleNamespace(
+            pp_enabled=False,
+            cp=1,
+            activate_spmd=contextlib.nullcontext,
+        )
         engine.model_parts = [model]
         engine.device = torch.device("cpu")
         engine.max_num_documents = None
@@ -262,11 +266,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             for index in range(2)
         ]
 
-        with patch(
-            "torchtitan.experiments.graph_trainer.trainer.dist_utils.get_spmd_context",
-            return_value=contextlib.nullcontext(),
-        ):
-            prepared_groups = engine._preprocess_microbatch_groups([microbatches])
+        prepared_groups = engine._preprocess_microbatch_groups([microbatches])
         engine._pp_forward_backward_microbatch_group = MagicMock(
             return_value=torch.tensor(3.0)
         )
