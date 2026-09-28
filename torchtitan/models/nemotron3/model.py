@@ -91,6 +91,35 @@ _fused_mamba_chunk_scan = _load_fused_mamba_scan()
 FUSED_MAMBA_SCAN_AVAILABLE = _fused_mamba_chunk_scan is not None
 
 
+# --- Fused causal depthwise conv (optional) ----------------------------------
+# causal-conv1d fuses the depthwise causal convolution and its SiLU into one
+# kernel, replacing nn.Conv1d + slice + SiLU. It is the same kernel HF's
+# NemotronH uses on its fully-fused path.
+#
+# Unlike mamba-ssm's Mamba-2 scan this is a compiled HIP/CUDA extension, not
+# Triton, so it must be built against the installed torch. See this model's
+# README for the ROCm build (upstream pins -std=c++17, which no longer compiles
+# against torch >= 2.14).
+def _load_fused_causal_conv():
+    import os
+
+    # Escape hatch, mirroring NEMOTRON_DISABLE_FUSED_MAMBA: forces the
+    # nn.Conv1d reference path for A/B timing or bisecting numerics.
+    if os.environ.get("NEMOTRON_DISABLE_FUSED_CONV", "") not in ("", "0"):
+        return None
+
+    try:
+        from causal_conv1d import causal_conv1d_fn
+    except ImportError:
+        return None
+
+    return causal_conv1d_fn
+
+
+_fused_causal_conv = _load_fused_causal_conv()
+FUSED_CAUSAL_CONV_AVAILABLE = _fused_causal_conv is not None
+
+
 # --- Mamba-2 Pure PyTorch Chunk Scan Helpers ---
 
 def pad_tensor_by_size(input_tensor: torch.Tensor, pad_size: int):
@@ -451,9 +480,22 @@ class NemotronTransformerBlock(TransformerBlock):
 
             # 2. Causal depthwise conv over x, B and C together, then SiLU.
             x_bc = x_bc.transpose(1, 2)
-            x_bc = self.conv1d(x_bc)[:, :, :L]
-            x_bc = x_bc.transpose(1, 2)
-            x_bc = F.silu(x_bc)
+            if _fused_causal_conv is not None and x_bc.is_cuda:
+                # One kernel for conv + SiLU. It is causal by construction, so
+                # there is no left-pad to slice back off. nn.Conv1d holds the
+                # depthwise weight as (channels, 1, width); the kernel wants
+                # (channels, width).
+                x_bc = _fused_causal_conv(
+                    x_bc,
+                    self.conv1d.weight.squeeze(1),
+                    self.conv1d.bias,
+                    activation="silu",
+                )
+                x_bc = x_bc.transpose(1, 2)
+            else:
+                x_bc = self.conv1d(x_bc)[:, :, :L]
+                x_bc = x_bc.transpose(1, 2)
+                x_bc = F.silu(x_bc)
 
             # 3. Split the convolved stream into x, B, C
             x_mamba, B_param, C_param = torch.split(
