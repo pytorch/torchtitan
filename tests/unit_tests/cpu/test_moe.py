@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.activation import Sigmoid, SiTUGLU, Softmax, SqrtSoftplus
 from torchtitan.models.common.config_utils import (

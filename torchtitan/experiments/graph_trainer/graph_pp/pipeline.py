@@ -24,7 +24,7 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.loss import LossFunction
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.pipeline_parallel import (
@@ -358,7 +358,7 @@ def _register_graph_runtime(
     parallelism: ParallelismConfig,
     loss_fn: LossFunction,
     trainer_config: "GraphTrainer.Config | None",
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     warn_if_cuda_graph_pass_requested: bool,
 ) -> GraphRuntime:
     """Bind GraphTrainer graph construction to an already chosen schedule.
@@ -379,7 +379,7 @@ def _register_graph_runtime(
         ),
         fuse_wgrad_accumulation=(gradient_accumulation_policy.fuse_wgrad_accumulation),
         trainer_config=trainer_config,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
     )
     if warn_if_cuda_graph_pass_requested:
         graph_provider._warn_if_cuda_graph_pass_requested()
@@ -397,7 +397,7 @@ def _make_spmd_graph_runtime(
     parallelism: ParallelismConfig,
     loss_fn: LossFunction,
     trainer_config: "GraphTrainer.Config",
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> GraphRuntime:
     """Build SPMD execution with joint microbatch and optional FSDP actions."""
     requires_graph_extraction = (
@@ -440,7 +440,7 @@ def _make_spmd_graph_runtime(
         num_microbatches=num_microbatches,
         parallelism=parallelism,
         loss_fn=loss_fn,
-        fsdp_enabled=parallel_dims.fsdp_enabled,
+        fsdp_enabled=parallelism_context.fsdp_enabled,
         extract_fsdp_param_unshard=fsdp_policy.extract_fsdp_param_unshard,
         extract_fsdp_grad_reduction=fsdp_policy.extract_fsdp_grad_reduction,
         accumulate_gradients_in_graph=(
@@ -456,7 +456,7 @@ def _make_spmd_graph_runtime(
         parallelism=parallelism,
         loss_fn=loss_fn,
         trainer_config=trainer_config,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         warn_if_cuda_graph_pass_requested=False,
     )
 
@@ -471,7 +471,7 @@ def _make_pipeline_parallel_graph_runtime(
     model_config: BaseModel.Config | None,
     parallelism: ParallelismConfig,
     loss_fn: LossFunction,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> GraphRuntime:
     """Build graph execution around a real pipeline-parallel schedule."""
     schedule = _make_pipeline_parallel_runtime_schedule(
@@ -490,7 +490,7 @@ def _make_pipeline_parallel_graph_runtime(
         parallelism=parallelism,
         loss_fn=loss_fn,
         trainer_config=None,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         warn_if_cuda_graph_pass_requested=True,
     )
 
@@ -499,7 +499,7 @@ def make_graph_runtime(
     stages: list[GraphPipelineStage],
     *,
     num_microbatches: int,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
     model_config: BaseModel.Config | None,
@@ -670,7 +670,7 @@ def make_graph_runtime(
         stages: Local graph stages. PP=1 requires exactly one stage.
         num_microbatches: Trainer accumulation steps for PP=1, or configured
             pipeline microbatches for PP>1.
-        parallel_dims: Parallel topology used to select PP=1 or PP>1 behavior.
+        parallelism_context: Parallel topology used to select PP=1 or PP>1 behavior.
         parallelism: Parallel configuration used to construct the schedule.
         compile_config: GraphTrainer execution-mode configuration.
         model_config: Model configuration consumed by graph passes.
@@ -683,7 +683,7 @@ def make_graph_runtime(
             f"GraphRuntime requires at least one microbatch, got {num_microbatches}"
         )
 
-    pp_enabled = parallel_dims.pp_enabled
+    pp_enabled = parallelism_context.pp_enabled
     if pp_enabled:
         _validate_graph_pp_config(
             compile_config=compile_config,
@@ -696,13 +696,13 @@ def make_graph_runtime(
         compile_config,
         num_microbatches=num_microbatches,
         pp_enabled=pp_enabled,
-        fsdp_enabled=parallel_dims.fsdp_enabled,
+        fsdp_enabled=parallelism_context.fsdp_enabled,
     )
     gradient_accumulation_policy = resolve_graph_runtime_gradient_accumulation_policy(
         compile_config,
         num_microbatches=num_microbatches,
         pp_enabled=pp_enabled,
-        fsdp_enabled=parallel_dims.fsdp_enabled,
+        fsdp_enabled=parallelism_context.fsdp_enabled,
         extract_fsdp_grad_reduction=fsdp_policy.extract_fsdp_grad_reduction,
     )
 
@@ -716,7 +716,7 @@ def make_graph_runtime(
             model_config=model_config,
             parallelism=parallelism,
             loss_fn=loss_fn,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
         )
 
     requires_graph_extraction = (
@@ -741,7 +741,7 @@ def make_graph_runtime(
         parallelism=parallelism,
         loss_fn=loss_fn,
         trainer_config=trainer_config,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
     )
 
 
@@ -749,7 +749,7 @@ def make_spmd_graph_runtime(
     model: nn.Module,
     *,
     gradient_accumulation_steps: int,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
     device: torch.device,
@@ -760,7 +760,7 @@ def make_spmd_graph_runtime(
     """Represent one SPMD model as a single-stage graph runtime."""
     # PipelineStage treats `group=None` as the world group.
     # TODO: Remove this when PipelineStage supports local single-stage execution.
-    pp_mesh = parallel_dims.get_optional_mesh("pp", include_singleton_axes=True)
+    pp_mesh = parallelism_context.get_optional_mesh("pp", include_singleton_axes=True)
     assert pp_mesh is not None
     stage = GraphPipelineStage(
         model,
@@ -772,7 +772,7 @@ def make_spmd_graph_runtime(
     return make_graph_runtime(
         [stage],
         num_microbatches=gradient_accumulation_steps,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         parallelism=parallelism,
         compile_config=compile_config,
         model_config=model_config,
@@ -784,7 +784,7 @@ def make_spmd_graph_runtime(
 def graph_pipeline_llm(
     model: nn.Module,
     *,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
@@ -798,7 +798,7 @@ def graph_pipeline_llm(
 
     Args:
         model: The full model before PP stage splitting.
-        parallel_dims: TorchTitan parallel dimension helper.
+        parallelism_context: TorchTitan parallel dimension helper.
         training: Training config used for local batch size.
         parallelism: Parallelism config used for PP schedule and module split.
         compile_config: GraphTrainer compile config.
@@ -811,14 +811,14 @@ def graph_pipeline_llm(
     Returns:
         A tuple of ``(runtime, model_parts, has_first_stage, has_last_stage)``.
     """
-    pp_mesh = parallel_dims.get_mesh("pp")
+    pp_mesh = parallelism_context.get_mesh("pp")
 
     (
         num_virtual_stages,
         num_layers,
         input_weight,
         output_weight,
-    ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
+    ) = _get_pipeline_metadata(parallelism_context, parallelism, model_config)
 
     module_names_per_stage = parallelism.pipeline_parallel_module_fqns_per_model_part
     if module_names_per_stage is None:
@@ -831,7 +831,7 @@ def graph_pipeline_llm(
     for index, stage_modules in enumerate(module_names_per_stage):
         logger.debug("GraphPP stage %s modules: %s", index, stage_modules)
 
-    get_mesh_cb = _build_get_mesh_callback(parallel_dims)
+    get_mesh_cb = _build_get_mesh_callback(parallelism_context)
     pp_rank_to_stage_indices = _get_pp_rank_to_stage_indices_mapping(
         pp_mesh.get_local_rank(),
         pp_mesh.size(),
@@ -843,7 +843,7 @@ def graph_pipeline_llm(
     for stage_index in pp_rank_to_stage_indices:
         model_part = _split_module(model, module_names_per_stage[stage_index])
         model_part = model_part.parallelize(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,
@@ -871,7 +871,7 @@ def graph_pipeline_llm(
     graph_runtime = make_graph_runtime(
         stages,
         num_microbatches=parallelism.num_pp_microbatches,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         parallelism=parallelism,
         compile_config=compile_config,
         model_config=model_config,

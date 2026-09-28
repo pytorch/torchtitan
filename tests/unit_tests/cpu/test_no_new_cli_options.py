@@ -137,12 +137,6 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "metrics.log_freq",
         "metrics.save_for_all_ranks",
         "metrics.save_tb_folder",
-        "optimizer.implementation",
-        "optimizer.optimizer_factory_kwargs_by_name",
-        "optimizer.param_groups",
-        "optimizer.param_groups.optimizer_kwargs",
-        "optimizer.param_groups.optimizer_name",
-        "optimizer.param_groups.pattern",
         "override.imports",
         "parallelism.context_parallel_degree",
         "parallelism.data_parallel_replicate_degree",
@@ -313,9 +307,8 @@ def _subclasses(config_cls: type) -> set[type]:
 def _config_types(field_type) -> set[type]:
     """The config classes a field may hold, unwrapping Annotated and generics.
 
-    Both unions and containers expand. tyro indexes a ``list[ParamGroupConfig]``
-    per element, so ``--optimizer.param-groups.0.optimizer-kwargs.lr`` is a real
-    option; the index is dropped here and the element's fields are recorded once.
+    Both unions and containers expand. Tyro indexes configurable list elements;
+    the index is dropped here and the element's fields are recorded once.
 
     Subclasses expand too, because a field declared as a component base holds
     whichever implementation the configuration picked -- ``loss.mtp_scale``

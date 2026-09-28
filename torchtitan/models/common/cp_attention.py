@@ -22,7 +22,7 @@ from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
 
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from torchtitan.models.common.attention import (

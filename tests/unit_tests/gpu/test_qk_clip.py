@@ -24,8 +24,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.components.optimizer import AdamW, OptimizersContainer
+from torchtitan.distributed import ParallelismContext
 from torchtitan.models.deepseek_v3.model import Attention
 
 from torchtitan.models.kimi_k2_7.qk_clip import (
@@ -123,15 +123,12 @@ class QKClipTest(unittest.TestCase):
     def test_optimizer_hook_runs_qk_clip(self) -> None:
         model = nn.Linear(2, 2, bias=False)
         optimizers = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 0.0,
-                        "weight_decay": 0.0,
-                    },
+                    lr=0.0,
+                    weight_decay=0.0,
+                    fused=False,
                 )
             ],
         ).build(model_parts=[model])
@@ -144,12 +141,12 @@ class QKClipTest(unittest.TestCase):
             self.assertEqual(mesh_name, "loss")
             return reduction_mesh
 
-        parallel_dims = cast(
-            ParallelDims,
+        parallelism_context = cast(
+            ParallelismContext,
             SimpleNamespace(get_mesh=get_mesh),
         )
         with patch("torchtitan.models.kimi_k2_7.qk_clip.qk_clip") as mock_qk_clip:
-            register_qk_clip_hook(optimizers, [model], parallel_dims)
+            register_qk_clip_hook(optimizers, [model], parallelism_context)
             model.weight.grad = torch.zeros_like(model.weight)
             optimizers.step()
 
