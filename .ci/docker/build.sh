@@ -26,6 +26,12 @@ case "${IMAGE_NAME}" in
     CLANG_VERSION=12
     BASE_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu${OS_VERSION}
     ;;
+  torchtitan-ubuntu-22.04-clang12:rl)
+    OS_VERSION=22.04
+    CLANG_VERSION=12
+    BASE_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu${OS_VERSION}
+    INSTALL_RL_DEPS=1
+    ;;
   torchtitan-rocm-ubuntu-22.04-clang12)
     OS_VERSION=22.04
     CLANG_VERSION=12
@@ -53,8 +59,8 @@ fi
   --build-arg "CLANG_VERSION=${CLANG_VERSION}" \
   --build-arg "PYTHON_VERSION=${PYTHON_VERSION}" \
   --build-arg "MINICONDA_VERSION=${MINICONDA_VERSION}" \
+  --build-arg "INSTALL_RL_DEPS=${INSTALL_RL_DEPS:-0}" \
   --shm-size=1g \
   -f "${OS}"/Dockerfile \
   "$@" \
   .
-
