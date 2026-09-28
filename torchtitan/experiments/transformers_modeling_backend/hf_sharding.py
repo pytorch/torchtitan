@@ -7,7 +7,7 @@
 """ShardingConfig-based TP setup for HF model modules.
 
 Sets ``_sharding_config`` on every HF sub-module so that a single
-``model._parallelize(parallel_dims)`` call handles all TP distribution
+``model._parallelize(parallelism_context)`` call handles all TP distribution
 and forward wrapping via the Module protocol.
 
 The flex-attention kernel uses a local SPMD region (via ``_attach_flex_kernel``)
@@ -25,7 +25,7 @@ import spmd_types as spmd
 import torch.nn as nn
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,

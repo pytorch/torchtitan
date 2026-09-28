@@ -8,10 +8,11 @@
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
-from torchtitan.components.optimizer import default_adamw
+from torchtitan.components.optimizer import AdamW, OptimizersContainer
 from torchtitan.config import CompileConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
+from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
@@ -345,8 +346,9 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.parallelism.context_parallel_load_balancer = "ptrr"
-    config.parallelism.context_parallel_ptrr_mask_key = "basic_mask"
+    config.parallelism.context_parallel_load_balancer = (
+        PTRRFlexAttentionCPLoadBalancer.Config(mask_key="basic_mask")
+    )
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
@@ -415,8 +417,10 @@ def kimi_k2_5_debugmodel_muon_fsdp8_ep8() -> Trainer.Config:
 def kimi_k2_5_debugmodel_seed_checkpoint() -> Trainer.Config:
     """Use the same Kimi model with an optimizer safe for unsharded setup."""
     config = kimi_k2_5_debugmodel_muon_fsdp8_ep8()
-    config.optimizer = default_adamw()
-    config.optimizer.implementation = "for-loop"
+    config.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*")]
+    )
+    config.optimizer.optimizers[0].fused = False
     return config
 
 

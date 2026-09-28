@@ -87,7 +87,7 @@ class _StubCompileConfig:
 
 
 @dataclass
-class _StubParallelDims:
+class _StubParallelismContext:
     world_size: int = 8
     dp_replicate: int = 1
     dp_shard: int = 2
@@ -177,7 +177,7 @@ class TestConfigFingerprint(unittest.TestCase):
         )
 
         cfg = _StubCompileConfig()
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         fp1 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
         fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
@@ -189,7 +189,7 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
         cfg_a = _StubCompileConfig(memory_policy="full")
         cfg_b = _StubCompileConfig(
             memory_policy="full",
@@ -206,7 +206,7 @@ class TestConfigFingerprint(unittest.TestCase):
         )
 
         cfg = _StubCompileConfig()
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         model_a = _make_stub_model(params=[("w", torch.zeros(4, 4))], buffers=[])
         model_b = _make_stub_model(params=[("w", torch.zeros(8, 8))], buffers=[])
@@ -222,8 +222,8 @@ class TestConfigFingerprint(unittest.TestCase):
         cfg = _StubCompileConfig()
         model = _make_stub_model()
 
-        dims_tp2 = _StubParallelDims(tp=2)
-        dims_tp4 = _StubParallelDims(tp=4)
+        dims_tp2 = _StubParallelismContext(tp=2)
+        dims_tp4 = _StubParallelismContext(tp=4)
         fp_tp2 = compute_config_fingerprint(model, cfg, dims_tp2)
         fp_tp4 = compute_config_fingerprint(_make_stub_model(), cfg, dims_tp4)
         self.assertNotEqual(fp_tp2, fp_tp4)
@@ -233,7 +233,7 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         cfg_a = _StubCompileConfig(passes=["pass_a"])
         cfg_b = _StubCompileConfig(passes=["pass_a", "pass_b"])
@@ -262,7 +262,7 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         cfg_ab = _StubCompileConfig(passes=["a", "b"])
         cfg_ba = _StubCompileConfig(passes=["b", "a"])
@@ -564,7 +564,7 @@ class TestCudaGraphFingerprintConsistency(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         cfg_with = _StubCompileConfig(
             passes=["full_inductor_compilation", "cuda_graph"]
@@ -583,7 +583,7 @@ class TestCudaGraphFingerprintConsistency(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         cfg = _StubCompileConfig(passes=["full_inductor_compilation", "cuda_graph"])
 

@@ -12,12 +12,14 @@ from dataclasses import dataclass
 
 import torch
 import torch._dynamo
+import torch_remat as remat
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -111,11 +113,20 @@ class Attention(BaseAttention):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        q, k, v = self.qkv_linear(x)
+        q, k, v = remat.region(
+            self.qkv_linear,
+            self.remat_region_name("qkv"),
+            recompute=self.remat_should_recompute("qkv"),
+        )(x)
 
+        remat.recompute_needs_tensor(q, k)
         q, k = self.rope(q, k, positions)
 
-        output = self.inner_attention(
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             q,
             k,
             v,
@@ -126,8 +137,15 @@ class Attention(BaseAttention):
         )
 
         # Reshape and project output
+        remat.recompute_needs_tensor(output)
         output = output.reshape(output.shape[0], -1).contiguous()
-        return self.wo(output)
+        output = remat.region(
+            self.wo,
+            self.remat_region_name("wo"),
+            recompute=self.remat_should_recompute("wo"),
+        )(output)
+        remat.recompute_needs_tensor(output)
+        return output
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""
@@ -195,10 +213,12 @@ class GptOssModel(Decoder):
     state_dict_adapter_cls = GptOssStateDictAdapter
 
     @classmethod
-    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
-        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
-        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
@@ -248,7 +268,7 @@ class GptOssModel(Decoder):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: CompileConfig | None,
@@ -256,7 +276,7 @@ class GptOssModel(Decoder):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> GptOssModel:
-        if parallel_dims.cp_enabled and isinstance(
+        if parallelism_context.cp_enabled and isinstance(
             self.config.first_full_attention_backend,
             UlyssesCPInnerAttention.Config,
         ):
@@ -266,7 +286,7 @@ class GptOssModel(Decoder):
             )
 
         if compile_config is not None and "model" in compile_config.components:
-            if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+            if parallelism_context.tp_enabled or parallelism_context.ep_enabled:
                 has_sliding_window_attention = any(
                     isinstance(
                         window_size := getattr(module, "window_size", None),
@@ -284,7 +304,7 @@ class GptOssModel(Decoder):
                     min_recompile_limit,
                 )
         return super().parallelize(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,

@@ -19,9 +19,20 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
-from torchtitan.config import FSDPSymmMemScope
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.config.parallelism import FSDPSymmMemScope
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.linear import GroupedLinear
+
+__all__ = [
+    "apply_fsdp_to_decoder",
+    "apply_fsdp_to_multimodal_encoder",
+    "disable_fsdp_gradient_division",
+    "enable_fsdp_symm_mem",
+    "get_fsdp_reshard_after_forward_policy",
+    "linear_param_shard_placements",
+    "resolve_fsdp_mesh",
+    "resolve_sparse_fsdp_mesh",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +43,10 @@ if TYPE_CHECKING:
 
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
-_SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
+_SPARSE_STORAGE_AXES = ["dp_replicate", "edp_shard", "ep"]
 
 
-def _linear_param_shard_placements(
+def linear_param_shard_placements(
     module: nn.Module,
     *,
     include_unstacked_grouped: bool = False,
@@ -68,7 +79,7 @@ def _linear_param_shard_placements(
 
 
 def resolve_fsdp_mesh(
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
     """Select the dense storage mesh and DataParallelMeshDims.
 
@@ -76,7 +87,7 @@ def resolve_fsdp_mesh(
     even at size 1) so FSDP can pick the DP submesh out of the multi-axis
     storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
     """
-    storage_mesh = parallel_dims.get_activated_mesh(_DENSE_STORAGE_AXES)
+    storage_mesh = parallelism_context.get_activated_mesh(_DENSE_STORAGE_AXES)
     assert storage_mesh is not None
 
     if storage_mesh.size() == 1:
@@ -87,31 +98,31 @@ def resolve_fsdp_mesh(
         return storage_mesh, None
 
     shard_axes = ["dp_shard"]
-    if parallel_dims.cp_enabled:
+    if parallelism_context.cp_enabled:
         shard_axes.append("cp")
     shard: str | tuple[str, ...] = (
         tuple(shard_axes) if len(shard_axes) > 1 else shard_axes[0]
     )
-    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
+    replicate = "dp_replicate" if parallelism_context.dp_replicate_enabled else None
 
     return storage_mesh, DataParallelMeshDims(shard=shard, replicate=replicate)
 
 
 def resolve_sparse_fsdp_mesh(
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> tuple[DeviceMesh | None, DataParallelMeshDims | None]:
     """Sparse counterpart of ``resolve_fsdp_mesh`` for routed experts.
 
     Returns ``(None, None)`` when EP is disabled; otherwise the sparse
-    storage mesh + sparse DP axes. The FSDP axis is ``efsdp`` and
+    storage mesh + sparse DP axes. The FSDP axis is ``edp_shard`` and
     ``dp_replicate`` is shared with the dense path.
     """
-    if not parallel_dims.ep_enabled:
+    if not parallelism_context.ep_enabled:
         return None, None
-    sparse_mesh = parallel_dims.get_activated_mesh(_SPARSE_STORAGE_AXES)
+    sparse_mesh = parallelism_context.get_activated_mesh(_SPARSE_STORAGE_AXES)
     assert sparse_mesh is not None
-    replicate = "dp_replicate" if parallel_dims.dp_replicate_enabled else None
-    return sparse_mesh, DataParallelMeshDims(shard="efsdp", replicate=replicate)
+    replicate = "dp_replicate" if parallelism_context.dp_replicate_enabled else None
+    return sparse_mesh, DataParallelMeshDims(shard="edp_shard", replicate=replicate)
 
 
 def disable_fsdp_gradient_division(model: nn.Module) -> None:
@@ -310,7 +321,7 @@ def apply_fsdp_to_decoder(
     for layer_id, transformer_block in model.layers.items():
         # A stacked Linear keeps W1/W3 separate from the matrix-row dimension.
         # Shard matrix rows so every rank retains both projections.
-        stacked_param_placements = _linear_param_shard_placements(transformer_block)
+        stacked_param_placements = linear_param_shard_placements(transformer_block)
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
@@ -326,19 +337,19 @@ def apply_fsdp_to_decoder(
 
             if ep_degree > 1:
                 assert edp_mesh is not None
-                efsdp_ep_size = edp_mesh["efsdp"].size() * ep_degree
+                expert_sharding_size = edp_mesh["edp_shard"].size() * ep_degree
             else:
                 # FSDP cuts dim 0 only over its shard axes: ``dp_shard``,
                 # plus ``cp`` when CP is on (see ``resolve_fsdp_mesh``).
                 # ``dp_replicate`` replicates, and ``tp`` shards other dims
                 # via the TP plan, so neither divides dim 0.
                 dp_storage_mesh = fsdp_config["mesh"]
-                efsdp_ep_size = dp_storage_mesh["dp_shard"].size()
+                expert_sharding_size = dp_storage_mesh["dp_shard"].size()
                 if "cp" in dp_storage_mesh.mesh_dim_names:
-                    efsdp_ep_size *= dp_storage_mesh["cp"].size()
+                    expert_sharding_size *= dp_storage_mesh["cp"].size()
 
-            if efsdp_ep_size > num_experts:
-                expert_param_placements = _linear_param_shard_placements(
+            if expert_sharding_size > num_experts:
+                expert_param_placements = linear_param_shard_placements(
                     routed_experts,
                     include_unstacked_grouped=True,
                 )
