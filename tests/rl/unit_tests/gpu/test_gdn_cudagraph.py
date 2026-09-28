@@ -72,16 +72,23 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
             str(output),
             str(int(batch_invariant)),
         ]
-        with output.with_suffix(".log").open("w") as log:
-            subprocess.run(
+        log_path = output.with_suffix(".log")
+        with log_path.open("w") as log:
+            completed = subprocess.run(
                 command,
-                check=True,
+                check=False,
                 timeout=195,
                 start_new_session=True,
                 cwd=root,
                 env=env,
                 stdout=log,
                 stderr=subprocess.STDOUT,
+            )
+        if completed.returncode:
+            pytest.fail(
+                f"{mode} subprocess exited with {completed.returncode}:\n"
+                + "\n".join(log_path.read_text(errors="replace").splitlines()[-120:]),
+                pytrace=False,
             )
         results.append(json.loads(output.read_text()))
     eager, full = results
