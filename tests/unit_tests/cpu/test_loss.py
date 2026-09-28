@@ -147,6 +147,32 @@ class TestLoss(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expects prediction and labels tuples"):
             loss_fn(pred, labels)
 
+    def test_mtp_loss_uses_per_depth_denominators(self):
+        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+        logits = tuple(torch.zeros(8, 4, requires_grad=True) for _ in range(4))
+        labels = (
+            torch.zeros(8, dtype=torch.long),
+            torch.tensor([0, 0, 0, 0, 0, 0, 0, IGNORE_INDEX]),
+            torch.tensor([0, 0, 0, 0, 0, 0, IGNORE_INDEX, IGNORE_INDEX]),
+            torch.tensor([0, 0, 0, 0, 0, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX]),
+        )
+        denominators = tuple(
+            (depth_labels != IGNORE_INDEX).sum() for depth_labels in labels[1:]
+        )
+
+        loss, _ = loss_fn(
+            logits,
+            labels,
+            torch.tensor(8),
+            global_mtp_valid_tokens=denominators,
+        )
+        expected = torch.log(torch.tensor(4.0)) * (1.0 + 0.3)
+        torch.testing.assert_close(loss, expected)
+
+        loss.backward()
+        torch.testing.assert_close(logits[0].grad[0, 0], torch.tensor(-0.75 / 8))
+        torch.testing.assert_close(logits[1].grad[0, 0], torch.tensor(-0.1 * 0.75 / 7))
+
     def test_ignore_index_equal_per_token_contribution(self):
         """Test that each valid token contributes equally to the loss.
 
@@ -888,16 +914,21 @@ class TestChunkedLossWrapper(unittest.TestCase):
             value.detach().clone().requires_grad_(True) for value in hidden
         )
         global_valid_tokens = (labels != IGNORE_INDEX).sum()
+        global_mtp_valid_tokens = tuple(
+            (mtp_labels != IGNORE_INDEX).sum() for mtp_labels in loss_labels[1:]
+        )
 
         reference_value, _ = full_loss(
             tuple(model_ref.output(value) for value in reference_hidden),
             loss_labels,
             global_valid_tokens,
+            global_mtp_valid_tokens=global_mtp_valid_tokens,
         )
         chunked_value, _ = chunked_loss(
             chunked_hidden,
             loss_labels,
             global_valid_tokens,
+            global_mtp_valid_tokens=global_mtp_valid_tokens,
         )
         reference_value.backward()
         chunked_value.backward()

@@ -80,6 +80,13 @@ class BaseModel(Module, ABC):
             f"{type(self).__name__} must implement preprocess_inputs()."
         )
 
+    def get_mtp_valid_counts(
+        self, input_dict: dict[str, Any]
+    ) -> tuple[int, ...] | None:
+        """Return local valid-target counts for MTP depths, if applicable."""
+        del input_dict
+        return None
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         """Base config for all models.

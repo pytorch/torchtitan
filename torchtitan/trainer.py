@@ -367,6 +367,15 @@ class Trainer(Configurable):
         else:
             global_valid_tokens = local_valid_tokens_tensor
 
+        get_global_mtp_valid_tokens = getattr(
+            self.engine, "get_global_mtp_valid_tokens", None
+        )
+        global_mtp_valid_tokens = (
+            get_global_mtp_valid_tokens(microbatch_groups)
+            if get_global_mtp_valid_tokens is not None
+            else None
+        )
+
         # Auxiliary losses normalize by the same per-step token count as the
         # main loss, so their scale is independent of parallelism degrees.
         global_valid_tokens = engine.prepare_step(
@@ -380,6 +389,7 @@ class Trainer(Configurable):
             detached_loss = engine.forward_backward_microbatch(
                 microbatch_group=microbatch_group,
                 global_valid_tokens=global_valid_tokens,
+                global_mtp_valid_tokens=global_mtp_valid_tokens,
                 accumulation_index=fwd_bwd_index,
             )
             if should_log:

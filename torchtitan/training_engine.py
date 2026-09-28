@@ -468,12 +468,48 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         AuxLoss.set_step_denominator(global_valid_tokens)
         return global_valid_tokens
 
+    def get_global_mtp_valid_tokens(
+        self, microbatch_groups: list[list[TrainingMicrobatch]]
+    ) -> tuple[torch.Tensor, ...] | None:
+        """Count and reduce MTP targets across one optimizer step."""
+        model = self.model_parts[0]
+        local_counts: tuple[int, ...] | None = None
+        for microbatch_group in microbatch_groups:
+            for microbatch in microbatch_group:
+                counts = model.get_mtp_valid_counts(microbatch.as_input_dict())
+                if counts is None:
+                    continue
+                if local_counts is None:
+                    local_counts = counts
+                elif len(local_counts) != len(counts):
+                    raise ValueError(
+                        "MTP depth count changed within an optimizer step."
+                    )
+                else:
+                    local_counts = tuple(
+                        previous + current
+                        for previous, current in zip(local_counts, counts, strict=True)
+                    )
+
+        if local_counts is None:
+            return None
+
+        counts_tensor = torch.tensor(
+            local_counts, dtype=torch.int64, device=self.device
+        )
+        if self.parallelism_context.dp_enabled:
+            counts_tensor = dist_utils.dist_sum_tensor(
+                counts_tensor, self.parallelism_context.get_mesh("dp")
+            )
+        return tuple(counts_tensor.unbind())
+
     @sl.log_trace_span("forward_backward_microbatch")
     def forward_backward_microbatch(
         self,
         *,
         microbatch_group: list[TrainingMicrobatch],
         global_valid_tokens: torch.Tensor,
+        global_mtp_valid_tokens: tuple[torch.Tensor, ...] | None = None,
         accumulation_index: int = 0,
     ) -> torch.Tensor:
         """Preprocess and execute one gradient-accumulation unit.
@@ -550,11 +586,16 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     if target_mbs is not None:
                         target_mbs.append(labels_mb)
 
+                loss_kwargs: dict[str, Any] = {
+                    "global_valid_tokens": global_valid_tokens
+                }
+                if global_mtp_valid_tokens is not None:
+                    loss_kwargs["global_mtp_valid_tokens"] = global_mtp_valid_tokens
                 return self.forward_backward_body_fn(
                     inputs=arg_mbs if self.pp_has_first_stage else None,
                     model_kwargs=kwarg_mbs,
                     labels=target_mbs,
-                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                    loss_kwargs=loss_kwargs,
                 )
 
             assert len(microbatch_group) == 1
@@ -580,14 +621,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     // self.parallelism_context.cp
                 )
 
+            loss_kwargs: dict[str, Any] = {
+                **microbatch.to_loss_kwargs(self.device, non_blocking=True),
+                "global_valid_tokens": global_valid_tokens,
+            }
+            if global_mtp_valid_tokens is not None:
+                loss_kwargs["global_mtp_valid_tokens"] = global_mtp_valid_tokens
             return self.forward_backward_body_fn(
                 inputs=inputs,
                 labels=labels,
                 model_kwargs=extra_kwargs,
-                loss_kwargs={
-                    **microbatch.to_loss_kwargs(self.device, non_blocking=True),
-                    "global_valid_tokens": global_valid_tokens,
-                },
+                loss_kwargs=loss_kwargs,
             )
 
         if self.sdc_replayer is not None and accumulation_index == 0:
