@@ -4,15 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from dataclasses import dataclass
+from typing import cast
 
 import pytest
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torchtitan.config.transform.quantization as quantization_transform
 
+from torchtitan.config import ConfigManager
 from torchtitan.config.transform import (
     Float8LinearConverter,
+    GroupedLinearLoRAHandler,
     LinearLoRAHandler,
     LoRATransform,
     transform_model_config_,
@@ -27,15 +32,78 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
+    GroupedLinear,
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.llama3 import model_registry
+from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.quantization import Float8Linear
+from torchtitan.trainer import Trainer
 
 
 LINEAR_LORA_HANDLERS = (LinearLoRAHandler(),)
+GROUPED_LINEAR_LORA_HANDLERS = (GroupedLinearLoRAHandler(),)
+
+
+def test_qwen35_moe_float8_lora_model_config(monkeypatch):
+    pytest.importorskip("torchao")
+    from torchtitan.quantization.float8.experts import _float8_grouped_linear_cache
+
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    config = cast(
+        Trainer.Config,
+        ConfigManager().parse_args(
+            [
+                "--module",
+                "qwen3_5",
+                "--config",
+                "qwen35_debugmodel_moe_float8_lora",
+            ]
+        ),
+    )
+    model_config = cast(Qwen35Model.Config, config.model)
+    num_layers = len(model_config.layers)
+    dense_lora = {
+        fqn: projection
+        for fqn, projection, _parent, _attr in model_config.traverse(Linear.Config)
+        if hasattr(projection, "rank")
+    }
+    grouped_lora = {
+        fqn: projection
+        for fqn, projection, _parent, _attr in model_config.traverse(
+            GroupedLinear.Config
+        )
+        if hasattr(projection, "rank")
+    }
+
+    assert set(dense_lora) == {
+        f"layers.{layer}.moe.shared_experts.{projection}"
+        for layer in range(num_layers)
+        for projection in ("w13", "w2")
+    }
+    assert set(grouped_lora) == {
+        f"layers.{layer}.moe.routed_experts.{projection}"
+        for layer in range(num_layers)
+        for projection in ("w13", "w2")
+    }
+    assert Float8Linear is not None
+    assert all(
+        isinstance(projection, Float8Linear.Config)
+        for projection in dense_lora.values()
+    )
+    float8_grouped_configs = tuple(
+        cls.Config for cls in _float8_grouped_linear_cache.values()
+    )
+    assert all(
+        isinstance(projection, float8_grouped_configs)
+        for projection in grouped_lora.values()
+    )
 
 
 def test_lora_model_builds():
@@ -168,6 +236,223 @@ def test_lora_targets_fused_feed_forward_projection():
     reloaded.init_states()
     reloaded.load_state_dict(feed_forward.state_dict())
     torch.testing.assert_close(reloaded(x), expected)
+
+
+def test_lora_targets_fused_grouped_projection():
+    """Each expert gets one A and a stacked B for a fused projection."""
+    config = LoRATransform(
+        handlers=GROUPED_LINEAR_LORA_HANDLERS,
+        rank=8,
+        alpha=16.0,
+    ).transform(
+        GroupedLinear.Config(
+            group_size=2,
+            in_features=8,
+            out_features=8,
+            num_linears=2,
+            param_init={"weight": torch.nn.init.ones_},
+        )
+    )
+    grouped = config.build()
+    grouped.init_states()
+
+    assert grouped.weight.shape == (2, 2, 8, 8)
+    assert grouped.lora_a.weight.shape == (2, 8, 8)
+    assert grouped.lora_b.weight.shape == (2, 2, 8, 8)
+    assert set(grouped.state_dict()) == {
+        "weight",
+        "lora_a.weight",
+        "lora_b.weight",
+    }
+    assert not grouped.weight.requires_grad
+    assert grouped.lora_a.weight.requires_grad
+    assert grouped.lora_b.weight.requires_grad
+    assert torch.count_nonzero(grouped.lora_b.weight) == 0
+
+    with torch.no_grad():
+        grouped.lora_a.weight.copy_(torch.randn_like(grouped.lora_a.weight))
+        grouped.lora_b.weight.copy_(torch.randn_like(grouped.lora_b.weight))
+
+    input_RI = torch.randn(5, 8, dtype=torch.bfloat16, requires_grad=True)
+    offsets_E = torch.tensor([2, 5], dtype=torch.int32)
+    actual_R2O = grouped(input_RI, offsets_E)
+
+    expected_parts = []
+    start = 0
+    for expert, end in enumerate(offsets_E.tolist()):
+        expert_input_RI = input_RI[start:end]
+        base_RO = F.linear(
+            expert_input_RI,
+            grouped.weight[expert].flatten(0, -2).bfloat16(),
+        )
+        hidden_RL = F.linear(
+            expert_input_RI,
+            grouped.lora_a.weight[expert].bfloat16(),
+        )
+        update_RO = F.linear(
+            hidden_RL,
+            grouped.lora_b.weight[expert].flatten(0, -2).bfloat16(),
+        )
+        expected_parts.append(base_RO + 2 * update_RO)
+        start = end
+    expected_R2O = torch.cat(expected_parts).unflatten(-1, (2, 8))
+
+    torch.testing.assert_close(actual_R2O, expected_R2O)
+    actual_R2O.float().sum().backward()
+    assert grouped.weight.grad is None
+    assert grouped.lora_a.weight.grad is not None
+    assert grouped.lora_b.weight.grad is not None
+
+
+def test_grouped_lora_preserves_specialized_projection():
+    config = LoRATransform(handlers=GROUPED_LINEAR_LORA_HANDLERS, rank=8,).transform(
+        GptOssGroupedLinear.Config(
+            group_size=2,
+            in_features=8,
+            out_features=8,
+            param_init={
+                "weight": torch.nn.init.ones_,
+                "bias": torch.nn.init.zeros_,
+            },
+        )
+    )
+    grouped = config.build()
+    grouped.init_states()
+
+    assert isinstance(grouped, GptOssGroupedLinear)
+    assert not grouped.weight.requires_grad
+    assert not grouped.bias.requires_grad
+    assert grouped.get_parameter("lora_a.weight").requires_grad
+    assert grouped.get_parameter("lora_b.weight").requires_grad
+
+    with torch.no_grad():
+        grouped.bias.fill_(3)
+        grouped.lora_a.weight.fill_(1)
+        grouped.lora_b.weight.fill_(1)
+
+    input_RI = torch.ones(4, 8, dtype=torch.bfloat16)
+    offsets_E = torch.tensor([2, 4], dtype=torch.int32)
+    base_RO = torch.full((4, 8), 8, dtype=torch.bfloat16)
+    update_RO = torch.full((4, 8), 64, dtype=torch.bfloat16)
+    expected_RO = base_RO + 2 * update_RO + 3
+    torch.testing.assert_close(grouped(input_RI, offsets_E), expected_RO)
+
+
+def test_grouped_lora_wraps_quantized_grouped_mm(monkeypatch):
+    pytest.importorskip("torchao")
+    from torchtitan.quantization.float8.experts import _get_float8_grouped_linear_cls
+
+    float8_cls = _get_float8_grouped_linear_cls(GroupedLinear)
+    base_called = False
+
+    def grouped_mm(module, *, input_RI, weight_EOI, offsets_E):
+        nonlocal base_called
+        del module, offsets_E
+        base_called = True
+        return input_RI.new_zeros(input_RI.shape[0], weight_EOI.shape[-2])
+
+    monkeypatch.setattr(float8_cls, "_grouped_mm", grouped_mm)
+    config = LoRATransform(
+        handlers=GROUPED_LINEAR_LORA_HANDLERS,
+        rank=8,
+        alpha=16.0,
+    ).transform(
+        float8_cls.Config(
+            group_size=2,
+            in_features=16,
+            out_features=16,
+            param_init={"weight": torch.nn.init.ones_},
+        )
+    )
+    grouped = config.build()
+    grouped.init_states()
+    with torch.no_grad():
+        grouped.lora_a.weight.fill_(1)
+        grouped.lora_b.weight.fill_(1)
+
+    output = grouped(
+        torch.ones(8, 16, dtype=torch.bfloat16),
+        torch.tensor([4, 8], dtype=torch.int32),
+    )
+
+    assert base_called
+    assert isinstance(grouped, float8_cls)
+    assert torch.count_nonzero(output) == output.numel()
+
+
+def test_grouped_lora_a_uses_linear_fan_in():
+    config = LoRATransform(handlers=GROUPED_LINEAR_LORA_HANDLERS, rank=8,).transform(
+        GroupedLinear.Config(
+            group_size=2,
+            in_features=16,
+            out_features=32,
+            param_init={"weight": torch.nn.init.ones_},
+        )
+    )
+    grouped = config.build()
+
+    torch.manual_seed(42)
+    grouped.init_states()
+    torch.manual_seed(42)
+    expected = torch.empty_like(grouped.lora_a.weight)
+    torch.nn.init.kaiming_uniform_(expected.flatten(0, -2), a=math.sqrt(5))
+
+    torch.testing.assert_close(grouped.lora_a.weight, expected)
+
+
+@pytest.mark.parametrize("rank", [1, 4, 9])
+def test_grouped_lora_requires_rank_divisible_by_eight(rank):
+    with pytest.raises(ValueError, match="rank must be divisible by 8"):
+        LoRATransform(handlers=GROUPED_LINEAR_LORA_HANDLERS, rank=rank).transform(
+            GroupedLinear.Config(
+                group_size=2,
+                in_features=8,
+                out_features=8,
+            )
+        )
+
+
+def test_grouped_lora_adapters_follow_expert_sharding():
+    expert_placement = expert_param_placement_sparse()
+    base_sharding = ShardingConfig(
+        state_shardings={"weight": expert_placement},
+    )
+    config = LoRATransform(handlers=GROUPED_LINEAR_LORA_HANDLERS, rank=8).transform(
+        GroupedLinear.Config(
+            group_size=8,
+            in_features=16,
+            out_features=32,
+            sharding_config=base_sharding,
+        )
+    )
+    grouped = config.build()
+
+    for adapter in (grouped.lora_a, grouped.lora_b):
+        assert adapter._sharding_config is not None
+        assert adapter._sharding_config is not base_sharding
+        assert adapter._sharding_config.state_shardings == {"weight": expert_placement}
+        assert adapter._sharding_config.in_src_shardings is None
+        assert adapter._sharding_config.in_dst_shardings is None
+        assert adapter._sharding_config.out_src_shardings is None
+        assert adapter._sharding_config.out_dst_shardings is None
+
+
+def test_grouped_lora_rejects_feature_axis_sharding():
+    config = LoRATransform(handlers=GROUPED_LINEAR_LORA_HANDLERS, rank=8).transform(
+        GroupedLinear.Config(
+            group_size=8,
+            in_features=16,
+            out_features=32,
+            sharding_config=ShardingConfig(
+                state_shardings={
+                    "weight": dense_param_placement(tp=spmd.S(1)),
+                },
+            ),
+        )
+    )
+
+    with pytest.raises(ValueError, match="only expert-axis parameter sharding"):
+        config.build()
 
 
 def test_stacked_lora_adapter_does_not_repeat_base_redistribution():

@@ -22,7 +22,8 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import DebugConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
@@ -132,7 +133,9 @@ def _trace_dsv3_moe_block_stage(
     torch.manual_seed(0)
 
     with _stable_flex_attention_compile_config():
-        model_config = dsv3_model_registry("debugmodel", attn_backend="flex")
+        model_config = dsv3_model_registry(
+            "debugmodel", enable_sp=True, attn_backend="flex"
+        )
         runtime_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(

@@ -55,6 +55,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
 )
+from torchtitan.experiments.graph_trainer.ep_pass_utils import (
+    _chunk_owner,
+    _clear_chunk_ownership,
+)
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     annotate_fsdp_unshard_outputs,
     find_fsdp_unshard_outputs_by_param,
@@ -98,6 +102,9 @@ def deduplicate_fsdp_unshard_chains_pass(
     collective infrastructure. It then annotates the canonical unshard
     boundaries so later collective bucketing can replace the launch/wait nodes
     without hiding the parameter reconstruction chain from downstream passes.
+
+    When deduplication makes one unshard chain serve multiple EP chunks, remove
+    its chunk ownership so EP scheduling treats it as shared infrastructure.
     """
     del example_inputs
 
@@ -109,12 +116,19 @@ def deduplicate_fsdp_unshard_chains_pass(
         if len(unshard_outputs) <= 1:
             continue
         canonical_output = unshard_outputs[0]
+        shared_across_chunk_scopes = (
+            len({_chunk_owner(output) for output in unshard_outputs}) > 1
+        )
         for duplicate_output in unshard_outputs[1:]:
             removable_nodes.update(
                 _chain_nodes_to_placeholder(duplicate_output, placeholder)
             )
             duplicate_output.replace_all_uses_with(canonical_output)
             num_duplicate_chains += 1
+        if shared_across_chunk_scopes:
+            _clear_chunk_ownership(
+                _chain_nodes_to_placeholder(canonical_output, placeholder)
+            )
 
     if num_duplicate_chains:
 
