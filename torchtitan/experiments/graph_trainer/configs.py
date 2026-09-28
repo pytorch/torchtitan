@@ -63,39 +63,92 @@ class EpOverlapConfig:
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
-    """
-    Compilation mode. Options:
-        aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
-        jit: standard torch.compile() with custom backend (deprecated)
-    """
-
-    backend: str = "aot_eager"
-
     passes: list[str] = field(default_factory=list)
     """
-    Additional compiler pass names to apply.
-    In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
+    Additional compiler pass names to apply or prepare inputs for.
     """
 
     enable_passes: bool = True
     """When False, skip optional graph passes (both default and user-configured).
 
-    GraphPP still runs mandatory pre-partition normalization passes because its
-    partitioning contracts depend on canonical graph structure.
+    GraphPP still runs mandatory pre-partition or pre-extraction normalization
+    passes because its partitioning and extraction contracts depend on
+    canonical graph structure.
     """
 
-    enable_inplace_graph_gradient_accumulation: bool = False
-    """Accumulate SPMD AOT gradients in-place into trainer-owned buffers.
+    fsdp_param_unshard_mode: Literal[
+        "auto", "in_graph", "extracted_in_schedule_stage"
+    ] = "auto"
+    """Choose where FSDP parameter all-gathers run.
 
-    This makes gradient accumulation CUDA-graph safe by avoiding clones of
-    replay-owned gradient outputs.
+    - ``auto``
+        - PP=1 without gradient accumulation: all-gathers inside
+          ``FULL_FORWARD_BACKWARD``
+        - PP=1 with gradient accumulation: explicit ``UNSHARD``
+        - PP>1: explicit ``UNSHARD``
+    - ``in_graph``
+        - PP=1: all-gathers inside ``FULL_FORWARD_BACKWARD``
+        - PP>1: error
+        - Keep all-gathers inside ``FULL_FORWARD_BACKWARD`` to be able to
+          immediately deallocate them after their last use and get lower peak
+          memory
+    - ``extracted_in_schedule_stage``
+        - PP=1 and PP>1: explicit ``UNSHARD``
+        - Commonly used for gradient accumulation and PP to run ``UNSHARD``
+          once at the first microbatch. This is achieved by extracting
+          ``UNSHARD`` (all-gathers) into a schedule stage and running it once
+          in GraphRuntime
+    """
 
-    TODO: Add support for:
-        GraphPP
-        precompile
-        parameter aliases
-        custom pass pipelines.
+    fsdp_gradient_sync_mode: Literal[
+        "auto", "in_graph", "deferred_as_schedule_stage"
+    ] = "auto"
+    """Choose where FSDP gradient reduction runs.
+
+    - ``auto``
+        - PP=1 without gradient accumulation: reduction inside
+          ``FULL_FORWARD_BACKWARD``
+        - PP=1 with gradient accumulation: explicit ``REDUCE_GRAD``
+        - PP>1: explicit ``REDUCE_GRAD``
+    - ``in_graph``
+        - PP=1: gradient reduction inside ``FULL_FORWARD_BACKWARD``
+        - PP>1: error
+        - Keep reduce-scatters inside ``FULL_FORWARD_BACKWARD`` to be able to
+          immediately deallocate them after their last use and get lower peak
+          memory
+    - ``deferred_as_schedule_stage``
+        - PP=1 and PP>1: explicit ``REDUCE_GRAD``
+        - Commonly used for gradient accumulation and PP to run
+          ``REDUCE_GRAD`` once at the last microbatch. This is achieved by
+          extracting ``REDUCE_GRAD`` (reduce-scatters) into a schedule stage
+          and running it once in GraphRuntime
+    """
+
+    gradient_accumulation_mode: Literal["auto", "runtime", "in_graph"] = "auto"
+    """Choose where gradients accumulate across schedule microbatches.
+
+    - ``auto``
+        - PP=1: in-graph for WGrad fusion or supported multi-microbatch schedules
+        - PP>1: runtime
+    - ``runtime``
+        - PP=1 and PP>1: accumulate backward outputs in ``GraphRuntime``
+    - ``in_graph``
+        - PP=1: accumulate into persistent graph inputs
+        - PP>1: error
+    """
+
+    gradient_accum_in_wgrad_fusion: Literal["auto", "disabled", "enabled"] = "auto"
+    """Control fusion of WGrad producers with gradient accumulation.
+
+    - ``auto``
+        - In-graph accumulation with ``numerics_changing_optim``: fuse
+          supported WGrad producers
+        - Otherwise: explicit accumulation
+    - ``disabled``
+        - Keep explicit accumulation
+    - ``enabled``
+        - PP=1: enable in-graph accumulation and fuse supported WGrad producers
+        - PP>1: error
     """
 
     disable_passes: list[str] = field(default_factory=list)
@@ -192,17 +245,7 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     enable_autoparallel: bool = False
     """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
-    manual TP/FSDP/EP. Forces the AOT compilation path internally."""
-
-
-def validate_autoparallel_config(
-    compile_config: GraphTrainerCompileConfig,
-) -> None:
-    if compile_config.enable_autoparallel and compile_config.mode != "aot_fx_trace":
-        raise ValueError(
-            "AutoParallel graph_trainer integration only supports "
-            "--compile.mode aot_fx_trace"
-        )
+    manual TP/FSDP/EP."""
 
 
 def validate_ep_overlap_config(

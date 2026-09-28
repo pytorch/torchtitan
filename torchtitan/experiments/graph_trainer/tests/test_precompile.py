@@ -80,8 +80,6 @@ class TestDiskStorageAdapter(unittest.TestCase):
 
 @dataclass
 class _StubCompileConfig:
-    mode: str = "aot_fx_trace"
-    backend: str = "aot_eager"
     passes: list = field(default_factory=list)
     memory_policy: str = "default"
     full_recompute_save_ops: str = ""
@@ -126,7 +124,7 @@ class TestPrecompileMain(unittest.TestCase):
         from torchtitan.experiments.graph_trainer import precompile_main
 
         events = []
-        compile_config = SimpleNamespace(mode="aot_fx_trace")
+        compile_config = SimpleNamespace()
         config = SimpleNamespace(compile=compile_config)
         config_manager = MagicMock()
         config_manager.parse_args.return_value = config
@@ -293,15 +291,15 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
-    def test_loaded_artifact_supports_graph_runner(self):
+    def test_loaded_artifact_supports_traced_execution(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
             minimal_fx_tracer,
+            run_traced,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             flatten_runtime_inputs,
             PrecompiledFxTraceArtifact,
         )
-        from torchtitan.experiments.graph_trainer.runner import GraphRunner
 
         model = torch.nn.Linear(3, 2, dtype=torch.float64)
         inputs = torch.randn(4, 3, dtype=torch.float64)
@@ -314,9 +312,9 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         loaded = PrecompiledFxTraceArtifact.from_traced_result(traced).to_traced_result(
             example_inputs
         )
-        runner = GraphRunner(loaded, module=model)
+        run = run_traced(loaded, module=model)
 
-        self.assertTrue(torch.equal(model(inputs), runner(inputs)))
+        self.assertTrue(torch.equal(model(inputs), run(inputs)))
 
     def test_rejects_trainer_owned_gradient_state(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (

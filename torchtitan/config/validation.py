@@ -13,12 +13,8 @@ from typing import TYPE_CHECKING
 from torchtitan.models.common.attention import BaseAttention
 
 if TYPE_CHECKING:
-    from torchtitan.config import (
-        CompileConfig,
-        DebugConfig,
-        ParallelismConfig,
-        TrainingConfig,
-    )
+    from torchtitan.config import CompileConfig, DebugConfig, TrainingConfig
+    from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )

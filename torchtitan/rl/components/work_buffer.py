@@ -55,9 +55,9 @@ class RolloutGroupWorkBuffer(Configurable):
     """Buffer of `RolloutGroupWork` shared between the data-input, rollout, and batcher loops.
 
     Each entry is a RolloutGroupWork moving WAITING -> INFLIGHT -> FINALIZED. An active-slot budget caps
-    the pipeline at `max_active_rollout_groups` active slots; the batcher takes finalized groups within
-    a fixed look-ahead window anchored at the oldest entry. A `window_size` of 1
-    gives strict FIFO.
+    the pipeline at `max_active_rollout_groups` active slots. With `window_size=None`, the batcher takes
+    the oldest finalized group anywhere in the buffer. A finite `window_size` restricts it to a look-ahead
+    range anchored at the oldest entry.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
@@ -88,14 +88,8 @@ class RolloutGroupWorkBuffer(Configurable):
         """No tunables: capacity and window size are derived by the controller."""
 
     def __init__(
-        self, config: Config, *, max_active_rollout_groups: int, window_size: int = 1
+        self, config: Config, *, max_active_rollout_groups: int, window_size: int | None
     ) -> None:
-        if not 1 <= window_size <= max_active_rollout_groups:
-            raise ValueError(
-                "window_size must be between 1 and max_active_rollout_groups, got "
-                f"window_size={window_size}, "
-                f"max_active_rollout_groups={max_active_rollout_groups}"
-            )
         self._max_active_rollout_groups = max_active_rollout_groups
         self._window_size = window_size
         self._active_rollout_groups = 0
@@ -173,20 +167,24 @@ class RolloutGroupWorkBuffer(Configurable):
 
     @sl.log_trace_span("take_finalized")
     async def take_finalized(self) -> RolloutGroup | None:
-        """Batcher loop: return the oldest FINALIZED group inside the anchored windowed FIFO range.
+        """Batcher loop: return the oldest FINALIZED group the window allows.
 
-        The window covers group ids ``[head, head + window_size - 1]``. Entries outside the
-        window stay blocked even if they are finalized, so taking non-head groups does not slide
-        the window. A `window_size` of 1 gives strict FIFO.
+        Cases:
+            window_size is None: every finalized group is eligible; the oldest is returned.
+            window_size is W:    only group ids ``[head, head + W - 1]`` are eligible, where head is
+                                 the oldest group still in the buffer. Finalized groups past the
+                                 window stay blocked, and taking a non-head group does not move the
+                                 window past the head.
+            window_size is 1:    only the head is eligible: strict FIFO.
 
-        This anchored-window policy follows MiniMax's rollout scheduling approach; see
+        This anchored window is inspired by MiniMax's rollout scheduling; see
         Section 6.2.4 of https://arxiv.org/pdf/2605.26494.
 
         Example:
-            # window_size=3: g0 is INFLIGHT, g1 is WAITING, and g2/g3 are FINALIZED.
+            # window_size=3: g0 INFLIGHT, g1 WAITING, g2 and g3 FINALIZED
             group = await buffer.take_finalized()
-            assert group.group_id == 2  # g2 is inside the anchored window [g0, g2].
-            # g3 remains blocked because taking g2 does not move the window past g0.
+            assert group.group_id == 2  # g2 is inside [g0, g2].
+            # g3 remains blocked. With window_size=None, g3 would be taken next.
         """
         async with self._condition:
             while True:
@@ -194,9 +192,11 @@ class RolloutGroupWorkBuffer(Configurable):
                     return None
                 if self._work_by_group_id:
                     head_group_id = next(iter(self._work_by_group_id))
-                    window_end = head_group_id + self._window_size - 1
                     for group_id, work in self._work_by_group_id.items():
-                        if group_id > window_end:
+                        if (
+                            self._window_size is not None
+                            and group_id >= head_group_id + self._window_size
+                        ):
                             break
                         if work.state is not _RolloutGroupWorkState.FINALIZED:
                             continue
@@ -210,7 +210,7 @@ class RolloutGroupWorkBuffer(Configurable):
         releases untrainable/filtered slots immediately.
 
         Args:
-            count:  Number of rollout groups leaving the active window.
+            count:  Number of rollout groups leaving the active slots.
             reason: Metric suffix such as `"trained"` or `"untrainable_group"`.
 
         Example:

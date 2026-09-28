@@ -29,7 +29,11 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RowParallelLinear,
+)
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 
@@ -348,15 +352,38 @@ class NVFP4Linear(Linear):
                     )
 
         def build(self, **kwargs):
-            # sharding_config (the stock colwise/rowwise weight placement) is
-            # attached by update_from_config after this Config is built, so it
-            # is available here but not in __post_init__. Fold it into the
-            # local SPMD region for the opaque NVFP4 autograd function, so base
-            # Module.parallelize consumes it directly.
+            # sharding_config is attached by update_from_config before this
+            # Config is built, so it is available here but not in
+            # __post_init__.
             # slots=True breaks zero-arg super(), so call the parent explicitly.
             instance = Linear.Config.build(self, **kwargs)
             if instance._sharding_config is not None:
                 sc = instance._sharding_config
+                state_shardings = {
+                    **sc.state_shardings,
+                    "_sr_seed": SpmdType(
+                        {
+                            MeshAxisName.DP: spmd.V,
+                            MeshAxisName.CP: spmd.V,
+                            TP: spmd.V,
+                        }
+                    ),
+                }
+                if isinstance(
+                    instance,
+                    (ColumnParallelLinear, RowParallelLinear),
+                ):
+                    # The explicit TP class owns its collective in forward.
+                    # Making the entire module local would hide that boundary.
+                    instance._sharding_config = replace(
+                        sc,
+                        state_shardings=state_shardings,
+                    )
+                    return instance
+
+                # Plain NVFP4Linear has no outer collective boundary. Fold its
+                # sharding contract into a local region for the opaque autograd
+                # function.
                 weight_tp = sc.state_shardings["weight"].local_type.get(TP)
                 rowwise = (
                     isinstance(weight_tp, spmd.Shard)
@@ -369,16 +396,7 @@ class NVFP4Linear(Linear):
                 # Local-SPMD input layouts are keyed by the forward argument name.
                 instance._sharding_config = replace(
                     sc,
-                    state_shardings={
-                        **sc.state_shardings,
-                        "_sr_seed": SpmdType(
-                            {
-                                MeshAxisName.DP: spmd.V,
-                                MeshAxisName.CP: spmd.V,
-                                TP: spmd.V,
-                            }
-                        ),
-                    },
+                    state_shardings=state_shardings,
                     in_src_shardings={
                         **(sc.in_src_shardings or {}),
                         "input": in_layout,
@@ -442,7 +460,12 @@ class NVFP4Linear(Linear):
         )
         self._refresh_rht_sign_vector_tuple()
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
         physical_weight = self.weight
         local_out_features = physical_weight.shape[-2]
         if local_out_features % _NVFP4_BLOCK:
@@ -452,7 +475,6 @@ class NVFP4Linear(Linear):
                 "Linear out_features or TP degree so quantization blocks "
                 "do not span projection boundaries."
             )
-        weight_NK, bias_N = self._flatten_weight_and_bias()
         if isinstance(physical_weight, _UnshardedFSDPTensor):
             operands = physical_weight.operands
         else:
@@ -467,16 +489,16 @@ class NVFP4Linear(Linear):
             raise RuntimeError("NVFP4 stochastic-rounding seed is not materialized")
         output = _NVFP4LinearFunction.apply(
             input,
-            weight_NK,
+            weight,
             operands.weight_qdata_fprop,
             operands.weight_scale_fprop,
             operands.weight_qdata_dgrad,
             operands.weight_scale_dgrad,
             operands.weight_amax,
-            bias_N,
+            bias,
             self._sr_seed,
             self.rht_sign_vector,
             _resolve_use_cutedsl(KernelPreference.AUTO),
             True,
         )
-        return self._unflatten_output(output)
+        return output

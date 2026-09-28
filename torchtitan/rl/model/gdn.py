@@ -39,7 +39,6 @@ from torchtitan.rl.model.gdn_backend import (
     TorchTitanGDNAttentionBackend,
     TorchTitanGDNAttentionMetadata,
 )
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -190,9 +189,6 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         )
         return query, key, value
 
-    # vLLM leaves attention eager under PIECEWISE and captures this same
-    # implementation under FULL. Metadata is prepared exclusively by the builder.
-    @eager_break_during_capture
     def _forward(
         self,
         mixed_qkv: torch.Tensor,

@@ -3,7 +3,7 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-"""GraphPP stage containers and graph execution contracts."""
+"""Stage containers and graph execution contracts for ``GraphRuntime``."""
 
 import dataclasses
 from collections.abc import Callable
@@ -18,11 +18,58 @@ from torch.distributed.pipelining.schedules import (
 from torch.distributed.pipelining.stage import PipelineStage
 
 
-class GraphPPStageGraphs(Protocol):
-    """Bound graph execution contract for one GraphPP pipeline stage.
+class StageGraphs(Protocol):
+    """Common contract shared by all stage graph executors.
+
+    Calling convention:
+        Parameter-gradient lists remain in flat graph-output order until
+        ``param_grads_for_accumulation`` converts them to live parameter order.
+    """
+
+    @property
+    def accumulates_gradients_in_graph(self) -> bool:
+        """Return whether backward writes into graph-owned accumulators."""
+
+    def zero_grad_(self) -> list[Any]:
+        """Zero graph-owned gradient accumulators.
+
+        Calling convention:
+            ``zero_grad_() -> flat_gradient_accumulators``
+        """
+
+    def unshard_params(
+        self,
+        flat_param_values: list[Any],
+        *,
+        runtime_validate: bool = False,
+    ) -> list[Any]:
+        """Materialize parameter values consumed by a graph action."""
+
+    def reduce_grads(
+        self,
+        unsharded_param_grads: list[Any],
+        *,
+        runtime_validate: bool = False,
+    ) -> list[Any]:
+        """Reduce raw parameter gradients after graph execution."""
+
+    def param_grads_for_accumulation(
+        self,
+        param_grads: list[Any],
+    ) -> list[Any]:
+        """Convert graph gradients to live parameter order.
+
+        Calling convention:
+            ``param_grads_for_accumulation(flat_graph_gradients)``
+            ``-> live_parameter_gradients``
+        """
+
+
+class SplitStageGraphs(StageGraphs, Protocol):
+    """Bound split-graph execution contract for one model stage.
 
     Implementations own their graph modules, metadata, and low-level graph
-    executor. ``GraphPipelineRuntime`` passes explicit runtime values and stores the
+    executor. ``GraphRuntime`` passes explicit runtime values and stores the
     returned values in ``GraphPipelineStage.state`` and upstream PP caches.
     """
 
@@ -33,16 +80,7 @@ class GraphPPStageGraphs(Protocol):
         Returns:
             bool: ``True`` when ``backward_input`` and ``backward_weight``
             should run as separate schedule actions; ``False`` when
-            ``FULL_BACKWARD`` is the only backward callable.
-        """
-
-    @property
-    def num_unsharded_param_grad_values(self) -> int:
-        """Return the number of unsharded param-grad accumulator slots.
-
-        Returns:
-            int: Number of flat values in ``GraphPPStageRuntimeState`` used to
-            accumulate unsharded parameter gradients across microbatches.
+            one full-backward graph handles both.
         """
 
     def unshard_params(
@@ -180,23 +218,30 @@ class GraphPPStageGraphs(Protocol):
             list[Any]: Flat sharded parameter-gradient values.
         """
 
-    def param_grads_for_accumulation(
+
+class JointStageGraphs(StageGraphs, Protocol):
+    """Bound joint forward/loss/backward graph for a PP=1 stage.
+
+    Calling convention:
+        ``(args, kwargs, target, loss_kwargs)``
+        ``-> (loss, parameter_gradients)``
+    """
+
+    def forward_backward(
         self,
-        sharded_param_grads: list[Any],
-    ) -> list[Any]:
-        """Prepare parameter gradients for accumulation on model parameters.
-
-        Args:
-            sharded_param_grads (list[Any]): Flat reduced parameter-gradient
-                values.
-
-        Returns:
-            list[Any]: Parameter gradients ordered for
-            ``accumulate_param_grads_``.
-        """
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        target: Any,
+        loss_kwargs: dict[str, Any],
+        *,
+        unsharded_param_values: list[Any],
+        flat_buffer_values: list[Any],
+        runtime_validate: bool = False,
+    ) -> tuple[Any, list[Any]]:
+        """Run one joint graph and return its loss and parameter gradients."""
 
 
-class GraphPPOverlapGraphs(Protocol):
+class OverlapStageGraphs(Protocol):
     """Bound graph execution contract for one ``OVERLAP_F_B`` stage pair."""
 
     def forward_backward(
@@ -244,8 +289,8 @@ class GraphPPOverlapGraphs(Protocol):
         """
 
 
-class GraphPPStageGraphsProvider(Protocol):
-    """Build or attach stage graphs before GraphPP runtime execution."""
+class StageGraphsProvider(Protocol):
+    """Build or attach stage graphs before graph runtime execution."""
 
     def prepare_graphs(
         self,
@@ -253,19 +298,19 @@ class GraphPPStageGraphsProvider(Protocol):
         ctx: _PipelineContext,
         *,
         loss_kwargs: dict[str, Any],
-    ) -> dict[tuple[int, int], GraphPPOverlapGraphs]:
-        """Prepare every local GraphPP stage for runtime execution.
+    ) -> dict[tuple[int, int], OverlapStageGraphs]:
+        """Prepare every local stage for graph runtime execution.
 
         Args:
             schedule (_PipelineScheduleRuntime): Runtime pipeline schedule
-                being executed by GraphPP.
+                being executed by the graph runtime.
             ctx (_PipelineContext): Pipeline schedule context for the current
                 step.
             loss_kwargs (dict[str, Any]): Extra loss keyword arguments from the
-                GraphPP runtime.
+                graph runtime.
 
         Returns:
-            dict[tuple[int, int], GraphPPOverlapGraphs]: Mapping from
+            dict[tuple[int, int], OverlapStageGraphs]: Mapping from
             ``(forward_stage_index, backward_stage_index)`` to the multiplexed
             overlap graph executor for that stage pair.
         """
@@ -312,7 +357,7 @@ class GraphPipelineStage(PipelineStage):
 
     ``GraphPipelineStage`` intentionally owns only PP runtime state and the
     bound graph executor consumed by the runtime. Graph construction policy is
-    provided separately through a ``GraphPPStageGraphsProvider`` so callers can
+    provided separately through a ``StageGraphsProvider`` so callers can
     supply non-GraphTrainer graph implementations without coupling the stage to
     GraphTrainer tracing or compilation.
 
@@ -351,20 +396,19 @@ class GraphPipelineStage(PipelineStage):
             group=group,
             get_mesh=get_mesh,
         )
-        self.graphs: GraphPPStageGraphs | None = None
+        self.graphs: SplitStageGraphs | JointStageGraphs | None = None
         self.state = GraphPPStageRuntimeState()
         self.saved_values_for_backward_weight_cache: dict[int, tuple[Any, ...]] = {}
         self._graph_pp_grads_scaled = False
 
     def set_graphs(
         self,
-        graphs: GraphPPStageGraphs,
+        graphs: SplitStageGraphs | JointStageGraphs,
     ) -> None:
         """Attach a bound graph executor to this stage.
 
         Args:
-            graphs (GraphPPStageGraphs): Stage graph executor implementing the
-                GraphPP stage graph protocol.
+            graphs: Split or joint stage graph executor.
         """
 
         self.graphs = graphs

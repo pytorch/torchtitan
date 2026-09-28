@@ -178,7 +178,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         with torch.device("meta"):
             build_config, max_context_length = qwen3_5_configs["debugmodel"]
-            model = build_config("flex", seq_len=max_context_length).build()
+            model = build_config(
+                "flex", enable_sp=True, seq_len=max_context_length
+            ).build()
         positions = torch.tensor([0, 1, 2, 0, 0], dtype=torch.int32)
 
         with mock.patch.object(Decoder, "get_attention_masks", return_value=None):
@@ -197,7 +199,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         with torch.device("meta"):
             build_config, max_context_length = qwen3_5_configs["debugmodel"]
-            model = build_config("flex", seq_len=max_context_length).build()
+            model = build_config(
+                "flex", enable_sp=True, seq_len=max_context_length
+            ).build()
         positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
         full_attention_mask = mock.sentinel.full_attention_mask
 
@@ -435,7 +439,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             device=device,
         )
 
-        flex_model = model_registry("debugmodel").build()
+        flex_model = model_registry("debugmodel", enable_sp=True).build()
         masks = flex_model.get_attention_masks(positions)
         self.assertIsInstance(masks, dict)
         self.assertEqual(set(masks.keys()), {"quadratic_attention", "deltanet"})
@@ -456,7 +460,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 "quadratic_attention" if layer.full_attn else "deltanet",
             )
 
-        varlen_model = model_registry("debugmodel", attn_backend="varlen").build()
+        varlen_model = model_registry(
+            "debugmodel", enable_sp=True, attn_backend="varlen"
+        ).build()
         varlen_masks = varlen_model.get_attention_masks(positions)
         self.assertIsInstance(varlen_masks, dict)
         self.assertIs(varlen_masks["quadratic_attention"], varlen_masks["deltanet"])
@@ -466,7 +472,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
-        deltanet_only_config = model_registry("debugmodel")
+        deltanet_only_config = model_registry("debugmodel", enable_sp=True)
         deltanet_only_config.layers = [
             layer
             for layer in deltanet_only_config.layers

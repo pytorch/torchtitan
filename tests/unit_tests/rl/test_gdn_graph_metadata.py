@@ -30,6 +30,46 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
 
+@pytest.mark.parametrize(
+    "graph_mode",
+    [CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY],
+)
+def test_gdn_supports_eager_and_full_decode_only_modes(graph_mode):
+    config = VllmConfig()
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=graph_mode,
+        cudagraph_capture_sizes=[1, 2],
+        max_cudagraph_capture_size=2,
+        cudagraph_num_of_warmups=1,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=16,
+        max_num_seqs=2,
+        max_num_batched_tokens=2,
+        is_encoder_decoder=False,
+    )
+    spec = MambaSpec(
+        block_size=8,
+        shapes=((3, 512), (2, 128, 128)),
+        dtypes=(torch.bfloat16, torch.float32),
+        mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
+    )
+
+    TorchTitanGDNAttentionMetadataBuilder(spec, [], config, torch.device("cpu"))
+
+    dispatcher = TorchTitanCudagraphDispatcher(config)
+    dispatcher.initialize_cudagraph_keys(graph_mode)
+    decode_mode, _ = dispatcher.dispatch(1, uniform_decode=True)
+    prefill_mode, _ = dispatcher.dispatch(2, uniform_decode=False)
+    expected_decode = (
+        CUDAGraphMode.FULL
+        if graph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        else CUDAGraphMode.NONE
+    )
+    assert (decode_mode, prefill_mode) == (expected_decode, CUDAGraphMode.NONE)
+
+
 def test_full_metadata_and_native_dispatch_variants():
     config = VllmConfig()
     config.compilation_config = CompilationConfig(

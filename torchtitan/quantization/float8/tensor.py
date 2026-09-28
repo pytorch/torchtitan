@@ -157,7 +157,7 @@ class _LinearShardedTensorWithFloat8HighPrecisionWeightGradient(
 
 
 @dataclass(frozen=True, slots=True)
-class _Float8GroupedExpertsOperands:
+class _Float8GroupedLinearOperands:
     """Float8 expert-weight operands owned by one FSDP unshard lifetime.
 
     FPROP uses transposed expert weights ``(E, I, O)`` with one scale per
@@ -175,7 +175,7 @@ class _Float8GroupedExpertsOperands:
 @torch.no_grad()
 def _quantize_float8_grouped_weight(
     weight_EOI: torch.Tensor,
-) -> _Float8GroupedExpertsOperands:
+) -> _Float8GroupedLinearOperands:
     """Build the two expert-weight orientations used by FPROP and DGRAD.
 
     The kernel sequence is adapted from
@@ -214,7 +214,7 @@ def _quantize_float8_grouped_weight(
         output_dtype=e4m3_dtype,
         round_scales_to_power_of_2=True,
     )
-    return _Float8GroupedExpertsOperands(
+    return _Float8GroupedLinearOperands(
         weight_qdata_fprop_EIO=weight_qdata_fprop_EIO,
         weight_scale_fprop_E1O=weight_scale_fprop_E1O,
         weight_qdata_dgrad_EOI=weight_qdata_dgrad_EOI,
@@ -222,15 +222,15 @@ def _quantize_float8_grouped_weight(
     )
 
 
-class _GroupedExpertsShardedTensorWithFloat8Compute(_ShardedFSDPTensor):
+class _GroupedLinearShardedTensorWithFloat8Compute(_ShardedFSDPTensor):
     """Persistent expert parameter with cached Float8 compute operands."""
 
     def _build_operands(
         self,
         logical_tensor: torch.Tensor,
-        out: _Float8GroupedExpertsOperands | None = None,
-    ) -> _Float8GroupedExpertsOperands:
-        operands = _quantize_float8_grouped_weight(logical_tensor)
+        out: _Float8GroupedLinearOperands | None = None,
+    ) -> _Float8GroupedLinearOperands:
+        operands = _quantize_float8_grouped_weight(logical_tensor.flatten(1, -2))
         if out is None:
             return operands
         out.weight_qdata_fprop_EIO.copy_(operands.weight_qdata_fprop_EIO)
