@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Tests for fixed-bin LPT packing and its FFD fallback."""
+"""CPU tests for fixed-bin LPT packing and its FFD fallback."""
 
 import random
 
