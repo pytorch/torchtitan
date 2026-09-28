@@ -24,10 +24,10 @@ By transitivity of test 2 and test 3: trainer == vLLM decode.
 
 Run each backend in a separate torchrun invocation:
     torchrun --nproc_per_node=2 -m pytest \
-        tests/rl/integration_tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
+        tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityVarlen -v
 
     torchrun --nproc_per_node=2 -m pytest \
-        tests/rl/integration_tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
+        tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
 import dataclasses
@@ -40,6 +40,7 @@ import unittest
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+import pytest
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
@@ -92,6 +93,9 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = logging.getLogger(__name__)
+
+# Each class runs under its own two-GPU torchrun launch.
+pytestmark = pytest.mark.multi_gpu
 
 
 # ---------------------------------------------------------------------------

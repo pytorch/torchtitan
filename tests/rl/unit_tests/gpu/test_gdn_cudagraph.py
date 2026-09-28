@@ -47,7 +47,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     if not model:
         pytest.skip(f"set {MODEL_ENV} to a local Qwen3.5-0.8B checkpoint")
     assert Path(model).is_dir(), model
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     # Set import-time options before the child interpreter starts.
     env = {
         **os.environ,

@@ -25,11 +25,14 @@ from torchtitan.rl.model.vllm_registry import register_to_vllm
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
-from tests.rl.integration_tests.test_bitwise_parity import (
+from tests.rl.unit_tests.gpu.test_bitwise_parity import (
     _make_prompt_tokens,
     _run_engine,
     build_inference_engine,
 )
+
+# Runs under a four-GPU torchrun launch.
+pytestmark = pytest.mark.multi_gpu
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

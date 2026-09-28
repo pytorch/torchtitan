@@ -114,26 +114,6 @@ jobs:
           --assert-equal \
           --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --num_generators 1'
 
-        # HF adapter layout regression uses two CPU/Gloo ranks.
-        python -m pytest tests/rl/unit_tests/test_vllm_wrapper.py -v
-
-        # Bitwise trainer/generator parity tests (batch-invariant). Each TP=2 case
-        # runs in a separate torchrun invocation so it gets a fresh process group
-        # and vLLM engine.
-        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
-          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/integration_tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
-        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
-          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/integration_tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
-        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
-          torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/integration_tests/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
-
-        # Four-GPU generator integration test needs its own process group.
-        torchrun --nproc-per-node=4 -m pytest \
-          tests/rl/integration_tests/test_generator_uneven_decode.py -v
-
         # Run E2E RL integration tests (up to 8 GPUs): includes the MoE TP=4 EP=4
         # random-init test and the batch-invariant debug tests (both need 8 GPUs).
         python -m tests.rl.integration_tests.rl \
