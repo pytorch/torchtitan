@@ -47,7 +47,7 @@ from torchtitan.experiments.graph_trainer.trainer import (
     GraphTrainingEngine,
 )
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import TrainingEngine
+from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 @contextmanager
@@ -107,7 +107,6 @@ def build_minimal_trainer(
     engine.model_parts = [model]
     engine.loss_fn = CrossEntropyLoss.Config().build()
     engine.parallel_dims = parallel_dims
-    engine.forward_backward_body_fn = engine._non_pp_forward_backward_microbatch
     engine.model_config = model_config
     engine.device = torch.device("cuda")
     engine.preprocess_inputs_kwargs = {}
@@ -124,7 +123,6 @@ def build_minimal_trainer(
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
             compile=GraphTrainerCompileConfig(
-                mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
                 passes=[] if compile_passes is None else list(compile_passes),
                 disable_passes=(
@@ -244,8 +242,30 @@ def build_minimal_trainer(
             )
             return outputs[0]
 
+        def run_direct_graph_accumulation(
+            microbatch_groups, global_valid_tokens
+        ) -> ForwardBackwardResult:
+            """Run all groups through the test's unsplit graph adapter."""
+            accumulated_loss = None
+            loss_metrics = []
+            for inputs, model_kwargs, labels in microbatch_groups:
+                loss = run_direct_graph_step(
+                    inputs=inputs,
+                    labels=labels,
+                    model_kwargs=model_kwargs,
+                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                ).detach()
+                if accumulated_loss is None:
+                    accumulated_loss = loss.clone()
+                else:
+                    accumulated_loss.add_(loss)
+                loss_metrics.append({})
+
+            assert accumulated_loss is not None
+            return ForwardBackwardResult(accumulated_loss, loss_metrics)
+
         # Compiler component tests inspect the unsplit graph directly.
-        engine.forward_backward_body_fn = run_direct_graph_step
+        engine._run_forward_backward = run_direct_graph_accumulation
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
@@ -258,10 +278,11 @@ def build_minimal_trainer(
             ),
         )
 
+        engine._run_forward_backward = partial(
+            engine._forward_backward_body,
+            defer_fsdp_gradient_reduction=False,
+        )
+
     engine.config = trainer.config
-    engine._run_forward_backward = partial(
-        engine._forward_backward_body,
-        defer_fsdp_gradient_reduction=False,
-    )
 
     return trainer
