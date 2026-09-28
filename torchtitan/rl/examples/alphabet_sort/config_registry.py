@@ -357,7 +357,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     )
 
 
-def rl_grpo_gpt_oss_debug_varlen_all_to_all() -> Controller.Config:
+def rl_grpo_gpt_oss_debug_varlen_a2a() -> Controller.Config:
     """Small GPT-OSS debug config (random init) on the standard all-to-all EP backend.
 
     Runs on GPUs without DeepEP (e.g. A10G CI). The all-to-all dispatcher syncs
@@ -443,7 +443,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
     the static CUDA-graph-compatible layout and captures FULL CUDA graphs.
     Per-layer compile is disabled because DeepEP training does not support it.
     """
-    config = rl_grpo_gpt_oss_debug_varlen_all_to_all()
+    config = rl_grpo_gpt_oss_debug_varlen_a2a()
     config.model = gpt_oss_model_registry(
         "debugmodel",
         seq_len=config.trainer.training.max_context_length,

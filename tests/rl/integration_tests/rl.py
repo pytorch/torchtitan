@@ -98,7 +98,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             [
                 [
                     "--module alphabet_sort",
-                    "--config rl_grpo_gpt_oss_debug_varlen_all_to_all",
+                    "--config rl_grpo_gpt_oss_debug_varlen_a2a",
                     "--async-loop.num-training-steps 5",
                     "--hf_assets_path tests/assets/tokenizer",
                     "--trainer.parallelism.tensor_parallel_degree 4",
