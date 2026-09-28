@@ -15,7 +15,6 @@ import math
 from collections.abc import Callable
 
 import einops as E
-import requests
 import torch
 
 import torchvision.io
@@ -23,6 +22,8 @@ import torchvision.io
 import torchvision.transforms.v2.functional as TVF
 
 from PIL import Image
+
+from . import _url
 
 
 logger = logging.getLogger(__name__)
@@ -35,8 +36,7 @@ def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
     falls back to TVF.pil_to_tensor for PIL Image inputs.
     """
     if isinstance(image, str) and image.startswith("http"):
-        response = requests.get(image, timeout=10)
-        image = response.content
+        image = _url.fetch_url(image).content
     if isinstance(image, bytes):
         raw = torch.frombuffer(bytearray(image), dtype=torch.uint8)
         return torchvision.io.decode_image(raw, mode=torchvision.io.ImageReadMode.RGB)
