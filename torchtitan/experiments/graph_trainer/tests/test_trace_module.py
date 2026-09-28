@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import unittest
 from collections import Counter
 from copy import deepcopy
@@ -168,7 +169,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         ):
             engine._initialize_forward_backward()
 
-    def test_aot_fx_initializes_one_stage_pipeline_runtime(self):
+    def test_initializes_one_stage_pipeline_runtime(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
 
@@ -177,7 +178,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
-            compile=SimpleNamespace(mode="aot_fx_trace", memory_policy="none"),
+            compile=SimpleNamespace(memory_policy="none"),
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             sdc_replayer=None,
             training=SimpleNamespace(
@@ -225,7 +226,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
     def test_aot_fx_runs_multi_microbatch_group_through_graph_runtime(self):
         from types import SimpleNamespace
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
 
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 
@@ -237,7 +238,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         )
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
-            compile=SimpleNamespace(mode="aot_fx_trace"),
+            compile=SimpleNamespace(),
             parallelism="PARALLELISM",
             training=SimpleNamespace(
                 max_context_length=8,
@@ -261,7 +262,11 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             for index in range(2)
         ]
 
-        prepared_groups = engine._preprocess_microbatch_groups([microbatches])
+        with patch(
+            "torchtitan.experiments.graph_trainer.trainer.dist_utils.get_spmd_context",
+            return_value=contextlib.nullcontext(),
+        ):
+            prepared_groups = engine._preprocess_microbatch_groups([microbatches])
         engine._pp_forward_backward_microbatch_group = MagicMock(
             return_value=torch.tensor(3.0)
         )
@@ -1722,7 +1727,10 @@ class TestTraceModels(unittest.TestCase):
 
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
-            attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+            attn_backend="flex",
+            moe_comm_backend="standard",
+            enable_sp=True,
+            seq_len=max_context_length,
         )
         # Aux losses normalize by the step's global valid-token count, which
         # the trainer sets; there is no training context here.
@@ -2133,7 +2141,10 @@ class TestTraceFSDP(FSDPTest):
 
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
-            attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+            attn_backend="flex",
+            moe_comm_backend="standard",
+            enable_sp=True,
+            seq_len=max_context_length,
         )
         # 2 matches the batch used inside _run_fsdp_model_test.
         AuxLoss.set_step_denominator(torch.tensor(2.0))
@@ -2229,7 +2240,6 @@ class TestTraceContextParallel(FSDPTest):
                 config.parallelism.context_parallel_degree = context_parallel_degree
                 config.parallelism.tensor_parallel_degree = 1
                 config.activation_checkpoint = None
-                config.compile.mode = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
                 config.model.layers = config.model.layers[:1]
