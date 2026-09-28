@@ -155,7 +155,7 @@ what you need, add NEW knobs for new gaps):
   through `spmd_types.redistribute(P->R)`. spmd_types is a pre-run CHECK (validates
   SPMD sharding via typechecking) -- keep it OFF for perf runs.
 - **compile / cudagraph**: `--compile {off,aot_eager,inductor}` `--cudagraph
-  {on,off}` `--cudagraph-mode {full_decode_only,full,full_and_piecewise}`. Capture
+  {on,off}` `--cudagraph-mode {full_decode_only,full}`. Capture
   PREFILL with `--cudagraph-mode full --max-num-batched-tokens <P> --max-capture-size
   <P>`, where P >= the prefill CHUNK size (= max_num_batched_tokens), NOT input_len.
   Decode capture sizes default to powers of 2 up to max_num_seqs (= batch).
@@ -168,11 +168,6 @@ These change WHO owns torch.compile:
   compile; torchtitan's per-layer `aot_eager` is the only compile. full_decode_only
   = decode captured, eager prefill; **full** = also captures prefill (needs
   `--max-capture-size >= chunk`). KEEPS torchtitan compile.
-- **full_and_piecewise**: `mode=VLLM_COMPILE, backend="eager"` AND `config.compile
-  =off` -- vLLM compiles the whole model (to split the graph around collectives),
-  so per-layer aot_eager is turned off. DROPS torchtitan compile for vLLM's.
-Mixing FULL and FAP across rungs mixes two compile strategies (a bug we hit --
-re-run the WHOLE ladder on ONE mode). native FULL ~= native FAP (878.9 vs 879.1 W1).
 
 ## Example ladder + results
 

@@ -320,7 +320,12 @@ class Float8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
         if torch.is_autocast_enabled():
             input = input.to(torch.get_autocast_gpu_dtype())
 
@@ -331,7 +336,6 @@ class Float8Linear(Linear):
                 "Float8 requires local out_features divisible by 16; got "
                 f"{local_out_features}. Adjust the Linear out_features or TP degree."
             )
-        weight_NK, bias_N = self._flatten_weight_and_bias()
         if isinstance(physical_weight, _UnshardedFSDPTensor):
             operands = physical_weight.operands
         else:
@@ -352,7 +356,7 @@ class Float8Linear(Linear):
 
         output = _Float8LinearFunction.apply(
             input,
-            weight_NK,
+            weight,
             operands.weight_qdata_fprop_KN,
             operands.weight_scale_fprop_1N,
             operands.weight_qdata_dgrad_NK,
@@ -360,6 +364,6 @@ class Float8Linear(Linear):
             self.recipe_name == "rowwise_with_gw_hp",
             self.emulate,
         )
-        if bias_N is not None:
-            output = output + bias_N.to(output.dtype)
-        return self._unflatten_output(output)
+        if bias is not None:
+            output = output + bias.to(output.dtype)
+        return output

@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 
 class GptOssStateDictAdapter(MoEStateDictAdapter):
     _EXPERT_BIAS_KEY = "layers.{}.moe.expert_bias_E"
+    _W13_WEIGHT_KEY = "layers.{}.moe.routed_experts.w13.weight"
+    _W13_BIAS_KEY = "layers.{}.moe.routed_experts.w13.bias"
 
     def __init__(self, model_config: GptOssModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
@@ -46,10 +48,10 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE
-            "model.layers.{}.mlp.experts.gate_up_proj_blocks": "layers.{}.moe.routed_experts.inner_experts.mlp1_weight_EGD",
-            "model.layers.{}.mlp.experts.gate_up_proj_bias": "layers.{}.moe.routed_experts.inner_experts.mlp1_bias_EG",
-            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.routed_experts.inner_experts.mlp2_weight_EDF",
-            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.routed_experts.inner_experts.mlp2_bias_ED",
+            "model.layers.{}.mlp.experts.gate_up_proj_blocks": self._W13_WEIGHT_KEY,
+            "model.layers.{}.mlp.experts.gate_up_proj_bias": self._W13_BIAS_KEY,
+            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.routed_experts.w2.weight",
+            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.routed_experts.w2.bias",
             "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
             "model.norm.weight": "norm.weight",
@@ -107,6 +109,8 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                     continue
                 hf_key = to_hf_map[abstract_key]
                 hf_key = hf_key.format(layer_num)
+                if abstract_key in (self._W13_WEIGHT_KEY, self._W13_BIAS_KEY):
+                    value = value.transpose(1, 2).flatten(1, 2)
                 hf_state_dict[hf_key] = value
             else:
                 if key not in to_hf_map:
@@ -136,6 +140,11 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 if tt_key is None:
                     continue
                 tt_key = tt_key.format(layer_num)
+                if self.from_hf_map[abstract_key] in (
+                    self._W13_WEIGHT_KEY,
+                    self._W13_BIAS_KEY,
+                ):
+                    value = value.unflatten(1, (-1, 2)).transpose(1, 2).contiguous()
                 state_dict[tt_key] = value
             else:
                 tt_key = self.from_hf_map[key]

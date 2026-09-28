@@ -17,9 +17,11 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
+    AsyncTensorParallelTransform,
     Float8LinearConverter,
     LinearLoRAHandler,
     LoRATransform,
@@ -113,7 +115,7 @@ def llama3_debugmodel_varlen_attn(
 def llama3_debugmodel_dist_gemm(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    """Async-TP: the attention TP collectives are folded into their GEMMs.
+    """Async-TP: attention and FFN collectives are folded into their GEMMs.
 
     Needs tensor_parallel_degree > 1 and CUDA. With TP off the fused modules
     fall back to the stock projections, so this stays runnable on one rank.
@@ -121,8 +123,13 @@ def llama3_debugmodel_dist_gemm(
     The fused modules take and return plain local tensors.
     """
     config = llama3_debugmodel(seq_len=seq_len)
-    config.model = model_registry(
-        "debugmodel", seq_len=seq_len, tp_gemm_backend="dist_gemm"
+    config = apply_transforms(
+        config,
+        [
+            AsyncTensorParallelTransform(
+                enable_sequence_parallel=config.parallelism.enable_sequence_parallel
+            )
+        ],
     )
     return config
 
