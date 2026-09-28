@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.optim import Optimizer
 
 from torchtitan.distributed import ParallelismContext
@@ -897,6 +898,10 @@ def register_moe_load_balancing_hook(
                 )
         return load_balance_enabled
 
+    # for MoE auxiliary-loss-free load balancing
+    def _is_recomputation_enabled(module):
+        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
+
     def _update_expert_bias(
         model_parts: list[nn.Module],
         parallelism_context: ParallelismContext,
@@ -907,6 +912,14 @@ def register_moe_load_balancing_hook(
         tokens_per_expert_E_list = []
         for transformer_block, moe in _iter_moe_layers(model_parts):
             tokens_per_expert_E = moe.router.tokens_per_expert_E
+            if _is_recomputation_enabled(transformer_block):
+                # TODO: This is a hack. FullAC recomputes through PyTorch
+                # checkpointing, where remat.is_recomputing() is False, so the
+                # router forward counts tokens_per_expert_E twice. This does not
+                # affect expert choice, but affects the expert usage metrics.
+                # torch_remat based policies skip the count during replay.
+                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
+                tokens_per_expert_E = tokens_per_expert_E // 2
             tokens_per_expert_E_list.append(tokens_per_expert_E)
 
         if not tokens_per_expert_E_list:
