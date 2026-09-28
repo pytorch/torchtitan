@@ -16,12 +16,7 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 
-from torchtitan.models.common import (
-    ComplexRoPE,
-    Embedding,
-    Linear,
-    PartialBiasRowwiseLinear,
-)
+from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RowParallelLinear
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
 from torchtitan.models.common.config_utils import (
     fused_qkv_param_init,
@@ -31,6 +26,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -175,7 +171,7 @@ def _build_muse_glimmer_attention(
                 ),
             ),
         ),
-        wo=Linear.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             param_init=_depth_init(layer_id),
@@ -254,10 +250,10 @@ def _vision_linear(in_features: int, out_features: int, *, bias: bool) -> Linear
     )
 
 
-def _vision_partial_bias_rowwise_linear(
+def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> PartialBiasRowwiseLinear.Config:
-    return PartialBiasRowwiseLinear.Config(
+) -> InvariantRowParallelLinear.Config:
+    return InvariantRowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -310,14 +306,12 @@ def muse_glimmer_vision_encoder_config(
                 wq=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wk=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
                 wv=_vision_linear(latent_dim, num_heads * head_dim, bias=True),
-                proj=_vision_partial_bias_rowwise_linear(
-                    num_heads * head_dim, latent_dim
-                ),
+                proj=_vision_row_parallel_linear(num_heads * head_dim, latent_dim),
             ),
             norm2=_vision_layer_norm(latent_dim),
             mlp=VisionMLP.Config(
                 fc1=_vision_linear(latent_dim, mlp_hidden, bias=True),
-                fc2=_vision_partial_bias_rowwise_linear(mlp_hidden, latent_dim),
+                fc2=_vision_row_parallel_linear(mlp_hidden, latent_dim),
                 act_fn=GELU.Config(approximate="none"),
             ),
         ),

@@ -29,7 +29,7 @@ from torchao.prototype.moe_training.kernels import (
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
     _FLOAT8_GEMM_ALIGNMENT,
-    _GroupedExpertsShardedTensorWithFloat8Compute,
+    _GroupedLinearShardedTensorWithFloat8Compute,
     _quantize_float8_grouped_weight,
 )
 
@@ -112,6 +112,8 @@ class _Float8GroupedMMFunction(torch.autograd.Function):
             if has_unsharded_tensor
             else (weight_qdata_dgrad_EOI, weight_scale_dgrad_EI)
         )
+        # TODO: Honor ctx.needs_input_grad like _Float8LinearFunction so frozen
+        # expert weights do not save A_RI for or compute WGRAD.
         ctx.save_for_backward(A_RI, offsets_E, *saved_weight_tensors)
         ctx.has_unsharded_tensor = has_unsharded_tensor
         ctx.weight_dtype = weight_EOI.dtype
@@ -182,17 +184,17 @@ class _Float8GroupedMMFunction(torch.autograd.Function):
 spmd.register_local_autograd_function(_Float8GroupedMMFunction)
 
 
-_float8_experts_cache: dict[type, type] = {}
+_float8_grouped_linear_cache: dict[type, type] = {}
 
 
-def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
-    """Get or create a Float8-quantized subclass of ``parent_cls``."""
-    if parent_cls in _float8_experts_cache:
-        return _float8_experts_cache[parent_cls]
+def _get_float8_grouped_linear_cls(parent_cls: type) -> type:
+    """Get or create a Float8-quantized grouped-linear subclass."""
+    if parent_cls in _float8_grouped_linear_cache:
+        return _float8_grouped_linear_cache[parent_cls]
 
     parent_config_cls = parent_cls.Config  # type: ignore[attr-defined]
 
-    class Float8GroupedExperts(parent_cls):  # type: ignore[valid-type, misc]
+    class Float8GroupedLinear(parent_cls):  # type: ignore[valid-type, misc]
         @dataclass(kw_only=True, slots=True)
         class Config(parent_config_cls):  # type: ignore[misc]
             pass
@@ -200,38 +202,28 @@ def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
         def __init__(self, config: Config):
             super().__init__(config)
             module = cast(nn.Module, self)
-            for name, parameter in tuple(module.named_parameters(recurse=False)):
-                if parameter.ndim == 3:
-                    setattr(
-                        self,
-                        name,
-                        nn.Parameter(
-                            _GroupedExpertsShardedTensorWithFloat8Compute(
-                                parameter.data
-                            ),
-                            requires_grad=parameter.requires_grad,
-                        ),
-                    )
+            parameter = module.get_parameter("weight")
+            module.weight = nn.Parameter(
+                _GroupedLinearShardedTensorWithFloat8Compute(parameter.data),
+                requires_grad=parameter.requires_grad,
+            )
 
         def _save_to_state_dict(self, destination, prefix, keep_vars):
             super()._save_to_state_dict(destination, prefix, keep_vars)
             module = cast(nn.Module, self)
-            for name, parameter in module.named_parameters(recurse=False):
-                if isinstance(
-                    parameter,
-                    _GroupedExpertsShardedTensorWithFloat8Compute,
-                ):
-                    tensor = parameter._tensor
-                    destination[prefix + name] = (
-                        tensor if keep_vars else tensor.detach()
-                    )
+            parameter = module.get_parameter("weight")
+            if isinstance(parameter, _GroupedLinearShardedTensorWithFloat8Compute):
+                tensor = parameter._tensor
+                destination[prefix + "weight"] = (
+                    tensor if keep_vars else tensor.detach()
+                )
 
         def _grouped_mm(
             self,
             *,
-            A: torch.Tensor,
+            input_RI: torch.Tensor,
             weight_EOI: torch.Tensor,
-            offs: torch.Tensor,
+            offsets_E: torch.Tensor,
         ) -> torch.Tensor:
             physical_weight = weight_EOI
             if isinstance(physical_weight, _UnshardedFSDPTensor):
@@ -242,23 +234,23 @@ def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
                         physical_weight._tensor
                         if isinstance(
                             physical_weight,
-                            _GroupedExpertsShardedTensorWithFloat8Compute,
+                            _GroupedLinearShardedTensorWithFloat8Compute,
                         )
                         else physical_weight
                     )
                     operands = _quantize_float8_grouped_weight(high_precision_weight)
 
             return _Float8GroupedMMFunction.apply(
-                A,
+                input_RI,
                 weight_EOI,
                 operands.weight_qdata_fprop_EIO,
                 operands.weight_scale_fprop_E1O,
                 operands.weight_qdata_dgrad_EOI,
                 operands.weight_scale_dgrad_EI,
-                offs,
+                offsets_E,
             )
 
-    Float8GroupedExperts.__name__ = f"Float8{parent_cls.__name__}"
-    Float8GroupedExperts.__qualname__ = f"Float8{parent_cls.__name__}"
-    _float8_experts_cache[parent_cls] = Float8GroupedExperts
-    return Float8GroupedExperts
+    Float8GroupedLinear.__name__ = f"Float8{parent_cls.__name__}"
+    Float8GroupedLinear.__qualname__ = f"Float8{parent_cls.__name__}"
+    _float8_grouped_linear_cache[parent_cls] = Float8GroupedLinear
+    return Float8GroupedLinear

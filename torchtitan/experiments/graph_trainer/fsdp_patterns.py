@@ -441,8 +441,8 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
         local_grad -> cast/view* -> all_reduce -> wait -> reduce_scatter
           -> wait -> grad
 
-    GraphPP splits at the input to the earliest grad-sync collective in that
-    suffix. The cast remains in ``bw_no_fsdp`` so microbatch accumulation
+    GraphPP extracts at the input to the earliest grad-sync collective in that
+    suffix. The cast remains in the compute graph so microbatch accumulation
     happens in FSDP's reduce dtype, and ``reduce_grad`` contains only the
     scheduled collective epilogue. Values that are not FX nodes, such as
     ``None`` parameter-grad slots, are not collective outputs and are preserved

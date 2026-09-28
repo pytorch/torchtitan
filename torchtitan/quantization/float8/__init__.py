@@ -17,10 +17,10 @@ except ImportError as import_error:
 _float8_experts_import_error: ImportError | None = None
 
 try:
-    from .experts import _float8_experts_cache, _get_float8_grouped_experts_cls
+    from .experts import _float8_grouped_linear_cache, _get_float8_grouped_linear_cls
 except ImportError as import_error:
-    _float8_experts_cache = {}
-    _get_float8_grouped_experts_cls = None
+    _float8_grouped_linear_cache = {}
+    _get_float8_grouped_linear_cls = None
     _float8_experts_import_error = import_error
 
 

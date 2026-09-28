@@ -1,3 +1,9 @@
+"ciflow/docker":
+  globs:
+    - .ci/docker/**
+    - .github/workflows/docker-builds.yml
+  draft: false
+
 "ciflow/fake-pg":
   globs:
     - .ci/docker/**

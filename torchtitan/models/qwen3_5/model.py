@@ -13,15 +13,17 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 from torch import nn
-from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    spmd_dense_sp_enabled,
     spmd_local_context,
+    spmd_mesh_group,
 )
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -29,12 +31,14 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
+    HybridAttentionMetadata,
     VarlenInnerAttention,
-    VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
+    add_zero_vision_dependency,
+    build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
@@ -58,8 +62,6 @@ from .vision_encoder import Qwen35VisionEncoder
 # H = attention heads,
 # K = query/key head dimension, V = value head dimension,
 # R = rotary dimension, P = non-rotary dimension.
-
-Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 
 class OffsetRMSNorm(Module):
@@ -144,6 +146,18 @@ class Qwen35Attention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # The query, key, and value projections all consume x. Gather once
+            # at their common attention boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
         num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
@@ -227,7 +241,7 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: Qwen35AttentionMaskDict | None,
+        attention_masks: HybridAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -419,7 +433,7 @@ class Qwen35Model(MultimodalModel):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
@@ -429,40 +443,37 @@ class Qwen35Model(MultimodalModel):
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
         del kwargs
-        # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
-        batch: dict[str, Any] = dict(input_dict)
-        padding_mask = batch.get("padding_mask", None)
+        padding_mask = input_dict.get("padding_mask", None)
 
         # Attention masks are built from the 1D ``positions``.
-        positions = batch.get("positions")
+        positions = input_dict.get("positions")
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                batch["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
                     max_context_length=max_context_length,
                 )
 
-        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
+        input_shardings = {
+            **decoder_input_sharding(),
+            **multimodal_input_sharding(),
+        }
 
         # RoPE uses the 3D MRoPE positions when present (multimodal), else the
         # same 2D positions. Collapse both into the single ``positions`` input.
-        mrope_positions = batch.pop("mrope_positions", None)
+        mrope_positions = input_dict.pop("mrope_positions", None)
         if mrope_positions is None:
             rope_positions = positions
         else:
             rope_positions = mrope_positions
             # MRoPE positions fold to ``(tokens, 3)`` (2D); replicate the
             # trailing component axis instead of the 1D token layout.
-            input_sharding["positions"] = SpmdType(
+            input_shardings["positions"] = SpmdType(
                 {
                     MeshAxisName.DP: spmd.V,
                     MeshAxisName.CP: spmd.V,
@@ -476,26 +487,27 @@ class Qwen35Model(MultimodalModel):
             "Qwen3.5 needs RoPE positions: the batch must provide "
             "'positions' or 'mrope_positions'."
         )
-        batch["positions"] = rope_positions
+        input_dict["positions"] = rope_positions
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+            input_dict = self._cp_shard(
+                input_dict,
+                input_shardings=input_shardings,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
             )
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        input_dict = annotate_input_spmd_types(
+            parallel_dims, input_dict, input_shardings
+        )
         # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
         # nested inside attention_masks, must be annotated at its container.
-        attention_masks = batch.get("attention_masks")
+        attention_masks = input_dict.get("attention_masks")
         if attention_masks is not None:
             with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
                 annotate_deltanet_cu_seqlens(attention_masks)
 
-        inputs = batch.pop("input")
-        labels = batch.pop("labels")
-        return inputs, labels, batch
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        return inputs, labels, input_dict
 
     def get_attention_masks(
         self,
@@ -504,7 +516,7 @@ class Qwen35Model(MultimodalModel):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> Qwen35AttentionMaskDict:
+    ) -> HybridAttentionMetadata:
         attn_config = self.config.first_attention
 
         # Multimodal padding uses position 0 for every padded token. A real
@@ -606,13 +618,27 @@ class Qwen35Model(MultimodalModel):
         inputs_embeds = (
             self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         )
+        if self.vision_encoder is None:
+            return inputs_embeds
 
-        if pixel_values is not None and grid_thw is not None:
+        # TODO: Configure the job-wide modality set from the dataset so
+        # single-modality jobs can avoid the second encoder call.
+        image_is_dummy = pixel_values is None or grid_thw is None
+        if image_is_dummy:
+            grid_size = self.vision_encoder.spatial_merge_size
+            pixel_values, grid_thw = build_dummy_vision_inputs(
+                patch_dim=self.vision_encoder.patch_embed.in_features,
+                grid_thw=(1, grid_size, grid_size),
+                device=inputs_embeds.device,
+            )
+        vision_embeds, num_tokens = self._get_vision_embeds(
+            pixel_values, grid_thw=grid_thw
+        )
+        if image_is_dummy:
+            inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
+        else:
             if special_tokens is None:
                 raise ValueError("special_tokens is required for image inputs")
-            vision_embeds, num_tokens = self._get_vision_embeds(
-                pixel_values, grid_thw=grid_thw
-            )
             image_positions = get_vision_positions(
                 tokens, num_tokens, special_tokens["image_id"]
             )
@@ -623,12 +649,22 @@ class Qwen35Model(MultimodalModel):
                     vision_positions=image_positions,
                 )
 
-        if pixel_values_videos is not None and grid_thw_videos is not None:
+        video_is_dummy = pixel_values_videos is None or grid_thw_videos is None
+        if video_is_dummy:
+            grid_size = self.vision_encoder.spatial_merge_size
+            pixel_values_videos, grid_thw_videos = build_dummy_vision_inputs(
+                patch_dim=self.vision_encoder.patch_embed.in_features,
+                grid_thw=(1, grid_size, grid_size),
+                device=inputs_embeds.device,
+            )
+        vision_embeds, num_tokens = self._get_vision_embeds(
+            pixel_values_videos, grid_thw=grid_thw_videos
+        )
+        if video_is_dummy:
+            inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
+        else:
             if special_tokens is None:
                 raise ValueError("special_tokens is required for video inputs")
-            vision_embeds, num_tokens = self._get_vision_embeds(
-                pixel_values_videos, grid_thw=grid_thw_videos
-            )
             video_positions = get_vision_positions(
                 tokens, num_tokens, special_tokens["video_id"]
             )
@@ -649,7 +685,7 @@ class Qwen35Model(MultimodalModel):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: Qwen35AttentionMaskDict | None = None,
+        attention_masks: HybridAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,

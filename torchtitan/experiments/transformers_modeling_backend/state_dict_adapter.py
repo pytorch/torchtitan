@@ -15,11 +15,9 @@ Two complementary pieces live here:
 
 - ``hf_to_titan_moe_state_dict`` / ``titan_to_hf_moe_state_dict`` -- functions
   that convert MoE expert weights between HF and Titan layouts after the Titan
-  MoE replacement (fused ``gate_up_proj`` <-> separate gate/up split, plus router
-  and shared-expert key renames). Non-MoE keys pass through. Used by the
-  numerical-equivalence and round-trip tests. Parameter names (e.g. ``w1`` vs
-  ``w1_EFD``) are discovered dynamically from ``GroupedExperts`` so this stays
-  compatible across naming conventions.
+  MoE replacement (packed ``gate_up_proj`` <-> structured W13, plus router and
+  shared-expert key renames). Non-MoE keys pass through. Used by the
+  numerical-equivalence and round-trip tests.
 """
 
 from __future__ import annotations
@@ -27,12 +25,8 @@ from __future__ import annotations
 import re
 from typing import Any, TYPE_CHECKING
 
-import spmd_types as spmd
 import torch
 
-from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
-    _get_expert_param_info,
-)
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 if TYPE_CHECKING:
@@ -43,13 +37,8 @@ if TYPE_CHECKING:
 # ``router.weight`` that must map back exactly rather than to ``gate.weight``).
 _TITAN_TO_ORIGINAL_HF_KEY: dict[str, str] = {}
 
-# Post-#3859 the routed grouped experts live under this submodule path on the
-# titan MoE (the token_dispatcher is a sibling node under ``routed_experts``).
-# HF stores the routed experts directly under ``experts``. Keeping the two
-# spellings distinct here is what makes ``load_state_dict`` actually populate
-# the GroupedExperts params; before this, the adapter emitted the stale
-# ``experts.*`` titan FQN and the weights silently failed to load.
-_TITAN_EXPERTS_PREFIX = "routed_experts.inner_experts"
+_TITAN_W13_WEIGHT = "routed_experts.w13.weight"
+_TITAN_W2_WEIGHT = "routed_experts.w2.weight"
 
 
 class HFTransformerStateDictAdapter(StateDictAdapter):
@@ -93,27 +82,13 @@ class HFTransformerStateDictAdapter(StateDictAdapter):
         return {"model." + k: v for k, v in hf_state_dict.items()}
 
 
-def _expert_names() -> tuple[str, str, str]:
-    """Return ``(gate_name, down_name, up_name)`` for routed expert params.
-
-    Maps canonical roles to actual ``GroupedExperts`` parameter names
-    (e.g. ``w1`` or ``w1_EFD`` depending on the torchtitan version).
-    """
-    _, layout = _get_expert_param_info()
-    colwise = [n for n, p in layout.items() if p == spmd.S(1)]
-    rowwise = [n for n, p in layout.items() if p == spmd.S(2)]
-    return colwise[0], rowwise[0], colwise[1]
-
-
 def _build_hf_to_titan_patterns() -> list[tuple[str, str, bool]]:
-    """Build regex patterns using actual expert parameter names."""
-    _, down, _ = _expert_names()
     return [
         (r"^(.*\.)gate\.weight$", r"\1router.gate.weight", False),
         (r"^(.*\.)router\.weight$", r"\1router.gate.weight", False),
         (r"^(.*\.)router\.proj\.weight$", r"\1router.gate.weight", False),
         (r"^(.*\.)gate\.e_score_correction_bias$", r"\1expert_bias", False),
-        (r"^(.*\.)experts\.down_proj$", rf"\1{_TITAN_EXPERTS_PREFIX}.{down}", False),
+        (r"^(.*\.)experts\.down_proj$", rf"\1{_TITAN_W2_WEIGHT}", False),
         # Shared experts use FeedForward (w1/w2/w3 attribute names, not params)
         (r"^(.*\.shared_experts)\.gate_proj\.weight$", r"\1.w1.weight", False),
         (r"^(.*\.shared_experts)\.up_proj\.weight$", r"\1.w3.weight", False),
@@ -138,13 +113,11 @@ def _build_hf_to_titan_patterns() -> list[tuple[str, str, bool]]:
 
 
 def _build_titan_to_hf_patterns() -> list[tuple[str, str, bool]]:
-    """Build reverse regex patterns using actual expert parameter names."""
-    _, down, _ = _expert_names()
     return [
         (r"^(.*\.)router\.gate\.weight$", r"\1gate.weight", False),
         (r"^(.*\.)expert_bias$", r"\1gate.e_score_correction_bias", False),
         (
-            rf"^(.*\.){re.escape(_TITAN_EXPERTS_PREFIX)}\.{re.escape(down)}$",
+            rf"^(.*\.){re.escape(_TITAN_W2_WEIGHT)}$",
             r"\1experts.down_proj",
             False,
         ),
@@ -176,39 +149,34 @@ def hf_to_titan_moe_state_dict(
 ) -> dict[str, torch.Tensor]:
     """Convert HF MoE state dict keys/values to titan format.
 
-    Handles fused ``gate_up_proj`` -> gate/up split, router and shared
+    Handles packed ``gate_up_proj`` -> structured W13, router and shared
     expert key renames, and expert bias mapping. Non-MoE keys pass through.
 
     Args:
         hf_state_dict: State dict with HF-format keys.
 
     Returns:
-        State dict with titan-format keys and split expert weights.
+        State dict with titan-format keys and structured expert weights.
     """
-    gate_name, down_name, up_name = _expert_names()
     patterns = _build_hf_to_titan_patterns()
     titan_state_dict = {}
 
     for key, value in hf_state_dict.items():
-        # Handle fused gate_up_proj -> gate + up. HF MoE models use the
-        # standard (E, 2*I, H) layout, so dim 1 is 2*I.
+        # HF stores W13 as [E, 2F, D]; Titan preserves gate/up as a semantic
+        # axis so TP can shard F without separating the two projections.
         # Match ``.experts.`` with a leading dot so the routed experts are not
         # confused with a shared expert (e.g. ``shared_experts.down_proj``).
         if key.endswith(".experts.gate_up_proj"):
             prefix = key[: -len("experts.gate_up_proj")]
-            intermediate_size = value.shape[1] // 2
-            titan_state_dict[f"{prefix}{_TITAN_EXPERTS_PREFIX}.{gate_name}"] = value[
-                :, :intermediate_size, :
-            ]
-            titan_state_dict[f"{prefix}{_TITAN_EXPERTS_PREFIX}.{up_name}"] = value[
-                :, intermediate_size:, :
-            ]
+            titan_state_dict[f"{prefix}{_TITAN_W13_WEIGHT}"] = value.unflatten(
+                1, (2, -1)
+            )
             continue
 
         # Handle expert down_proj rename.
         if key.endswith(".experts.down_proj"):
             prefix = key[: -len("experts.down_proj")]
-            titan_state_dict[f"{prefix}{_TITAN_EXPERTS_PREFIX}.{down_name}"] = value
+            titan_state_dict[f"{prefix}{_TITAN_W2_WEIGHT}"] = value
             continue
 
         # Try regex patterns
@@ -232,47 +200,22 @@ def titan_to_hf_moe_state_dict(
 ) -> dict[str, torch.Tensor]:
     """Convert titan MoE state dict keys/values to HF format.
 
-    Inverse of ``hf_to_titan_moe_state_dict``. Fuses gate/up back
-    into ``gate_up_proj`` and reverses all key renames.
+    Inverse of ``hf_to_titan_moe_state_dict``. Packs structured W13 back into
+    ``gate_up_proj`` and reverses all key renames.
 
     Args:
         titan_state_dict: State dict with titan-format keys.
 
     Returns:
-        State dict with HF-format keys and fused expert weights.
+        State dict with HF-format keys and packed expert weights.
     """
-    gate_name, down_name, up_name = _expert_names()
-    gate_suffix = f"{_TITAN_EXPERTS_PREFIX}.{gate_name}"
-    up_suffix = f"{_TITAN_EXPERTS_PREFIX}.{up_name}"
     patterns = _build_titan_to_hf_patterns()
     hf_state_dict = {}
 
-    # Collect gate/up pairs for fusing back into gate_up_proj
-    gate_keys: dict[str, str] = {}
-    up_keys: dict[str, str] = {}
-
-    for key in titan_state_dict:
-        if key.endswith(gate_suffix):
-            prefix = key[: -len(gate_suffix)]
-            gate_keys[prefix] = key
-        elif key.endswith(up_suffix):
-            prefix = key[: -len(up_suffix)]
-            up_keys[prefix] = key
-
-    fused = set()
-    for prefix, g_key in gate_keys.items():
-        u_key = up_keys.get(prefix)
-        if u_key is not None:
-            hf_key = f"{prefix}experts.gate_up_proj"
-            fused_value = torch.cat(
-                [titan_state_dict[g_key], titan_state_dict[u_key]], dim=1
-            )
-            hf_state_dict[hf_key] = fused_value
-            fused.add(g_key)
-            fused.add(u_key)
-
     for key, value in titan_state_dict.items():
-        if key in fused:
+        if key.endswith(_TITAN_W13_WEIGHT):
+            prefix = key[: -len(_TITAN_W13_WEIGHT)]
+            hf_state_dict[f"{prefix}experts.gate_up_proj"] = value.flatten(1, 2)
             continue
 
         if key in _TITAN_TO_ORIGINAL_HF_KEY:

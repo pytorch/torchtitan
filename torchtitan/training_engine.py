@@ -13,11 +13,6 @@ import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
-from torch.distributed.pipelining.schedules import (
-    _PipelineScheduleRuntime,
-    get_schedule_class,
-    PipelineScheduleMulti,
-)
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
@@ -33,10 +28,10 @@ from torchtitan.config.configs import (
     CommConfig,
     CompileConfig,
     DebugConfig,
-    ParallelismConfig,
     TrainingConfig,
 )
 from torchtitan.config.override import OverrideConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
@@ -116,22 +111,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     "(--parallelism.pipeline_parallel_degree 1)."
                 )
 
-            if (
-                not self.training.disable_cuda_graphs
-                and cuda_graphs_supported()
-                and self.parallelism.pipeline_parallel_degree > 1
-            ):
-                pp_schedule_class = (
-                    _PipelineScheduleRuntime
-                    if self.parallelism.pipeline_parallel_schedule_csv
-                    else get_schedule_class(self.parallelism.pipeline_parallel_schedule)
-                )
-                if issubclass(pp_schedule_class, PipelineScheduleMulti):
-                    raise ValueError(
-                        "CUDA graphs do not support looped pipeline schedules yet. "
-                        "Use a single-stage pipeline schedule or disable CUDA graphs."
-                    )
-
             if self.parallelism.num_pp_microbatches <= 0:
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
@@ -143,9 +122,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 else 1
             )
             context_parallel_degree = self.parallelism.context_parallel_degree
-            activation_shard_degree = sequence_parallel_degree * (
-                2 * context_parallel_degree if context_parallel_degree > 1 else 1
-            )
+            activation_shard_degree = sequence_parallel_degree * context_parallel_degree
             if num_tokens % activation_shard_degree != 0:
                 raise ValueError(
                     "The number of tokens per pipeline microbatch "
@@ -230,12 +207,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         config = self.config
         dist_utils.set_batch_invariance(config.debug.batch_invariant)
         with sl.log_trace_span("torch_distributed_init"):
-            world_size = dist_utils.init_distributed(
+            topology = dist_utils.init_distributed(
                 config.comm,
                 enable_cpu_backend=config.training.enable_cpu_offload,
                 base_folder=self.output_dir,
+                pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
-        self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, topology)
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq,
             debug=config.training.gc_debug,
@@ -539,7 +517,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     input_dict = microbatch.to_input_dict(
                         self.device, non_blocking=True
                     )
-                    with sl.log_trace_span("preprocess_inputs"):
+                    with (
+                        sl.log_trace_span("preprocess_inputs"),
+                        dist_utils.get_spmd_context(parallel_dims=self.parallel_dims),
+                    ):
                         inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
                             0
                         ].preprocess_inputs(
@@ -577,7 +558,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             assert len(microbatch_group) == 1
             microbatch = microbatch_group[0]
             input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
-            with sl.log_trace_span("preprocess_inputs"):
+            with (
+                sl.log_trace_span("preprocess_inputs"),
+                dist_utils.get_spmd_context(parallel_dims=self.parallel_dims),
+            ):
                 inputs, labels, extra_kwargs = self.model_parts[0].preprocess_inputs(
                     input_dict,
                     parallel_dims=self.parallel_dims,

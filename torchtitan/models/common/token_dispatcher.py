@@ -716,7 +716,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # It also does padding to make sure the number of tokens each expert
         # gets locally is a multiple of `self.pad_multiple`.
         # Note that this will create side effects when wrapping the for-loop
-        # implementation of GroupedExperts, as it does not need padding.
+        # implementation of routed experts, as it does not need padding.
         from torchao.prototype.moe_training.ep.permute import permute_and_pad
 
         # ep_size=1 when EP is disabled: permute_and_pad then only pads token

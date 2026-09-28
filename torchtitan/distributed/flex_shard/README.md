@@ -38,9 +38,9 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   boundaries. DistMuon's planning code constructs zero-copy strided
   `[M, R, C]` views directly from each rank's compute shape and logical starting
   row. For `(R,)`, the view is equivalent to unflattening the row dimension.
-  A native batch-first 3D `[M, R, C]`
-  parameter uses `Shard(0)` to distribute complete matrices, or `Owned` to
-  assign the complete batch to one rank. A single 2D matrix without
+  A native matrix batch `[..., R, C]` uses `Shard(0)` to distribute its
+  outermost batch dimension, or `Owned` to assign the complete batch to one
+  rank. A single 2D matrix without
   `BlockShard` uses whole-matrix compute such as `Owned`. The builder validates
   named DTensor parameters and plans their storage-to-compute transitions.
 
@@ -49,9 +49,10 @@ Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
 most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
 `Replicate`; every other non-unit storage mesh axis must be replicated.
 
-Native `[M, R, C]` parameters can redistribute `Replicate()`, `Shard(1)`,
-or `Shard(2)` storage to `Shard(0)` compute on one mesh axis, with every
-other non-unit storage mesh axis replicated.
+Native `[..., R, C]` parameters can redistribute `Replicate()`, a shard of the
+matrix-row dimension, or a shard of the matrix-column dimension to `Shard(0)`
+compute on one mesh axis, with every other non-unit storage mesh axis
+replicated.
 
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,

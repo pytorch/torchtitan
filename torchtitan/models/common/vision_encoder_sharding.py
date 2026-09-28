@@ -133,10 +133,8 @@ def vision_colwise_config(
     )
 
 
-def vision_partial_bias_rowwise_config(
-    *, include_cp_axis: bool = False
-) -> ShardingConfig:
-    """Partial-bias rowwise vision linear returning a TP-invariant activation."""
+def vision_rowwise_config(*, include_cp_axis: bool = False) -> ShardingConfig:
+    """Sharding contract for an invariant-output vision row projection."""
     input_layout = _vision_activation_placement(
         tp=spmd.S(1), include_cp_axis=include_cp_axis
     )
@@ -153,11 +151,7 @@ def vision_partial_bias_rowwise_config(
         in_dst_shardings={
             "input": input_layout,
         },
-        out_src_shardings=_vision_activation_placement(
-            tp=spmd.P, include_cp_axis=include_cp_axis
-        ),
-        out_dst_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
-        local_spmd=True,
+        out_src_shardings=_vision_activation_placement(include_cp_axis=include_cp_axis),
     )
 
 
@@ -198,7 +192,7 @@ def set_vision_transformer_block_sharding_config(
     block.attn.wv.sharding_config = vision_colwise_config(
         input_tp=spmd.R, include_cp_axis=include_cp_axis
     )
-    block.attn.proj.sharding_config = vision_partial_bias_rowwise_config(
+    block.attn.proj.sharding_config = vision_rowwise_config(
         include_cp_axis=include_cp_axis
     )
     if include_cp_axis:
@@ -225,6 +219,6 @@ def set_vision_transformer_block_sharding_config(
     block.mlp.fc1.sharding_config = vision_colwise_config(
         include_cp_axis=include_cp_axis
     )
-    block.mlp.fc2.sharding_config = vision_partial_bias_rowwise_config(
+    block.mlp.fc2.sharding_config = vision_rowwise_config(
         include_cp_axis=include_cp_axis
     )
