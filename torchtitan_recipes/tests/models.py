@@ -177,14 +177,14 @@ def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     return config
 
 
-def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
+def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
     from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_debugmodel
 
     config = deepseek_v4_debugmodel(seq_len=512)
     _set_spmd_typechecking(config, typechecking=False)
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.tensor_parallel_degree = 1
+    config.parallelism.expert_parallel_degree = 4
     config.parallelism.context_parallel_degree = 1
     config.parallelism.pipeline_parallel_degree = 1
     config.training.max_context_length = 512

@@ -101,19 +101,14 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
-            configs=[recipes.deepseek_v4_debugmodel_fsdp2_tp2_ep2],
-            test_descr="DeepSeek V4 FSDP+TP+EP",
-            test_name="deepseek_v4_fsdp+tp+ep",
+            configs=[recipes.deepseek_v4_debugmodel_fsdp4_ep4],
+            test_descr="DeepSeek V4 DistMuon FSDP+EP",
+            test_name="deepseek_v4_dist_muon_fsdp+ep",
             ngpu=4,
             # Sparse attention / indexer kernels are CUDA-only and unvalidated
             # on ROCm.
             skip_rocm_test=True,
-            # Runs on a real PG. Under Fake PG this config's sequence-parallel
-            # collectives return activations that alias their inputs, which
-            # corrupts a saved-for-backward tensor and blows up grad_norm at
-            # step 1. The same config trains cleanly on a real 4-GPU PG
-            # (grad_norm ~3.8), so keep it on a real PG until the Fake PG
-            # collective aliasing under spmd_types is fixed.
+            # DistMuon exercises real collectives and requires a real PG.
             use_real_pg=True,
         ),
         # Integration Test Cases for Qwen3 dense and MoE model
