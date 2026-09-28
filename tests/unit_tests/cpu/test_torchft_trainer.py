@@ -103,7 +103,7 @@ def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None
         2 * config.training.num_tokens_per_microbatch_per_dp_rank
     )
     engine = SimpleNamespace(
-        parallel_dims=SimpleNamespace(
+        parallelism_context=SimpleNamespace(
             dp_enabled=False,
             pp_enabled=False,
             fsdp_enabled=True,
