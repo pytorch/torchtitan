@@ -21,6 +21,12 @@ from . import model_registry
 from .mtp import MTPLoss
 
 
+# TODO: Restore packed-document recipes once compression and index selection
+# respect document boundaries (#4801). Remove max_num_documents=1 from all four
+# recipes and restore num_tokens_per_microbatch_per_dp_rank to
+# 8 * model_config.max_context_length in both debug recipes.
+
+
 def deepseek_v4_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
