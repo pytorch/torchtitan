@@ -20,7 +20,6 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimization import (
     Adam,
     AdamW,
-    default_adamw,
     LRSchedulersContainer,
     Optimization,
     OptimizersContainer,
@@ -60,7 +59,9 @@ def qwen3_debugmodel(
             shuffle=False,
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_ratio=0.8,
@@ -178,7 +179,9 @@ def qwen3_debugmodel_flex_flash(
             shuffle=False,
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_ratio=0.8,
@@ -211,7 +214,9 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=3e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         ),
         training=TrainingConfig(
@@ -238,7 +243,9 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         ),
         training=TrainingConfig(
@@ -290,7 +297,9 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         ),
         training=TrainingConfig(
@@ -323,7 +332,9 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         ),
         training=TrainingConfig(
@@ -356,7 +367,9 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         ),
         training=TrainingConfig(
@@ -393,7 +406,9 @@ def qwen3_moe_debug(
             shuffle=False,
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=3e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         ),
         training=TrainingConfig(
@@ -443,7 +458,9 @@ def qwen3_moe_deepep(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=3e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         ),
         training=TrainingConfig(
@@ -483,7 +500,9 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3-8B",
         model=model_config,
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=2e-5),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=2e-5)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=15,
                 decay_ratio=0.9,

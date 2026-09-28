@@ -42,7 +42,6 @@ __all__ = [
     "BaseOptimizer",
     "DistMuon",
     "OptimizersContainer",
-    "default_adamw",
 ]
 
 MomentDType = Literal["parameter", "bfloat16"]
@@ -55,6 +54,8 @@ class BaseOptimizer(Optimizer, Configurable):
     class Config(Configurable.Config):
         pattern: str
         """Regex matched against parameter fully qualified names."""
+        enable_cuda_graph: bool = False
+        """Prepare this optimizer for CUDA graph capture."""
 
 
 def _validate_moment_dtype(
@@ -242,7 +243,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
     Args:
         config (Config): Ordered optimizer configurations.
         model_parts (List[nn.Module]): List of model parts to be optimized.
-        enable_cuda_graph (bool): Whether optimizer steps run in a CUDA graph.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -289,7 +289,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         config: Config,
         *,
         model_parts: list[nn.Module],
-        enable_cuda_graph: bool = False,
     ) -> None:
         all_params: list[nn.Parameter] = []
         self.optimizers = []
@@ -304,7 +303,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     claimed,
                 )
                 optimizer = optimizer_config.build(params=[param_group])
-                if enable_cuda_graph:
+                if optimizer_config.enable_cuda_graph:
                     if any(
                         "capturable" not in group for group in optimizer.param_groups
                     ):
@@ -434,10 +433,3 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
     def init_cache_state_dict(self) -> None:
         """Initialize cached state dict for TorchFT. No-op for base class."""
         pass
-
-
-def default_adamw(lr: float = 8e-4, **kwargs: Any) -> OptimizersContainer.Config:
-    """Build a catch-all AdamW optimizer configuration."""
-    return OptimizersContainer.Config(
-        optimizers=[AdamW.Config(pattern=r".*", lr=lr, **kwargs)]
-    )

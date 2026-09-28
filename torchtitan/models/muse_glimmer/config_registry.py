@@ -9,9 +9,10 @@ from dataclasses import replace
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimization import (
-    default_adamw,
+    AdamW,
     LRSchedulersContainer,
     Optimization,
+    OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
@@ -131,7 +132,9 @@ def muse_glimmer_debugmodel(
             shuffle=False,
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_ratio=0.8,
@@ -180,7 +183,9 @@ def muse_glimmer_debugmodel_mm(
         model=mm_model_spec,
         dataloader=_muse_glimmer_mm_dataloader(mm_model_spec, "cc12m-test"),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_ratio=0.8,
@@ -217,7 +222,9 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=3e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         ),
         training=TrainingConfig(
@@ -252,7 +259,9 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         dataloader=_muse_glimmer_mm_dataloader(model_config, "cc12m"),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=3e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         ),
         training=TrainingConfig(

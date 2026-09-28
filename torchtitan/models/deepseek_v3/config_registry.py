@@ -7,9 +7,10 @@
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimization import (
-    default_adamw,
+    AdamW,
     LRSchedulersContainer,
     Optimization,
+    OptimizersContainer,
 )
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -73,7 +74,9 @@ def deepseek_v3_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_ratio=0.8,
@@ -185,7 +188,9 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=2.2e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=2.2e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 decay_ratio=0.8,
                 decay_type="cosine",
@@ -241,7 +246,9 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=2.2e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=2.2e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2000,
                 decay_ratio=0.8,

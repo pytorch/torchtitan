@@ -17,9 +17,10 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimization import (
-    default_adamw,
+    AdamW,
     LRSchedulersContainer,
     Optimization,
+    OptimizersContainer,
 )
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -83,7 +84,9 @@ def llama3_debugmodel(
         hf_assets_path="./tests/assets/tokenizer",
         model=model_config,
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_ratio=0.8,
@@ -275,7 +278,11 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model=model_config,
-        optimization=Optimization.Config(optimizer=default_adamw(lr=3e-4)),
+        optimization=Optimization.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+            )
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -345,7 +352,11 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model=model_config,
-        optimization=Optimization.Config(optimizer=default_adamw(lr=1.5e-4)),
+        optimization=Optimization.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1.5e-4)]
+            )
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -395,7 +406,9 @@ def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
         ),
         model=model_config,
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-5),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-5)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         ),
         training=TrainingConfig(
@@ -438,7 +451,9 @@ def sft_debugmodel(
         hf_assets_path="./tests/assets/tokenizer",
         model=model_config,
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_ratio=0.8,

@@ -14,7 +14,7 @@ from unittest import mock
 
 import pytest
 import tyro
-from torchtitan.components.optimization import default_adamw
+from torchtitan.components.optimization import AdamW, OptimizersContainer
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ConfigManager, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -274,6 +274,8 @@ class TestConfigManager(unittest.TestCase):
             ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
         config.optimization.enable_cuda_graph = True
+        for optimizer in config.optimization.optimizer.optimizers:
+            optimizer.enable_cuda_graph = True
         config.training.disable_cuda_graphs = True
 
         with pytest.raises(ValueError, match="requires CUDA graphs"):
@@ -284,7 +286,13 @@ class TestConfigManager(unittest.TestCase):
             ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
         )
         config.optimization.enable_cuda_graph = True
-        config.optimization.optimizer = default_adamw(fused=False, foreach=True)
+        config.optimization.optimizer = OptimizersContainer.Config(
+            optimizers=[
+                AdamW.Config(
+                    pattern=r".*", fused=False, foreach=True, enable_cuda_graph=True
+                )
+            ]
+        )
 
         config.__post_init__()
 

@@ -114,7 +114,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
     def _initialize_optimization(self) -> None:
-        optimizer_build_kwargs = (
+        optimizer_runtime_kwargs = (
             {"ft_manager": self.ft_manager}
             if isinstance(
                 self.config.optimization.optimizer,
@@ -127,7 +127,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             parallelism_context=self.parallelism_context,
             training_steps=self.config.training.steps,
             pp_has_last_stage=self.pp_has_last_stage,
-            optimizer_build_kwargs=optimizer_build_kwargs,
+            optimizer_runtime_kwargs=optimizer_runtime_kwargs,
         )
         self.model_cls._register_optimizer_hooks(
             self.optimization.optimizers,

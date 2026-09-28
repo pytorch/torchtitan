@@ -13,9 +13,10 @@ from renderers import Qwen3RendererConfig
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimization import (
-    default_adamw,
+    AdamW,
     LRSchedulersContainer,
     Optimization,
+    OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import CompileConfig, TrainingConfig
@@ -118,10 +119,15 @@ def _qwen3_4b_dapo_math_config(
         ),
         trainer=Trainer.Config(
             optimization=Optimization.Config(
-                optimizer=default_adamw(
-                    lr=1e-6,
-                    betas=(0.9, 0.98),
-                    weight_decay=0.1,
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[
+                        AdamW.Config(
+                            pattern=r".*",
+                            lr=1e-6,
+                            betas=(0.9, 0.98),
+                            weight_decay=0.1,
+                        )
+                    ]
                 ),
                 lr_scheduler=LRSchedulersContainer.Config(
                     warmup_steps=0,

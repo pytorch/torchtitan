@@ -13,9 +13,10 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimization import (
-    default_adamw,
+    AdamW,
     LRSchedulersContainer,
     Optimization,
+    OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
@@ -69,7 +70,9 @@ def qwen38_debugmodel(
             streaming_shuffle_buffer_size=128,
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=5e-3),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=5e-3)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2,
                 decay_ratio=0.8,
@@ -120,7 +123,9 @@ def qwen38_debugmodel_moe(
             streaming_shuffle_buffer_size=128,
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=5e-3),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=5e-3)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         ),
         training=TrainingConfig(
@@ -158,7 +163,9 @@ def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
             streaming_shuffle_buffer_size=128,
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=5e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=5e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         ),
         training=TrainingConfig(
@@ -192,7 +199,9 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=5e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=5e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         ),
         training=TrainingConfig(

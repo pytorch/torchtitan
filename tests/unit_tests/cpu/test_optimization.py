@@ -4,18 +4,40 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 
-from torchtitan.components.optimization import Optimization
+from torchtitan.components.optimization import AdamW, Optimization, OptimizersContainer
+
+
+@dataclass
+class _OptimizerConfig:
+    enable_cuda_graph: bool
+
+
+@dataclass
+class _OptimizersConfig:
+    optimizers: list[_OptimizerConfig]
+    build: MagicMock
 
 
 def test_optimization_config_rejects_negative_max_norm() -> None:
     with pytest.raises(ValueError, match="max_norm"):
         Optimization.Config(max_norm=-1)
+
+
+def test_optimization_config_rejects_mismatched_cuda_graph_setting() -> None:
+    with pytest.raises(ValueError, match="must match every optimizer"):
+        Optimization.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*")]
+            ),
+            enable_cuda_graph=True,
+        )
 
 
 @pytest.mark.parametrize("enable_cuda_graph", [False, True])
@@ -27,8 +49,12 @@ def test_optimization_builds_owned_components(enable_cuda_graph: bool) -> None:
     optimizers = MagicMock()
     lr_schedulers = MagicMock()
     ema = MagicMock()
+    optimizer_config = _OptimizersConfig(
+        optimizers=[_OptimizerConfig(enable_cuda_graph=enable_cuda_graph)],
+        build=MagicMock(return_value=optimizers),
+    )
     config = SimpleNamespace(
-        optimizer=SimpleNamespace(build=MagicMock(return_value=optimizers)),
+        optimizer=optimizer_config,
         lr_scheduler=SimpleNamespace(build=MagicMock(return_value=lr_schedulers)),
         ema=SimpleNamespace(build=MagicMock(return_value=ema)),
         max_norm=1.0,
@@ -51,12 +77,7 @@ def test_optimization_builds_owned_components(enable_cuda_graph: bool) -> None:
             pp_has_last_stage=True,
         )
 
-    expected_optimizer_kwargs = (
-        {"model_parts": [model], "enable_cuda_graph": True}
-        if enable_cuda_graph
-        else {"model_parts": [model]}
-    )
-    config.optimizer.build.assert_called_once_with(**expected_optimizer_kwargs)
+    optimizer_config.build.assert_called_once_with(model_parts=[model])
     config.lr_scheduler.build.assert_called_once_with(
         optimizers=optimizers,
         training_steps=10,
@@ -80,8 +101,12 @@ def test_optimization_cuda_graph_falls_back_for_unsupported_device(
 ) -> None:
     model = torch.nn.Linear(2, 2)
     optimizers = MagicMock()
+    optimizer_build = MagicMock(return_value=optimizers)
     config = SimpleNamespace(
-        optimizer=SimpleNamespace(build=MagicMock(return_value=optimizers)),
+        optimizer=_OptimizersConfig(
+            optimizers=[_OptimizerConfig(enable_cuda_graph=True)],
+            build=optimizer_build,
+        ),
         lr_scheduler=SimpleNamespace(build=MagicMock()),
         ema=None,
         max_norm=1.0,
@@ -102,7 +127,7 @@ def test_optimization_cuda_graph_falls_back_for_unsupported_device(
             pp_has_last_stage=True,
         )
 
-    config.optimizer.build.assert_called_once_with(model_parts=[model])
+    optimizer_build.assert_called_once_with(model_parts=[model])
     wrap.assert_not_called()
     assert optimization._run_update == optimization._update
     assert "Optimization CUDA graph is disabled" in caplog.text

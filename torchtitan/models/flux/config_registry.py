@@ -16,9 +16,10 @@ from torchtitan.components.checkpointer import (
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.optimization import (
-    default_adamw,
+    AdamW,
     LRSchedulersContainer,
     Optimization,
+    OptimizersContainer,
 )
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -78,7 +79,9 @@ def flux_debugmodel() -> FluxTrainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_registry("flux-debug"),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=8e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=1,
                 decay_ratio=0.0,
@@ -136,7 +139,9 @@ def flux_dev() -> FluxTrainer.Config:
         metrics=MetricsProcessor.Config(log_freq=100),
         model=model_registry("flux-dev"),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=1e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=3000,
                 decay_ratio=0.0,
@@ -177,7 +182,9 @@ def flux_schnell() -> FluxTrainer.Config:
         metrics=MetricsProcessor.Config(log_freq=100),
         model=model_registry("flux-schnell"),
         optimization=Optimization.Config(
-            optimizer=default_adamw(lr=1e-4),
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]
+            ),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=3000,
                 decay_ratio=0.0,
