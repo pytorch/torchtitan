@@ -30,7 +30,7 @@ from torchtitan.config import (
     OverrideConfig,
     TrainingConfig,
 )
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (

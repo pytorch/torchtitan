@@ -14,7 +14,7 @@ from torchtitan.models.common.attention import BaseAttention
 
 if TYPE_CHECKING:
     from torchtitan.config import CompileConfig, DebugConfig, TrainingConfig
-    from torchtitan.config.parallelism import ParallelismConfig
+    from torchtitan.config.configs.parallelism import ParallelismConfig
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )

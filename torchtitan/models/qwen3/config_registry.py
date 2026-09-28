@@ -24,7 +24,7 @@ from torchtitan.components.optimizer import (
     ParamGroupConfig,
 )
 from torchtitan.config import CompileConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.config.transform import NVFP4LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS

@@ -18,7 +18,7 @@ from torchtitan.components.data import (
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.config import CompileConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,

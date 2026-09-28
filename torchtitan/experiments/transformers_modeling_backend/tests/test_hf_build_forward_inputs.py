@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 import spmd_types as spmd
 import torch
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.experiments.transformers_modeling_backend.model import (

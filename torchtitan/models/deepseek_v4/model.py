@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock

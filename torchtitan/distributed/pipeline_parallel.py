@@ -28,7 +28,7 @@ from torch.distributed.pipelining.schedules import (
 
 from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
 from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.models.common.decoder import Decoder

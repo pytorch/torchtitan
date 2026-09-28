@@ -6,7 +6,7 @@
 
 import pytest
 
-from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
+from torchtitan.config.configs.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 
 

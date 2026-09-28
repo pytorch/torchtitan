@@ -16,7 +16,7 @@ import pytest
 import tyro
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig, ConfigManager, DebugConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )

@@ -25,7 +25,7 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torchtitan.tools.utils import device_type
 
 if TYPE_CHECKING:
-    from torchtitan.config.parallelism import ParallelismConfig
+    from torchtitan.config.configs.parallelism import ParallelismConfig
 
 logger = logging.getLogger(__name__)
 

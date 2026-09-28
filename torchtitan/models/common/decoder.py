@@ -13,7 +13,7 @@ from spmd_types import SpmdType
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
@@ -144,7 +144,7 @@ class Decoder(BaseModel):
             object with a ``ParallelismConfig`` in its ``parallelism`` field; in
             that case the training/debug setup is skipped.
             """
-            from torchtitan.config.parallelism import ParallelismConfig
+            from torchtitan.config.configs.parallelism import ParallelismConfig
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (

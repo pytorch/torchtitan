@@ -10,7 +10,7 @@ import pytest
 import torch.nn as nn
 from torch.distributed.tensor import Shard
 
-from torchtitan.config.parallelism import FSDPSymmMemScope
+from torchtitan.config.configs.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.fsdp import (
     enable_fsdp_symm_mem,
     linear_param_shard_placements,

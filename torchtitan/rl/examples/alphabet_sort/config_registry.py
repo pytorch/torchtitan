@@ -20,7 +20,7 @@ from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import CompileConfig, DebugConfig, OverrideConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     BatchInvariantFlexConverter,
     LMHeadCastConverter,

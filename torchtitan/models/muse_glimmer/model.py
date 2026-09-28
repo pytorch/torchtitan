@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import CompileConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.configs.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
 from torchtitan.distributed.spmd_types import (
