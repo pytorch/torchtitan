@@ -84,6 +84,22 @@ class RoutedExperts(Module):
                 raise ValueError("w13 output and w2 input dimensions must match")
             if self.w2.num_linears != 1:
                 raise ValueError("w2 must contain one down projection")
+            if (
+                self.output_postprocess is not None
+                and self.token_dispatcher.absorb_router_scores
+            ):
+                # Absorbed scores scale W2's input, so the postprocess would see
+                # score-scaled outputs; the post-combine path instead applies the
+                # score after the postprocess. Only a linear postprocess keeps
+                # those equivalent, and a scale-invariant one (e.g. RMSNorm)
+                # would drop the score entirely. ``absorb_router_scores=None``
+                # (auto) is resolved against this postprocess at build time.
+                raise ValueError(
+                    "output_postprocess and absorb_router_scores cannot be "
+                    "combined: absorbed router scores are applied before W2, "
+                    "while output_postprocess runs after it. Set "
+                    "absorb_router_scores=False or drop output_postprocess."
+                )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -96,6 +112,11 @@ class RoutedExperts(Module):
             else None
         )
         self.token_dispatcher = config.token_dispatcher.build()
+        if config.token_dispatcher.absorb_router_scores is None:
+            # Auto: resolve here rather than in the config builder, since a
+            # caller may attach output_postprocess to an already-built config.
+            # A post-W2 postprocess must see unscaled expert outputs.
+            self.token_dispatcher.absorb_router_scores = self.output_postprocess is None
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         del buffer_device
@@ -136,6 +157,7 @@ class RoutedExperts(Module):
                 # TODO(pianpwk): Relax this restriction in spmd_types.
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
+        routed_scores_R = getattr(metadata, "routed_scores_R", None)
         with maybe_set_sparse_mesh():
             gate_up_R2F = remat.region(
                 self.w13,
@@ -145,11 +167,16 @@ class RoutedExperts(Module):
             remat.recompute_needs_tensor(gate_up_R2F)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
+            # Widen W2's contract only when a score is actually absorbed, so
+            # W2 modules that do not know about scores keep working unchanged.
+            w2_kwargs = (
+                {} if routed_scores_R is None else {"routed_scores_R": routed_scores_R}
+            )
             routed_output_RD = remat.region(
                 self.w2,
                 self.remat_region_name("w2"),
                 recompute=self.remat_should_recompute("w2"),
-            )(hidden_RF, offsets_E)
+            )(hidden_RF, offsets_E, **w2_kwargs)
             remat.recompute_needs_tensor(routed_output_RD)
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
