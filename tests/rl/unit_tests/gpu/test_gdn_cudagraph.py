@@ -284,7 +284,10 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
             max_model_len=256,
             max_num_seqs=4,
             max_num_batched_tokens=256,
-            num_gpu_blocks_override=32,
+            # A10G's PyTorch varlen paged-KV kernel requires 256-token pages.
+            # Eight blocks still hold more than four maximum-length requests.
+            block_size=256,
+            num_gpu_blocks_override=8,
             gpu_memory_utilization=0.25,
             enable_chunked_prefill=True,
             enable_prefix_caching=False,
