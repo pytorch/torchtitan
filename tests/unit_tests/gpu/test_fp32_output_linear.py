@@ -128,9 +128,12 @@ def test_backward_error_stays_at_bf16_rounding_floor(
 def test_compiled_backward_keeps_lo_half():
     # torch.compile folds a bf16 round trip away inside fused kernels; if the split used one,
     # lo would compile to zero and the error would rise to that of a bf16 grad_output.
-    ratios = _backward_errors_vs_bf16_floor(
-        torch.compile(linear_module._Fp32OutputLinearFunction.apply), 64, 256, 1024
-    )
+    # Compile a wrapper: compiling any ``Function.apply`` directly breaks later compiles of other
+    # autograd Functions in the same process (test_qwen3_5_deltanet fails after it).
+    def linear(input, weight):
+        return linear_module._Fp32OutputLinearFunction.apply(input, weight)
+
+    ratios = _backward_errors_vs_bf16_floor(torch.compile(linear), 64, 256, 1024)
     assert max(ratios) < 1.05, ratios
 
 
