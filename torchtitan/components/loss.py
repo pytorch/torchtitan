@@ -639,7 +639,13 @@ class ChunkedLossWrapper(BaseLoss):
             )
             label_chunks_per_output = tuple(_chunk_local(label) for label in labels)
             input_chunks = {
-                key: _chunk_local(value) if isinstance(value, torch.Tensor) else value
+                key: (
+                    value
+                    if key == "global_mtp_valid_tokens"
+                    else _chunk_local(value)
+                    if isinstance(value, torch.Tensor)
+                    else value
+                )
                 for key, value in loss_inputs.items()
             }
             grad_accumulators = (
@@ -695,7 +701,13 @@ class ChunkedLossWrapper(BaseLoss):
                     chunks[chunk_index] for chunks in label_chunks_per_output
                 )
                 loss_inputs = {
-                    key: chunks[chunk_index] if isinstance(chunks, tuple) else chunks
+                    key: (
+                        chunks
+                        if key == "global_mtp_valid_tokens"
+                        else chunks[chunk_index]
+                        if isinstance(chunks, tuple)
+                        else chunks
+                    )
                     for key, chunks in input_chunks.items()
                 }
                 logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)

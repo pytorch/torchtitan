@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -389,6 +389,31 @@ class MTPDecoder(Decoder):
         )
         return input_tokens, loss_labels, input_dict
 
+    def get_mtp_valid_counts(
+        self, input_dict: dict[str, Any]
+    ) -> tuple[int, ...] | None:
+        if self.mtp_layers is None:
+            return None
+
+        labels = input_dict["labels"]
+        positions = input_dict.get("positions")
+        padding_mask = input_dict.get("padding_mask")
+        if positions is None:
+            raise ValueError("MTP valid-token counts require positions.")
+
+        counts = []
+        for depth in range(1, len(self.mtp_layers) + 1):
+            mtp_labels = roll_mtp_sequence(
+                labels,
+                shift=depth,
+                positions=positions,
+                padding_mask=padding_mask,
+                fill_value=IGNORE_INDEX,
+            )
+            mtp_labels = cast(torch.Tensor, mtp_labels)
+            counts.append(int((mtp_labels != IGNORE_INDEX).sum()))
+        return tuple(counts)
+
     def forward(
         self,
         tokens: torch.Tensor | tuple[torch.Tensor, ...],
@@ -517,6 +542,7 @@ class MTPLoss(CrossEntropyLoss):
         pred: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
         global_valid_tokens: torch.Tensor | None = None,
+        global_mtp_valid_tokens: tuple[torch.Tensor, ...] | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the weighted objective from aligned prediction/label pairs."""
@@ -536,22 +562,37 @@ class MTPLoss(CrossEntropyLoss):
             )
         mtp_weight = self.mtp_scale / num_mtp_layers
         main_loss, _ = super().__call__(pred[0], labels[0])
-        mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
-        if spmd.is_type_checking():
-            mtp_loss = spmd.mutate_type(
-                mtp_loss,
-                src=spmd.R,
-                dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
-            )
-        for mtp_pred, mtp_labels in zip(pred[1:], labels[1:], strict=True):
-            depth_loss, _ = super().__call__(mtp_pred, mtp_labels)
-            mtp_loss = mtp_loss + depth_loss * mtp_weight
-        loss = main_loss + mtp_loss
         if global_valid_tokens is not None:
             if current_spmd_mesh() is not None:
                 spmd.assert_type(
                     global_valid_tokens,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
                 )
-            loss = loss / global_valid_tokens
+            main_loss = main_loss / global_valid_tokens
+        mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
+        if global_mtp_valid_tokens is None:
+            raise ValueError(
+                "MTPLoss requires global_mtp_valid_tokens for MTP normalization."
+            )
+        if len(global_mtp_valid_tokens) != num_mtp_layers:
+            raise ValueError(
+                "MTPLoss requires one valid-token denominator per MTP depth, "
+                f"got {len(global_mtp_valid_tokens)} for {num_mtp_layers} depths."
+            )
+        if spmd.is_type_checking():
+            mtp_loss = spmd.mutate_type(
+                mtp_loss,
+                src=spmd.R,
+                dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
+            )
+        for depth, (mtp_pred, mtp_labels) in enumerate(
+            zip(pred[1:], labels[1:], strict=True)
+        ):
+            depth_loss, _ = super().__call__(mtp_pred, mtp_labels)
+            denominator = global_mtp_valid_tokens[depth]
+            if int(denominator.item()) == 0:
+                raise ValueError(f"MTP depth {depth + 1} has zero valid targets.")
+            with spmd.no_typecheck():
+                mtp_loss = mtp_loss + depth_loss / denominator * mtp_weight
+        loss = main_loss + mtp_loss
         return loss, {}
