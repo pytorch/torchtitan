@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
     # The EMA class shares its name with the ``EMA = "ema"`` state-dict key
     # constant imported above, so alias it here.
-    from torchtitan.components.optimizer import (  # noqa: N811
+    from torchtitan.components.optimization import (  # noqa: N811
         EMA as EMAContainer,
         LRSchedulersContainer,
         OptimizersContainer,
@@ -108,7 +108,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         The solution to this problem is optimizer flattening.
         TorchTitan's OptimizersContainer flattens optimizer state dicts to FQN-keyed
-        flat dicts using the utilities in torchtitan/components/optimizer/utils.py.
+        flat dicts using the utilities in torchtitan/components/optimization/utils.py.
 
     2. With complex PP schedules, we have multiple model chunks per pp rank. This
     compounds challenge (1) by also requiring us to reason about multiple 'optim'
@@ -131,7 +131,7 @@ class CheckpointManager(BaseCheckpointManager):
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize
             the model.
         ema (Optional[EMA]): Online EMA of model weights, or None when the
-            user hasn't configured one (see torchtitan.components.optimizer.ema.EMA).
+            user hasn't configured one (see torchtitan.components.optimization.ema.EMA).
         states (Dict[str, Any]): The states that need to be saved, other than the
             previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert

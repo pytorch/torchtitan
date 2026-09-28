@@ -8,6 +8,10 @@
 
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+from torchtitan.distributed.context_parallel import (
+    ContextParallelLoadBalancer,
+    HeadTailCPLoadBalancer,
+)
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
@@ -25,7 +29,7 @@ def muse_glimmer_30b_bf16_optimizer_states() -> Trainer.Config:
     config.training.dtype = "float32"
     config.training.mixed_precision_param = "bfloat16"
     config.training.mixed_precision_reduce = "float32"
-    config.optimizer.implementation = "fused_opt_states_bf16"
+    config.optimization.optimizer.implementation = "fused_opt_states_bf16"
     return config
 
 
@@ -33,7 +37,7 @@ def _muse_glimmer_30b_cp(
     *,
     inner_attention: type[Module],
     cp_degree: int,
-    load_balancer: str | None = "headtail",
+    load_balancer: ContextParallelLoadBalancer.Config | None,
 ) -> Trainer.Config:
     config = muse_glimmer_30b()
     config.parallelism.context_parallel_degree = cp_degree
@@ -47,7 +51,9 @@ def _muse_glimmer_30b_cp(
 def muse_glimmer_30b_allgather_cp8() -> Trainer.Config:
     """Muse Glimmer 30B with all-gather CP degree 8."""
     return _muse_glimmer_30b_cp(
-        inner_attention=KVAllGatherCPFlexInnerAttention, cp_degree=8
+        inner_attention=KVAllGatherCPFlexInnerAttention,
+        cp_degree=8,
+        load_balancer=HeadTailCPLoadBalancer.Config(),
     )
 
 

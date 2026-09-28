@@ -13,6 +13,7 @@ from typing import Any
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
@@ -74,9 +75,9 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
-        if "optimizer_step" in config.cuda_graph.components:
+        if config.optimization.enable_cuda_graph:
             raise ValueError(
-                "Optimizer CUDA graphs are not supported with GraphTrainer."
+                "Optimization CUDA graphs are not supported with GraphTrainer."
             )
         validate_memory_policy_config(config.compile)
         super().__init__(
@@ -93,10 +94,7 @@ class GraphTrainingEngine(TrainingEngine):
                 "GraphTrainer does not support fsdp_defer_gradient_reduction."
             )
 
-        if (
-            self.config.compile.mode == "aot_fx_trace"
-            and not self.parallel_dims.pp_enabled
-        ):
+        if not self.parallel_dims.pp_enabled:
             num_tokens_per_train_step = self.config.training.num_tokens_per_train_step
             if num_tokens_per_train_step < 0:
                 num_microbatches = 1
@@ -163,7 +161,7 @@ class GraphTrainingEngine(TrainingEngine):
         microbatch_groups: list[list[TrainingMicrobatch]],
     ) -> list[tuple[Any, ...]]:
         """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
-        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
+        if self.parallel_dims.pp_enabled:
             return super()._preprocess_microbatch_groups(microbatch_groups)
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
@@ -182,7 +180,10 @@ class GraphTrainingEngine(TrainingEngine):
             target_mbs: list[torch.Tensor] = []
             for microbatch in microbatch_group:
                 input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
-                with sl.log_trace_span("preprocess_inputs"):
+                with (
+                    sl.log_trace_span("preprocess_inputs"),
+                    dist_utils.get_spmd_context(parallel_dims=self.parallel_dims),
+                ):
                     inputs_mb, labels_mb, extra_kwargs_mb = self.model_parts[
                         0
                     ].preprocess_inputs(
@@ -214,7 +215,7 @@ class GraphTrainingEngine(TrainingEngine):
         defer_fsdp_gradient_reduction: bool,
     ) -> ForwardBackwardResult:
         """Run AOT single-stage groups through GraphRuntime."""
-        if self.parallel_dims.pp_enabled or self.config.compile.mode != "aot_fx_trace":
+        if self.parallel_dims.pp_enabled:
             return super()._forward_backward_body(
                 microbatch_groups,
                 global_valid_tokens,
@@ -271,8 +272,7 @@ class GraphTrainer(Trainer):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         if (
-            self.config.compile.mode == "aot_fx_trace"
-            and not self.engine.parallel_dims.pp_enabled
+            not self.engine.parallel_dims.pp_enabled
             and self.engine.pp_schedule.num_microbatches > 1
         ):
             self.num_pp_microbatches = self.engine.pp_schedule.num_microbatches

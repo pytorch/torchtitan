@@ -10,7 +10,8 @@ from typing import cast, TYPE_CHECKING
 import torch
 from torch import nn
 
-from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -114,7 +115,7 @@ class DeepSeekV4Model(Decoder):
 
     @classmethod
     def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
-        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+        from torchtitan.components.optimization import register_moe_load_balancing_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
 

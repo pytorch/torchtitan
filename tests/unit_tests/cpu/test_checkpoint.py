@@ -42,7 +42,7 @@ from torchtitan.components.checkpointer.dcp import (
     AsyncMode,
     CheckpointManager,
 )
-from torchtitan.components.optimizer import EMA
+from torchtitan.components.optimization import EMA
 from torchtitan.config import Function
 from torchtitan.observability import structured_logger as sl
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -190,10 +190,10 @@ class TestCheckpointManager(unittest.TestCase):
 
     def test_optimizer_and_checkpointer_import_order(self):
         for statement in (
-            "from torchtitan.components.optimizer import LRSchedulersContainer; "
+            "from torchtitan.components.optimization import LRSchedulersContainer; "
             "from torchtitan.components.checkpointer import CheckpointManager",
             "from torchtitan.components.checkpointer import CheckpointManager; "
-            "from torchtitan.components.optimizer import LRSchedulersContainer",
+            "from torchtitan.components.optimization import LRSchedulersContainer",
         ):
             with self.subTest(statement=statement):
                 subprocess.run([sys.executable, "-c", statement], check=True)

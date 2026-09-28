@@ -9,7 +9,7 @@ import logging
 import math
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, cast, Literal
 
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
@@ -32,10 +32,10 @@ class _HostLRScheduler(LRScheduler):
     host_lrs: list[float]
 
     def get_lr(self) -> list[float | Tensor]:
+        # Capturable optimizers keep initial_lr on the host, so scheduler
+        # calculations do not read the device lr tensor.
         lrs = super().get_lr()
-        # CUDA graph setup moves group lr values to the device. Save the
-        # scheduler results before PyTorch copies them into the groups.
-        self.host_lrs = [float(lr) for lr in lrs]
+        self.host_lrs = cast(list[float], list(lrs))
         return lrs
 
     def get_last_host_lrs(self) -> list[float]:

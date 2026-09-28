@@ -35,7 +35,7 @@ from torchtitan.components.checkpointer import (
     TRAIN_STATE,
 )
 from torchtitan.components.data.loader import BaseDataLoader
-from torchtitan.components.optimizer import (  # noqa: N811
+from torchtitan.components.optimization import (  # noqa: N811
     EMA as EMAContainer,
     LRSchedulersContainer,
     OptimizersContainer,

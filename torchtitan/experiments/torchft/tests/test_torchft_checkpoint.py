@@ -23,7 +23,11 @@ from torch.utils.data import DataLoader
 
 from torchtitan.components.checkpointer import CheckpointManager
 
-from torchtitan.components.optimizer import EMA, LRSchedulersContainer, ParamGroupConfig
+from torchtitan.components.optimization import (
+    EMA,
+    LRSchedulersContainer,
+    ParamGroupConfig,
+)
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer

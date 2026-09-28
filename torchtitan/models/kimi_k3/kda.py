@@ -90,9 +90,11 @@ class KDAKernel(Module):
         if not q_1THK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
         capability = torch.cuda.get_device_capability(q_1THK.device)
-        if capability not in {(10, 0), (10, 3)}:
+        # The fused bounded gate needs TMA (SM90+). chunk_kda runs its CuTe
+        # kernels on SM100/SM103 and its Triton kernels on other NVIDIA GPUs.
+        if capability < (9, 0):
             raise RuntimeError(
-                "Attention Gym KDA requires Blackwell SM100/SM103; "
+                "Attention Gym KDA requires CUDA capability 9.0 or newer; "
                 f"got CUDA capability {capability}."
             )
 

@@ -40,7 +40,7 @@ import torch_remat as remat
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optimization import OptimizersContainer
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import device_type
@@ -286,7 +286,7 @@ def register_aux_loss_zero_hook(
     into the ``group_acc`` registers and zeroes the instances.
 
     Same pattern as ``register_moe_load_balancing_hook``
-    (:func:`torchtitan.components.optimizer.optimizer.register_moe_load_balancing_hook`).
+    (:func:`torchtitan.components.optimization.optimizer.register_moe_load_balancing_hook`).
     """
     optimizers.register_step_pre_hook(
         lambda *args, **kwargs: _zero_aux_losses(model_parts)

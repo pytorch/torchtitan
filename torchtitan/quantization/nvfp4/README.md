@@ -71,7 +71,7 @@ torchrun --standalone --nproc_per_node 4 \
   --training.steps 763 \
   --dataloader.dataset c4 \
   --metrics.log_freq 10 \
-  --optimizer.param-groups.0.optimizer-kwargs.lr 0.0003 \
+  --optimization.optimizer.param-groups.0.optimizer-kwargs.lr 0.0003 \
   --hf-assets-path ./tests/assets/tokenizer
 ```
 

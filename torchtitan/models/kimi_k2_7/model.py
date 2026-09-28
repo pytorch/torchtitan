@@ -17,7 +17,8 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
@@ -32,6 +33,8 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
+    add_zero_vision_dependency,
+    build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
@@ -53,7 +56,7 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
 
     @classmethod
     def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
-        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+        from torchtitan.components.optimization import register_moe_load_balancing_hook
         from torchtitan.models.kimi_k2_7.qk_clip import register_qk_clip_hook
 
         register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
@@ -152,7 +155,7 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
@@ -162,40 +165,38 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap, and return the batch."""
         del kwargs
-        # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
-        batch: dict[str, Any] = dict(input_dict)
-        positions = batch.get("positions", None)
-        padding_mask = batch.get("padding_mask", None)
+        positions = input_dict.get("positions", None)
+        padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
             inner = getattr(self.config.first_attention, "inner_attention", None)
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                batch["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
                     max_context_length=max_context_length,
                 )
 
-        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
+        input_shardings = {
+            **decoder_input_sharding(),
+            **multimodal_input_sharding(),
+        }
         if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+            input_dict = self._cp_shard(
+                input_dict,
+                input_shardings=input_shardings,
+                parallel_dims=parallel_dims,
+                parallelism=parallelism,
             )
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        input_dict = annotate_input_spmd_types(
+            parallel_dims, input_dict, input_shardings
+        )
 
-        inputs = batch.pop("input")
-        labels = batch.pop("labels")
-        return inputs, labels, batch
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        return inputs, labels, input_dict
 
     def _prepare_multimodal_embeds(
         self,
@@ -205,7 +206,7 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         grid_thw: torch.Tensor | None,
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        special_tokens: dict[str, int],
+        special_tokens: dict[str, int] | None,
     ) -> torch.Tensor:
         """Embed tokens, run the vision encoder, scatter features into text.
 
@@ -223,8 +224,18 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         if pixel_values_videos is not None and grid_thw_videos is not None:
             modalities.append((pixel_values_videos, grid_thw_videos))
 
-        if not modalities:
-            return inputs_embeds
+        is_dummy = not modalities
+        if is_dummy:
+            if self.vision_encoder is None:
+                return inputs_embeds
+            kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
+            modalities.append(
+                build_dummy_vision_inputs(
+                    patch_dim=self.vision_encoder.patch_embed.in_features,
+                    grid_thw=(1, kernel_h, kernel_w),
+                    device=inputs_embeds.device,
+                )
+            )
         # TODO: support mixed image+video batches. Upstream fix: when
         # image_id == video_id, emit one document-ordered vision stream so the
         # runs stay modality-agnostic and this branch goes away.
@@ -234,12 +245,16 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         # encoder is present (text-only configs never populate pixels).
         assert self.vision_encoder is not None
 
-        placeholder_id = special_tokens["image_id"]
-        assert placeholder_id == special_tokens["video_id"]
-
         # Patches arrive float32; match the encoder's compute dtype for the matmul.
         pixels = pixels.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixels, grid_thw=grid)
+        if is_dummy:
+            return add_zero_vision_dependency(inputs_embeds, vision_embeds)
+
+        if special_tokens is None:
+            raise ValueError("special_tokens are required for multimodal inputs.")
+        placeholder_id = special_tokens["image_id"]
+        assert placeholder_id == special_tokens["video_id"]
         # MoonViT collapses time (temporal pooling) and merges 2x2 spatially, so
         # the token count is (h/kh)*(w/kw), independent of t.
         kh, kw = self.vision_encoder.merge_kernel_size
@@ -296,7 +311,7 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
                     grid_thw=grid_thw,
                     pixel_values_videos=pixel_values_videos,
                     grid_thw_videos=grid_thw_videos,
-                    special_tokens=special_tokens,  # pyrefly: ignore [bad-argument-type]
+                    special_tokens=special_tokens,
                 )
             else:
                 x = tokens

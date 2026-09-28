@@ -121,7 +121,7 @@ def build_cmd(
     )
     if total_steps > 0:
         # Pin LR schedule so the save run uses the same curve as the full run.
-        cmd += f" --lr_scheduler.total_steps={total_steps}"
+        cmd += f" --optimization.lr_scheduler.total_steps={total_steps}"
     if options:
         cmd += f" {options}"
     return cmd

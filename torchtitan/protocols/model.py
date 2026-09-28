@@ -12,13 +12,14 @@ from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallel_dims import ParallelDims
 
 from .module import Module
 
 if TYPE_CHECKING:
-    from torchtitan.components.optimizer import OptimizersContainer
+    from torchtitan.components.optimization import OptimizersContainer
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )
@@ -49,7 +50,7 @@ class BaseModel(Module, ABC):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
         parallel_dims: ParallelDims,
         parallelism: ParallelismConfig,
@@ -103,6 +104,7 @@ class BaseModel(Module, ABC):
 
     state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None
     pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
+    pipeline_last_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
     supports_pipeline_parallel: ClassVar[bool] = True
 
     def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
@@ -114,13 +116,18 @@ class BaseModel(Module, ABC):
 
         from torchtitan.distributed.pipeline_parallel import (
             pipeline_llm,
-            pipeline_with_first_stage_modules,
+            pipeline_with_first_last_stage_modules,
         )
 
-        if self.pipeline_first_stage_module_fqns:
-            return pipeline_with_first_stage_modules(
+        parallelism = kwargs["parallelism"]
+        if parallelism.pipeline_parallel_module_fqns_per_model_part is None and (
+            self.pipeline_first_stage_module_fqns
+            or self.pipeline_last_stage_module_fqns
+        ):
+            return pipeline_with_first_last_stage_modules(
                 self,
                 first_stage_module_fqns=self.pipeline_first_stage_module_fqns,
+                last_stage_module_fqns=self.pipeline_last_stage_module_fqns,
                 **kwargs,
             )
         return pipeline_llm(self, **kwargs)

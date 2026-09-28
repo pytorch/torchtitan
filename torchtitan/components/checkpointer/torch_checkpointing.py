@@ -43,7 +43,7 @@ from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.base_storage import Storage, StorageConfig
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
 from torchtitan.components.data.loader import BaseDataLoader
-from torchtitan.components.optimizer import (  # noqa: N811
+from torchtitan.components.optimization import (  # noqa: N811
     EMA as EMAContainer,
     LRSchedulersContainer,
     OptimizersContainer,

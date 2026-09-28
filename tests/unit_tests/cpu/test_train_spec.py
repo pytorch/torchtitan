@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.components.optimization import OptimizersContainer, ParamGroupConfig
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.llama3 import Llama3Model, model_registry
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter

@@ -17,13 +17,15 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimizer import (
+from torchtitan.components.optimization import (
     default_adamw,
     LRSchedulersContainer,
+    Optimization,
     OptimizersContainer,
     ParamGroupConfig,
 )
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import NVFP4LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
@@ -56,12 +58,14 @@ def qwen3_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
@@ -126,7 +130,7 @@ def qwen3_debugmodel_moe_param_groups(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = qwen3_moe_debug(seq_len=seq_len)
-    config.optimizer = OptimizersContainer.Config(
+    config.optimization.optimizer = OptimizersContainer.Config(
         param_groups=[
             ParamGroupConfig(
                 pattern=r"(?:tok_embeddings|output)\.",
@@ -177,12 +181,14 @@ def qwen3_debugmodel_flex_flash(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
@@ -208,8 +214,10 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=default_adamw(lr=3e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=3e-4),
+            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -233,8 +241,10 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -283,8 +293,10 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -314,8 +326,10 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -345,8 +359,10 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -380,8 +396,10 @@ def qwen3_moe_debug(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimizer=default_adamw(lr=3e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=3e-4),
+            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -428,8 +446,10 @@ def qwen3_moe_deepep(
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
-        optimizer=default_adamw(lr=3e-4),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=3e-4),
+            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
+        ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -466,12 +486,14 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-8B",
         model=model_config,
-        optimizer=default_adamw(lr=2e-5),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=15,
-            decay_ratio=0.9,
-            decay_type="cosine",
-            min_lr_factor=0.1,
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=2e-5),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=15,
+                decay_ratio=0.9,
+                decay_type="cosine",
+                min_lr_factor=0.1,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,

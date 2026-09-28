@@ -351,7 +351,9 @@ def test_qwen36_27b_config_applies_offset_rmsnorm_to_both_actors():
     assert config.trainer.parallelism.data_parallel_shard_degree == 2
     assert config.trainer.parallelism.tensor_parallel_degree == 2
     assert config.generator.parallelism.tensor_parallel_degree == 4
-    assert config.trainer.optimizer.implementation == "fused_opt_states_bf16"
+    assert (
+        config.trainer.optimization.optimizer.implementation == "fused_opt_states_bf16"
+    )
     assert isinstance(config.trainer.activation_checkpoint, FullAC.Config)
     assert config.generator.cuda_graph.mode == "FULL"
 

@@ -16,7 +16,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.components.optimizer import (
+from torchtitan.components.optimization import (
     OptimizersContainer,
     ParamGroupConfig,
     register_moe_quantile_balancing_hook,

@@ -17,6 +17,7 @@ from torchtitan.components.data.types import (
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
 )
+from torchtitan.components.optimization import Optimization
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.observability.metrics import compute_training_performance_metrics
@@ -79,14 +80,8 @@ def _dict_microbatch(
 
 
 def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
-    if not hasattr(trainer, "loss_is_finite"):
-        trainer.loss_is_finite = torch.ones((), dtype=torch.int32)
-    if not hasattr(trainer, "optimizer_step"):
-        trainer.optimizer_step = lambda: TrainingEngine.optimizer_step(trainer)
-    if not hasattr(trainer, "_run_optimizer_step"):
-        trainer._run_optimizer_step = lambda *, loss_is_finite: (
-            TrainingEngine._optimizer_step_body(trainer, loss_is_finite=loss_is_finite)
-        )
+    if not hasattr(trainer, "optimization_step"):
+        trainer.optimization_step = lambda: TrainingEngine.optimization_step(trainer)
 
     return SimpleNamespace(
         engine=trainer,
@@ -215,9 +210,21 @@ def test_pp_forward_backward_microbatch_group_releases_consumed_loss_graphs(
     assert all(reference() is None for reference in activation_refs)
 
 
-def test_preprocess_microbatch_groups_prepares_structured_pp_inputs() -> None:
+def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
+    monkeypatch,
+) -> None:
+    spmd_context_active = False
+
+    @contextlib.contextmanager
+    def spmd_context(**kwargs):
+        nonlocal spmd_context_active
+        spmd_context_active = True
+        yield
+        spmd_context_active = False
+
     class _FakeModel:
         def preprocess_inputs(self, input_dict, **kwargs):
+            assert spmd_context_active
             return (
                 input_dict["input"] + 1,
                 input_dict["labels"] + 2,
@@ -260,6 +267,10 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs() -> None:
             }
         ),
     ]
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        spmd_context,
+    )
 
     [(arg_mbs, kwarg_mbs, target_mbs)] = TrainingEngine._preprocess_microbatch_groups(
         trainer, [microbatches]
@@ -280,7 +291,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs() -> None:
         assert microbatch.to_loss_kwargs_calls == [(trainer.device, True)]
 
 
-def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs() -> None:
+def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> None:
     trainer = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -313,6 +324,10 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs() -> None:
         {"input": torch.tensor([1]), "labels": torch.tensor([1])},
         {"advantages": torch.tensor([0.1])},
     )
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        lambda **kwargs: contextlib.nullcontext(),
+    )
 
     with pytest.raises(ValueError, match="pipeline parallelism"):
         TrainingEngine._preprocess_microbatch_groups(
@@ -321,7 +336,7 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs() -> None:
         )
 
 
-def test_forward_backward_runs_whole_accumulation() -> None:
+def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     class _FakeModel:
@@ -364,7 +379,7 @@ def test_forward_backward_runs_whole_accumulation() -> None:
     engine.num_completed_steps = 0
     engine.device = torch.device("cpu")
     engine.gc_handler = SimpleNamespace(run=MagicMock())
-    engine.optimizers = SimpleNamespace(zero_grad=MagicMock())
+    engine.optimization = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = None
     engine._non_pp_forward_backward_microbatch = forward_backward_body
     engine._run_forward_backward = partial(
@@ -379,6 +394,10 @@ def test_forward_backward_runs_whole_accumulation() -> None:
         )
         for index in range(2)
     ]
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        lambda **kwargs: contextlib.nullcontext(),
+    )
 
     result = TrainingEngine.forward_backward(
         engine,
@@ -393,9 +412,9 @@ def test_forward_backward_runs_whole_accumulation() -> None:
     ]
     assert engine.num_accumulation_steps == 2
     assert engine.ntokens_seen == 114
-    assert engine.loss_is_finite.item() == 1
+    assert engine.loss is result.loss
     engine.gc_handler.run.assert_called_once_with(1)
-    engine.optimizers.zero_grad.assert_called_once_with(set_to_none=True)
+    engine.optimization.zero_grad.assert_called_once_with(set_to_none=True)
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
         assert microbatch.to_input_dict_calls == [(engine.device, True)]
@@ -513,7 +532,6 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
-                cuda_graph=SimpleNamespace(components=["forward_backward"]),
                 parallelism=SimpleNamespace(
                     enable_sequence_parallel=False,
                     fsdp_defer_gradient_reduction=True,
@@ -553,7 +571,6 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                cuda_graph=SimpleNamespace(components=["forward_backward"]),
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
@@ -568,9 +585,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     )
 
     with (
-        patch(
-            "torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph"
-        ) as wrap,
+        patch("torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph") as wrap,
         patch("torchtitan.training_engine.cuda_graphs_supported", return_value=False),
     ):
         TrainingEngine._initialize_forward_backward(engine)
@@ -583,36 +598,8 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     wrap.assert_not_called()
 
 
-def test_training_engine_skips_forward_backward_cuda_graph_component() -> None:
-    eager_forward_backward = MagicMock(
-        return_value=ForwardBackwardResult(torch.tensor(1.0), [])
-    )
-    engine = cast(
-        TrainingEngine,
-        SimpleNamespace(
-            config=SimpleNamespace(
-                training=SimpleNamespace(disable_cuda_graphs=False),
-                cuda_graph=SimpleNamespace(components=[]),
-                parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
-                sdc_replayer=None,
-            ),
-            parallel_dims=SimpleNamespace(pp_enabled=False),
-            _forward_backward_body=eager_forward_backward,
-        ),
-    )
-
-    with patch("torchtitan.training_engine.wrap_with_cuda_graph") as wrap:
-        TrainingEngine._initialize_forward_backward(engine)
-        engine._run_forward_backward([], torch.tensor(0))
-
-    eager_forward_backward.assert_called_once()
-    wrap.assert_not_called()
-
-
 def test_graph_training_engine_rejects_optimizer_cuda_graph() -> None:
-    config = SimpleNamespace(
-        cuda_graph=SimpleNamespace(components=["forward_backward", "optimizer_step"])
-    )
+    config = SimpleNamespace(optimization=SimpleNamespace(enable_cuda_graph=True))
 
     with (
         patch.object(TrainingEngine, "__init__") as init,
@@ -628,25 +615,20 @@ def test_graph_training_engine_rejects_optimizer_cuda_graph() -> None:
     init.assert_not_called()
 
 
-def test_optimizer_step_body_clips_before_update() -> None:
+def test_optimization_update_clips_before_parameter_update() -> None:
     events = []
     optimizers = MagicMock()
     optimizers.step.side_effect = lambda: events.append("step")
-    engine = cast(
-        TrainingEngine,
+    optimization = cast(
+        Optimization,
         SimpleNamespace(
-            config=SimpleNamespace(
-                training=SimpleNamespace(max_norm=1.0),
-                cuda_graph=SimpleNamespace(
-                    components=["forward_backward", "optimizer_step"]
-                ),
-            ),
+            config=SimpleNamespace(max_norm=1.0),
             parallel_dims=SimpleNamespace(
                 pp_enabled=False,
                 ep_enabled=False,
                 get_optional_mesh=lambda name: None,
             ),
-            model_parts=[SimpleNamespace(parameters=lambda: [])],
+            parameters=[],
             optimizers=optimizers,
         ),
     )
@@ -656,89 +638,73 @@ def test_optimizer_step_body_clips_before_update() -> None:
         return torch.tensor(2.0)
 
     with patch(
-        "torchtitan.training_engine.dist_utils.clip_grad_norm_",
+        "torchtitan.components.optimization.optimization.dist_utils.clip_grad_norm_",
         side_effect=clip_grad_norm,
     ):
-        grad_norm = TrainingEngine._optimizer_step_body(
-            engine, loss_is_finite=torch.ones((), dtype=torch.int32)
-        )
+        grad_norm = Optimization._update(optimization, torch.tensor(1.0))
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
     assert events == ["clip", "step"]
 
 
-@pytest.mark.parametrize("capture", [False, True])
-def test_initialize_optimizer_configures_optimizer_step(capture: bool) -> None:
-    optimizers = MagicMock()
-    lr_schedulers = MagicMock()
-    eager_optimizer_step = MagicMock(return_value=torch.tensor(1.0))
-    cuda_graph_optimizer_step = MagicMock(return_value=torch.tensor(2.0))
-    components = ["forward_backward"]
-    if capture:
-        components.append("optimizer_step")
+def test_initialize_optimization_builds_component() -> None:
+    optimization = MagicMock()
+    optimization_config = SimpleNamespace(build=MagicMock(return_value=optimization))
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                optimizer=SimpleNamespace(build=MagicMock(return_value=optimizers)),
-                lr_scheduler=SimpleNamespace(
-                    build=MagicMock(return_value=lr_schedulers)
-                ),
+                optimization=optimization_config,
                 training=SimpleNamespace(steps=10),
-                ema=None,
-                cuda_graph=SimpleNamespace(components=components),
             ),
             model_parts=[MagicMock()],
+            pp_has_last_stage=True,
             model_cls=SimpleNamespace(_register_optimizer_hooks=MagicMock()),
             parallel_dims=MagicMock(),
-            _optimizer_step_body=eager_optimizer_step,
         ),
     )
 
-    with patch(
-        "torchtitan.training_engine.wrap_with_cuda_graph",
-        return_value=cuda_graph_optimizer_step,
-    ) as wrap:
-        TrainingEngine._initialize_optimizer(engine)
+    TrainingEngine._initialize_optimization(engine)
 
-    engine.config.optimizer.build.assert_called_once_with(
+    optimization_config.build.assert_called_once_with(
         model_parts=engine.model_parts,
-        capturable=capture,
+        parallel_dims=engine.parallel_dims,
+        training_steps=10,
+        pp_has_last_stage=True,
     )
-    if capture:
-        wrap.assert_called_once_with(
-            eager_optimizer_step,
-            num_warmup_iterations=2,
-        )
-        assert engine._run_optimizer_step is cuda_graph_optimizer_step
-    else:
-        wrap.assert_not_called()
-        assert engine._run_optimizer_step is eager_optimizer_step
+    engine.model_cls._register_optimizer_hooks.assert_called_once_with(
+        optimization.optimizers,
+        engine.model_parts,
+        engine.parallel_dims,
+    )
 
 
-def test_optimizer_step_keeps_host_work_outside_cuda_graph() -> None:
+def test_optimization_step_waits_for_checkpoint() -> None:
     events = []
+    loss = torch.tensor(1.0)
+    optimization = SimpleNamespace(
+        step=lambda actual_loss, *, current_step: (
+            events.append(f"optimization_{current_step}"),
+            torch.testing.assert_close(actual_loss, loss),
+            torch.tensor(2.0),
+        )[2]
+    )
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
             num_completed_steps=2,
-            loss_is_finite=torch.ones((), dtype=torch.int32),
+            loss=loss,
             checkpointer=SimpleNamespace(
                 maybe_wait_for_staging=lambda: events.append("checkpoint")
             ),
-            _run_optimizer_step=lambda *, loss_is_finite: (
-                events.append("optimizer"),
-                torch.tensor(2.0),
-            )[1],
-            lr_schedulers=SimpleNamespace(step=lambda: events.append("lr_scheduler")),
-            ema=SimpleNamespace(step=lambda step: events.append(f"ema_{step}")),
+            optimization=optimization,
         ),
     )
 
-    grad_norm = TrainingEngine.optimizer_step(engine)
+    grad_norm = TrainingEngine.optimization_step(engine)
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    assert events == ["checkpoint", "optimizer", "lr_scheduler", "ema_3"]
+    assert events == ["checkpoint", "optimization_3"]
     assert engine.num_completed_steps == 3
 
 
@@ -760,17 +726,14 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                training=SimpleNamespace(
-                    disable_cuda_graphs=False,
-                    max_norm=1.0,
-                ),
-                cuda_graph=SimpleNamespace(components=["forward_backward"]),
+                training=SimpleNamespace(disable_cuda_graphs=False),
             ),
-            optimizers=MagicMock(),
-            ema=None,
-            lr_schedulers=SimpleNamespace(
-                get_metrics=MagicMock(return_value={}),
-                step=MagicMock(),
+            optimization=SimpleNamespace(
+                zero_grad=MagicMock(),
+                lr_schedulers=SimpleNamespace(
+                    get_metrics=MagicMock(return_value={}),
+                ),
+                step=MagicMock(return_value=torch.tensor(4.0)),
             ),
             parallel_dims=SimpleNamespace(
                 dp_enabled=False,
@@ -784,6 +747,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             num_pp_microbatches=1,
             device=torch.device("cpu"),
             forward_backward=forward_backward,
+            loss=graph_loss,
             sdc_replayer=None,
             model_parts=[],
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
@@ -794,11 +758,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     )
     data_iterator = iter([_batch() for _ in range(3)])
 
-    with patch(
-        "torchtitan.training_engine.dist_utils.clip_grad_norm_",
-        return_value=torch.tensor(4.0),
-    ):
-        Trainer.train_step(_training_loop(trainer), data_iterator)
+    Trainer.train_step(_training_loop(trainer), data_iterator)
 
     metrics_processor.log.assert_called_once_with(
         1,
@@ -811,14 +771,10 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
 
     metrics_processor.should_log.return_value = False
     metrics_processor.log.reset_mock()
-    with patch(
-        "torchtitan.training_engine.dist_utils.clip_grad_norm_",
-        return_value=torch.tensor(4.0),
-    ):
-        Trainer.train_step(
-            _training_loop(trainer),
-            data_iterator=iter([_batch() for _ in range(3)]),
-        )
+    Trainer.train_step(
+        _training_loop(trainer),
+        data_iterator=iter([_batch() for _ in range(3)]),
+    )
 
     metrics_processor.log.assert_not_called()
     assert trainer.num_completed_steps == 2
@@ -842,7 +798,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine.parallel_dims = SimpleNamespace(fsdp_enabled=False)
     engine.device = torch.device("cpu")
     engine.gc_handler = SimpleNamespace(run=MagicMock())
-    engine.optimizers = SimpleNamespace(zero_grad=MagicMock())
+    engine.optimization = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(
@@ -881,7 +837,7 @@ def test_replay_failure_propagates_from_engine():
     engine.parallel_dims = SimpleNamespace(fsdp_enabled=False)
     engine.device = torch.device("cpu")
     engine.gc_handler = SimpleNamespace(run=MagicMock())
-    engine.optimizers = SimpleNamespace(zero_grad=MagicMock())
+    engine.optimization = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(return_value=[("input",)])
@@ -925,8 +881,8 @@ def test_initialize_preserves_phase_order():
             _initialize_model=MagicMock(
                 side_effect=lambda *args, **kwargs: events.append("model")
             ),
-            _initialize_optimizer=MagicMock(
-                side_effect=lambda *args, **kwargs: events.append("optimizer")
+            _initialize_optimization=MagicMock(
+                side_effect=lambda *args, **kwargs: events.append("optimization")
             ),
             _initialize_checkpointer=MagicMock(
                 side_effect=lambda *args, **kwargs: events.append("checkpointer")
@@ -947,7 +903,7 @@ def test_initialize_preserves_phase_order():
     assert events == [
         "model",
         "model_memory",
-        "optimizer",
+        "optimization",
         "checkpointer",
         "forward_backward",
     ]
@@ -957,7 +913,7 @@ def test_initialize_preserves_phase_order():
         hf_assets_path="",
         create_seed_checkpoint=True,
     )
-    engine._initialize_optimizer.assert_called_once_with()
+    engine._initialize_optimization.assert_called_once_with()
     engine._initialize_checkpointer.assert_called_once_with(
         dataloader=None,
         sd_adapter=engine.state_dict_adapter,
@@ -1017,7 +973,6 @@ def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
             parallel_dims=SimpleNamespace(pp_enabled=False),
             config=SimpleNamespace(
                 training=SimpleNamespace(disable_cuda_graphs=False),
-                cuda_graph=SimpleNamespace(components=["forward_backward"]),
                 sdc_replayer=None,
                 parallelism=SimpleNamespace(
                     fsdp_defer_gradient_reduction=False,

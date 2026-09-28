@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import os
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -51,8 +50,8 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         output_dir: str,
         fault_tolerance: FaultTolerance,
     ) -> None:
-        if "optimizer_step" in config.cuda_graph.components:
-            raise ValueError("Optimizer CUDA graphs are not supported with TorchFT.")
+        if config.optimization.enable_cuda_graph:
+            raise ValueError("Optimization CUDA graphs are not supported with TorchFT.")
         # The base constructor invokes the distributed-runtime hook.
         self.fault_tolerance = fault_tolerance
         super().__init__(
@@ -77,16 +76,15 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             global_ranks = list(range(first_rank, last_rank + 1))
 
         config = self.config
-        dist_utils.init_distributed(
+        topology = dist_utils.init_distributed(
             config.comm,
             enable_cpu_backend=config.training.enable_cpu_offload,
             base_folder=self.output_dir,
             ranks=global_ranks,
+            pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
         self.ft_manager = self.fault_tolerance.build()
-        self.parallel_dims = ParallelDims.from_config(
-            config.parallelism, int(os.environ["WORLD_SIZE"])
-        )
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, topology)
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq,
             debug=config.training.gc_debug,
@@ -113,27 +111,26 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         )
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
-    def _initialize_optimizer(self) -> None:
-        if isinstance(self.config.optimizer, TorchFTOptimizersContainer.Config):
-            self.optimizers = self.config.optimizer.build(
-                model_parts=self.model_parts,
-                ft_manager=self.ft_manager,
+    def _initialize_optimization(self) -> None:
+        optimizer_build_kwargs = (
+            {"ft_manager": self.ft_manager}
+            if isinstance(
+                self.config.optimization.optimizer,
+                TorchFTOptimizersContainer.Config,
             )
-        else:
-            self.optimizers = self.config.optimizer.build(model_parts=self.model_parts)
+            else None
+        )
+        self.optimization = self.config.optimization.build(
+            model_parts=self.model_parts,
+            parallel_dims=self.parallel_dims,
+            training_steps=self.config.training.steps,
+            pp_has_last_stage=self.pp_has_last_stage,
+            optimizer_build_kwargs=optimizer_build_kwargs,
+        )
         self.model_cls._register_optimizer_hooks(
-            self.optimizers,
+            self.optimization.optimizers,
             self.model_parts,
             self.parallel_dims,
-        )
-        self.lr_schedulers = self.config.lr_scheduler.build(
-            optimizers=self.optimizers,
-            training_steps=self.config.training.steps,
-        )
-        self.ema = (
-            self.config.ema.build(model_parts=self.model_parts)
-            if self.config.ema is not None
-            else None
         )
 
     def _initialize_checkpointer(
@@ -148,9 +145,9 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         self.checkpointer = checkpointer_config.build(
             dataloader=dataloader,
             model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            ema=self.ema,
+            optimizers=self.optimization.optimizers,
+            lr_schedulers=self.optimization.lr_schedulers,
+            ema=self.optimization.ema,
             states={"train_state": self},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
@@ -253,7 +250,6 @@ class FaultTolerantTrainer(Configurable):
             config.fault_tolerance.enable
             and cuda_graphs_supported()
             and not config.training.disable_cuda_graphs
-            and "forward_backward" in config.cuda_graph.components
             and parallel_dims.fsdp_enabled
             and self.gradient_accumulation_steps > 1
         ):
@@ -286,7 +282,7 @@ class FaultTolerantTrainer(Configurable):
             f"({engine.model_device_mem_stats.max_reserved_pct:.2f}%)"
         )
 
-        self.metrics_processor.optimizers = engine.optimizers
+        self.metrics_processor.optimizers = engine.optimization.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
         # Build validator if validation is configured
@@ -324,7 +320,7 @@ class FaultTolerantTrainer(Configurable):
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"maximum context length {config.training.max_context_length}, "
             f"total steps {config.training.steps} "
-            f"(warmup {config.lr_scheduler.warmup_steps})"
+            f"(warmup {config.optimization.lr_scheduler.warmup_steps})"
         )
 
     def microbatch_generator(
@@ -350,7 +346,7 @@ class FaultTolerantTrainer(Configurable):
         engine = self.engine
         current_step = engine.num_completed_steps + 1
         # Save the current step learning rate for logging
-        lr = engine.lr_schedulers.schedulers[0].get_last_lr()[0]
+        lr = engine.optimization.lr_schedulers.schedulers[0].get_last_lr()[0]
         should_log = self.metrics_processor.should_log(current_step)
 
         # Keep these variables local to shorten the code as these are
@@ -386,7 +382,7 @@ class FaultTolerantTrainer(Configurable):
             global_valid_tokens=global_valid_tokens,
         )
 
-        grad_norm = engine.optimizer_step()
+        grad_norm = engine.optimization_step()
 
         # log metrics
         if not should_log:
@@ -473,7 +469,7 @@ class FaultTolerantTrainer(Configurable):
                     if hasattr(engine.model_config, "layers")
                     else 0
                 ),
-                optimizer=engine.optimizers,
+                optimizer=engine.optimization.optimizers,
                 fragment_fn=getattr(engine.model_cls, "_fragment", None),
             ),
         ):

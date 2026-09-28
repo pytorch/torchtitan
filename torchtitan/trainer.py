@@ -89,7 +89,6 @@ class Trainer(Configurable):
 
             if (
                 not self.training.disable_cuda_graphs
-                and "forward_backward" in self.cuda_graph.components
                 and cuda_graphs_supported()
                 and self.parallelism.pipeline_parallel_degree > 1
                 and self.validator is not None
@@ -105,7 +104,6 @@ class Trainer(Configurable):
                     self.model,
                     parallelism=self.parallelism,
                     training=self.training,
-                    cuda_graph=self.cuda_graph,
                     debug=self.debug,
                     activation_checkpoint=self.activation_checkpoint,
                     compile_config=self.compile,
@@ -250,7 +248,7 @@ class Trainer(Configurable):
                 color=color,
             )
         self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
-        self.metrics_processor.optimizers = engine.optimizers
+        self.metrics_processor.optimizers = engine.optimization.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
         logger.info(
@@ -297,7 +295,7 @@ class Trainer(Configurable):
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"maximum context length {config.training.max_context_length}, "
             f"total steps {config.training.steps} "
-            f"(warmup {config.lr_scheduler.warmup_steps})"
+            f"(warmup {config.optimization.lr_scheduler.warmup_steps})"
         )
 
     def microbatch_generator(
@@ -373,9 +371,11 @@ class Trainer(Configurable):
         )
 
         # Capture the learning rates used by this optimizer update before the
-        # scheduler advances in engine.optimizer_step().
-        lr_metrics = engine.lr_schedulers.get_metrics() if should_log else {}
-        grad_norm = engine.optimizer_step()
+        # scheduler advances in engine.optimization_step().
+        lr_metrics = (
+            engine.optimization.lr_schedulers.get_metrics() if should_log else {}
+        )
+        grad_norm = engine.optimization_step()
 
         # log metrics
         if not should_log:

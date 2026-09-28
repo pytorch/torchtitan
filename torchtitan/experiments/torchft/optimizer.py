@@ -10,8 +10,8 @@ from typing import Any, TYPE_CHECKING
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.optimizer.utils import (
+from torchtitan.components.optimization import OptimizersContainer
+from torchtitan.components.optimization.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
 )

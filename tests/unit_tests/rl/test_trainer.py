@@ -14,13 +14,8 @@ import torch
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
-from torchtitan.config import (
-    CompileConfig,
-    Configurable,
-    DebugConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, Configurable, DebugConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.trainer import Trainer
@@ -232,9 +227,11 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             reset_peak_stats=MagicMock(),
         )
         engine = SimpleNamespace(
-            lr_schedulers=SimpleNamespace(
-                get_metrics=MagicMock(
-                    return_value={"lr/AdamW/0": 0.25, "lr/AdamW/1": 0.125}
+            optimization=SimpleNamespace(
+                lr_schedulers=SimpleNamespace(
+                    get_metrics=MagicMock(
+                        return_value={"lr/AdamW/0": 0.25, "lr/AdamW/1": 0.125}
+                    )
                 )
             ),
             parallel_dims=SimpleNamespace(non_data_parallel_size=1),
@@ -243,11 +240,11 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             num_flops_per_token=200,
             has_quantization=False,
             device_memory_monitor=device_memory_monitor,
-            optimizer_step=MagicMock(return_value=torch.tensor(2.0)),
+            optimization_step=MagicMock(return_value=torch.tensor(2.0)),
             save_checkpoint=MagicMock(),
             step_profiler=MagicMock(),
         )
-        engine.optimizer_step.side_effect = lambda: (
+        engine.optimization_step.side_effect = lambda: (
             setattr(engine, "num_completed_steps", engine.num_completed_steps + 1),
             torch.tensor(2.0),
         )[1]
@@ -290,7 +287,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             "trainer/mfu_percent": 50.0,
             "aux_loss/mean": 0.5,
         }
-        engine.optimizer_step.assert_called_once_with()
+        engine.optimization_step.assert_called_once_with()
         engine.save_checkpoint.assert_called_once_with(last_step=False)
         engine.step_profiler.assert_called_once_with()
         compute_performance.assert_called_once_with(

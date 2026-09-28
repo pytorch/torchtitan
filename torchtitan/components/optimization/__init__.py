@@ -6,6 +6,7 @@
 
 from .ema import EMA
 from .lr_scheduler import LRSchedulersContainer
+from .optimization import Optimization
 from .optimizer import (
     default_adamw,
     OptimizersContainer,
@@ -18,6 +19,7 @@ __all__ = [
     "EMA",
     "LRSchedulersContainer",
     "OptimizersContainer",
+    "Optimization",
     "ParamGroupConfig",
     "default_adamw",
     "register_moe_load_balancing_hook",

@@ -15,8 +15,13 @@ from torchtitan.components.checkpointer import (
 )
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
-from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.components.optimization import (
+    default_adamw,
+    LRSchedulersContainer,
+    Optimization,
+)
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
@@ -72,15 +77,17 @@ def flux_debugmodel() -> FluxTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_registry("flux-debug"),
-        optimizer=default_adamw(lr=8e-4),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=1,
-            decay_ratio=0.0,
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=8e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=1,
+                decay_ratio=0.0,
+            ),
+            max_norm=2.0,
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2048,
             max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
-            max_norm=2.0,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -89,7 +96,9 @@ def flux_debugmodel() -> FluxTrainer.Config:
             collator=FluxCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
-        parallelism=ParallelismConfig(context_parallel_degree=1),
+        parallelism=ParallelismConfig(
+            context_parallel_degree=1,
+        ),
         activation_checkpoint=FullAC.Config(),
         checkpointer=None,
         validator=None,
@@ -126,10 +135,12 @@ def flux_dev() -> FluxTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model=model_registry("flux-dev"),
-        optimizer=default_adamw(lr=1e-4),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=3000,
-            decay_ratio=0.0,
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=1e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=3000,
+                decay_ratio=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=24576,
@@ -165,10 +176,12 @@ def flux_schnell() -> FluxTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model=model_registry("flux-schnell"),
-        optimizer=default_adamw(lr=1e-4),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=3000,
-            decay_ratio=0.0,
+        optimization=Optimization.Config(
+            optimizer=default_adamw(lr=1e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=3000,
+                decay_ratio=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=32768,

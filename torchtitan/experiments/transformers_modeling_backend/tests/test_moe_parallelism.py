@@ -17,7 +17,7 @@ import unittest
 
 import torch
 
-from torchtitan.components.optimizer import (
+from torchtitan.components.optimization import (
     default_adamw,
     register_moe_load_balancing_hook,
 )

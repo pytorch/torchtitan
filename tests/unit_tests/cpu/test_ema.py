@@ -11,7 +11,7 @@ import unittest
 import torch
 import torch.nn as nn
 
-from torchtitan.components.optimizer import EMA
+from torchtitan.components.optimization import EMA
 
 
 class TestEMADynamicDecay(unittest.TestCase):
@@ -388,7 +388,7 @@ class TestEMAWarnings(unittest.TestCase):
         model = _ModelWithExpertBias()
         ema = EMA.Config().build(model_parts=[model])
         with self.assertLogs(
-            "torchtitan.components.optimizer.ema", level="WARNING"
+            "torchtitan.components.optimization.ema", level="WARNING"
         ) as logs:
             ema.load_state_dict({})
         joined = "\n".join(logs.output)
@@ -399,7 +399,7 @@ class TestEMAWarnings(unittest.TestCase):
         """A fixed decay replaces the half-life schedule, so setting both
         means half_life_fraction silently does nothing."""
         with self.assertLogs(
-            "torchtitan.components.optimizer.ema", level="WARNING"
+            "torchtitan.components.optimization.ema", level="WARNING"
         ) as logs:
             EMA.Config(decay=0.9, half_life_fraction=0.42)
         joined = "\n".join(logs.output)
@@ -407,11 +407,15 @@ class TestEMAWarnings(unittest.TestCase):
         self.assertIn("ignored", joined)
 
     def test_fixed_decay_alone_does_not_warn(self):
-        with self.assertNoLogs("torchtitan.components.optimizer.ema", level="WARNING"):
+        with self.assertNoLogs(
+            "torchtitan.components.optimization.ema", level="WARNING"
+        ):
             EMA.Config(decay=0.9)
 
     def test_half_life_fraction_alone_does_not_warn(self):
-        with self.assertNoLogs("torchtitan.components.optimizer.ema", level="WARNING"):
+        with self.assertNoLogs(
+            "torchtitan.components.optimization.ema", level="WARNING"
+        ):
             EMA.Config(half_life_fraction=0.42)
 
     def test_low_precision_tracking_warns(self):
@@ -419,14 +423,16 @@ class TestEMAWarnings(unittest.TestCase):
         away and the EMA never moves."""
         model = _ModelWithExpertBias().to(torch.bfloat16)
         with self.assertLogs(
-            "torchtitan.components.optimizer.ema", level="WARNING"
+            "torchtitan.components.optimization.ema", level="WARNING"
         ) as logs:
             EMA.Config().build(model_parts=[model])
         self.assertIn("torch.bfloat16", "\n".join(logs.output))
 
     def test_float32_tracking_does_not_warn(self):
         model = _ModelWithExpertBias()
-        with self.assertNoLogs("torchtitan.components.optimizer.ema", level="WARNING"):
+        with self.assertNoLogs(
+            "torchtitan.components.optimization.ema", level="WARNING"
+        ):
             EMA.Config().build(model_parts=[model])
 
     def test_bf16_increment_rounds_away_while_float32_tracks(self):

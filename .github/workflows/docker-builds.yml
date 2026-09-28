@@ -2,14 +2,15 @@ name: docker-builds
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - .ci/docker/**
-      - .github/workflows/docker-builds.yml
   push:
     branches:
       - main
       - release/*
+    # A pull request opts in by applying the ciflow/docker label, which pushes
+    # this tag. Building on every PR that touches .ci/docker would hold an
+    # image builder for each one.
+    tags:
+      - ciflow/docker/*
     paths:
       - .ci/docker/**
       - .github/workflows/docker-builds.yml
@@ -20,6 +21,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
   cancel-in-progress: true
 
+# The build assumes an AWS role by OIDC to push to ECR, which needs a token the
+# workflow has to ask for. contents is named explicitly because naming any
+# permission zeroes the ones left out, and checkout needs it.
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   docker-build:
     # Skip scheduled runs on forks, where they would only fail and email the fork owner
@@ -27,43 +35,50 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - docker-image-name: torchtitan-ubuntu-22.04-clang12
-            runner: [self-hosted, linux.2xlarge]
-          - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
-            runner: [linux.2xlarge]
-    runs-on: ${{ matrix.runner }}
+        docker-image-name:
+          - torchtitan-ubuntu-22.04-clang12
+          - torchtitan-rocm-ubuntu-22.04-clang12
+    # BuildKit runs out of cluster on the OSDC BuildKit pool, so this runner only
+    # streams the (small) .ci/docker context and waits.
+    runs-on: mt-l-x86iavx512-8-64
+    container:
+      image: ghcr.io/actions/actions-runner:latest
     timeout-minutes: 240
     env:
       DOCKER_IMAGE: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image-name }}
     steps:
-      - name: Clean workspace
-        shell: bash
-        run: |
-          echo "${GITHUB_WORKSPACE}"
-          sudo rm -rf "${GITHUB_WORKSPACE}"
-          mkdir "${GITHUB_WORKSPACE}"
-
-      - name: Setup SSH (Click me for login details)
-        uses: pytorch/test-infra/.github/actions/setup-ssh@main
-        with:
-          github-secret: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Checkout the repo
         uses: actions/checkout@v7
 
-      - name: Setup Linux
-        uses: pytorch/test-infra/.github/actions/setup-linux@main
-
-      - name: Build docker image
-        id: build-docker-image
-        uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          docker-image-name: ${{ matrix.docker-image-name }}
-          always-rebuild: true
-          push: true
-          force-push: true
+          role-to-assume: arn:aws:iam::308535385114:role/arc
+          aws-region: us-east-1
+          role-duration-seconds: 18000
 
-      - name: Teardown Linux
-        uses: pytorch/test-infra/.github/actions/teardown-linux@main
-        if: always()
+      # buildx forwards the client's registry auth to the remote builder, so the
+      # push at the end of build.sh authenticates with what this step writes.
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registries: "308535385114"
+
+      - name: Compute the image tag
+        id: tag
+        shell: bash
+        run: |
+          set -eux
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          # The tag set-matrix derives for consumers, so the test jobs resolve
+          # the image this build pushes.
+          DOCKER_TAG=$(git rev-parse HEAD:.ci/docker)
+          echo "docker-image=${DOCKER_IMAGE}:${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push to ECR
+        uses: pytorch/test-infra/.github/actions/docker-build-remote-buildkit@main
+        with:
+          command: |
+            cd .ci/docker
+            REMOTE_BUILDKIT=1 ./build.sh ${{ matrix.docker-image-name }} \
+              -t ${{ steps.tag.outputs.docker-image }}

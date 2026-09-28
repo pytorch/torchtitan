@@ -15,31 +15,21 @@ import torch
 import torch.distributed.checkpoint.stateful
 import tyro
 from torch.distributed.fsdp import FSDPModule
-from torch.distributed.pipelining.schedules import (
-    _PipelineScheduleRuntime,
-    get_schedule_class,
-    PipelineScheduleMulti,
-)
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.optimizer import (
-    EMA,
-    LRSchedulersContainer,
-    OptimizersContainer,
-)
+from torchtitan.components.optimization import Optimization
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     CommConfig,
     CompileConfig,
-    CUDAGraphConfig,
     DebugConfig,
-    ParallelismConfig,
     TrainingConfig,
 )
 from torchtitan.config.override import OverrideConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
@@ -48,8 +38,8 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
+    NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
-    wrap_with_cuda_graph,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability import structured_logger as sl
@@ -66,8 +56,6 @@ from torchtitan.tools import utils
 
 
 logger = logging.getLogger(__name__)
-
-_NUM_CUDA_GRAPH_WARMUP_STEPS = 2
 
 
 class ForwardBackwardResult(NamedTuple):
@@ -106,21 +94,22 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 +-- _pp_forward_backward_microbatch_group
                 |
                 +-- _non_pp_forward_backward_microbatch
+
+        Trainer.train_step
+        |
+        +-- TrainingEngine.optimization_step
+            |
+            +-- Optimization.step
+                |
+                +-- _update (maybe_wrapped_with_cuda_graph)
+                +-- lr_schedulers.step
+                +-- ema.step
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        optimizer: OptimizersContainer.Config = field(
-            default_factory=OptimizersContainer.Config
-        )
-        lr_scheduler: LRSchedulersContainer.Config = field(
-            default_factory=LRSchedulersContainer.Config
-        )
-        ema: EMA.Config | None = None
-        """Online EMA of model weights, e.g. for cheap mid-WSD-training eval
-        without a full LR decay. Unset (None) means EMA is disabled."""
+        optimization: Optimization.Config = field(default_factory=Optimization.Config)
         training: TrainingConfig = field(default_factory=TrainingConfig)
-        cuda_graph: CUDAGraphConfig = field(default_factory=CUDAGraphConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         checkpointer: Annotated[
             CheckpointManager.Config | None, tyro.conf.AvoidSubcommands
@@ -148,55 +137,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     "(--parallelism.pipeline_parallel_degree 1)."
                 )
 
-            if (
-                not self.training.disable_cuda_graphs
-                and "forward_backward" in self.cuda_graph.components
-                and cuda_graphs_supported()
-                and self.parallelism.pipeline_parallel_degree > 1
-            ):
-                pp_schedule_class = (
-                    _PipelineScheduleRuntime
-                    if self.parallelism.pipeline_parallel_schedule_csv
-                    else get_schedule_class(self.parallelism.pipeline_parallel_schedule)
-                )
-                if issubclass(pp_schedule_class, PipelineScheduleMulti):
-                    raise ValueError(
-                        "CUDA graphs do not support looped pipeline schedules yet. "
-                        "Use a single-stage pipeline schedule or disable CUDA graphs."
-                    )
-
             if self.parallelism.num_pp_microbatches <= 0:
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
-            optimizer_cuda_graph = "optimizer_step" in self.cuda_graph.components
-            if optimizer_cuda_graph and self.training.disable_cuda_graphs:
-                raise ValueError(
-                    "The optimizer CUDA graph requires CUDA graphs to be enabled."
-                )
             if (
-                optimizer_cuda_graph
-                and "forward_backward" not in self.cuda_graph.components
+                self.optimization.enable_cuda_graph
+                and self.training.disable_cuda_graphs
             ):
                 raise ValueError(
-                    "The optimizer CUDA graph requires the forward_backward component."
+                    "The optimization CUDA graph requires CUDA graphs to be enabled."
                 )
-            if optimizer_cuda_graph:
-                if self.optimizer.implementation not in (
-                    "fused",
-                    "fused_opt_states_bf16",
-                ):
-                    raise ValueError(
-                        "Optimizer CUDA graphs require the fused implementation."
-                    )
-                if any(
-                    group.optimizer_name not in ("Adam", "AdamW")
-                    or group.optimizer_kwargs.get("fused") is False
-                    for group in self.optimizer.param_groups
-                ):
-                    raise ValueError(
-                        "Optimizer CUDA graphs support only fused Adam and AdamW."
-                    )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
                 self.parallelism.tensor_parallel_degree
@@ -204,9 +155,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 else 1
             )
             context_parallel_degree = self.parallelism.context_parallel_degree
-            activation_shard_degree = sequence_parallel_degree * (
-                2 * context_parallel_degree if context_parallel_degree > 1 else 1
-            )
+            activation_shard_degree = sequence_parallel_degree * context_parallel_degree
             if num_tokens % activation_shard_degree != 0:
                 raise ValueError(
                     "The number of tokens per pipeline microbatch "
@@ -223,7 +172,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     )
                 if (
                     not self.training.disable_cuda_graphs
-                    and "forward_backward" in self.cuda_graph.components
                     and cuda_graphs_supported()
                     and self.sdc_replayer.num_replays > 1
                 ):
@@ -240,9 +188,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     model_config: BaseModel.Config
     output_dir: str
     loss_fn: BaseLoss
-    optimizers: OptimizersContainer
-    lr_schedulers: LRSchedulersContainer
-    ema: EMA | None
+    optimization: Optimization
     checkpointer: BaseCheckpointManager
     pp_has_last_stage: bool
     max_num_documents: int | None
@@ -253,7 +199,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     model_param_count: int
     num_flops_per_token: int
     has_quantization: bool
-    loss_is_finite: torch.Tensor
+    loss: torch.Tensor
     loss_metrics: dict[str, torch.Tensor]
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
@@ -292,12 +238,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         config = self.config
         dist_utils.set_batch_invariance(config.debug.batch_invariant)
         with sl.log_trace_span("torch_distributed_init"):
-            world_size = dist_utils.init_distributed(
+            topology = dist_utils.init_distributed(
                 config.comm,
                 enable_cpu_backend=config.training.enable_cpu_offload,
                 base_folder=self.output_dir,
+                pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
-        self.parallel_dims = ParallelDims.from_config(config.parallelism, world_size)
+        self.parallel_dims = ParallelDims.from_config(config.parallelism, topology)
         self.gc_handler = utils.GarbageCollection(
             gc_freq=config.training.gc_freq,
             debug=config.training.gc_debug,
@@ -326,7 +273,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             create_seed_checkpoint=create_seed_checkpoint,
         )
         self.model_device_mem_stats = self.device_memory_monitor.get_peak_stats()
-        self._initialize_optimizer()
+        self._initialize_optimization()
         self._initialize_checkpointer(
             dataloader=dataloader,
             sd_adapter=self.state_dict_adapter,
@@ -432,32 +379,19 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             f"{self.model_param_count:,} total parameters"
         )
 
-    def _initialize_optimizer(self) -> None:
-        """Construct optimizers, learning-rate schedulers and the weight EMA."""
-        self.optimizers = self.config.optimizer.build(
+    def _initialize_optimization(self) -> None:
+        """Construct the parameter update and its state."""
+        self.optimization = self.config.optimization.build(
             model_parts=self.model_parts,
-            capturable="optimizer_step" in self.config.cuda_graph.components,
+            parallel_dims=self.parallel_dims,
+            training_steps=self.config.training.steps,
+            pp_has_last_stage=self.pp_has_last_stage,
         )
         self.model_cls._register_optimizer_hooks(
-            self.optimizers,
+            self.optimization.optimizers,
             self.model_parts,
             self.parallel_dims,
         )
-        self.lr_schedulers = self.config.lr_scheduler.build(
-            optimizers=self.optimizers,
-            training_steps=self.config.training.steps,
-        )
-        self.ema = (
-            self.config.ema.build(model_parts=self.model_parts)
-            if self.config.ema is not None
-            else None
-        )
-        self._run_optimizer_step = self._optimizer_step_body
-        if "optimizer_step" in self.config.cuda_graph.components:
-            self._run_optimizer_step = wrap_with_cuda_graph(
-                self._optimizer_step_body,
-                num_warmup_iterations=_NUM_CUDA_GRAPH_WARMUP_STEPS,
-            )
 
     def _initialize_checkpointer(
         self,
@@ -472,9 +406,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.checkpointer = checkpointer_config.build(
             dataloader=dataloader,
             model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            ema=self.ema,
+            optimizers=self.optimization.optimizers,
+            lr_schedulers=self.optimization.lr_schedulers,
+            ema=self.optimization.ema,
             states={"train_state": self},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
@@ -502,11 +436,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             ),
         )
         self._run_forward_backward = eager_forward_backward_fn
-        if (
-            self.config.training.disable_cuda_graphs
-            or "forward_backward" not in self.config.cuda_graph.components
-            or not cuda_graphs_supported()
-        ):
+        if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
             return
 
         def forward_backward_for_cuda_graph(
@@ -533,7 +463,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 for model_part in self.model_parts
                 for parameter in model_part.parameters()
             ),
-            num_warmup_iterations=_NUM_CUDA_GRAPH_WARMUP_STEPS,
+            num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
         )
 
     @sl.log_trace_span("forward_backward")
@@ -548,7 +478,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             raise ValueError("microbatch_groups must not be empty.")
         self.num_accumulation_steps = len(microbatch_groups)
         self.gc_handler.run(self.num_completed_steps + 1)
-        self.optimizers.zero_grad(set_to_none=True)
+        self.optimization.zero_grad(set_to_none=True)
         if isinstance(global_valid_tokens, int):
             global_valid_tokens = torch.tensor(
                 global_valid_tokens,
@@ -579,8 +509,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 global_valid_tokens,
             )
 
-        # int32 is supported by NCCL reductions, unlike bool.
-        self.loss_is_finite = torch.isfinite(result.loss).all().to(torch.int32)
+        self.loss = result.loss
         return result
 
     def _preprocess_microbatch_groups(
@@ -592,7 +521,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         for microbatch_group in microbatch_groups:
             prepared_microbatches: list[tuple[Any, ...]] = []
             for microbatch in microbatch_group:
-                with sl.log_trace_span("preprocess_inputs"):
+                with (
+                    sl.log_trace_span("preprocess_inputs"),
+                    dist_utils.get_spmd_context(parallel_dims=self.parallel_dims),
+                ):
                     inputs, labels, model_kwargs = self.model_parts[
                         0
                     ].preprocess_inputs(
@@ -767,60 +699,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             return torch.sum(torch.stack(detached_losses)).to(self.device)
         return self._pp_loss_sentinel_on_non_last_stage
 
-    @sl.log_trace_span("optimizer_step")
-    def optimizer_step(self) -> torch.Tensor:
-        """Run one optimizer update and advance its eager state."""
+    @sl.log_trace_span("optimization_step")
+    def optimization_step(self) -> torch.Tensor:
+        """Run one optimization update and advance its eager state."""
         current_step = self.num_completed_steps + 1
         if hasattr(self, "checkpointer"):
             self.checkpointer.maybe_wait_for_staging()
-        grad_norm = self._run_optimizer_step(loss_is_finite=self.loss_is_finite)
-        self.lr_schedulers.step()
-        if self.ema is not None:
-            # The EMA schedule uses the step that was just optimized.
-            self.ema.step(current_step)
+        grad_norm = self.optimization.step(
+            self.loss,
+            current_step=current_step,
+        )
         self.num_completed_steps = current_step
-        return grad_norm
-
-    def _optimizer_step_body(self, *, loss_is_finite: torch.Tensor) -> torch.Tensor:
-        """Clip gradients, validate numerics, and update parameters."""
-        grad_norm = dist_utils.clip_grad_norm_(
-            [p for model in self.model_parts for p in model.parameters()],
-            self.config.training.max_norm,
-            foreach=True,
-            pp_mesh=self.parallel_dims.get_optional_mesh("pp"),
-            ep_enabled=self.parallel_dims.ep_enabled,
-        )
-        if not self.parallel_dims.pp_enabled or self.pp_has_last_stage:
-            loss_mesh = self.parallel_dims.get_optional_mesh("loss")
-            if loss_mesh is not None:
-                torch.distributed.all_reduce(
-                    loss_is_finite,
-                    op=torch.distributed.ReduceOp.MIN,
-                    group=loss_mesh.get_group(),
-                )
-        pp_mesh = self.parallel_dims.get_optional_mesh("pp")
-        if pp_mesh is not None:
-            torch.distributed.all_reduce(
-                loss_is_finite,
-                op=torch.distributed.ReduceOp.MIN,
-                group=pp_mesh.get_group(),
-            )
-        step_is_finite = loss_is_finite.logical_and(torch.isfinite(grad_norm).all())
-        if "optimizer_step" in self.config.cuda_graph.components:
-            error_message = (
-                "Loss or gradient norm is not finite. Stopping before the update."
-            )
-        else:
-            error_message = (
-                "Loss or gradient norm is not finite on at least one rank at "
-                f"step {self.num_completed_steps + 1}. "
-                "Stopping training before the optimizer update."
-            )
-        torch._assert_async(
-            step_is_finite,
-            error_message,
-        )
-        self.optimizers.step()
         return grad_norm
 
     def state_dict(self) -> dict[str, Any]:
@@ -863,10 +752,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def close(self) -> None:
         """Release CUDA graph and checkpoint resources owned by the trainer."""
         self.close_profiler()
-        if (
-            not self.config.training.disable_cuda_graphs
-            and self.config.cuda_graph.components
-        ):
+        if not self.config.training.disable_cuda_graphs:
             cuda_graph_teardown()
         if hasattr(self, "checkpointer"):
             self.checkpointer.close()

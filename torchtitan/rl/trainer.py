@@ -96,7 +96,6 @@ class Trainer(Configurable):
             model_config,
             parallelism=config.parallelism,
             training=config.training,
-            cuda_graph=config.cuda_graph,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
             compile_config=compile_config,
@@ -271,10 +270,10 @@ class Trainer(Configurable):
 
         engine = self.engine
         # Capture the learning rates used by this optimizer update before the
-        # scheduler advances in engine.optimizer_step().
-        lr_metrics = engine.lr_schedulers.get_metrics()
+        # scheduler advances in engine.optimization_step().
+        lr_metrics = engine.optimization.lr_schedulers.get_metrics()
 
-        grad_norm = engine.optimizer_step()
+        grad_norm = engine.optimization_step()
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.

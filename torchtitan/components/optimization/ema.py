@@ -57,9 +57,8 @@ class EMA(OptimizersContainer):
     resharding-safe ``state_dict()``/``load_state_dict()`` while overriding
     ``__init__``/``step()``/``zero_grad()`` -- this is never a real training
     optimizer. Never merged into ``Trainer.optimizers`` or
-    ``LRSchedulersContainer`` -- it's a sibling object, only built (via
-    ``Trainer.Config.ema``) when the user opts in, and stepped explicitly
-    from ``train_step()``.
+    ``LRSchedulersContainer``. ``Optimization`` builds and steps it when
+    ``Optimization.Config.ema`` is set.
     """
 
     # Deliberately extends Configurable.Config, not OptimizersContainer.Config:
@@ -111,21 +110,25 @@ class EMA(OptimizersContainer):
 
         def __post_init__(self) -> None:
             if self.update_every_n_steps < 1:
-                raise ValueError("ema.update_every_n_steps must be greater than 0.")
+                raise ValueError(
+                    "optimization.ema.update_every_n_steps must be greater than 0."
+                )
             if not math.isfinite(self.half_life_fraction):
-                raise ValueError("ema.half_life_fraction must be finite.")
+                raise ValueError("optimization.ema.half_life_fraction must be finite.")
             if self.half_life_fraction <= 0:
-                raise ValueError("ema.half_life_fraction must be greater than 0.")
+                raise ValueError(
+                    "optimization.ema.half_life_fraction must be greater than 0."
+                )
             if self.step_bias < 0:
                 raise ValueError(
-                    "ema.step_bias must not be negative; it is added to the firing "
+                    "optimization.ema.step_bias must not be negative; it is added to the firing "
                     "count, and a non-positive count has no decay."
                 )
             if self.decay is not None and not (
                 math.isfinite(self.decay) and 0 <= self.decay < 1
             ):
                 raise ValueError(
-                    "ema.decay must be finite and in [0, 1); "
+                    "optimization.ema.decay must be finite and in [0, 1); "
                     "decay=1 never updates the EMA."
                 )
             # A fixed decay replaces the half-life schedule outright, so a
@@ -135,7 +138,8 @@ class EMA(OptimizersContainer):
             )
             if self.decay is not None and self.half_life_fraction != default_half_life:
                 logger.warning(
-                    "ema.half_life_fraction=%s is ignored because ema.decay=%s is "
+                    "optimization.ema.half_life_fraction=%s is ignored because "
+                    "optimization.ema.decay=%s is "
                     "set; the decay is then fixed and the half-life schedule is "
                     "never used. Leave decay unset to use half_life_fraction.",
                     self.half_life_fraction,
@@ -228,11 +232,11 @@ class EMA(OptimizersContainer):
         pass  # never called by the training loop; no-op for safety
 
     # Takes the step rather than an optimizer closure: the firing count has to
-    # be derived from it, and this is never merged into Trainer.optimizers.
+    # be derived from it, and this is never merged into the training optimizers.
     @torch.no_grad()
     def step(self, current_step: int) -> None:  # pyrefly: ignore[bad-override]
         """Call directly with the trainer's global step -- never merged into
-        Trainer.optimizers, so there's no closure/zero-arg step() to honor."""
+        the training optimizers, so there is no closure/zero-arg step() to honor."""
         elapsed = current_step - self.start_step
         if elapsed <= 0 or elapsed % self.update_every_n_steps != 0:
             return

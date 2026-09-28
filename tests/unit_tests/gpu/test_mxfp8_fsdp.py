@@ -485,6 +485,110 @@ def test_mxfp8_fsdp_tensor_lifecycle(target):
     )
 
 
+def _build_fully_sharded_mxfp8_linear(mesh, reduce_dtype: torch.dtype) -> MXFP8Linear:
+    torch.manual_seed(0)
+    linear = (
+        MXFP8Linear.Config(in_features=128, out_features=128, bias=False)
+        .build()
+        .cuda()
+        .bfloat16()
+    )
+    fully_shard(
+        linear,
+        mesh=mesh,
+        mp_policy=MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16,
+            reduce_dtype=reduce_dtype,
+        ),
+        reshard_after_forward=False,
+    )
+    return linear
+
+
+def _run_fused_wgrad_accum(
+    rank: int,
+    world_size: int,
+    port: int,
+    reduce_dtype: torch.dtype,
+) -> None:
+    """Test WGRAD accumulation across PP-style microbatches under FSDP.
+
+    FSDP gives the unsharded parameter a grad_dtype equal to the reduce dtype,
+    so with gradient sync disabled it keeps the running unsharded gradient on
+    the parameter instead of moving it into a separate accumulator. The second
+    microbatch must fold into it with scaled_addmm_, and the reduced gradient
+    must equal two single-microbatch ones.
+    """
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    original_scaled_addmm_ = torch.nn.functional.scaled_addmm_
+    num_scaled_addmm_calls = 0
+
+    def counting_scaled_addmm_(*args, **kwargs):
+        nonlocal num_scaled_addmm_calls
+        num_scaled_addmm_calls += 1
+        return original_scaled_addmm_(*args, **kwargs)
+
+    torch.nn.functional.scaled_addmm_ = counting_scaled_addmm_
+    try:
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
+        torch.manual_seed(1)
+        x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+
+        reference = _build_fully_sharded_mxfp8_linear(mesh, reduce_dtype)
+        reference(x).sum().backward()
+        expected = reference.weight.grad.to_local().float() * 2
+
+        linear = _build_fully_sharded_mxfp8_linear(mesh, reduce_dtype)
+        linear.set_is_last_backward(False)
+        linear.set_reshard_after_backward(False)
+        linear.set_requires_gradient_sync(False)
+        linear(x).sum().backward()
+        linear.set_is_last_backward(True)
+        linear.set_reshard_after_backward(True)
+        linear.set_requires_gradient_sync(True)
+        linear(x).sum().backward()
+
+        assert num_scaled_addmm_calls == 1, num_scaled_addmm_calls
+        torch.testing.assert_close(
+            linear.weight.grad.to_local().float(), expected, rtol=2e-2, atol=2e-2
+        )
+    finally:
+        torch.nn.functional.scaled_addmm_ = original_scaled_addmm_
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "reduce_dtype",
+    [
+        pytest.param(torch.bfloat16, id="bf16-reduce"),
+        # TODO(anijain2305): FSDP leaves the unsharded parameter's grad_dtype
+        # at its BF16 dtype today and accumulates in FP32 separately, so the
+        # fused path does not fire.
+        # https://github.com/pytorch/pytorch/pull/194434 makes FSDP set
+        # grad_dtype to reduce_dtype, removing that separate accumulation.
+        # Remove the xfail once it lands.
+        pytest.param(
+            torch.float32,
+            id="fp32-reduce",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="FSDP does not yet set grad_dtype to reduce_dtype",
+            ),
+        ),
+    ],
+)
+def test_mxfp8_fsdp_fused_wgrad_accum(reduce_dtype):
+    mp.spawn(
+        _run_fused_wgrad_accum,
+        args=(2, get_free_port(), reduce_dtype),
+        nprocs=2,
+        join=True,
+    )
+
+
 def _run_simple_fsdp_disabled_parametrization(
     rank: int,
     world_size: int,

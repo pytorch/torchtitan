@@ -103,7 +103,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
     Args:
         config (Config): Optimizer configuration with param group definitions.
         model_parts (list[nn.Module]): Model parts to optimize.
-        capturable (bool): Whether optimizer steps can run in a CUDA graph.
+        enable_cuda_graph (bool): Whether optimizer steps run in a CUDA graph.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -128,7 +128,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
           momentum and variance in bfloat16 via a step pre-hook so the fused
           CUDA kernel uses its mixed-precision path (fp32 params + bf16 states).
           Only supported for Adam/AdamW. See
-          torchtitan/components/optimizer/bf16_optimizer_states.md.
+          torchtitan/components/optimization/bf16_optimizer_states.md.
         - more info: https://pytorch.org/docs/stable/optim.html
         """
 
@@ -228,8 +228,18 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         config: Config,
         *,
         model_parts: list[nn.Module],
-        capturable: bool = False,
+        enable_cuda_graph: bool = False,
     ) -> None:
+        if any(
+            "capturable" in group.optimizer_kwargs for group in config.param_groups
+        ) or any(
+            "capturable" in kwargs
+            for kwargs in config.optimizer_factory_kwargs_by_name.values()
+        ):
+            raise ValueError(
+                "Set CUDA graph capture with enable_cuda_graph, not capturable."
+            )
+
         impl_kwargs = self._build_impl_kwargs(config)
         param_group_configs = config.param_groups
         all_params = []
@@ -241,35 +251,41 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
                 model, param_group_configs, impl_kwargs
             )
             for opt_name, opt_param_groups in groups_by_opt_name.items():
-                if opt_name in ("Adam", "AdamW"):
-                    for group in opt_param_groups:
-                        group["capturable"] = capturable
-                        if capturable:
-                            group["lr"] = torch.tensor(
-                                group["lr"],
-                                dtype=torch.float32,
-                                device=group["params"][0].device,
-                            )
                 optimizer = self._resolve_optimizer_factory(opt_name)(
                     opt_param_groups,
                     **config.optimizer_factory_kwargs_by_name.get(opt_name, {}),
                 )
-                if capturable:
-                    if not isinstance(optimizer, (torch.optim.Adam, torch.optim.AdamW)):
+                if enable_cuda_graph:
+                    if any(
+                        "capturable" not in group for group in optimizer.param_groups
+                    ):
                         raise ValueError(
-                            "Optimizer CUDA graphs support only Adam and AdamW."
+                            f"Optimizer {type(optimizer).__name__} does not support "
+                            "CUDA graph capture."
                         )
-                    if any(not group.get("fused") for group in optimizer.param_groups):
-                        raise ValueError(
-                            "Optimizer CUDA graphs require the fused implementation."
+                    for group in optimizer.param_groups:
+                        group["initial_lr"] = group["lr"]
+                        group["capturable"] = True
+                        group["lr"] = torch.tensor(
+                            group["lr"],
+                            dtype=torch.float32,
+                            device=group["params"][0].device,
                         )
+
+                    def _save_host_lr(
+                        _optimizer: Optimizer, state_dict: dict[str, Any]
+                    ) -> dict[str, Any]:
+                        for group in state_dict["param_groups"]:
+                            if isinstance(group["lr"], torch.Tensor):
+                                group["lr"] = float(group["lr"])
+                        return state_dict
+
+                    optimizer.register_state_dict_post_hook(_save_host_lr)
+
                 self.optimizers.append(cast(T, optimizer))
                 self._log_optimizer(optimizer, part_idx, patterns_by_opt_name[opt_name])
                 for group in opt_param_groups:
                     all_params.extend(group["params"])
-
-                if opt_name in ("Adam", "AdamW") and capturable:
-                    self._register_cuda_graph_state_dict_hook(optimizer)
 
         self._validate_params(all_params)
 
@@ -363,20 +379,6 @@ class OptimizersContainer(Optimizer, Stateful, Configurable, Generic[T]):
         # We need to call Optimizer.__init__() to initialize some necessary optimizer
         # functionality such as hooks (e.g. register_step_pre_hook for MoE load balancing).
         Optimizer.__init__(self, all_params, {})
-
-    @staticmethod
-    def _register_cuda_graph_state_dict_hook(optimizer: Optimizer) -> None:
-        """Save device learning rates as host floats."""
-
-        def _save_host_lr(
-            _optimizer: Optimizer, state_dict: dict[str, Any]
-        ) -> dict[str, Any]:
-            for group in state_dict["param_groups"]:
-                if isinstance(group["lr"], torch.Tensor):
-                    group["lr"] = float(group["lr"])
-            return state_dict
-
-        optimizer.register_state_dict_post_hook(_save_host_lr)
 
     def _register_bf16_optimizer_state_hook(self) -> None:
         """Create and restore Adam optimizer states in bfloat16.

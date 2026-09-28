@@ -2,7 +2,7 @@
 
 In the default fp32 training configuration (`training.dtype="float32"`), Adam/AdamW keep momentum (`exp_avg`) and variance (`exp_avg_sq`) in float32, which roughly doubles optimizer-state memory versus storing those buffers in bfloat16.
 
-Set `optimizer.implementation` to **`fused_opt_states_bf16`** to use the fused Adam/AdamW CUDA kernel with **bf16 optimizer states** and **fp32 parameters**. This lowers optimizer-state memory while keeping parameter updates in fp32. FSDP may still reduce gradients in bf16. It casts the reduced gradient shards to fp32 before the optimizer step.
+Set `optimization.optimizer.implementation` to **`fused_opt_states_bf16`** to use the fused Adam/AdamW CUDA kernel with **bf16 optimizer states** and **fp32 parameters**. This lowers optimizer-state memory while keeping parameter updates in fp32. FSDP may still reduce gradients in bf16. It casts the reduced gradient shards to fp32 before the optimizer step.
 
 If you use **`training.dtype="bfloat16"`** (params and grads in bf16), you typically keep **`implementation="fused"`** (default). PyTorch then aligns optimizer state dtypes with training; you do not need `fused_opt_states_bf16` unless you explicitly want the pre-hook initialization path (behavior should match fused training in practice).
 
@@ -21,7 +21,7 @@ config.training.dtype = "float32"
 config.training.mixed_precision_param = "bfloat16"
 config.training.mixed_precision_reduce = "float32"
 # config.training.mixed_precision_reduce = "bfloat16"  # Optional BF16 reduction.
-config.optimizer.implementation = "fused_opt_states_bf16"
+config.optimization.optimizer.implementation = "fused_opt_states_bf16"
 ```
 
 The reduction dtype is independent of the optimizer-state dtype. Keep

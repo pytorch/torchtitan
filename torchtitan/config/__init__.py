@@ -12,15 +12,7 @@ TORCH_DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
-from .configs import (
-    CommConfig,
-    CompileConfig,
-    CUDAGraphConfig,
-    DebugConfig,
-    FSDPSymmMemScope,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from .configs import CommConfig, CompileConfig, DebugConfig, TrainingConfig
 from .configurable import Configurable
 from .function import Function
 from .manager import ConfigManager
@@ -40,12 +32,9 @@ __all__ = [
     "TORCH_DTYPE_MAP",
     # Config dataclasses
     "CompileConfig",
-    "CUDAGraphConfig",
-    "ParallelismConfig",
     "CommConfig",
     "TrainingConfig",
     "DebugConfig",
-    "FSDPSymmMemScope",
     # Override mechanism
     "OverrideConfig",
     "Override",

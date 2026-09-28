@@ -15,7 +15,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
 
-from torchtitan.components.optimizer import EMA
+from torchtitan.components.optimization import EMA
 
 
 class _ModelWithExpertBias(nn.Module):
@@ -32,7 +32,7 @@ class _ModelWithExpertBias(nn.Module):
 class TestEMACpuOffload(unittest.TestCase):
     """Exercises offload_to_cpu under real FSDP2 DTensor params -- the DTensor
     pin_memory workaround (_pin_local/_materialize_dtensor in
-    torchtitan/components/optimizer/ema.py) can't be tested without real
+    torchtitan/components/optimization/ema.py) can't be tested without real
     DTensors.
     """
 
