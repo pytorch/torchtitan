@@ -100,11 +100,7 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--trainer.parallelism.expert_parallel_degree 4",
                     "--trainer.parallelism.data_parallel_shard_degree 1",
                     "--generator.parallelism.tensor_parallel_degree 4",
-                    "--generator.parallelism.expert_parallel_degree 4",
                     "--generator.parallelism.data_parallel_degree 1",
-                    # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
-                    # CUDA-graph-compatible distributed MoE token dispatcher.
-                    "--generator.cuda_graph.mode NONE",
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
