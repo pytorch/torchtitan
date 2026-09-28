@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Annotated, Any
@@ -19,7 +19,7 @@ import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
-from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.data.types import OptimizerStepLayout, TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable
@@ -188,6 +188,7 @@ class Trainer(Configurable):
             dp_mesh = parallel_dims.get_mesh("dp")
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
+            dp_mesh = None
             dp_degree, dp_rank = 1, 0
 
         # metrics logging
@@ -199,6 +200,7 @@ class Trainer(Configurable):
             config_dict=config.to_dict(),
             has_quantization=engine.has_quantization,
         )
+        self._dataloader_metrics: dict[str, float] = {}
         color = self.metrics_processor.color
 
         self.num_pp_microbatches = (
@@ -221,6 +223,10 @@ class Trainer(Configurable):
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
             num_tokens_per_dp_rank * dp_degree
         )
+        optimizer_step_layout = OptimizerStepLayout(
+            num_accumulation_steps=self.gradient_accumulation_steps,
+            num_pp_microbatches=self.num_pp_microbatches,
+        )
 
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
         num_tokens_per_microbatch = (
@@ -229,9 +235,11 @@ class Trainer(Configurable):
         self.dataloader = config.dataloader.build(
             dp_world_size=dp_degree,
             dp_rank=dp_rank,
+            dp_mesh=dp_mesh,
             tokenizer=self.tokenizer,
             max_context_length=config.training.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            optimizer_step_layout=optimizer_step_layout,
         )
 
         engine.initialize(
@@ -299,33 +307,30 @@ class Trainer(Configurable):
         )
 
     def microbatch_generator(
-        self, data_iterable: Iterable[TrainingMicrobatch]
+        self, dataloader: BaseDataLoader
     ) -> Iterator[TrainingMicrobatch]:
         """Return microbatches while recording data-loading metrics.
 
-        Note: Tensors are yielded on CPU. The caller is responsible for moving
-        them to GPU when needed. This allows for more efficient memory usage
-        when doing gradient accumulation.
+        Tensors are yielded on CPU. The caller moves them to GPU when needed,
+        which avoids retaining an entire accumulation window on the device.
         """
-        data_iterator = iter(data_iterable)
-
+        data_iterator = iter(dataloader)
         while True:
             data_load_start = time.perf_counter()
             try:
                 microbatch = next(data_iterator)
             except StopIteration as ex:
-                # If data runs out during gradient accumulation, that
-                # entire step will not be executed.
                 raise DataloaderExhaustedError() from ex
-            ntokens_microbatch = (
+            dataloader_metrics = dataloader.drain_metrics()
+            if dataloader_metrics:
+                self._dataloader_metrics.clear()
+                self._dataloader_metrics.update(dataloader_metrics)
+            self.metrics_processor.ntokens_since_last_log += (
                 self.config.training.num_tokens_per_microbatch_per_dp_rank
             )
-            self.metrics_processor.ntokens_since_last_log += ntokens_microbatch
             self.metrics_processor.data_loading_times.append(
                 time.perf_counter() - data_load_start
             )
-
-            # Tensors stay on CPU; moved to GPU per-microbatch during training
             yield microbatch
 
     def train_step(self, data_iterator: Iterator[TrainingMicrobatch]):
@@ -437,6 +442,7 @@ class Trainer(Configurable):
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
             **collect_aux_loss_metrics(parallel_dims),
+            **self._dataloader_metrics,
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
@@ -445,6 +451,7 @@ class Trainer(Configurable):
             float(grad_norm.item()),
             extra_metrics=extra_metrics,
         )
+        self._dataloader_metrics.clear()
 
     @record
     def train(self):

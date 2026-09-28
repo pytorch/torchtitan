@@ -60,6 +60,25 @@ class TrainingMicrobatch(ABC):
         }
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class OptimizerStepLayout:
+    """Shape of the microbatch grid consumed by one optimizer step."""
+
+    num_accumulation_steps: int
+    num_pp_microbatches: int
+
+    def __post_init__(self) -> None:
+        if self.num_accumulation_steps <= 0:
+            raise ValueError("num_accumulation_steps must be greater than 0")
+        if self.num_pp_microbatches <= 0:
+            raise ValueError("num_pp_microbatches must be greater than 0")
+
+    @property
+    def num_microbatches(self) -> int:
+        """Return the number of microbatches in one optimizer step."""
+        return self.num_accumulation_steps * self.num_pp_microbatches
+
+
 @dataclass(kw_only=True, slots=True)
 class TokenizedTrainingMicrobatch(TrainingMicrobatch):
     """One fixed-size, data-parallel-rank-local token microbatch.
