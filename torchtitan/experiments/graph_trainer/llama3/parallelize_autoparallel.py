@@ -21,7 +21,7 @@ from torch.distributed.tensor.placement_types import Replicate, Shard
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.autoparallel_api import (
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 def parallelize_autoparallel_llama(
     model,
     *,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
@@ -51,11 +51,11 @@ def parallelize_autoparallel_llama(
     Returns a sharded model carrying AutoParallel train-step metadata for
     graph_trainer's aot_fx_trace path.
     """
-    if parallel_dims.dp_replicate_enabled:
+    if parallelism_context.dp_replicate_enabled:
         raise ValueError("AutoParallel Llama3 does not support DDP yet")
-    if parallel_dims.cp_enabled:
+    if parallelism_context.cp_enabled:
         raise ValueError("AutoParallel Llama3 does not support CP yet")
-    if parallel_dims.pp_enabled:
+    if parallelism_context.pp_enabled:
         raise ValueError("AutoParallel Llama3 does not support PP yet")
 
     # CP is rejected above, so the former flattened ``fsdp = dp_shard * cp``
@@ -64,12 +64,12 @@ def parallelize_autoparallel_llama(
     dense_names = [
         name
         for name in dense_names
-        if parallel_dims.get_optional_mesh(name) is not None
+        if parallelism_context.get_optional_mesh(name) is not None
     ]
-    dense_mesh = parallel_dims.get_mesh(dense_names)
+    dense_mesh = parallelism_context.get_mesh(dense_names)
 
     def input_fn():
-        dp_degree = parallel_dims.dp_replicate * parallel_dims.dp_shard
+        dp_degree = parallelism_context.dp_replicate * parallelism_context.dp_shard
         num_tokens_per_train_step = training.num_tokens_per_train_step
         if num_tokens_per_train_step < 0:
             num_tokens_per_train_step = (
@@ -100,7 +100,7 @@ def parallelize_autoparallel_llama(
     )
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         parallelism.fsdp_reshard_after_forward,
-        parallel_dims.pp_enabled,
+        parallelism_context.pp_enabled,
     )
 
     possible_input_shardings = {
@@ -145,11 +145,11 @@ def parallelize_autoparallel_llama(
 
         model_output = (
             AutoParallelModelOutput(
-                output_mesh=parallel_dims.get_mesh("tp"),
+                output_mesh=parallelism_context.get_mesh("tp"),
                 output_placements=(Shard(1),),
                 sharded_output_axis=1,
             )
-            if parallel_dims.tp_enabled
+            if parallelism_context.tp_enabled
             else None
         )
         parallel_mod = autop.apply_placement_for_fx_module(
@@ -161,6 +161,6 @@ def parallelize_autoparallel_llama(
     model = apply_compile(
         parallel_mod,
         compile_config=compile_config,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
     )
     return model

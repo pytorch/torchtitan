@@ -53,7 +53,7 @@ from torch.nn.attention.flex_attention import and_masks
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
@@ -102,7 +102,7 @@ logger = logging.getLogger(__name__)
 # TODO: directly testing against Trainer with debug model to avoid OOM
 def build_trainer_model(
     config: Controller.Config,
-) -> tuple[torch.nn.Module, torch.device, ParallelDims]:
+) -> tuple[torch.nn.Module, torch.device, ParallelismContext]:
     """Build, parallelize, and load weights for the trainer model.
 
     Mirrors Trainer._build_model() without the Monarch actor framework.
@@ -115,7 +115,7 @@ def build_trainer_model(
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
-    parallel_dims = ParallelDims(
+    parallelism_context = ParallelismContext(
         dp_shard=parallelism.data_parallel_shard_degree,
         dp_replicate=parallelism.data_parallel_replicate_degree,
         cp=parallelism.context_parallel_degree,
@@ -126,10 +126,10 @@ def build_trainer_model(
         enable_sequence_parallel=parallelism.enable_sequence_parallel,
     )
     dist_utils.set_determinism(
-        parallel_dims,
+        parallelism_context,
         device,
         config.trainer.debug,
-        distinct_seed_mesh_dims=["pp"],
+        distinct_seed_mesh_axes=["pp"],
     )
 
     trainer_config = config.trainer
@@ -148,14 +148,14 @@ def build_trainer_model(
             model = model_config.build()
 
     model = model.parallelize(
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         training=trainer_config.training,
         parallelism=parallelism,
         compile_config=config.compile,
         ac_config=trainer_config.activation_checkpoint,
         dump_folder=config.dump_folder,
     )
-    with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+    with parallelism_context.activate_spmd():
         model.to_empty(device=device)
         with torch.no_grad():
             model.init_weights(buffer_device=None)
@@ -178,7 +178,7 @@ def build_trainer_model(
             )
 
     model.eval()
-    return model, device, parallel_dims
+    return model, device, parallelism_context
 
 
 # TODO: directly testing against VLLMGenerator with debug model to avoid OOM
@@ -186,7 +186,7 @@ def _set_generator_determinism(debug) -> None:
     """Apply deterministic flags for the generator side.
 
     Mirrors VLLMGenerator._set_determinism() — the generator doesn't use
-    torchtitan's ParallelDims, so we apply the flags directly.
+    torchtitan's ParallelismContext, so we apply the flags directly.
     """
     if debug.deterministic:
         torch.use_deterministic_algorithms(
@@ -290,7 +290,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     vllm_sd = plain_tensor_to_dtensor_state_dict(
         vllm_sd,
         state_dict_layouts=wrapper.get_state_dict_layouts(),
-        parallel_dims=wrapper.parallel_dims,
+        parallelism_context=wrapper.parallelism_context,
     )
 
     missing = []
@@ -680,7 +680,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         # GPU memory for vLLM to leave room for the trainer model.
         config.generator.gpu_memory_limit = 0.5
 
-        cls.model, cls.device, cls.parallel_dims = build_trainer_model(config)
+        cls.model, cls.device, cls.parallelism_context = build_trainer_model(config)
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
@@ -750,9 +750,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         n = len(self.prompt_ids)
         mid = max(1, n // 2)
 
-        with dist_utils.get_spmd_context(
-            parallel_dims=type(self).parallel_dims
-        ), torch.no_grad():
+        with type(self).parallelism_context.activate_spmd(), torch.no_grad():
             lps_partial = compute_trainer_prefill_logprobs(
                 model,
                 self.prompt_ids[:mid],
@@ -786,9 +784,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         model = self.model
         engine = self.engine
 
-        with dist_utils.get_spmd_context(
-            parallel_dims=type(self).parallel_dims
-        ), torch.no_grad():
+        with type(self).parallelism_context.activate_spmd(), torch.no_grad():
             trainer_lps = compute_trainer_prefill_logprobs(
                 model, self.prompt_ids, self.device, attn_backend=self.attn_backend
             )

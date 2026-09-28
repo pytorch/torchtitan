@@ -78,7 +78,7 @@ class TestFluxDataLoader(unittest.TestCase):
                 "clip": torch.ones(2, 1, 4, dtype=torch.int64),
                 "t5": torch.ones(2, 1, 5, dtype=torch.int64),
             },
-            parallel_dims=SimpleNamespace(cp_enabled=False),
+            parallelism_context=SimpleNamespace(cp_enabled=False),
             parallelism=SimpleNamespace(),
             autoencoder=Autoencoder(),
             clip_encoder=Encoder((4,)),

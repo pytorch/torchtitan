@@ -153,8 +153,11 @@ def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage(
                     )
                 )
             ],
-            parallel_dims=SimpleNamespace(
-                pp_enabled=True, cp=1, dp_replicate_enabled=False
+            parallelism_context=SimpleNamespace(
+                pp_enabled=True,
+                cp=1,
+                dp_replicate_enabled=False,
+                activate_spmd=lambda **kwargs: contextlib.nullcontext(),
             ),
             max_num_documents=None,
             preprocess_inputs_kwargs={},
@@ -177,11 +180,6 @@ def test_pp_forward_backward_microbatch_returns_sentinel_without_last_stage(
         ),
     )
     _bind_pp_forward_backward_body(trainer)
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        lambda **kwargs: contextlib.nullcontext(),
-    )
-
     loss = TrainingEngine.forward_backward_microbatch(
         trainer,
         microbatch_group=[
@@ -228,8 +226,11 @@ def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs(
                     )
                 )
             ],
-            parallel_dims=SimpleNamespace(
-                pp_enabled=True, cp=1, dp_replicate_enabled=False
+            parallelism_context=SimpleNamespace(
+                pp_enabled=True,
+                cp=1,
+                dp_replicate_enabled=False,
+                activate_spmd=lambda **kwargs: contextlib.nullcontext(),
             ),
             max_num_documents=None,
             preprocess_inputs_kwargs={},
@@ -250,11 +251,6 @@ def test_pp_forward_backward_microbatch_releases_consumed_loss_graphs(
         ),
     )
     _bind_pp_forward_backward_body(trainer)
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        lambda **kwargs: contextlib.nullcontext(),
-    )
-
     reporting_loss = TrainingEngine.forward_backward_microbatch(
         trainer,
         microbatch_group=[
@@ -301,8 +297,11 @@ def test_pp_forward_backward_microbatch_prepares_structured_inputs(
             pp_has_first_stage=True,
             pp_has_last_stage=True,
             model_parts=[_FakeModel()],
-            parallel_dims=SimpleNamespace(
-                pp_enabled=True, cp=1, dp_replicate_enabled=False
+            parallelism_context=SimpleNamespace(
+                pp_enabled=True,
+                cp=1,
+                dp_replicate_enabled=False,
+                activate_spmd=spmd_context,
             ),
             max_num_documents=4,
             preprocess_inputs_kwargs={},
@@ -323,11 +322,6 @@ def test_pp_forward_backward_microbatch_prepares_structured_inputs(
         ),
     )
     global_valid_tokens = torch.tensor(2)
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        spmd_context,
-    )
-
     result = TrainingEngine.forward_backward_microbatch(
         trainer,
         microbatch_group=[
@@ -370,7 +364,9 @@ def test_pp_forward_backward_microbatch_rejects_batch_loss_kwargs() -> None:
     trainer = cast(
         TrainingEngine,
         SimpleNamespace(
-            parallel_dims=SimpleNamespace(pp_enabled=True, dp_replicate_enabled=False),
+            parallelism_context=SimpleNamespace(
+                pp_enabled=True, dp_replicate_enabled=False
+            ),
             device=torch.device("cpu"),
             sdc_replayer=None,
             num_accumulation_steps=1,
@@ -410,8 +406,11 @@ def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple(
     fake = SimpleNamespace(
         model_parts=[_FakeModel()],
         max_num_documents=4,
-        parallel_dims=SimpleNamespace(
-            pp_enabled=False, cp=1, dp_replicate_enabled=False
+        parallelism_context=SimpleNamespace(
+            pp_enabled=False,
+            cp=1,
+            dp_replicate_enabled=False,
+            activate_spmd=contextlib.nullcontext,
         ),
         config=SimpleNamespace(
             parallelism="PARA",
@@ -435,10 +434,6 @@ def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple(
         {"input": 0, "labels": torch.zeros(1)},
         {"advantages": torch.tensor([0.1]), "reduction": "sum"},
     )
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        lambda **kwargs: contextlib.nullcontext(),
-    )
     detached_loss = TrainingEngine.forward_backward_microbatch(
         fake,  # pyrefly: ignore[bad-argument-type]
         microbatch_group=[microbatch],
@@ -455,7 +450,7 @@ def test_forward_backward_microbatch_accumulates_tokens_and_forwards_triple(
     assert microbatch.to_input_dict_calls == [(fake.device, True)]
     assert microbatch.to_loss_kwargs_calls == [(fake.device, True)]
     assert captured["preprocess_kwargs"] == {
-        "parallel_dims": fake.parallel_dims,
+        "parallelism_context": fake.parallelism_context,
         "parallelism": "PARA",
         "max_num_documents": 4,
         "max_context_length": 2048,
@@ -560,17 +555,13 @@ def test_training_engine_owns_cuda_graph_warmup() -> None:
                 parallelism=SimpleNamespace(enable_sequence_parallel=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
             ),
-            parallel_dims=SimpleNamespace(pp_enabled=False),
+            parallelism_context=SimpleNamespace(pp_enabled=False),
             _non_pp_forward_backward_body=eager_forward_backward_body,
             _num_optimizer_steps_since_cuda_graph_init=100,
         ),
     )
 
     with (
-        patch(
-            "torchtitan.training_engine.dist_utils.get_spmd_context",
-            return_value=MagicMock(),
-        ),
         patch(
             "torchtitan.training_engine.wrap_with_cuda_graph",
             return_value=cuda_graph_forward_backward_body,
@@ -619,16 +610,12 @@ def test_training_engine_skips_cuda_graph_warmup_when_unsupported() -> None:
                 parallelism=SimpleNamespace(enable_sequence_parallel=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
             ),
-            parallel_dims=SimpleNamespace(pp_enabled=False),
+            parallelism_context=SimpleNamespace(pp_enabled=False),
             _non_pp_forward_backward_body=eager_forward_backward_body,
         ),
     )
 
     with (
-        patch(
-            "torchtitan.training_engine.dist_utils.get_spmd_context",
-            return_value=MagicMock(),
-        ),
         patch(
             "torchtitan.training_engine.wrap_with_cuda_graph",
             side_effect=lambda fn: fn,
@@ -671,7 +658,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
                 get_metrics=MagicMock(return_value={}),
                 step=MagicMock(),
             ),
-            parallel_dims=SimpleNamespace(
+            parallelism_context=SimpleNamespace(
                 dp_enabled=False,
                 pp_enabled=False,
                 dp_cp_enabled=False,
@@ -741,10 +728,11 @@ def test_engine_replay_checks_only_first_forward_backward(monkeypatch):
                 ),
                 parallelism="PARA",
             ),
-            parallel_dims=SimpleNamespace(
+            parallelism_context=SimpleNamespace(
                 pp_enabled=False,
                 dp_replicate_enabled=False,
                 cp=1,
+                activate_spmd=contextlib.nullcontext,
             ),
             device=torch.device("cpu"),
             model_parts=[
@@ -765,11 +753,6 @@ def test_engine_replay_checks_only_first_forward_backward(monkeypatch):
             ntokens_seen=0,
         ),
     )
-    monkeypatch.setattr(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        lambda **kwargs: contextlib.nullcontext(),
-    )
-
     for accumulation_index in range(2):
         TrainingEngine.forward_backward_microbatch(
             engine,
@@ -800,7 +783,7 @@ def test_replay_failure_propagates_from_engine():
                     num_tokens_per_microbatch_per_dp_rank=1,
                 )
             ),
-            parallel_dims=SimpleNamespace(
+            parallelism_context=SimpleNamespace(
                 pp_enabled=False,
                 dp_replicate_enabled=False,
             ),
@@ -968,10 +951,11 @@ def _run_forward_backward_recording_all_reduce(
                     num_tokens_per_microbatch_per_dp_rank=1,
                 ),
             ),
-            parallel_dims=SimpleNamespace(
+            parallelism_context=SimpleNamespace(
                 pp_enabled=False,
                 dp_replicate_enabled=dp_replicate_enabled,
                 cp=1,
+                activate_spmd=contextlib.nullcontext,
             ),
             device=torch.device("cpu"),
             forward_backward_body_fn=MagicMock(return_value=torch.tensor(1.0)),
@@ -984,17 +968,13 @@ def _run_forward_backward_recording_all_reduce(
             ntokens_seen=0,
         ),
     )
-    with patch(
-        "torchtitan.training_engine.dist_utils.get_spmd_context",
-        return_value=contextlib.nullcontext(),
-    ):
-        for accumulation_index in range(gradient_accumulation_steps):
-            TrainingEngine.forward_backward_microbatch(
-                trainer,
-                microbatch_group=[_batch()],
-                global_valid_tokens=torch.tensor(gradient_accumulation_steps),
-                accumulation_index=accumulation_index,
-            )
+    for accumulation_index in range(gradient_accumulation_steps):
+        TrainingEngine.forward_backward_microbatch(
+            trainer,
+            microbatch_group=[_batch()],
+            global_valid_tokens=torch.tensor(gradient_accumulation_steps),
+            accumulation_index=accumulation_index,
+        )
     return part.requires_all_reduce_calls
 
 

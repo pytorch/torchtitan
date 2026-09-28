@@ -13,7 +13,7 @@ Two-phase replacement:
   Phase 2 (parallelize time): ``build_and_swap_native_moe`` calls
       ``set_moe_sharding_config`` on each stored config, builds the Titan MoE,
       initializes it, and swaps it into the layer. Actual parallelization
-      happens later via ``model._parallelize(parallel_dims)``.
+      happens later via ``model._parallelize(parallelism_context)``.
 """
 
 import logging
@@ -25,7 +25,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
     _hf_activation_placement,
     _hf_sequence_parallel_placement,
@@ -94,7 +94,7 @@ def prepare_native_moe_configs(model: nn.Module, config) -> None:
 
 def build_and_swap_native_moe(
     model: nn.Module,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Build Titan MoE modules and swap them into the model.
 
@@ -107,16 +107,16 @@ def build_and_swap_native_moe(
     Args:
         model: The HFTransformerModel with ``_native_moe_config`` stored on
             each MoE-enabled layer (from ``prepare_native_moe_configs``).
-        parallel_dims: Parallel dimensions for EP/TP mesh resolution.
+        parallelism_context: Parallel dimensions for EP/TP mesh resolution.
     """
-    if parallel_dims.ep < parallel_dims.tp:
+    if parallelism_context.ep < parallelism_context.tp:
         raise ValueError(
-            f"MoE models require expert_parallel_degree ({parallel_dims.ep}) to be "
+            f"MoE models require expert_parallel_degree ({parallelism_context.ep}) to be "
             "greater than or equal to tensor_parallel_degree "
-            f"({parallel_dims.tp})."
+            f"({parallelism_context.tp})."
         )
-    enable_ep = parallel_dims.ep_enabled
-    enable_sp = parallel_dims.tp_enabled
+    enable_ep = parallelism_context.ep_enabled
+    enable_sp = parallelism_context.tp_enabled
 
     for layer in model.layers.values():
         moe_config = getattr(layer, "_native_moe_config", None)

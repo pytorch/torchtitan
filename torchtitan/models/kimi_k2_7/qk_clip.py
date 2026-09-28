@@ -16,7 +16,7 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.nn.attention.flex_attention import AuxRequest
 
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -182,10 +182,10 @@ def qk_clip(
 def register_qk_clip_hook(
     optimizers: OptimizersContainer,
     model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Apply QK clipping after each ordinary optimizer step."""
-    reduction_mesh = parallel_dims.get_mesh("loss")
+    reduction_mesh = parallelism_context.get_mesh("loss")
 
     def _qk_clip_hook(
         _optimizer: torch.optim.Optimizer,

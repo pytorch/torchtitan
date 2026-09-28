@@ -29,7 +29,7 @@ from torch.distributed.pipelining.schedules import (
 from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
 from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model import BaseModel
@@ -48,7 +48,7 @@ __all__ = [
 
 
 def _build_get_mesh_callback(
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> Callable[[tuple[str, ...], _MeshLayout | None], DeviceMesh | None]:
     """Build a callback that resolves a DeviceMesh from dimension names.
 
@@ -63,7 +63,7 @@ def _build_get_mesh_callback(
     def _get_mesh(
         mesh_dim_names: tuple[str, ...], mesh_layout: _MeshLayout | None
     ) -> DeviceMesh | None:
-        mesh = parallel_dims.get_mesh(list(mesh_dim_names))
+        mesh = parallelism_context.get_mesh(list(mesh_dim_names))
         if mesh_layout is not None and mesh._layout != mesh_layout:
             return None
         return mesh
@@ -74,7 +74,7 @@ def _build_get_mesh_callback(
 def pipeline_llm(
     model: BaseModel,
     *,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: CompileConfig | None,
@@ -84,14 +84,14 @@ def pipeline_llm(
     model_config: BaseModel.Config,
     loss_fn: LossFunction,
 ) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
-    pp_mesh = parallel_dims.get_mesh("pp")
+    pp_mesh = parallelism_context.get_mesh("pp")
 
     (
         num_virtual_stages,
         num_layers,
         input_weight,
         output_weight,
-    ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
+    ) = _get_pipeline_metadata(parallelism_context, parallelism, model_config)
 
     module_names_per_stage = parallelism.pipeline_parallel_module_fqns_per_model_part
     if module_names_per_stage is None:
@@ -116,14 +116,14 @@ def pipeline_llm(
                 "decoder blocks or use a real pipeline process group."
             )
         stage_io = _build_decoder_stage_io(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             parallelism=parallelism,
             training=training,
             model_config=model_config,
             lm_head_in_loss=isinstance(loss_fn, ChunkedLossWrapper),
         )
 
-    get_mesh_cb = _build_get_mesh_callback(parallel_dims)
+    get_mesh_cb = _build_get_mesh_callback(parallelism_context)
     stages, model_parts = _pipeline_module_split(
         model,
         pp_mesh,
@@ -140,7 +140,7 @@ def pipeline_llm(
     for i, m in enumerate(model_parts):
         # apply SPMD-style PT-D techniques
         m = m.parallelize(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,
@@ -176,7 +176,7 @@ def get_module_fqns_per_model_part(
     *,
     first_stage_module_fqns: Sequence[str],
     last_stage_module_fqns: Sequence[str],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
     model_config: BaseModel.Config,
 ) -> list[list[str]]:
@@ -195,7 +195,7 @@ def get_module_fqns_per_model_part(
         num_layers,
         input_weight,
         output_weight,
-    ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
+    ) = _get_pipeline_metadata(parallelism_context, parallelism, model_config)
     fqn_per_part = _generate_llm_fqn_per_model_part(
         num_virtual_stages, num_layers, input_weight, output_weight
     )
@@ -216,7 +216,7 @@ def pipeline_with_first_last_stage_modules(
     model: BaseModel,
     *,
     first_stage_module_fqns: Sequence[str],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
     model_config: BaseModel.Config,
     last_stage_module_fqns: Sequence[str] = (),
@@ -242,7 +242,7 @@ def pipeline_with_first_last_stage_modules(
         model,
         first_stage_module_fqns=first_stage_module_fqns,
         last_stage_module_fqns=last_stage_module_fqns,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         parallelism=parallelism,
         model_config=model_config,
     )
@@ -251,7 +251,7 @@ def pipeline_with_first_last_stage_modules(
     parallelism.pipeline_parallel_module_fqns_per_model_part = fqn_per_part
     return pipeline_llm(
         model,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         parallelism=parallelism,
         model_config=model_config,
         **kwargs,
@@ -259,7 +259,7 @@ def pipeline_with_first_last_stage_modules(
 
 
 def _get_pipeline_metadata(
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
     model_config: BaseModel.Config,
 ) -> tuple[int, int, int, int]:
@@ -293,26 +293,24 @@ def _get_pipeline_metadata(
 
         # Validation: check stages per rank based on schedule type
         model_config_info = f"Model has {num_layers} layers with pipeline_parallel_layers_per_stage={layers_per_stage}"
-        stage_distribution_info = (
-            f"resulting in {num_virtual_stages=} across {parallel_dims.pp} PP ranks"
-        )
+        stage_distribution_info = f"resulting in {num_virtual_stages=} across {parallelism_context.pp} PP ranks"
 
-        if num_virtual_stages % parallel_dims.pp != 0:
+        if num_virtual_stages % parallelism_context.pp != 0:
             raise ValueError(
                 f"Number of virtual stages ({num_virtual_stages}) must be divisible by "
-                f"pipeline parallel size ({parallel_dims.pp}). "
+                f"pipeline parallel size ({parallelism_context.pp}). "
                 f"{model_config_info}. "
                 f"Please adjust pipeline_parallel_layers_per_stage to a value that results in a number of stages "
-                f"divisible by {parallel_dims.pp}."
+                f"divisible by {parallelism_context.pp}."
             )
 
-        stages_per_rank = num_virtual_stages // parallel_dims.pp
+        stages_per_rank = num_virtual_stages // parallelism_context.pp
 
         if is_single_stage_schedule and stages_per_rank != 1:
             raise ValueError(
                 f"Single stage schedule requires exactly 1 stage per rank, but got {stages_per_rank} stages per rank. "
                 f"{model_config_info}, {stage_distribution_info}. "
-                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallel_dims.pp} or higher "
+                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallelism_context.pp} or higher "
                 f"to achieve 1 stage per rank."
             )
 
@@ -327,7 +325,7 @@ def _get_pipeline_metadata(
         # For multi-stage schedules, default is 2 virtual stages per rank
         # For single-stage schedules, default is 1 virtual stage per rank
         stages_per_rank = 1 if is_single_stage_schedule else 2
-        num_virtual_stages = parallel_dims.pp * stages_per_rank
+        num_virtual_stages = parallelism_context.pp * stages_per_rank
     return num_virtual_stages, num_layers, input_weight, output_weight
 
 
@@ -680,14 +678,14 @@ def _unsupported_static_split(
 
 def _build_decoder_stage_io(
     *,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
     training: TrainingConfig,
     model_config: Decoder.Config,
     lm_head_in_loss: bool,
 ) -> _DecoderStageIO:
     """Build static metadata for tensors crossing decoder stage boundaries."""
-    cp_shards = parallel_dims.cp
+    cp_shards = parallelism_context.cp
     num_tokens, cp_remainder = divmod(
         training.num_tokens_per_microbatch_per_dp_rank, cp_shards
     )
@@ -698,12 +696,12 @@ def _build_decoder_stage_io(
         )
 
     hidden_tokens = num_tokens
-    if parallel_dims.tp_enabled and parallelism.enable_sequence_parallel:
-        hidden_tokens, tp_remainder = divmod(num_tokens, parallel_dims.tp)
+    if parallelism_context.tp_enabled and parallelism.enable_sequence_parallel:
+        hidden_tokens, tp_remainder = divmod(num_tokens, parallelism_context.tp)
         if tp_remainder:
             raise ValueError(
                 "Static pipeline metadata requires the CP-local token count to "
-                f"be divisible by TP ({parallel_dims.tp}) with sequence parallelism."
+                f"be divisible by TP ({parallelism_context.tp}) with sequence parallelism."
             )
 
     dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
@@ -716,10 +714,10 @@ def _build_decoder_stage_io(
         decoder_output = example(num_tokens, model_config.dim)
     else:
         local_vocab_size = model_config.vocab_size
-        if parallel_dims.tp_enabled:
-            tp_rank = parallel_dims.get_mesh("tp").get_local_rank()
+        if parallelism_context.tp_enabled:
+            tp_rank = parallelism_context.get_mesh("tp").get_local_rank()
             local_vocab_size, remainder = divmod(
-                model_config.vocab_size, parallel_dims.tp
+                model_config.vocab_size, parallelism_context.tp
             )
             local_vocab_size += tp_rank < remainder
         decoder_output = example(num_tokens, local_vocab_size)

@@ -12,7 +12,7 @@ import spmd_types as spmd
 import torch
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.experiments.transformers_modeling_backend.model import (
     HFTransformerModel,
 )
@@ -31,7 +31,7 @@ def _run(
             "labels": torch.zeros(B, S),
         },
     )
-    pd = ParallelDims(
+    pd = ParallelismContext(
         dp_replicate=1,
         dp_shard=1,
         cp=1,
@@ -43,12 +43,12 @@ def _run(
     )
     with patch(
         "torchtitan.distributed.spmd_types.annotate_input_spmd_types",
-        side_effect=lambda _parallel_dims, batch, _input_sharding: batch,
+        side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
     ):
         return (
             m.preprocess_inputs(
                 batch,
-                parallel_dims=pd,
+                parallelism_context=pd,
                 parallelism=ParallelismConfig(),
             ),
             B,
@@ -99,7 +99,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         calls.append("cp_metadata")
         return attention_metadata
 
-    def annotate(_parallel_dims, batch, input_sharding):
+    def annotate(_parallelism_context, batch, input_sharding):
         assert calls == ["permutation", "cp_metadata", "cp_input"]
         assert set(batch) == {"input", "labels", "positions"}
         assert input_sharding["input"].local_type[MeshAxisName.TP] is spmd.R
@@ -132,14 +132,14 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
         "labels": torch.zeros(2, 4),
         "positions": torch.arange(4).repeat(2, 1),
     }
-    parallel_dims = cast(
-        ParallelDims,
+    parallelism_context = cast(
+        ParallelismContext,
         SimpleNamespace(cp_enabled=True),
     )
 
     _, _, extra_kwargs = model.preprocess_inputs(
         batch,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         parallelism=ParallelismConfig(
             context_parallel_load_balancer=load_balancer_config
         ),

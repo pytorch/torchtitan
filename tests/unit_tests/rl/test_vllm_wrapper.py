@@ -14,7 +14,7 @@ import torch.multiprocessing as mp
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
@@ -168,7 +168,7 @@ def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:
         adapter = PlainToDTensorStateDictAdapter(
             model_adapter,
             layouts,
-            ParallelDims(
+            ParallelismContext(
                 dp_replicate=1,
                 dp_shard=1,
                 cp=1,
