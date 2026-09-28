@@ -19,7 +19,8 @@ import torch
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
-from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
@@ -28,10 +29,7 @@ from torchtitan.experiments.graph_trainer.autoparallel_api import (
     AutoParallelModelOutput,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
-from torchtitan.experiments.graph_trainer.configs import (
-    GraphTrainerCompileConfig,
-    validate_autoparallel_config,
-)
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.tools.utils import device_type
 
 
@@ -53,8 +51,6 @@ def parallelize_autoparallel_llama(
     Returns a sharded model carrying AutoParallel train-step metadata for
     graph_trainer's aot_fx_trace path.
     """
-    validate_autoparallel_config(compile_config)
-
     if parallel_dims.dp_replicate_enabled:
         raise ValueError("AutoParallel Llama3 does not support DDP yet")
     if parallel_dims.cp_enabled:
@@ -165,8 +161,6 @@ def parallelize_autoparallel_llama(
     model = apply_compile(
         parallel_mod,
         compile_config=compile_config,
-        parallelism=parallelism,
         parallel_dims=parallel_dims,
-        dump_folder=dump_folder,
     )
     return model

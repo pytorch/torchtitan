@@ -11,6 +11,10 @@ Install the additional dependencies:
 pip install -r .ci/docker/requirements-vlm.txt
 ```
 
+KDA uses Attention Gym kernels, which need an NVIDIA GPU with CUDA capability
+9.0 or newer. Attention Gym runs its CuTe kernels on SM100/SM103 and its Triton
+kernels on other GPUs.
+
 ## Architecture
 
 Kimi K3 is built on Kimi Delta Attention (KDA) and Attention Residuals

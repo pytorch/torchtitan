@@ -22,7 +22,8 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
@@ -191,13 +192,6 @@ def resolve_graph_runtime_gradient_accumulation_policy(
     )
 
 
-def _validate_spmd_graph_runtime_config(
-    compile_config: GraphTrainerCompileConfig,
-) -> None:
-    if compile_config.mode != "aot_fx_trace":
-        raise ValueError("GraphRuntime requires --compile.mode aot_fx_trace")
-
-
 def _new_spmd_runtime_schedule(
     stage: GraphPipelineStage,
     *,
@@ -335,8 +329,6 @@ def _validate_graph_pp_config(
     compile_config: GraphTrainerCompileConfig,
     parallelism: ParallelismConfig,
 ) -> None:
-    if compile_config.mode != "aot_fx_trace":
-        raise ValueError("GraphPP requires --compile.mode aot_fx_trace")
     if compile_config.precompile_artifact_dir:
         raise ValueError(
             "GraphPP does not support --compile.precompile_artifact_dir yet. "
@@ -697,10 +689,8 @@ def make_graph_runtime(
             compile_config=compile_config,
             parallelism=parallelism,
         )
-    else:
-        _validate_spmd_graph_runtime_config(compile_config)
-        if len(stages) != 1:
-            raise ValueError(f"PP=1 requires one local stage, got {len(stages)}")
+    elif len(stages) != 1:
+        raise ValueError(f"PP=1 requires one local stage, got {len(stages)}")
 
     fsdp_policy = resolve_graph_runtime_fsdp_policy(
         compile_config,
@@ -830,7 +820,7 @@ def graph_pipeline_llm(
         output_weight,
     ) = _get_pipeline_metadata(parallel_dims, parallelism, model_config)
 
-    module_names_per_stage = parallelism.module_fqns_per_model_part
+    module_names_per_stage = parallelism.pipeline_parallel_module_fqns_per_model_part
     if module_names_per_stage is None:
         module_names_per_stage = _generate_llm_fqn_per_model_part(
             num_virtual_stages,

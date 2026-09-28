@@ -22,7 +22,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallel_dims import MeshAxisName
-from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.common.attention import HybridAttentionMetadata, VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -39,7 +39,6 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe_sharding import (
-    set_moe_block_padding_mask_sharding,
     set_routed_moe_sharding_config,
     shared_expert_rowwise_config,
 )
@@ -61,14 +60,15 @@ if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
     from torchtitan.models.qwen3_5.model import (
         Qwen35Attention,
-        Qwen35AttentionMaskDict,
         Qwen35Model,
         Qwen35TransformerBlock,
     )
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 
-def annotate_deltanet_cu_seqlens(attention_masks: "Qwen35AttentionMaskDict") -> None:
+def annotate_deltanet_cu_seqlens(
+    attention_masks: HybridAttentionMetadata,
+) -> None:
     """Annotate the nested GatedDeltaNet ``cu_seq_q`` offsets as DP-varying.
 
     ``cu_seq_q`` sits inside a ``VarlenMetadata`` inside the attention-mask
@@ -78,10 +78,7 @@ def annotate_deltanet_cu_seqlens(attention_masks: "Qwen35AttentionMaskDict") -> 
     deltanet_metadata = attention_masks.get("deltanet")
     if not isinstance(deltanet_metadata, VarlenMetadata):
         return
-    spmd.assert_type(
-        deltanet_metadata.cu_seq_q,
-        {MeshAxisName.DP: spmd.V, MeshAxisName.TP: spmd.R},
-    )
+    deltanet_metadata.annotate_spmd_types()
 
 
 def _qk_norm_sharding() -> ShardingConfig:
@@ -194,7 +191,6 @@ def _set_qwen35_layer_sharding(
     if layer_cfg.moe is not None:
         moe_cfg = layer_cfg.moe
         assert isinstance(moe_cfg, MoE.Config)
-        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         shared_experts = moe_cfg.shared_experts
         set_routed_moe_sharding_config(
             moe_cfg,
@@ -232,7 +228,6 @@ def set_sigmoid_gated_feed_forward_sharding_config(
     )
     shared_experts.sharding_config = ShardingConfig(
         in_src_shardings={"x": input_layout},
-        in_dst_shardings={"x": replicated_input_layout},
         out_src_shardings=output_layout,
     )
     shared_experts.w13.sharding_config = stacked_colwise_config(
@@ -248,11 +243,6 @@ def set_sigmoid_gated_feed_forward_sharding_config(
         },
         in_src_shardings={"input": replicated_input_layout},
         out_src_shardings=replicated_input_layout,
-        out_dst_shardings=(
-            dense_sequence_parallel_placement()
-            if enable_ep and enable_sp
-            else replicated_input_layout
-        ),
     )
 
 

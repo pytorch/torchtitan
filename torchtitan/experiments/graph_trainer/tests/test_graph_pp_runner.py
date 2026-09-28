@@ -26,7 +26,7 @@ from torch.distributed.pipelining.schedules import (
     UNSHARD,
 )
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -52,7 +52,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     _make_spmd_runtime_schedule,
     _set_graph_backward_actions,
     _validate_graph_pp_config,
-    _validate_spmd_graph_runtime_config,
     make_graph_runtime,
     resolve_graph_runtime_fsdp_policy,
     resolve_graph_runtime_gradient_accumulation_policy,
@@ -256,7 +255,11 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
     def test_prepare_fwd_user_args_allows_absent_args_and_kwargs(self) -> None:
         stage = types.SimpleNamespace(is_first=True, is_last=False)
-        ctx = _PipelineContext(types.SimpleNamespace(), None, None, None, [])
+        ctx = _PipelineContext(
+            schedule_ref=types.SimpleNamespace(),
+            wait_fwd_send_if_implicit=lambda *_: None,
+            losses=[],
+        )
 
         args, kwargs, target = _prepare_fwd_user_args(stage, 0, ctx)
 
@@ -380,10 +383,16 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             rank=0,
             pipeline_order_with_comms={0: []},
         )
-        ctx = _PipelineContext(schedule, arg_mbs, kwarg_mbs, None, [])
+        ctx = _PipelineContext(
+            schedule_ref=schedule,
+            wait_fwd_send_if_implicit=lambda *_: None,
+            arg_mbs=arg_mbs,
+            kwarg_mbs=kwarg_mbs,
+            losses=[],
+        )
         provider = GraphTrainerStageGraphProvider(
             loss_fn=lambda pred, target: pred.sum(),
-            compile_config=GraphTrainerCompileConfig(mode=None),
+            compile_config=GraphTrainerCompileConfig(),
             model_config=None,
             parallelism=None,
         )
@@ -606,11 +615,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                         extract_fsdp_param_unshard=extract_unshard,
                         extract_fsdp_grad_reduction=extract_reduce_grad,
                     )
-
-    def test_spmd_graph_runtime_accepts_precompile_artifacts(self) -> None:
-        _validate_spmd_graph_runtime_config(
-            GraphTrainerCompileConfig(precompile_artifact_dir="artifacts")
-        )
 
     def test_precompile_rejects_scheduled_joint_graphs(self) -> None:
         parallel_dims = types.SimpleNamespace(pp_enabled=False, fsdp_enabled=False)

@@ -210,9 +210,21 @@ def test_pp_forward_backward_microbatch_group_releases_consumed_loss_graphs(
     assert all(reference() is None for reference in activation_refs)
 
 
-def test_preprocess_microbatch_groups_prepares_structured_pp_inputs() -> None:
+def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
+    monkeypatch,
+) -> None:
+    spmd_context_active = False
+
+    @contextlib.contextmanager
+    def spmd_context(**kwargs):
+        nonlocal spmd_context_active
+        spmd_context_active = True
+        yield
+        spmd_context_active = False
+
     class _FakeModel:
         def preprocess_inputs(self, input_dict, **kwargs):
+            assert spmd_context_active
             return (
                 input_dict["input"] + 1,
                 input_dict["labels"] + 2,
@@ -255,6 +267,10 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs() -> None:
             }
         ),
     ]
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        spmd_context,
+    )
 
     [(arg_mbs, kwarg_mbs, target_mbs)] = TrainingEngine._preprocess_microbatch_groups(
         trainer, [microbatches]
@@ -275,7 +291,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs() -> None:
         assert microbatch.to_loss_kwargs_calls == [(trainer.device, True)]
 
 
-def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs() -> None:
+def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> None:
     trainer = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -308,6 +324,10 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs() -> None:
         {"input": torch.tensor([1]), "labels": torch.tensor([1])},
         {"advantages": torch.tensor([0.1])},
     )
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        lambda **kwargs: contextlib.nullcontext(),
+    )
 
     with pytest.raises(ValueError, match="pipeline parallelism"):
         TrainingEngine._preprocess_microbatch_groups(
@@ -316,7 +336,7 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs() -> None:
         )
 
 
-def test_forward_backward_runs_whole_accumulation() -> None:
+def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     class _FakeModel:
@@ -374,6 +394,10 @@ def test_forward_backward_runs_whole_accumulation() -> None:
         )
         for index in range(2)
     ]
+    monkeypatch.setattr(
+        "torchtitan.training_engine.dist_utils.get_spmd_context",
+        lambda **kwargs: contextlib.nullcontext(),
+    )
 
     result = TrainingEngine.forward_backward(
         engine,
@@ -565,9 +589,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     )
 
     with (
-        patch(
-            "torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph"
-        ) as wrap,
+        patch("torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph") as wrap,
         patch("torchtitan.training_engine.cuda_graphs_supported", return_value=False),
     ):
         TrainingEngine._initialize_forward_backward(engine)
