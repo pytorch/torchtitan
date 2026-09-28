@@ -13,6 +13,7 @@ import logging
 import math
 import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
@@ -34,7 +35,7 @@ from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
 )
-from torchtitan.distributed.utils import set_batch_invariance
+from torchtitan.distributed.utils import get_spmd_context, set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
@@ -55,6 +56,18 @@ from torchtitan.tools.utils import has_cuda_capability
 logger = logging.getLogger(__name__)
 
 # TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
+
+
+def _initialize_engine_step_thread(device_index: int, parallel_dims) -> None:
+    """Initialize thread-local state used by CUDA and compiled models."""
+    torch.accelerator.set_device_index(device_index)
+    # Materialize the worker's context stacks once, but leave them empty for
+    # the model wrapper to enter during each forward.
+    with (
+        parallel_dims.spmd_dense_mesh(),
+        get_spmd_context(parallel_dims=parallel_dims),
+    ):
+        pass
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1021,6 +1034,18 @@ class VLLMGenerator(Configurable):
         # Background asyncio.Task running _engine_loop; None until start_engine_loop starts it.
         self._engine_loop_task: asyncio.Task | None = None
 
+        # One private worker keeps vLLM access serialized while the actor's
+        # event loop remains responsive. CUDA and SPMD state are thread-local.
+        self._engine_step_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"{generator_name}-vllm-step-r{self._rank}",
+            initializer=_initialize_engine_step_thread,
+            initargs=(
+                torch.accelerator.current_device_index(),
+                self._get_model().parallel_dims,
+            ),
+        )
+
         logger.info("Generator initialized with vLLM engine")
 
     @staticmethod
@@ -1215,9 +1240,8 @@ class VLLMGenerator(Configurable):
                     for _ in range(self.config.max_engine_steps_between_decisions):
                         if not self._engine.has_unfinished_requests():
                             break
-                        with torch.no_grad():
-                            with sl.log_trace_span("vllm_engine_step"):
-                                request_outputs = self._engine.step()
+                        with sl.log_trace_span("vllm_engine_step"):
+                            request_outputs = await self._run_engine_step()
                         self._request_dispatcher.process_finished_requests(
                             request_outputs, self.policy_version
                         )
@@ -1227,6 +1251,17 @@ class VLLMGenerator(Configurable):
             logger.exception("engine loop crashed; failing all outstanding futures")
             self._fail_outstanding_futures(exc)
             raise
+
+    def _run_engine_step_sync(self) -> list[RequestOutput]:
+        """Execute one vLLM step on the dedicated worker thread."""
+        with torch.no_grad():
+            return self._engine.step()
+
+    async def _run_engine_step(self) -> list[RequestOutput]:
+        """Execute one serialized vLLM step without blocking the actor loop."""
+        return await asyncio.get_running_loop().run_in_executor(
+            self._engine_step_executor, self._run_engine_step_sync
+        )
 
     async def _decide_next_action(self) -> LoopDecision:
         """RANK 0: picks the next action. Sleeps until there is something to do."""
@@ -1408,6 +1443,9 @@ class VLLMGenerator(Configurable):
             except Exception:
                 logger.exception("engine loop raised during shutdown")
             self._engine_loop_task = None
+
+        # The engine loop has awaited its last step, so the worker is idle.
+        self._engine_step_executor.shutdown(wait=True, cancel_futures=True)
 
         # Stop the result-drain task on rank 0.
         await self._request_dispatcher.shutdown()

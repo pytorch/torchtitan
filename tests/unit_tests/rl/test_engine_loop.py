@@ -13,6 +13,14 @@ admit/pull/shutdown branching is tested without a GPU.
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, suppress
+from types import SimpleNamespace
+
+import torch
+
+import torchtitan.rl.generator as generator_module
 
 from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.distributed.routing.strategies import (
@@ -22,6 +30,7 @@ from torchtitan.rl.distributed.routing.strategies import (
 )
 
 from torchtitan.rl.generator import (
+    _initialize_engine_step_thread,
     CloseRequest,
     GenerationRequest,
     LoopAction,
@@ -162,3 +171,200 @@ def test_step_sticky_session_reuses_dp_rank() -> None:
         "r1": 0,
         "r2": 1,
     }
+
+
+def test_engine_step_does_not_block_generate_admission() -> None:
+    """A long vLLM step must not block actor endpoint work."""
+
+    async def run() -> None:
+        entered_step = threading.Event()
+        release_step = threading.Event()
+
+        class BlockingEngine:
+            def step(self):
+                entered_step.set()
+                release_step.wait()
+                return []
+
+        generator = _bare_generator()
+        generator._rank = 0
+        generator._engine = BlockingEngine()
+        generator._engine_loop_task = object()
+        generator.config = SimpleNamespace(sampling=SamplingConfig())
+        generator._engine_step_executor = ThreadPoolExecutor(max_workers=1)
+
+        # Release a regressed inline step so the test fails instead of hanging.
+        watchdog = threading.Timer(5.0, release_step.set)
+        watchdog.start()
+        step_task = asyncio.create_task(generator._run_engine_step())
+        generate_task = None
+        try:
+            await asyncio.wait_for(asyncio.to_thread(entered_step.wait), timeout=5.0)
+            generate_task = asyncio.create_task(
+                generator.generate(
+                    [1, 2],
+                    request_id="admitted-while-step-blocked",
+                    routing_session_id="session",
+                )
+            )
+            await asyncio.sleep(0)
+            admitted_before_step_finished = [
+                request.request_id for request in generator._queued_generation_requests
+            ] == ["admitted-while-step-blocked"] and not release_step.is_set()
+        finally:
+            release_step.set()
+            await step_task
+            if generate_task is not None:
+                generate_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await generate_task
+            watchdog.cancel()
+            generator._engine_step_executor.shutdown(wait=True)
+
+        assert admitted_before_step_finished
+
+    asyncio.run(run())
+
+
+def test_engine_step_worker_initializes_thread_local_state(monkeypatch) -> None:
+    state = threading.local()
+    mesh = object()
+    device_calls: list[tuple[int, int]] = []
+
+    @contextmanager
+    def mesh_context():
+        state.device_mesh_stack = [mesh]
+        try:
+            yield
+        finally:
+            state.device_mesh_stack.pop()
+
+    @contextmanager
+    def spmd_context(*, parallel_dims):
+        state.spmd_stack = [parallel_dims]
+        try:
+            yield
+        finally:
+            state.spmd_stack.pop()
+
+    parallel_dims = SimpleNamespace(spmd_dense_mesh=mesh_context)
+
+    monkeypatch.setattr(
+        torch.accelerator,
+        "set_device_index",
+        lambda device_index: device_calls.append((device_index, threading.get_ident())),
+    )
+    monkeypatch.setattr(generator_module, "get_spmd_context", spmd_context)
+
+    with ThreadPoolExecutor(
+        max_workers=1,
+        initializer=_initialize_engine_step_thread,
+        initargs=(3, parallel_dims),
+    ) as executor:
+        device_mesh_stack, spmd_stack, worker_thread = executor.submit(
+            lambda: (
+                list(state.device_mesh_stack),
+                list(state.spmd_stack),
+                threading.get_ident(),
+            )
+        ).result()
+
+    assert device_calls == [(3, worker_thread)]
+    assert device_mesh_stack == []
+    assert spmd_stack == []
+
+
+def test_engine_step_worker_serializes_engine_access() -> None:
+    async def run() -> None:
+        first_step_entered = threading.Event()
+        release_first_step = threading.Event()
+        event_loop_grad_enabled = torch.is_grad_enabled()
+        calls: list[int] = []
+        grad_enabled: list[bool] = []
+
+        class RecordingEngine:
+            def step(self):
+                calls.append(threading.get_ident())
+                grad_enabled.append(torch.is_grad_enabled())
+                if len(calls) == 1:
+                    first_step_entered.set()
+                    release_first_step.wait()
+                return []
+
+        generator = _bare_generator()
+        generator._engine = RecordingEngine()
+        generator._engine_step_executor = ThreadPoolExecutor(max_workers=1)
+
+        first = asyncio.create_task(generator._run_engine_step())
+        second = None
+        watchdog = threading.Timer(5.0, release_first_step.set)
+        watchdog.start()
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(first_step_entered.wait), timeout=5.0
+            )
+            second = asyncio.create_task(generator._run_engine_step())
+            await asyncio.sleep(0)
+            calls_before_release = len(calls)
+        finally:
+            release_first_step.set()
+            tasks = [first] if second is None else [first, second]
+            results = await asyncio.gather(*tasks)
+            watchdog.cancel()
+            generator._engine_step_executor.shutdown(wait=True)
+
+        assert calls_before_release == 1
+        assert results == [[], []]
+        assert len(set(calls)) == 1
+        assert grad_enabled == [False, False]
+        assert torch.is_grad_enabled() == event_loop_grad_enabled
+
+    asyncio.run(run())
+
+
+def test_close_waits_for_engine_loop_before_releasing_engine() -> None:
+    async def run() -> None:
+        events: list[str] = []
+        release_loop = asyncio.Event()
+
+        async def finish_engine_loop() -> None:
+            await release_loop.wait()
+            events.append("engine-loop")
+
+        class RecordingExecutor:
+            def shutdown(self, *, wait, cancel_futures):
+                assert wait and cancel_futures
+                events.append("executor")
+
+        class RecordingDispatcher:
+            async def shutdown(self):
+                events.append("dispatcher")
+
+        class RecordingRenderer:
+            def shutdown(self):
+                events.append("renderer")
+
+        generator = _bare_generator()
+        generator._rank = 1
+        generator._engine_loop_task = asyncio.create_task(finish_engine_loop())
+        generator._engine_step_executor = RecordingExecutor()
+        generator._request_dispatcher = RecordingDispatcher()
+        generator._fail_outstanding_futures = lambda exc: events.append("futures")
+        generator._engine = SimpleNamespace(renderer=RecordingRenderer())
+
+        close_task = asyncio.create_task(generator.close())
+        await asyncio.sleep(0)
+        assert events == []
+        release_loop.set()
+        await close_task
+
+        assert events == [
+            "engine-loop",
+            "executor",
+            "dispatcher",
+            "futures",
+            "renderer",
+        ]
+        assert generator._engine is None
+
+    asyncio.run(run())
