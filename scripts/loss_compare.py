@@ -800,6 +800,7 @@ def assert_metrics_equal(
         log_print("Error: baseline-only mode requires --import-result")
         sys.exit(1)
 
+    all_metrics_equal = True
     for name, baseline in baseline_metrics.items():
         for other_name, other in (
             ("test", test_metrics),
@@ -810,12 +811,17 @@ def assert_metrics_equal(
             if name not in other:
                 log_print(f"Error: metric '{name}' missing from {other_name} results")
                 sys.exit(1)
-        assert_losses_equal(
+        if not assert_losses_equal(
             baseline,
             None if test_metrics is None else test_metrics[name],
             None if imported_metrics is None else imported_metrics[name],
             metric_name=name,
-        )
+            exit_on_failure=False,
+        ):
+            all_metrics_equal = False
+
+    if not all_metrics_equal:
+        sys.exit(1)
 
 
 def assert_losses_equal(
@@ -823,7 +829,9 @@ def assert_losses_equal(
     test_losses: dict[int, float] | None = None,
     imported_losses: dict[int, float] | None = None,
     metric_name: str = "loss",
-) -> None:
+    *,
+    exit_on_failure: bool = True,
+) -> bool:
     """Assert one metric is equal between baseline and test using unittest.
 
     Args:
@@ -832,6 +840,8 @@ def assert_losses_equal(
             compares baseline against imported values (baseline-only mode).
         imported_losses: Values read from a golden result file.
         metric_name: Metric these values belong to, used in messages.
+        exit_on_failure: Exit immediately when values differ. Callers comparing
+            multiple metrics can disable this to report every mismatch first.
     """
     log_print(f"Asserting {metric_name} values are equal...")
     log_print(f"Baseline: {len(baseline_losses)} steps")
@@ -844,7 +854,9 @@ def assert_losses_equal(
 
     if not baseline_losses:
         log_print(f"Error: No {metric_name} values found in baseline")
-        sys.exit(1)
+        if exit_on_failure:
+            sys.exit(1)
+        return False
 
     if test_losses is not None and not test_losses:
         log_print(f"Error: No {metric_name} values found in test")
@@ -924,7 +936,9 @@ def assert_losses_equal(
             loss = baseline_losses[step]
             print(f"{step} {repr(loss)}")
         log_print()
-        sys.exit(1)
+        if exit_on_failure:
+            sys.exit(1)
+        return False
     else:
         if test_losses is not None and imported_losses is not None:
             log_print(
@@ -935,6 +949,7 @@ def assert_losses_equal(
             log_print("All losses are equal (baseline and test). Assertion passed!")
         else:
             log_print("All losses are equal (baseline and imported). Assertion passed!")
+        return True
 
 
 # =============================================================================
