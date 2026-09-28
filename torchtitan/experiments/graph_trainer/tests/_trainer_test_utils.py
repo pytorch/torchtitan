@@ -120,7 +120,6 @@ def build_minimal_trainer(
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
             compile=GraphTrainerCompileConfig(
-                mode="aot_fx_trace",
                 enable_passes=compile_enable_passes,
                 passes=[] if compile_passes is None else list(compile_passes),
                 disable_passes=(
@@ -245,6 +244,7 @@ def build_minimal_trainer(
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
+            debug=DebugConfig(),
             training=TrainingConfig(),
             parallelism=SimpleNamespace(enable_sequence_parallel=False),
         )

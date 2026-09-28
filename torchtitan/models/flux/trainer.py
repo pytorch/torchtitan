@@ -42,6 +42,18 @@ class FluxTrainer(Trainer):
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
         inference: Inference = field(default_factory=Inference)
 
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if (
+                self.parallelism.context_parallel_degree > 1
+                and self.parallelism.context_parallel_load_balancer is not None
+            ):
+                raise ValueError(
+                    "Flux context parallelism only supports contiguous sharding "
+                    "because image and text inputs may have different sequence "
+                    "lengths. Set context_parallel_load_balancer to None."
+                )
+
     def __init__(self, config: Config):
         super().__init__(config)
 

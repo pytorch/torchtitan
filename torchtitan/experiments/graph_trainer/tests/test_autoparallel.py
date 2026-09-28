@@ -11,11 +11,9 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from torchtitan.config import ParallelismConfig, TrainingConfig
-from torchtitan.experiments.graph_trainer.configs import (
-    GraphTrainerCompileConfig,
-    validate_autoparallel_config,
-)
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
 
 class _FakeMesh:
@@ -110,22 +108,6 @@ def test_autoparallel_integration_matrix():
         "autoparallel_deepseek_v3_efsdp_ep"
     ]
     assert all(test.ngpu == 4 for tests in suites.values() for test in tests)
-
-
-def test_autoparallel_config_validation():
-    with pytest.raises(ValueError, match="only supports --compile.mode aot_fx_trace"):
-        validate_autoparallel_config(
-            GraphTrainerCompileConfig(
-                mode="jit",
-                enable_autoparallel=True,
-            )
-        )
-
-    compile_config = GraphTrainerCompileConfig(
-        inductor_compilation="regional",
-        enable_autoparallel=True,
-    )
-    validate_autoparallel_config(compile_config)
 
 
 def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():

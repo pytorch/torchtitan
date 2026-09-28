@@ -416,7 +416,10 @@ class MuseGlimmerVisionEncoder(Module):
     # ------------------------------------------------------------------
 
     def forward(
-        self, pixel_values: torch.Tensor, *, grid_thw: torch.Tensor
+        self,
+        pixel_values: torch.Tensor,
+        *,
+        grid_thw: torch.Tensor,
     ) -> torch.Tensor:
         device = self.conv1_linear.weight.device
         dtype = self.conv1_linear.weight.dtype

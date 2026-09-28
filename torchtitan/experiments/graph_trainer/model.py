@@ -10,7 +10,8 @@ from typing import Any
 
 import torch
 
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 
@@ -65,16 +66,10 @@ class GraphTrainerModel:
         return apply_compile(
             model,
             compile_config=compile_config,
-            parallelism=parallelism,
             parallel_dims=parallel_dims,
-            dump_folder=dump_folder,
         )
 
     def pipeline(self, **kwargs: Any):
-        compile_config = kwargs["compile_config"]
-        if compile_config.mode is None:
-            return super().pipeline(**kwargs)
-
         from .graph_pp.pipeline import graph_pipeline_llm
 
         return graph_pipeline_llm(self, **kwargs)

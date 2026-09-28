@@ -28,9 +28,9 @@ from torchtitan.config import (
     apply_overrides,
     CompileConfig,
     OverrideConfig,
-    ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.parallel_dims import ParallelDims
 from torchtitan.distributed.spmd_types import (
