@@ -28,14 +28,7 @@ class StageGraphs(Protocol):
 
     @property
     def accumulates_gradients_in_graph(self) -> bool:
-        """Return whether backward writes into graph-owned accumulators."""
-
-    def zero_grad_(self) -> list[Any]:
-        """Zero graph-owned gradient accumulators.
-
-        Calling convention:
-            ``zero_grad_() -> flat_gradient_accumulators``
-        """
+        """Return whether backward accumulates gradients inside graph execution."""
 
     def unshard_params(
         self,
@@ -111,6 +104,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
         *,
         unsharded_param_values: list[Any],
         flat_buffer_values: list[Any],
+        grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, tuple[Any, ...]]:
         """Run the stage forward graph.
@@ -236,9 +230,68 @@ class JointStageGraphs(StageGraphs, Protocol):
         *,
         unsharded_param_values: list[Any],
         flat_buffer_values: list[Any],
+        grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
         """Run one joint graph and return its loss and parameter gradients."""
+
+
+class NoGradAccumJointStageGraphs(JointStageGraphs, Protocol):
+    """Joint PP=1 graph that produces gradients without accumulating them."""
+
+    def forward_backward_nogradaccum(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        target: Any,
+        loss_kwargs: dict[str, Any],
+        *,
+        unsharded_param_values: list[Any],
+        flat_buffer_values: list[Any],
+        runtime_validate: bool = False,
+    ) -> tuple[Any, list[Any]]:
+        """Return one microbatch loss and new gradient accumulators."""
+
+
+class FSDPBoundaryJointStageGraphs(JointStageGraphs, Protocol):
+    """Joint PP=1 graphs with FSDP boundaries fused into edge microbatches."""
+
+    def forward_backward_with_unshard(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        target: Any,
+        loss_kwargs: dict[str, Any],
+        *,
+        flat_param_values: list[Any],
+        flat_buffer_values: list[Any],
+        runtime_validate: bool = False,
+    ) -> tuple[Any, list[Any], list[Any]]:
+        """Run the first microbatch with parameter unsharding.
+
+        Calling convention:
+            ``forward_backward_with_unshard(...)``
+            ``-> (loss, unsharded_param_grads, unsharded_param_values)``
+        """
+
+    def forward_backward_with_reduce_grad(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        target: Any,
+        loss_kwargs: dict[str, Any],
+        *,
+        unsharded_param_values: list[Any],
+        flat_buffer_values: list[Any],
+        grad_accumulators: list[Any] | None = None,
+        runtime_validate: bool = False,
+    ) -> tuple[Any, list[Any]]:
+        """Run the last microbatch with gradient reduction.
+
+        Calling convention:
+            ``forward_backward_with_reduce_grad(...)``
+            ``-> (loss, sharded_param_grads)``
+        """
 
 
 class OverlapStageGraphs(Protocol):
@@ -327,8 +380,10 @@ class GraphPPStageRuntimeState:
             module.
         unsharded_param_values (list[Any]): Flat unsharded params consumed by
             forward graphs.
-        unsharded_param_grads (list[Any]): Flat unsharded gradient accumulator
-            slots.
+        unsharded_param_grads (list[Any]): Per-step gradient references. PP>1
+            and PP=1 without in-graph accumulation use runtime-owned slots
+            when reduction is deferred. PP=1 in-graph accumulation carries
+            references to first-microbatch gradient outputs.
         sharded_param_grads (list[Any]): Flat reduced gradients after
             ``reduce_grads``.
         trainable_params (list[torch.Tensor]): Stage parameters that receive

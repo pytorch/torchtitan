@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import unittest
 from typing import Any, cast
 
@@ -15,9 +16,13 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torchtitan.experiments.graph_trainer.common_utils import (
     PARAMETER_GRADIENT_FQNS_META,
 )
+from torchtitan.experiments.graph_trainer.grad_accumulation import (
+    insert_graph_gradient_accumulation,
+    insert_graph_gradient_accumulation_before_reduction,
+    insert_graph_gradient_accumulation_from_outputs,
+)
 from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
     fuse_wgrad_accumulation_pass,
-    insert_graph_gradient_accumulation,
 )
 
 
@@ -177,7 +182,7 @@ class TestWgradAccumulation(unittest.TestCase):
         (accumulator,) = [
             node
             for node in gm.graph.find_nodes(op="placeholder")
-            if node.name.startswith("graph_runtime_grad_accumulator_")
+            if node.name.startswith("grad_accumulator_")
         ]
         wgrad_value = wgrad.meta["val"]
         accumulator_value = accumulator.meta["val"]
@@ -208,6 +213,24 @@ class TestWgradAccumulation(unittest.TestCase):
         self.assertIs(second, accumulator)
         torch.testing.assert_close(accumulator, 2 * (lhs @ rhs))
 
+    def test_first_graph_output_becomes_accumulator(self) -> None:
+        first = _mm_graph(torch.float64)
+        following = _mm_graph(torch.float64)
+        accumulator_indices = insert_graph_gradient_accumulation_from_outputs(
+            following,
+            num_param_grads=1,
+            device=torch.device("cpu"),
+        )
+        self.assertEqual(accumulator_indices, (0,))
+
+        lhs = torch.randn(3, 4, dtype=torch.float64)
+        rhs = torch.randn(4, 2, dtype=torch.float64)
+        (accumulator,) = first(lhs, rhs)
+        (actual,) = following(lhs, rhs, accumulator)
+
+        self.assertIs(actual, accumulator)
+        torch.testing.assert_close(actual, 2 * (lhs @ rhs))
+
     def test_graph_accumulator_preserves_outputs_before_parameter_grads(self) -> None:
         gm = _mm_graph(torch.float64)
         output = gm.graph.find_nodes(op="output")[0]
@@ -236,6 +259,45 @@ class TestWgradAccumulation(unittest.TestCase):
         torch.testing.assert_close(actual_loss, lhs_value.sum())
         self.assertIs(actual_grad, accumulator)
         torch.testing.assert_close(actual_grad, lhs_value @ rhs_value)
+
+    def test_graph_accumulator_feeds_in_graph_reduction(self) -> None:
+        gm = _mm_graph()
+        output = gm.graph.find_nodes(op="output")[0]
+        (wgrad,) = output.args[0]
+        with gm.graph.inserting_before(output):
+            reduced = gm.graph.call_function(
+                torch.ops.aten.mul.Tensor,
+                args=(wgrad, 2),
+            )
+        reduced.meta = copy.copy(wgrad.meta)
+        output.args = ((reduced,),)
+        gm.recompile()
+        accumulator = torch.zeros_like(wgrad.meta["val"])
+
+        insert_graph_gradient_accumulation_before_reduction(
+            gm,
+            param_grad_output_names=(wgrad.name,),
+            reduce_grad_input_names=(wgrad.name,),
+            accumulators=(accumulator,),
+            device=torch.device("cpu"),
+        )
+        fuse_wgrad_accumulation_pass(gm)
+        self.assertEqual(
+            len(
+                gm.graph.find_nodes(
+                    op="call_function",
+                    target=torch.ops.aten.addmm_.default,
+                )
+            ),
+            1,
+        )
+
+        lhs = torch.randn(3, 4, dtype=torch.bfloat16)
+        rhs = torch.randn(4, 2, dtype=torch.bfloat16)
+        (first,) = gm(lhs, rhs, accumulator)
+        torch.testing.assert_close(first, 2 * (lhs @ rhs))
+        (second,) = gm(lhs, rhs, accumulator)
+        torch.testing.assert_close(second, 4 * (lhs @ rhs))
 
     def test_duplicate_gradient_outputs_share_one_accumulator(self) -> None:
         gm = _mm_graph(torch.float64)
@@ -292,7 +354,7 @@ class TestWgradAccumulation(unittest.TestCase):
             node.name: node for node in gm.graph.find_nodes(op="placeholder")
         }
         arguments = cast(Any, wgrad.args)
-        self.assertIs(arguments[0], placeholders["graph_runtime_grad_accumulator_0"])
+        self.assertIs(arguments[0], placeholders["grad_accumulator_0"])
         self.assertIs(arguments[1], placeholders["lhs"])
         self.assertIs(arguments[2], placeholders["rhs"])
         self.assertIs(arguments[3][0], placeholders["lhs_scale"])
@@ -408,7 +470,7 @@ class TestWgradAccumulation(unittest.TestCase):
         }
         self.assertIs(
             rewritten_arguments[0],
-            placeholders["graph_runtime_grad_accumulator_0"],
+            placeholders["grad_accumulator_0"],
         )
         self.assertEqual(rewritten_arguments[3], [placeholders["lhs_scale"]])
         self.assertEqual(

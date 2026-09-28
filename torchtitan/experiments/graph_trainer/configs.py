@@ -63,7 +63,10 @@ class GraphTrainerCompileConfig:
     """
 
     fsdp_param_unshard_mode: Literal[
-        "auto", "in_graph", "extracted_in_schedule_stage"
+        "auto",
+        "in_graph",
+        "in_graph_only_first_mb",
+        "extracted_in_schedule_stage",
     ] = "auto"
     """Choose where FSDP parameter all-gathers run.
 
@@ -73,11 +76,17 @@ class GraphTrainerCompileConfig:
         - PP=1 with gradient accumulation: explicit ``UNSHARD``
         - PP>1: explicit ``UNSHARD``
     - ``in_graph``
-        - PP=1: all-gathers inside ``FULL_FORWARD_BACKWARD``
+        - PP=1: all-gathers inside each joint microbatch graph
         - PP>1: error
-        - Keep all-gathers inside ``FULL_FORWARD_BACKWARD`` to be able to
+        - Keep all-gathers inside each joint graph to be able to
           immediately deallocate them after their last use and get lower peak
           memory
+    - ``in_graph_only_first_mb``
+        - PP=1 with gradient accumulation: all-gathers inside the first
+          ``FORWARD_BACKWARD_WITH_UNSHARD`` and parameters retained across microbatches
+        - PP>1: error
+        - Requires in-graph gradient accumulation and
+          ``fsdp_reshard_after_forward=never``
     - ``extracted_in_schedule_stage``
         - PP=1 and PP>1: explicit ``UNSHARD``
         - Commonly used for gradient accumulation and PP to run ``UNSHARD``
@@ -87,7 +96,10 @@ class GraphTrainerCompileConfig:
     """
 
     fsdp_gradient_sync_mode: Literal[
-        "auto", "in_graph", "deferred_as_schedule_stage"
+        "auto",
+        "in_graph",
+        "in_graph_only_last_mb",
+        "deferred_as_schedule_stage",
     ] = "auto"
     """Choose where FSDP gradient reduction runs.
 
@@ -97,11 +109,16 @@ class GraphTrainerCompileConfig:
         - PP=1 with gradient accumulation: explicit ``REDUCE_GRAD``
         - PP>1: explicit ``REDUCE_GRAD``
     - ``in_graph``
-        - PP=1: gradient reduction inside ``FULL_FORWARD_BACKWARD``
+        - PP=1: gradient reduction inside each joint microbatch graph
         - PP>1: error
-        - Keep reduce-scatters inside ``FULL_FORWARD_BACKWARD`` to be able to
+        - Keep reduce-scatters inside each joint graph to be able to
           immediately deallocate them after their last use and get lower peak
           memory
+    - ``in_graph_only_last_mb``
+        - PP=1 with gradient accumulation: reduction inside the last
+          ``FORWARD_BACKWARD_WITH_REDUCE_GRAD`` after accumulating all microbatches
+        - PP>1: error
+        - Requires in-graph gradient accumulation
     - ``deferred_as_schedule_stage``
         - PP=1 and PP>1: explicit ``REDUCE_GRAD``
         - Commonly used for gradient accumulation and PP to run
@@ -114,12 +131,14 @@ class GraphTrainerCompileConfig:
     """Choose where gradients accumulate across schedule microbatches.
 
     - ``auto``
-        - PP=1: in-graph for WGrad fusion or supported multi-microbatch schedules
+        - PP=1 with multiple microbatches: in-graph
+        - PP=1 with one microbatch: no accumulation
         - PP>1: runtime
     - ``runtime``
         - PP=1 and PP>1: accumulate backward outputs in ``GraphRuntime``
     - ``in_graph``
-        - PP=1: accumulate into persistent graph inputs
+        - PP=1: accumulate inside the microbatch graphs
+        - First-microbatch gradients become inputs to later microbatch graphs
         - PP>1: error
     """
 
