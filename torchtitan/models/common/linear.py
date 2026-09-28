@@ -284,7 +284,7 @@ class Fp32OutputLinear(Linear):
 
     Falls back to slower fp32 matmuls when off CUDA, with non-bf16 operands, or in batch-invariant
     mode.
-    Accuracy and timings: https://github.com/felipemello1/torchtitan/pull/55
+    Accuracy and timings: https://github.com/pytorch/torchtitan/pull/4923
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -314,7 +314,7 @@ class _Fp32OutputLinearFunction(torch.autograd.Function):
 
     Falls back to slower fp32 matmuls when off CUDA, with non-bf16 operands, or in batch-invariant
     mode.
-    Accuracy and timings: https://github.com/felipemello1/torchtitan/pull/55
+    Accuracy and timings: https://github.com/pytorch/torchtitan/pull/4923
     """
 
     @staticmethod
