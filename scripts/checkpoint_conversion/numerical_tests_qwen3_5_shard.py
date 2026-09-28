@@ -107,13 +107,15 @@ def run_worker(args):
     # BlockMask, which the model normally builds in its preprocess_inputs; build
     # it here directly since we call the model outside the trainer.
     positions = torch.arange(seq_len, device="cuda").unsqueeze(0)
-    attention_masks = cast(Qwen35Model, model).get_attention_masks(positions=positions)
+    attention_metadata = cast(Qwen35Model, model).get_attention_metadata(
+        positions=positions
+    )
 
     with torch.no_grad():
         output = model(
             tokens,
             positions=positions,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             special_tokens={"image_id": 248056, "video_id": 248057},
         )
 

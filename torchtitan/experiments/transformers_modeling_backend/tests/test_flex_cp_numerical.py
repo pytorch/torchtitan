@@ -181,7 +181,9 @@ def main():
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )
-        batch["attention_metadata"] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+        batch[
+            "attention_metadata"
+        ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
             batch["attention_metadata"],
             permutation=permutation,
         )

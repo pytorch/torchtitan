@@ -162,7 +162,9 @@ def test_lora_forward():
     # The default attention backend is FlexInnerAttention, which does not support
     # backward on CPU; this is a forward-only shape check, so run under no_grad.
     with torch.no_grad():
-        output = model(tokens, attention_metadata=attention_metadata, positions=positions)
+        output = model(
+            tokens, attention_metadata=attention_metadata, positions=positions
+        )
     assert output.shape == (num_tokens, vocab_size)
 
 

@@ -439,7 +439,7 @@ def run_tt(
         dtype=torch.int32,
         device=device,
     )
-    attention_masks = model.get_attention_masks(positions)
+    attention_metadata = model.get_attention_metadata(positions)
 
     print(
         f"tokens={tuple(tokens.shape)} pixel_values={tuple(pixel_values.shape)} "
@@ -472,7 +472,7 @@ def run_tt(
         grid_thw=grid_thw,
         special_tokens={"image_id": _MEDIA_TOKEN_ID},
         positions=positions,
-        attention_masks=attention_masks,
+        attention_metadata=attention_metadata,
     )
     _print_routing_comparison(ref["expert_indices"], expert_indices)
     return logits[-1].float().cpu()

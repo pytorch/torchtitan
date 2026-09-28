@@ -13,6 +13,7 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -28,13 +29,9 @@ from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
     AttentionMetadata,
     BaseAttention,
-    create_varlen_metadata_for_document,
-    FlexAttentionMetadata,
     FlexInnerAttention,
-    InnerAttention,
     local_head_split,
     VarlenAttentionMetadata,
-    VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -55,7 +52,7 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import Module
 
-from .kda import KDA
+from .kda import InnerKDA, KDA
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
@@ -117,7 +114,7 @@ class KimiMLAAttention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None = None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
@@ -244,11 +241,11 @@ class KimiK3TransformerBlock(Module):
         )
         self.moe = config.moe.build() if config.moe is not None else None
         self.moe_enabled = self.moe is not None
-        self.attention_metadata_key = (
-            type(self.attention.inner_attention)
-            if self.attention is not None
-            else type(self.delta_attention)
-        )
+        if self.attention is not None:
+            self.attention_metadata_key = type(self.attention.inner_attention)
+        else:
+            assert self.delta_attention is not None
+            self.attention_metadata_key = type(self.delta_attention.inner_kda)
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.attention_res_norm = (
@@ -268,7 +265,7 @@ class KimiK3TransformerBlock(Module):
         self,
         x_TD: torch.Tensor,
         block_residual_TND: torch.Tensor,
-        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None = None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -471,7 +468,7 @@ class KimiK3Model(MultimodalModel):
         )
         attention_metadata = input_dict.get("attention_metadata")
         if attention_metadata is not None:
-            kda_metadata = attention_metadata.get(KDA)
+            kda_metadata = attention_metadata.get(InnerKDA)
             if isinstance(kda_metadata, VarlenAttentionMetadata):
                 with parallelism_context.activate_spmd():
                     kda_metadata.annotate_spmd_types()
@@ -479,43 +476,6 @@ class KimiK3Model(MultimodalModel):
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         return inputs, labels, input_dict
-
-    def get_attention_metadata(
-        self,
-        positions: torch.Tensor,
-        *,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> AttentionMetadata:
-        attn_config = self.config.first_attention
-
-        kda_metadata = create_varlen_metadata_for_document(
-            positions,
-            padding_mask=padding_mask,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-        )
-
-        attention_metadata: dict[
-            type[Module], FlexAttentionMetadata | VarlenAttentionMetadata
-        ] = {KDA: kda_metadata}
-        if attn_config is None:
-            return attention_metadata
-        if isinstance(attn_config.inner_attention, VarlenInnerAttention.Config):
-            # Under varlen both consumers read the same document offsets.
-            backend = attn_config.inner_attention._owner
-            assert backend is not None and issubclass(backend, InnerAttention)
-            attention_metadata[backend] = kda_metadata
-        else:
-            full_attention_metadata = super().get_attention_metadata(
-                positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-            attention_metadata.update(full_attention_metadata)
-        return attention_metadata
 
     def _prepare_multimodal_embeds(
         self,
@@ -607,7 +567,9 @@ class KimiK3Model(MultimodalModel):
                 h_TD,
                 block_residual_TND,
                 (
-                    attention_metadata[layer.attention_metadata_key]
+                    attention_metadata[
+                        cast(KimiK3TransformerBlock, layer).attention_metadata_key
+                    ]
                     if attention_metadata is not None
                     else None
                 ),

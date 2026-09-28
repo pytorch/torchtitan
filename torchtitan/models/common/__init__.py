@@ -27,6 +27,7 @@ from .attention import (
     InnerAttention,
     QKVLinear,
     ScaledDotProductInnerAttention,
+    SlidingWindowFlexInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "RouterGateLinear",
     "SharedExpertRowParallelLinear",
     "ScaledDotProductInnerAttention",
+    "SlidingWindowFlexInnerAttention",
     "Sigmoid",
     "SiLU",
     "BinaryActivationFn",

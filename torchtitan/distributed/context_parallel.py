@@ -34,7 +34,7 @@ from torchtitan.distributed.spmd_types import (
 )
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.attention import FlexAttentionMetadata
+    from torchtitan.models.common.cp_attention import CPInnerAttention
 
 __all__ = [
     "ContextParallelLoadBalancer",
@@ -42,6 +42,7 @@ __all__ = [
     "PTRRFlexAttentionCPLoadBalancer",
     "get_cp_input_seq_len",
     "shard_tensors",
+    "supports_cp_inner_attention",
 ]
 
 
@@ -66,7 +67,7 @@ class HeadTailCPLoadBalancer(ContextParallelLoadBalancer):
         config: Config,
         *,
         seq_len: int,
-        attention_metadata: FlexAttentionMetadata | None,
+        attention_metadata: BlockMask | None,
     ) -> None:
         del config, attention_metadata
         cp_group = spmd_mesh_group(MeshAxisName.CP)
@@ -102,46 +103,25 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
     class Config(Configurable.Config):
         """Configuration for PTRR context-parallel load balancing."""
 
-        mask_key: str | None = None
-        """Mask used to derive the partition when attention metadata is a mapping."""
-
     def __init__(
         self,
         config: Config,
         *,
         seq_len: int,
-        attention_metadata: FlexAttentionMetadata | None,
+        attention_metadata: BlockMask | None,
     ) -> None:
-        del seq_len
-        mask_key = config.mask_key
+        del config, seq_len
 
         if attention_metadata is None:
             raise ValueError(
                 "PTRR load balancing requires attention metadata, but got None."
             )
-        if isinstance(attention_metadata, Mapping):
-            if mask_key is None:
-                raise ValueError(
-                    "PTRR load balancing received a Mapping[str, BlockMask] but no "
-                    "mask key was specified. Set "
-                    "PTRRFlexAttentionCPLoadBalancer.Config(mask_key=...) "
-                    "to one of: "
-                    f"{sorted(attention_metadata.keys())}"
-                )
-            if mask_key not in attention_metadata:
-                raise ValueError(
-                    f"PTRR mask key '{mask_key}' is not a key in attention metadata. "
-                    f"Available keys: {sorted(attention_metadata.keys())}"
-                )
-            block_mask = attention_metadata[mask_key]
-        else:
-            block_mask = attention_metadata
-        if not isinstance(block_mask, BlockMask):
+        if not isinstance(attention_metadata, BlockMask):
             raise ValueError(
-                "PTRR load balancing requires the selected metadata to be a "
-                f"BlockMask, but got {type(block_mask).__name__}."
+                "PTRR load balancing requires BlockMask metadata, but got "
+                f"{type(attention_metadata).__name__}."
             )
-        self.block_mask = block_mask
+        self.block_mask = attention_metadata
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         if cp_group is None:
             raise RuntimeError(
@@ -155,6 +135,36 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
             self.block_mask, self.cp_size
         )._generate_indices()
         return permutation
+
+
+def supports_cp_inner_attention(
+    load_balancer_config: ContextParallelLoadBalancer.Config,
+    cp_inner_attention: type[CPInnerAttention[Any, Any]],
+) -> bool:
+    """Return whether a load balancer supports a CP inner attention."""
+    from torchtitan.models.common.cp_attention import (
+        KVAllGatherCPFlexInnerAttention,
+        KVAllGatherCPSlidingWindowFlexInnerAttention,
+    )
+
+    supported_cp_inner_attentions: dict[type, tuple[type, ...]] = {
+        HeadTailCPLoadBalancer: (
+            KVAllGatherCPFlexInnerAttention,
+            KVAllGatherCPSlidingWindowFlexInnerAttention,
+        ),
+        PTRRFlexAttentionCPLoadBalancer: (
+            KVAllGatherCPFlexInnerAttention,
+            KVAllGatherCPSlidingWindowFlexInnerAttention,
+        ),
+    }
+    load_balancer_type = load_balancer_config._owner
+    assert load_balancer_type is not None
+    return any(
+        issubclass(cp_inner_attention, supported_cp_inner_attention)
+        for supported_cp_inner_attention in supported_cp_inner_attentions.get(
+            load_balancer_type, ()
+        )
+    )
 
 
 def _cp_shard_dims(input_shardings: dict[str, SpmdType]) -> dict[str, int]:

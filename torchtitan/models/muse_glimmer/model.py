@@ -20,6 +20,7 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -27,13 +28,8 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common.attention import (
     AttentionMetadata,
-    FlexAttentionMetadata,
     FlexInnerAttention,
-    get_causal_mask_mod,
-    get_efficient_causal_mask_mod_for_packed_document,
-    get_sliding_window_mask_mod,
     GQAttention,
-    InnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -58,11 +54,6 @@ from torchtitan.protocols.module import Module
 from .state_dict_adapter import MuseGlimmerStateDictAdapter
 
 from .vision_encoder import MuseGlimmerVisionAdapter, MuseGlimmerVisionEncoder
-
-
-def _window_mask_key(window_size: int | None) -> str:
-    """Mask-dict key for a layer's attention window (``"global"`` or ``"swa_<n>"``)."""
-    return "global" if window_size is None else f"swa_{window_size}"
 
 
 class RMSGainCenterNorm(RMSNorm):
@@ -91,8 +82,7 @@ class Attention(GQAttention):
 
     Adds, on top of :class:`GQAttention`:
     - a tuned query scaling applied after q-norm (``scale_query_by``),
-    - a sigmoid output gate (``o_gate``),
-    - per-layer sliding-window selection from a window-keyed mask dict.
+    - a sigmoid output gate (``o_gate``).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -121,7 +111,7 @@ class Attention(GQAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # qkv and the output gate both consume x, so gather once at their
@@ -141,14 +131,6 @@ class Attention(GQAttention):
         # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
         if self.rope is not None:
             xq, xk = self.rope(xq, xk, positions)
-
-        # Select this layer's mask by its window ("global" key = full attention).
-        # Only flex passes a window-keyed dict of BlockMasks to index into. Varlen
-        # passes one VarlenAttentionMetadata shared by every layer (each layer's window is
-        # a kernel arg, baked in at build time), so it goes straight through to the
-        # kernel (mirrors gpt_oss).
-        if isinstance(attention_metadata, dict):
-            attention_metadata = attention_metadata[_window_mask_key(self.window_size)]
 
         output = remat.region(
             self.inner_attention,
@@ -200,7 +182,7 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ):
         attn_out = self.attention(
@@ -600,7 +582,9 @@ class MuseGlimmerModel(MultimodalModel):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(type(layer.attention.inner_attention))
+                else attention_metadata.get(
+                    type(cast(TransformerBlock, layer).attention.inner_attention)
+                )
             )
             h_TD = layer(
                 h_TD,
@@ -615,67 +599,3 @@ class MuseGlimmerModel(MultimodalModel):
         if self._skip_lm_head:
             return h_TD
         return self.lm_head(h_TD) if self.lm_head is not None else h_TD
-
-    def get_attention_metadata(
-        self,
-        positions: torch.Tensor,
-        *,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> AttentionMetadata:
-        attn_config = self.config.first_attention
-        assert attn_config is not None
-        inner_attention_config = attn_config.inner_attention
-        backend = inner_attention_config._owner
-        assert backend is not None and issubclass(backend, InnerAttention)
-        # Varlen carries each layer's sliding window in its own kernel arg (baked at
-        # build time), so all layers share one document-varlen metadata; only the
-        # flex path needs the per-window BlockMask dict built below.
-        if issubclass(backend, VarlenInnerAttention):
-            return {
-                backend: backend.build_attention_metadata(
-                    positions,
-                    config=inner_attention_config,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                )
-            }
-        if not issubclass(backend, FlexInnerAttention):
-            raise TypeError(
-                "Muse Glimmer requires FlexInnerAttention or VarlenInnerAttention for "
-                f"sliding-window masks, got {backend.__name__}"
-            )
-
-        # Language models always use block-causal (per-document) masking: the
-        # dataloaders emit per-document positions, and the efficient packed-doc
-        # mask ANDed with the causal mask yields same-document causal attention.
-        base_mods = [
-            get_causal_mask_mod(),
-            get_efficient_causal_mask_mod_for_packed_document(positions),
-        ]
-
-        def _build_mask(mask_mods: list) -> BlockMask:
-            return backend.build_attention_metadata_from_mask_mods(
-                positions,
-                config=inner_attention_config,
-                mask_mods=mask_mods,
-            )
-
-        # "global" mask (no sliding window) plus one mask per distinct sliding
-        # window size across the layers; Attention.forward selects by window.
-        # All masks are built from the same ``base_mods`` so the global and
-        # windowed variants cannot drift apart.
-        masks: dict[str, BlockMask] = {_window_mask_key(None): _build_mask(base_mods)}
-        window_sizes = {
-            layer.attention.window_size
-            for layer in self.config.layers
-            if layer.attention.window_size is not None
-        }
-        for window_size in window_sizes:
-            masks[_window_mask_key(window_size)] = _build_mask(
-                [*base_mods, get_sliding_window_mask_mod(window_size)]
-            )
-
-        return {backend: masks}

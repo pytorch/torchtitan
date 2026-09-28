@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from typing import cast
 from unittest.mock import patch
 
 import torch
@@ -64,6 +65,35 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         self.assertEqual(
             model(torch.randn(2, 8, dtype=torch.bfloat16)).dtype, torch.bfloat16
         )
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_preserves_classes_without_direct_parameters(self):
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=1,
+            enable_sequence_parallel=False,
+        )
+        training = TrainingConfig(
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
+        )
+        model = nn.Sequential(nn.ReLU(), nn.Linear(8, 8))
+
+        model = apply_simple_fsdp(
+            model,
+            parallelism_context=parallelism_context,
+            training=training,
+        )
+
+        self.assertIs(type(model), nn.Sequential)
+        sequential = cast(nn.Sequential, model)
+        self.assertIs(type(sequential[0]), nn.ReLU)
+        self.assertIsNot(type(sequential[1]), nn.Linear)
 
 
 if __name__ == "__main__":

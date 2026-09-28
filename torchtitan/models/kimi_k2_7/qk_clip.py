@@ -154,7 +154,10 @@ def qk_clip(
     if not attention_layers:
         return
 
-    inner_attentions = [layer.inner_attention for layer in attention_layers]
+    inner_attentions = [
+        cast(QKClipFlexInnerAttention, layer.inner_attention)
+        for layer in attention_layers
+    ]
     # Each entry holds one layer's local maximum logit per query head.
     layer_max_logits_H = [
         torch.stack(inner_attention.max_attention_logits_H).amax(dim=0)
@@ -176,7 +179,9 @@ def qk_clip(
         strict=True,
     ):
         _clip_mla_weights(attention, layer_scales_H, alpha=alpha)
-        attention.inner_attention.max_attention_logits_H.clear()
+        cast(
+            QKClipFlexInnerAttention, attention.inner_attention
+        ).max_attention_logits_H.clear()
 
 
 def register_qk_clip_hook(

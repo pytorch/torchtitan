@@ -95,7 +95,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         deltanet_backend = next(
             layer.attention_metadata_key
             for layer in model.layers.values()
-            if layer.attention_metadata_key.__name__ == "GatedDeltaNet"
+            if layer.attention_metadata_key.__name__ == "InnerGatedDeltaNet"
         )
         return model, sink, parallelism_context, parallelism, deltanet_backend
 
