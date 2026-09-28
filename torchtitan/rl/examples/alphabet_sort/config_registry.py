@@ -171,7 +171,7 @@ def rl_grpo_qwen3_0_6b_varlen_checkpoint_test() -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen()
     assert config.trainer.checkpointer is not None
     config.trainer.checkpointer.interval = 2
-    config.trainer.lr_scheduler.total_steps = 4
+    config.trainer.optimization.lr_scheduler.total_steps = 4
     return config
 
 

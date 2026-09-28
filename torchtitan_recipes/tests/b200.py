@@ -92,5 +92,5 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     parallelism.pipeline_parallel_module_fqns_per_model_part = split
     # DistMuon does not support tensor parallelism yet (#3353), so this cell
     # keeps AdamW the way kimi_k3_debugmodel_mm does.
-    config.optimizer = default_adamw(lr=8e-4)
+    config.optimization.optimizer = default_adamw(lr=8e-4)
     return config
