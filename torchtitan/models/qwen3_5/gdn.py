@@ -29,6 +29,10 @@ from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_g
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import local_head_split, VarlenMetadata
+from torchtitan.models.common.cp_attention import (
+    ulysses_heads_to_tokens,
+    ulysses_tokens_to_heads,
+)
 from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
 
@@ -266,25 +270,18 @@ def _cp_slice(
     return tensor.narrow(dim, rank * local, local)
 
 
-def _cp_tokens_to_heads(
-    x_TC: torch.Tensor,
-    head_dim: int,
-    group: dist.ProcessGroup,
+def _pack_for_ulysses(
+    x_TC: torch.Tensor, head_dim: int, group: dist.ProcessGroup
 ) -> torch.Tensor:
-    """``[T/cp, H, D]`` → ``[T, H/cp, D]``, flattened back to channels."""
+    """Reshape channels to heads, then the shared Ulysses token→head exchange."""
     if x_TC.shape[-1] % head_dim != 0:
         raise ValueError(
             f"channels {x_TC.shape[-1]} are not divisible by head dim {head_dim}"
         )
     num_heads = x_TC.shape[-1] // head_dim
     x_THD = x_TC.reshape(x_TC.shape[0], num_heads, head_dim)
-    y_THD = spmd.redistribute(x_THD, group, src=spmd.S(0), dst=spmd.S(1))
+    y_THD = ulysses_tokens_to_heads(x_THD, group)
     return y_THD.reshape(y_THD.shape[0], -1)
-
-
-def _cp_heads_to_tokens(x_THD: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:
-    """``[T, H/cp, D]`` → ``[T/cp, H, D]``."""
-    return spmd.redistribute(x_THD, group, src=spmd.S(1), dst=spmd.S(0))
 
 
 class InnerGatedDeltaNet(Module):
@@ -330,11 +327,11 @@ class InnerGatedDeltaNet(Module):
         """
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         if cp_group is not None:
-            query_TC = _cp_tokens_to_heads(query_TC, key_head_dim, cp_group)
-            key_TC = _cp_tokens_to_heads(key_TC, key_head_dim, cp_group)
-            value_TC = _cp_tokens_to_heads(value_TC, value_head_dim, cp_group)
-            a_TH = _cp_tokens_to_heads(a_TH, 1, cp_group)
-            b_TH = _cp_tokens_to_heads(b_TH, 1, cp_group)
+            query_TC = _pack_for_ulysses(query_TC, key_head_dim, cp_group)
+            key_TC = _pack_for_ulysses(key_TC, key_head_dim, cp_group)
+            value_TC = _pack_for_ulysses(value_TC, value_head_dim, cp_group)
+            a_TH = _pack_for_ulysses(a_TH, 1, cp_group)
+            b_TH = _pack_for_ulysses(b_TH, 1, cp_group)
             conv_q_weight_C1W = _cp_slice(conv_q_weight_C1W, cp_group)
             conv_k_weight_C1W = _cp_slice(conv_k_weight_C1W, cp_group)
             conv_v_weight_C1W = _cp_slice(conv_v_weight_C1W, cp_group)
@@ -393,7 +390,7 @@ class InnerGatedDeltaNet(Module):
         )
         if cp_group is None:
             return output_THV
-        return _cp_heads_to_tokens(output_THV, cp_group)
+        return ulysses_heads_to_tokens(output_THV, cp_group)
 
 
 class GatedDeltaNet(Module):
